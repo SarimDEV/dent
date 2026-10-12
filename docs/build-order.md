@@ -10,12 +10,12 @@ Everything in this spec gets built; the order only decides what you can use dail
    - Exit: both agents run side by side with limits always visible.
 4. **Many machines.** Direct connections over Tailscale and the LAN, device pairing, shared state, client cache, projects, quick capture with project routing, environment and secrets, search, honest liveness, sharing links, the CLI and MCP server.
    - Exit: from a coffee shop on Tailscale, the laptop drives agents on the Mac server, and a restart of anything loses nothing.
-   - The hub (sign-in, encryption of shared state, relays, push) is on hold ([0033](decisions/0033-direct-websocket-hub-on-hold.md)) and slots in before the iPhone phase needs push.
+   - The hub (sign-in, encryption of shared state, relays) is on hold ([0033](decisions/0033-direct-websocket-hub-on-hold.md)). Phone push doesn't wait for it: dent-push ships with the iPhone phase ([0035](decisions/0035-dent-push.md)).
 5. **Review.** Diffs, staging, small edits, commit and push, inline comments sent to the agent, PR and CI status, auto-archive.
    - Exit: you stop opening VS Code and GitHub to review.
 6. **Docs.** Markdown viewer with Mermaid and math, live reload, project docs folder sync.
 7. **Terminal and previews.** Embedded terminal on session-holder PTYs, port forwarding and previews, the agent browser and browser panel, adopting sessions started in a terminal.
-8. **iPhone.** Client core through UniFFI, SwiftUI app, hub push with time-sensitive approvals, notification actions, widget, Live Activity, Face ID, Apple Watch.
+8. **iPhone.** Client core through UniFFI, SwiftUI app, dent-push with time-sensitive approvals, notification actions, widget, Live Activity, Face ID, Apple Watch.
    - Exit: you answer an approval from your lock screen.
 9. **Web client and backup.** Browser client served by the hub, encrypted session backup.
 10. **Machines on demand.** Provider interface, command provider, AWS provider, hosted cloud machines, join tokens, safe teardown, fleet updates, moving sessions between machines, automations and the inbox.

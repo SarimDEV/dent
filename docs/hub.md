@@ -9,7 +9,7 @@
 
 All three use the same protocol over the same encrypted channel.
 
-Signing in is the whole setup: install the daemon, sign in, and that machine appears on every device you own within a second. A hosted hub handles accounts, devices, connections, relaying, push notifications, shared state and backup. Everything it stores is end-to-end encrypted, and the hub can be self-hosted.
+Signing in is the whole setup: install the daemon, sign in, and that machine appears on every device you own within a second. A hosted hub handles accounts, devices, connections, relaying, shared state and backup; phone notifications come from the separate dent-push service. Everything it stores is end-to-end encrypted, and the hub can be self-hosted.
 
 ## Three kinds of state
 
@@ -59,7 +59,14 @@ A remote client must never show an idle session as working or leave a dead sessi
 
 ## Push notifications
 
-The hub sends Apple push notifications with encrypted payloads; a notification service extension on the phone decrypts and shows the real text. Approvals that block an agent are sent as time-sensitive so they break through Focus modes. Desktop clients use native OS notifications directly.
+Phone notifications come from dent-push, a small stateless service on Cloudflare Workers, separate from the hub ([0035](decisions/0035-dent-push.md)).
+
+- The phone registers its APNs token with dent-push and gets back a sealed push handle; it gives the handle and a notification key to each daemon it pairs with. Daemons never see the token, and dent-push stores nothing.
+- A daemon encrypts each notification for the phone and sends it to dent-push with the handle; dent-push forwards it to Apple. It sees a token and the timing, never the content.
+- A notification service extension on the phone decrypts and shows the real text. Allow and Deny work from the notification.
+- Approvals that block an agent are sent as time-sensitive, so they break through Focus modes.
+- Limits per handle cap what any one phone, or anyone abusing a handle, can send.
+- Desktop clients use native OS notifications directly.
 
 ## Client cache
 
@@ -77,7 +84,8 @@ The local product is free; hosted conveniences are paid. Users always bring thei
 | Service | What it gives | Price |
 | --- | --- | --- |
 | Daemon, desktop and iPhone apps | Everything over LAN, Tailscale or a self-hosted hub | Free |
-| Hosted hub | Sign-in, device list, connections, relay, push, shared state, fleet updates | Free for up to 3 machines, then a subscription |
+| Hosted hub | Sign-in, device list, connections, relay, shared state, fleet updates | Free for up to 3 machines, then a subscription |
+| dent-push | Phone notifications and Live Activities | See Risks: open question |
 | Web client | Open sessions from any browser, served by the hub | Included with the hub |
 | Encrypted session backup | History survives a lost or torn-down machine; new devices get full history at once | Subscription |
 | Hosted cloud machines | One click runs a session on a cloud box that auto-joins and tears down when idle | Usage-based |

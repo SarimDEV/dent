@@ -20,4 +20,4 @@ A hub decides accounts, sign-in and relays before dent is useful to its first us
 - Three ways to connect: LAN, Tailscale, and later a relay (free for up to 3 devices, paid beyond).
 - Pairing is open only while a code is showing on the machine being added (Settings › Devices there, or `dent pair` on a headless machine), for 10 minutes. Three wrong codes show a new code and pause pairing, doubling each time; ten close it. A code works once. That caps a guesser at 10 tries per code shown, 1 in 100,000.
 - Trust from Tailscale is checked against Tailscale on every connection and holds only over Tailscale, so leaving the account ends it. Removing such a device on the other machine sticks.
-- Machines outside the tailnet, iPhone push and the browser away from home need the hub or another transport later.
+- Machines outside the tailnet and the browser away from home need the hub or another transport later. iPhone push comes from dent-push, which doesn't wait for the hub ([0035](0035-dent-push.md)).

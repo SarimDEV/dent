@@ -1,6 +1,6 @@
 # 0021. Push: APNs from the hub
 
-Status: accepted (2026-10-11) · Spec: [hub.md](../hub.md)
+Status: superseded by [0035](0035-dent-push.md) (2026-10-12) · Spec: [hub.md](../hub.md)
 
 ## Decision
 

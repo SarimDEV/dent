@@ -21,7 +21,7 @@ dent borrows every hard engine and owns only the thin layers that make it dent: 
 | Web client transport | The browser opens the same WebSocket to the daemon directly | A hub WebSocket path once the hub returns |
 | Encryption | Our own small layer: one account key wrapped per device, per-field XChaCha20-Poly1305 records, QR or tap approval from an existing device, printed recovery key | Standard primitives only; no sync framework to outgrow |
 | Hub | One Rust binary with SQLite and the iroh relay, the same build hosted and self-hosted | One codebase rather than a Workers version plus a self-hosted version |
-| Push | APNs sent from the hub; self-hosted hubs send content-free pushes through the hosted one | Notifications fall back to in-app |
+| Push | dent-push: a stateless Cloudflare Worker that forwards end-to-end encrypted notifications to APNs ([0035](decisions/0035-dent-push.md)) | A tiny VM running the same code; in-app notifications |
 | Process lifetime | A tiny, rarely changed session holder owns agent processes and terminals; the daemon reconnects to it after an upgrade, because service managers otherwise kill child processes on restart ([systemd](https://man7.org/linux/man-pages/man5/systemd.kill.5.html)) | Sessions resume from the agent's transcript |
 | Install and update | service-manager for launchd, systemd and Windows services; cargo-dist with its updater ([service-manager](https://docs.rs/service-manager/latest/service_manager/)) | Manual install still works |
 | Shared core on iPhone | UniFFI pinned, built by our own script rather than cargo-swift; a hand-written Swift wrapper adds cancellation and main-actor safety ([UniFFI](https://github.com/mozilla/uniffi-rs)) | The core stays free of I/O so it can be rebound |

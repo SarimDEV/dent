@@ -14,7 +14,8 @@ daemon (one per machine) ── session-holder (owns agent processes + PTYs, sur
    │  SQLite event log per daemon, monotonic seq; clients subscribe "everything after N"
    ▼
 agents (claude -p stream-json · codex app-server · ACP)
-hub: accounts, devices, relay, push, shared state (E2E encrypted), backup
+hub: accounts, devices, relay, shared state (E2E encrypted), backup
+dent-push: stateless Cloudflare Worker forwarding E2E-encrypted phone notifications to APNs
 ```
 
 - The daemon is the source of truth for anything it runs; the hub is the record for shared state (projects, settings, UI state). Clients never hold authority.
@@ -37,7 +38,7 @@ All under `crates/`. Package names are prefixed `dent-`.
 | `cli` | `dent` binary: scripts, agents, `dent daemon install`, `dent doctor` | `client-core`, `protocol` |
 | `hub` | Hosted/self-hosted hub. **AGPL-3.0**; everything else is MIT | `protocol` |
 
-`spikes/` holds throwaway Phase 1 experiments (each its own crate, named `spike-*`, with a findings note in `docs/spikes/`). Spikes may use any dependency without a decision record and are excluded from the default build; production crates never depend on them. `ios/` (Xcode) and `relay/` (deployment files) come later.
+`spikes/` holds throwaway Phase 1 experiments (each its own crate, named `spike-*`, with a findings note in `docs/spikes/`). Spikes may use any dependency without a decision record and are excluded from the default build; production crates never depend on them. `ios/` (Xcode), `push/` (dent-push, a TypeScript Cloudflare Worker) and `relay/` (deployment files) come later.
 
 Boundaries enforced by `just verify`: logic crates never import GPUI.
 
