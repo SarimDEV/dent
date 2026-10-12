@@ -2,6 +2,13 @@
 
 > **On hold** ([0033](decisions/0033-direct-websocket-hub-on-hold.md)). For now clients connect straight to each daemon over Tailscale or the LAN. This file describes where the hub fits once it returns.
 
+**Three ways to connect.** The first two work today, without the hub ([spike 05](spikes/05-direct-links.md)):
+1. **LAN:** found with Bonjour, paired once with a 6-digit code shown on the other machine.
+2. **Tailscale:** found through your Tailscale account; machines on the same account are trusted with no code.
+3. **Relay:** the hub, for machines that can't reach each other directly. Free for up to 3 devices, then paid.
+
+All three use the same protocol over the same encrypted channel.
+
 Signing in is the whole setup: install the daemon, sign in, and that machine appears on every device you own within a second. A hosted hub handles accounts, devices, connections, relaying, push notifications, shared state and backup. Everything it stores is end-to-end encrypted, and the hub can be self-hosted.
 
 ## Three kinds of state

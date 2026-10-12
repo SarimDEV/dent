@@ -4,16 +4,7 @@
 //! `cargo run -p spike-link -- test` runs every scenario against a second
 //! daemon on this machine, standing in for another device.
 
-mod channel;
-mod client;
-mod daemon;
-mod discovery;
-mod harness;
-mod identity;
-mod pair;
-mod proto;
-mod proxy;
-mod tailnet;
+use spike_link::{daemon, harness, tailnet};
 
 use std::path::PathBuf;
 

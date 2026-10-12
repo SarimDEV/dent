@@ -7184,7 +7184,9 @@ dependencies = [
  "pulldown-cmark",
  "ratex-katex-fonts",
  "ratex-types",
+ "spike-link",
  "spike-markdown",
+ "tokio",
  "ttf-parser",
 ]
 

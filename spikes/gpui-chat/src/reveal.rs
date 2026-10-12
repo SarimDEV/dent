@@ -266,7 +266,7 @@ impl Render for Compare {
 #[cfg(target_os = "macos")]
 // objc 0.2's macros test a `cargo-clippy` feature this crate doesn't declare.
 #[allow(unexpected_cfgs)]
-fn hide_cursor() {
+pub fn hide_cursor() {
     use objc::{class, msg_send, sel, sel_impl};
     // SAFETY: a class method on NSCursor, called on the main thread.
     unsafe {
@@ -275,4 +275,4 @@ fn hide_cursor() {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn hide_cursor() {}
+pub fn hide_cursor() {}

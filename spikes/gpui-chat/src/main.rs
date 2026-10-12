@@ -13,6 +13,7 @@
 mod anim;
 mod bench;
 mod demo;
+mod devices;
 mod ds;
 mod fake;
 mod specimen;
@@ -49,6 +50,7 @@ pub struct Opts {
     pub stress: bool,
     pub verify: bool,
     pub compare: bool,
+    pub devices: bool,
     pub size: Option<(f32, f32)>,
 }
 
@@ -69,6 +71,7 @@ fn opts() -> Opts {
         stress: false,
         verify: false,
         compare: false,
+        devices: false,
         size: None,
     };
     let mut it = std::env::args().skip(1);
@@ -94,6 +97,7 @@ fn opts() -> Opts {
             "--record" => o.record = it.next().map(Into::into),
             "--fps" => o.fps = true,
             "--specimen" => o.specimen = true,
+            "--devices" => o.devices = true,
             "--compare" => {
                 o.specimen = true;
                 o.compare = true;
@@ -1241,7 +1245,9 @@ fn main() {
             })),
             titlebar: Some(TitlebarOptions {
                 title: Some(
-                    if o.compare {
+                    if o.devices {
+                        "dent · devices"
+                    } else if o.compare {
                         "dent · streaming, three ways"
                     } else if o.stress {
                         "dent · spike 04 stress"
@@ -1257,6 +1263,22 @@ fn main() {
             focus: true,
             ..Default::default()
         };
+        if o.devices {
+            let (dark, demo, record) = (o.dark, o.demo.is_some(), o.record.clone());
+            gpui_kit::open_window(options, cx, move |window, cx| {
+                let view = cx.new(|cx| devices::DevicesView::new(dark, demo, cx));
+                let focus = view.read(cx).focus_handle();
+                window.focus(&focus, cx);
+                view
+            })
+            .expect("open window");
+            if let Some(path) = record {
+                demo::record(path, 25.);
+            }
+            cx.on_window_closed(|cx, _| cx.quit()).detach();
+            cx.activate(true);
+            return;
+        }
         if o.compare {
             let (dark, record) = (o.dark, o.record.clone());
             gpui_kit::open_window(options, cx, move |_, cx| {
