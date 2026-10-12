@@ -1,5 +1,7 @@
 # Hub, sync and networking
 
+> **On hold** ([0033](decisions/0033-direct-websocket-hub-on-hold.md)). For now clients connect straight to each daemon over Tailscale or the LAN. This file describes where the hub fits once it returns.
+
 Signing in is the whole setup: install the daemon, sign in, and that machine appears on every device you own within a second. A hosted hub handles accounts, devices, connections, relaying, push notifications, shared state and backup. Everything it stores is end-to-end encrypted, and the hub can be self-hosted.
 
 ## Three kinds of state

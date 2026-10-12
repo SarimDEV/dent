@@ -1,6 +1,6 @@
 # Architecture
 
-dent is four Rust pieces (daemon, session holder, client core, desktop UI) plus a SwiftUI iPhone app, a web client and a hosted hub. Every client talks to every daemon over one versioned protocol, directly when possible and through the hub otherwise.
+dent is four Rust pieces (daemon, session holder, client core, desktop UI) plus a SwiftUI iPhone app, a web client and a hosted hub. Every client talks to every daemon over one versioned protocol. For now that is a direct WebSocket over Tailscale or the LAN; the hub is on hold ([0033](decisions/0033-direct-websocket-hub-on-hold.md)).
 
 ![system architecture · 2 clients, 1 relay, a daemon per machine](design/architecture.png)
 

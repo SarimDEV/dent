@@ -3,7 +3,7 @@
 One short record per settled choice. Don't relitigate these; write a new record that supersedes one instead.
 
 - [0001. Desktop UI: GPUI through pinned gpui-component](0001-gpui-via-gpui-component.md)
-- [0002. Connectivity: iroh, on n0's free public relays for now](0002-iroh-with-n0-relays.md)
+- [0002. Connectivity: iroh, on n0's free public relays for now](0002-iroh-with-n0-relays.md) (superseded by 0033)
 - [0003. Git writes through the git CLI; gix read-only](0003-git-through-cli.md)
 - [0004. A session holder owns agent processes and terminals](0004-session-holder.md)
 - [0005. License: MIT, with the hub under AGPL-3.0](0005-license-mit-agpl-hub.md)
@@ -34,3 +34,4 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0030. Core runtime dependencies: tokio, serde, anyhow](0030-core-runtime-deps.md)
 - [0031. Usage limits come from the agent CLIs, per account, synced via the hub](0031-usage-limits-through-agent-clis.md)
 - [0032. Type: the Book pairing, bundled, with fonts as theme roles](0032-bundle-field-notes-fonts.md)
+- [0033. Connectivity for now: WebSocket over the tailnet or LAN; hub on hold](0033-direct-websocket-hub-on-hold.md)

@@ -8,7 +8,7 @@ The name is always lowercase: **dent**.
 
 ```
 clients (desktop · iphone · web · cli)
-   │  one versioned protocol over QUIC (iroh): direct first, hub relay as fallback
+   │  one versioned protocol over a direct WebSocket (Tailscale or LAN); hub on hold
    ▼
 daemon (one per machine) ── session-holder (owns agent processes + PTYs, survives daemon upgrades)
    │  SQLite event log per daemon, monotonic seq; clients subscribe "everything after N"

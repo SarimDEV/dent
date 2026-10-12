@@ -1,6 +1,6 @@
 # 0002. Connectivity: iroh, on n0's free public relays for now
 
-Status: accepted (2026-10-11) · Spec: [durability.md](../durability.md)
+Status: superseded by [0033](0033-direct-websocket-hub-on-hold.md) (2026-10-11) · Spec: [durability.md](../durability.md)
 
 ## Decision
 
