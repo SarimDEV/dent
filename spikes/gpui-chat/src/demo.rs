@@ -49,6 +49,8 @@ pub struct Demo {
 const WORDS_PER_SEC: f32 = 16.;
 /// Seconds the recorder runs before the scene clock starts.
 pub const LEAD: f32 = 1.5;
+/// Seconds the window stays open after the scene when recording.
+pub const HOLD: f32 = 1.5;
 
 fn scene(name: &str) -> (Vec<(f32, Act)>, f32) {
     use Act::*;
@@ -275,7 +277,10 @@ pub fn step(app: &mut Spike, window: &mut Window, cx: &mut Context<Spike>) {
         d.flick_v *= 0.955;
     }
 
-    if t >= d.length {
+    // Keep the window up until well after the recorder stops, so a clip can
+    // never run past the window and capture whatever is behind it.
+    let hold = if d.record.is_some() { HOLD } else { 0. };
+    if t >= d.length + hold {
         cx.quit();
         return;
     }

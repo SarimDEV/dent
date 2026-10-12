@@ -41,9 +41,22 @@ Paper and Carbon measure the same. One frame in warm-up (~22 ms) is the first dr
 - **Status squares:** distinct patterns work at 12 px: working = 2 px dither, needs you = solid, done = four dots, waiting and idle = outlines.
 - **Screenshots:** `screencapture -R` on a fixed window rectangle is enough for the spike. Real screenshot tests should render offscreen.
 
+## Motion (added after the first pass)
+
+The spike now implements the Field Notes motion from docs/design.md, at no measurable frame cost:
+
+- **Dither dissolve:** new rows, the live pill and theme switches resolve in through an 8×8 Bayer pattern over 220 ms, painted as quads on a canvas.
+- **Working square drift:** the working status dither steps every 420 ms; a slow repaint timer keeps it moving when nothing else changes.
+- **Streaming cursor:** a block cursor in the working colour at the end of the streaming text.
+- **Approval resolve:** the pressed button flashes the done colour, then the card folds into a one-line tool call and the blocked count updates.
+- **Title and live pill:** the serif title eases from 30 to 19 px while you read history and a LIVE pill appears; both return at the tail. The chat uses GPUI's `FollowMode::Tail`, which follows new rows, stops when you scroll up, and re-engages at the bottom.
+- **Grain:** pre-rendered 256 px tiles (`scripts/gen-grain.py`) behind everything. The first pass was far too strong; alpha is now 12/255 on Paper and 7/255 on Carbon.
+
+`--demo stream|approval|scroll|theme|rest [--record FILE.mov]` plays a scripted scene. `scripts/record-demos.sh` records every scene with ffmpeg (pointer hidden with one synthetic keypress, since this macOS ignores ffmpeg's hide-cursor flag) and writes X-ready MP4s, posters and stills to the gitignored `media/` folder. The window stays open 1.5 s after the recorder stops, so a clip can never capture what is behind the window.
+
 ## Not covered
 
-- Grain texture and dither-dissolve motion; markdown rendering inside messages (spike 04); the editable diff; Linux and Windows; a release build (debug was already well inside budget).
+- Markdown rendering inside messages (spike 04); the editable diff; Linux and Windows; a release build (debug was already well inside budget).
 
 ## Changes to the spec
 
