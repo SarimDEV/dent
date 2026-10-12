@@ -304,15 +304,10 @@ struct Syncing: View {
                 .listRowBackground(look.row)
             }
             Section("Needs you") { ForEach(Fake.needs) { SessionLink(s: $0) } }
-            Section("Working") { ForEach(Fake.working.filter { $0.machine == "studio" }) { SessionLink(s: $0) } }
+            Section("Working") { ForEach(Fake.working.filter { $0.machine == "studio" }) { SessionLink(s: $0, quiet: true) } }
         }
         .scrollContentBackground(.hidden)
         .background(look.background)
         .navigationTitle("Sessions")
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {} label: { Label("New session", systemImage: "square.and.pencil") }
-            }
-        }
     }
 }

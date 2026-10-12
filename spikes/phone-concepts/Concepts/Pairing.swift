@@ -18,7 +18,6 @@ struct PairingFlow: View {
             Group {
                 switch start {
                 case .qr: ScanCode()
-                case .new: NewSession()
                 default: AddMachine()
                 }
             }
@@ -179,36 +178,157 @@ struct Paired: View {
     }
 }
 
-/// Starting a session from the phone.
+/// Starting a session is just typing. Where it runs, the model, permissions
+/// and worktree sit under the composer, already chosen: the least busy
+/// machine, and whatever you picked last time. The project fills in from
+/// what you type. Tap any of them to change it.
 struct NewSession: View {
+    var typed: Bool
     @Environment(\.look) private var look
-    @State private var text = "Add a test that cuts the link mid-frame and check the reply still arrives whole."
+    @ScaledMetric(relativeTo: .body) private var control: CGFloat = 44
+    @Environment(\.dynamicTypeSize) private var size
+    @State private var draft: String
+    @FocusState private var focused: Bool
+
+    init(typed: Bool) {
+        self.typed = typed
+        _draft = State(initialValue: typed ? "The usage line under Sessions cuts off at large text sizes. Make it wrap instead." : "")
+    }
+
     var body: some View {
-        Form {
-            Section {
-                Picker("Project", selection: .constant("dent")) { ForEach(Fake.projects, id: \.self) { Text($0) } }
-                Picker("Machine", selection: .constant("studio")) { ForEach(Fake.machines) { Text($0.name).tag($0.name) } }
-                Picker("Agent", selection: .constant("claude")) { Text("claude").tag("claude"); Text("codex").tag("codex") }
+        ScrollView { Color.clear.frame(height: 1) }
+            .background(look.page)
+            .navigationTitle("New Session")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button(role: .cancel) {} }
             }
-            .listRowBackground(look.row)
-            Section("Message") {
-                TextField("What should it do?", text: $text, axis: .vertical)
-                    .font(look.reading)
-                    .lineLimit(5...12)
+            .safeAreaBar(edge: .bottom) {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .bottom, spacing: 6) {
+                        TextField("What should it do?", text: $draft, axis: .vertical)
+                            .font(look.reading)
+                            .lineLimit(size.isAccessibilitySize ? 1...3 : 1...8)
+                            .focused($focused)
+                            .padding(.leading, 16).padding(.vertical, 11)
+                        if !draft.isEmpty {
+                            Button {} label: {
+                                Image(systemName: "arrow.up").font(.body.weight(.bold)).foregroundStyle(look.onTint)
+                                    .frame(width: min(control - 12, 44), height: min(control - 12, 44))
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .buttonBorderShape(.circle)
+                            .accessibilityLabel("Start")
+                            .padding(6)
+                        }
+                    }
+                    .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 22))
+                    Defaults(project: typed ? "dent" : nil)
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 4)
             }
-            .listRowBackground(look.row)
+            .onAppear { focused = true }
+    }
+}
+
+/// The session's settings as small menus under the composer, wrapping onto
+/// a second line. At accessibility sizes they fold into one menu.
+struct Defaults: View {
+    var project: String?
+    @Environment(\.look) private var look
+    @Environment(\.dynamicTypeSize) private var size
+
+    var body: some View {
+        if size.isAccessibilitySize {
+            Menu {
+                projectPicker; machinePicker; modelPicker; accessPicker; worktreePicker
+            } label: {
+                Text("\(project ?? "Project from message") · studio · Opus 5.5 · Full access · New worktree")
+                    .font(look.ui(.footnote)).multilineTextAlignment(.leading)
+            }
+            .tint(look.tint)
+            .padding(.horizontal, 4)
+        } else {
+            Flow(spacing: 8, lineSpacing: 8) {
+                Menu { projectPicker } label: { Label(project ?? "Project from message", systemImage: "sparkles") }
+                Menu { machinePicker } label: { Label("studio", systemImage: "desktopcomputer") }
+                Menu { modelPicker } label: { Text("Opus 5.5") }
+                Menu { accessPicker } label: { Label("Full access", systemImage: "lock.open") }
+                Menu { worktreePicker } label: { Label("New worktree", systemImage: "arrow.triangle.branch") }
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.capsule)
+            .controlSize(.regular)
+            .font(look.ui(.subheadline, .medium))
+            .tint(look.ink)
         }
-        .font(look.ui(.body))
-        .scrollContentBackground(.hidden)
-        .background(look.background)
-        .navigationTitle("New Session")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) { Button(role: .cancel) {} }
-            ToolbarItem(placement: .confirmationAction) {
-                Button {} label: { Label("Start", systemImage: "arrow.up").foregroundStyle(look.onTint) }.buttonStyle(.glassProminent)
-            }
+    }
+
+    var projectPicker: some View {
+        Picker("Project", selection: .constant(project ?? "auto")) {
+            Text("From Message").tag("auto")
+            ForEach(Fake.projects, id: \.self) { Text($0).tag($0) }
+            Text("New Project").tag("new")
         }
+    }
+    var machinePicker: some View {
+        Picker("Machine", selection: .constant("auto")) {
+            Text("Least Busy (studio)").tag("auto")
+            Text("studio · 2 working").tag("studio")
+            Text("mac-mini · 1 working").tag("mini")
+        }
+    }
+    var modelPicker: some View {
+        Picker("Model", selection: .constant("opus")) {
+            Text("Opus 5.5").tag("opus"); Text("Sonnet 5.5").tag("sonnet"); Text("Astra 6.1").tag("astra")
+        }
+    }
+    var accessPicker: some View {
+        Picker("Permissions", selection: .constant("full")) {
+            Text("Ask Each Time").tag("ask"); Text("Auto").tag("auto"); Text("Full Access").tag("full")
+        }
+    }
+    var worktreePicker: some View {
+        Picker("Worktree", selection: .constant("new")) {
+            Text("New Worktree").tag("new"); Text("Main Checkout").tag("main")
+        }
+    }
+}
+
+/// Lays children out left to right, wrapping to new lines.
+struct Flow: Layout {
+    var spacing: CGFloat = 8
+    var lineSpacing: CGFloat = 8
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = arrange(width: proposal.width ?? .infinity, subviews)
+        let height = rows.map(\.height).reduce(0, +) + lineSpacing * CGFloat(max(rows.count - 1, 0))
+        return CGSize(width: proposal.width ?? rows.map(\.width).max() ?? 0, height: height)
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in arrange(width: bounds.width, subviews) {
+            var x = bounds.minX
+            for i in row.items {
+                let s = subviews[i].sizeThatFits(.unspecified)
+                subviews[i].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(s))
+                x += s.width + spacing
+            }
+            y += row.height + lineSpacing
+        }
+    }
+    private func arrange(width: CGFloat, _ subviews: Subviews) -> [(items: [Int], width: CGFloat, height: CGFloat)] {
+        var rows: [(items: [Int], width: CGFloat, height: CGFloat)] = [([], 0, 0)]
+        for (i, v) in subviews.enumerated() {
+            let s = v.sizeThatFits(.unspecified)
+            let w = rows[rows.count - 1].width
+            if !rows[rows.count - 1].items.isEmpty && w + spacing + s.width > width { rows.append(([], 0, 0)) }
+            let last = rows.count - 1
+            rows[last].width += (rows[last].items.isEmpty ? 0 : spacing) + s.width
+            rows[last].height = max(rows[last].height, s.height)
+            rows[last].items.append(i)
+        }
+        return rows
     }
 }
 

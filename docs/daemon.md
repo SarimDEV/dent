@@ -119,13 +119,13 @@ If the target lacks a secret or a tool the session used, the move is refused wit
 
 ## Automations
 
-An automation starts a session from a prompt on a schedule or on an event, and drops the result into a review inbox.
+An automation starts a session from a prompt on a schedule or on an event, and drops the result into the session list as Done.
 
 - **Triggers:** a schedule; GitHub events such as a PR opened, a check failed or an issue labelled; or a webhook.
 - **Where it runs:** a chosen machine, or a fresh ephemeral or hosted machine that is torn down afterwards.
 - **Who fires it:** the hub, so automations run while your laptop is closed. If the chosen machine is offline, the run waits, moves to a fallback machine, or is skipped and reported, as configured.
 - **Guards:** a usage threshold above which runs wait, a time and usage budget per run, and a permission mode per automation (default: no pushing without review).
-- **Results:** every run lands in the inbox with its summary, diff and PR, ready to review, continue or discard.
+- **Results:** every run lands in the session list under Done with its summary, diff and PR, ready to continue or close.
 
 ## Browser for agents
 

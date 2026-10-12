@@ -1,79 +1,123 @@
 import SwiftUI
 
-/// Sessions across every machine. Blocked ones are always first.
+/// Every session on every machine, as an inbox: what needs you, then what's
+/// done and waiting for you to steer or close. Working sessions sit dimmed
+/// at the bottom. Inbox zero is when everything is working or closed.
 struct Home: View {
-    enum Grouping { case status, project }
-    var grouping: Grouping
-    @Binding var sheet: SheetKind?
+    var zero = false
     @Environment(\.look) private var look
-    @Environment(\.dynamicTypeSize) private var size
 
     var body: some View {
         List {
-            Section {
-                ForEach(Fake.needs) { SessionLink(s: $0) }
-            } header: {
-                Text("Needs you")
-            }
-            switch grouping {
-            case .status:
-                Section("Working") { ForEach(Fake.working) { SessionLink(s: $0) } }
-                Section("Recent") { ForEach(Fake.recent) { SessionLink(s: $0) } }
-            case .project:
-                ForEach(Fake.projects, id: \.self) { p in
-                    Section(p) {
-                        ForEach(Fake.sessions.filter { $0.project == p && $0.status != .needs }) { SessionLink(s: $0, showProject: false) }
+            if zero {
+                Section {
+                    HStack(spacing: 14) {
+                        Image(systemName: "checkmark.circle").font(.title2).foregroundStyle(look.quiet)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("All caught up").font(look.ui(.body, .semibold))
+                            Text("Everything is working or closed.").font(look.ui(.subheadline)).foregroundStyle(look.quiet)
+                        }
+                    }
+                    .padding(.vertical, 8)
+                    .listRowBackground(look.row)
+                }
+            } else {
+                Section("Needs you") { ForEach(Fake.needs) { SessionLink(s: $0) } }
+                Section {
+                    ForEach(Fake.done) { SessionLink(s: $0) }
+                } header: {
+                    HStack {
+                        Text("Done")
+                        Spacer()
+                        Button("Close All") {}.font(look.ui(.subheadline, .medium)).textCase(nil)
                     }
                 }
             }
+            Section("Working") { ForEach(Fake.busy) { SessionLink(s: $0, quiet: true) } }
         }
         .listStyle(.insetGrouped)
         .scrollContentBackground(.hidden)
         .background(look.background)
         .navigationTitle("Sessions")
-        .navigationSubtitle(grouping == .status ? (size.isAccessibilitySize ? "" : "Claude 62% · Codex 18% used this week") : "")
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
+        .navigationSubtitle(zero ? "\(Fake.busy.count) working" : "\(Fake.needs.count + Fake.done.count) to clear")
+    }
+}
+
+/// The list's chrome, shared by every state of it: Settings and usage at the
+/// top, search and New Session in the bottom toolbar.
+struct HomeToolbar: ViewModifier {
+    @Binding var path: [Route]
+    @Binding var sheet: SheetKind?
+    var full = true
+    @State private var query = ""
+
+    func body(content: Content) -> some View {
+        if full {
+            content
+                .searchable(text: $query, prompt: "Sessions, messages, docs")
+                .searchToolbarBehavior(.minimize)
+                .toolbar { top; bottom }
+        } else {
+            content.toolbar { top }
+        }
+    }
+
+    @ToolbarContentBuilder var top: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            Button { path.append(.settings) } label: { Label("Settings", systemImage: "gearshape") }
+        }
+        if full {
+            ToolbarItem(placement: .topBarTrailing) {
                 Menu {
-                    Picker("Group by", selection: .constant(grouping == .status ? 0 : 1)) {
-                        Text("Status").tag(0)
-                        Text("Project").tag(1)
-                        Text("Machine").tag(2)
-                    }
-                    Toggle("Show archived", isOn: .constant(false))
+                    Text("Claude: 62% of this week")
+                    Text("Codex: 18% of this week")
                 } label: {
-                    Label("View options", systemImage: "line.3.horizontal.decrease")
+                    Label("Usage", systemImage: "gauge.with.dots.needle.50percent")
                 }
             }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { sheet = .new } label: { Label("New session", systemImage: "square.and.pencil") }
-            }
         }
+    }
+
+    @ToolbarContentBuilder var bottom: some ToolbarContent {
+        DefaultToolbarItem(kind: .search, placement: .bottomBar)
+        ToolbarSpacer(.flexible, placement: .bottomBar)
+        ToolbarItem(placement: .bottomBar) {
+            Button { sheet = .compose } label: { Label("New Session", systemImage: "square.and.pencil") }
+        }
+    }
+}
+
+extension View {
+    func homeToolbar(path: Binding<[Route]>, sheet: Binding<SheetKind?>, full: Bool = true) -> some View {
+        modifier(HomeToolbar(path: path, sheet: sheet, full: full))
     }
 }
 
 struct SessionLink: View {
     let s: Session
     var showProject = true
+    var quiet = false
     var body: some View {
-        NavigationLink(value: Route.chat) { SessionRow(s: s, showProject: showProject) }
+        NavigationLink(value: Route.chat) { SessionRow(s: s, showProject: showProject, quiet: quiet) }
             .swipeActions(edge: .trailing) {
-                Button(role: .destructive) {} label: { Label("Archive", systemImage: "archivebox") }
                 if s.status == .working {
-                    Button {} label: { Label("Stop", systemImage: "stop.fill") }.tint(.orange)
+                    // Working sessions need nothing; the only action is stopping one.
+                    Button(role: .destructive) {} label: { Label("Stop", systemImage: "stop.fill") }
+                } else {
+                    // Closing is how the list gets to zero.
+                    Button {} label: { Label("Close", systemImage: "xmark") }.tint(.gray)
                 }
             }
-            .swipeActions(edge: .leading) {
+            .swipeActions(edge: .leading, allowsFullSwipe: false) {
                 if s.status == .needs {
                     Button {} label: { Label("Allow", systemImage: "checkmark") }.tint(.green)
                 }
             }
             .contextMenu {
                 Button {} label: { Label("Open", systemImage: "arrow.up.forward") }
-                Button {} label: { Label("Pin", systemImage: "pin") }
                 Button {} label: { Label("Mute notifications", systemImage: "bell.slash") }
                 Divider()
-                Button(role: .destructive) {} label: { Label("Archive", systemImage: "archivebox") }
+                Button {} label: { Label("Close", systemImage: "xmark") }
             }
     }
 }
@@ -82,6 +126,8 @@ struct SessionLink: View {
 struct SessionRow: View {
     let s: Session
     var showProject = true
+    /// Working rows step back: lighter title, nothing to do yet.
+    var quiet = false
     @Environment(\.look) private var look
     @Environment(\.dynamicTypeSize) private var size
 
@@ -92,11 +138,11 @@ struct SessionRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 // At accessibility sizes the title wraps and the age moves below it.
                 if size.isAccessibilitySize {
-                    Text(s.title).font(look.ui(.body, .medium)).foregroundStyle(look.ink).lineLimit(4)
+                    Text(s.title).font(look.ui(.body, quiet ? .regular : .medium)).foregroundStyle(quiet ? look.quiet : look.ink).lineLimit(4)
                     Text(s.age).font(look.ui(.subheadline)).foregroundStyle(look.quiet).monospacedDigit()
                 } else {
                     HStack(alignment: .firstTextBaseline) {
-                        Text(s.title).font(look.ui(.body, .medium)).foregroundStyle(look.ink).lineLimit(1)
+                        Text(s.title).font(look.ui(.body, quiet ? .regular : .medium)).foregroundStyle(quiet ? look.quiet : look.ink).lineLimit(1)
                         Spacer(minLength: 8)
                         Text(s.age).font(look.ui(.subheadline)).foregroundStyle(look.quiet).monospacedDigit()
                     }
@@ -107,6 +153,7 @@ struct SessionRow: View {
             }
         }
         .padding(.vertical, 4)
+        .opacity(quiet ? 0.65 : 1)
         .listRowBackground(look.row)
         .accessibilityElement(children: .combine)
         .accessibilityValue(s.status.label)
@@ -135,92 +182,3 @@ struct EmptyHome: View {
     }
 }
 
-/// Usage limits as the tab bar's accessory (the alternative to the subtitle).
-struct UsageAccessory: View {
-    @Environment(\.look) private var look
-    var body: some View {
-        HStack(spacing: 10) {
-            Gauge(value: 0.62) { EmptyView() }
-                .gaugeStyle(.accessoryCircularCapacity)
-                .scaleEffect(0.42)
-                .frame(width: 22, height: 22)
-                .tint(look.ink)
-            Text("claude 62%").font(look.ui(.subheadline, .medium)).monospacedDigit()
-            Text("codex 18%").font(look.ui(.subheadline)).foregroundStyle(look.quiet).monospacedDigit()
-            Spacer()
-            Text("resets Thu").font(look.ui(.footnote)).foregroundStyle(look.quiet)
-        }
-        .padding(.horizontal, 16)
-    }
-}
-
-/// Automation results and finished goals.
-struct Inbox: View {
-    @Environment(\.look) private var look
-    var body: some View {
-        List {
-            Section("New") {
-                InboxRow(icon: "clock.arrow.circlepath", title: "Nightly dependency check", detail: "3 updates available · dent", age: "6:00", status: .done)
-                InboxRow(icon: "flag.checkered", title: "Goal: docs site builds clean", detail: "Finished after 4 runs · website", age: "Yesterday", status: .done)
-            }
-            Section("Running") {
-                VStack(alignment: .leading, spacing: 8) {
-                    InboxRow(icon: "flag", title: "Goal: every spike has a findings note", detail: "Run 3 of about 5 · dent", age: "12m", status: .working)
-                    ProgressView(value: 0.6).tint(look.tint).padding(.leading, 34)
-                }
-                .listRowBackground(look.row)
-            }
-            Section("Paused") {
-                InboxRow(icon: "flag", title: "Goal: migrate CI to the new runners", detail: "Paused at the usage limit · resumes 3:10 pm", age: "2h", status: .waiting)
-            }
-        }
-        .listStyle(.insetGrouped)
-        .scrollContentBackground(.hidden)
-        .background(look.background)
-        .navigationTitle("Inbox")
-    }
-}
-
-struct InboxRow: View {
-    let icon: String, title: String, detail: String, age: String
-    let status: Status
-    @Environment(\.look) private var look
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Image(systemName: icon).foregroundStyle(look.quiet).frame(width: 22)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(title).font(look.ui(.body, .medium)).lineLimit(1)
-                    Spacer(minLength: 8)
-                    Text(age).font(look.ui(.subheadline)).foregroundStyle(look.quiet)
-                }
-                HStack(spacing: 6) {
-                    Mark(status: status)
-                    Text(detail).font(look.ui(.subheadline)).foregroundStyle(look.quiet).lineLimit(2)
-                }
-            }
-        }
-        .padding(.vertical, 4)
-        .listRowBackground(look.row)
-        .swipeActions {
-            Button(role: .destructive) {} label: { Label("Discard", systemImage: "trash") }
-            Button {} label: { Label("Continue", systemImage: "arrow.turn.down.right") }.tint(.blue)
-        }
-    }
-}
-
-struct SearchScreen: View {
-    @Environment(\.look) private var look
-    @State private var query = ""
-    var body: some View {
-        List {
-            Section("Recent") {
-                ForEach(Fake.sessions.prefix(3)) { SessionRow(s: $0) }
-            }
-        }
-        .scrollContentBackground(.hidden)
-        .background(look.background)
-        .navigationTitle("Search")
-        .searchable(text: $query, prompt: "Sessions, messages, docs")
-    }
-}

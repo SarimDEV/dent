@@ -37,3 +37,4 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0033. Connectivity for now: WebSocket over the tailnet or LAN; hub on hold](0033-direct-websocket-hub-on-hold.md)
 - [0034. How streaming text appears is a setting; word by word by default](0034-streaming-reveal-setting.md)
 - [0035. dent-push: notifications as their own small service on Cloudflare Workers](0035-dent-push.md)
+- [0036. Sessions are an inbox; a new session starts by typing](0036-sessions-as-an-inbox.md)

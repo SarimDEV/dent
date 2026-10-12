@@ -18,5 +18,5 @@ Everything in this spec gets built; the order only decides what you can use dail
 8. **iPhone.** Client core through UniFFI, SwiftUI app, dent-push with time-sensitive approvals, notification actions, widget, Live Activity, Face ID, Apple Watch.
    - Exit: you answer an approval from your lock screen.
 9. **Web client and backup.** Browser client served by the hub, encrypted session backup.
-10. **Machines on demand.** Provider interface, command provider, AWS provider, hosted cloud machines, join tokens, safe teardown, fleet updates, moving sessions between machines, automations and the inbox.
+10. **Machines on demand.** Provider interface, command provider, AWS provider, hosted cloud machines, join tokens, safe teardown, fleet updates, moving sessions between machines, and automations.
 11. **Public release.** Linux and Windows polish, installers, billing, own relays on Hetzner, Anthropic approval for subscription logins, protocol docs, license, website.

@@ -4,7 +4,7 @@ The desktop app is a GPUI client for macOS, Linux and Windows, built around a ch
 
 ## Layout
 
-- **Sidebar:** projects, each listing its sessions with a status dot (working, blocked, idle, done, errored) and its machine; machines and their connection state at the bottom.
+- **Sidebar:** one list of sessions across every machine, sorted as an inbox (decision [0036](decisions/0036-sessions-as-an-inbox.md)): Needs you, then Done, then Working, lighter, at the bottom. Each row shows its status, project and machine. Closing a session takes it off the list; inbox zero is when everything is working or closed. Machines and their connection state sit at the bottom.
 - **Main:** the selected session's chat.
 - **Side panel:** docs, diff or terminal, toggled and resized by keyboard; can pop out into its own window.
 - **Status bar:** usage limits, machine connectivity, blocked-session count.
@@ -28,6 +28,14 @@ The desktop app is a GPUI client for macOS, Linux and Windows, built around a ch
 - **Accounts:** several Claude or Codex logins per machine, picked per project or session, each with its own usage limits.
 - **Rewind:** each of your messages offers restore code, restore conversation, or both (see Checkpoints).
 
+## New session
+
+Cmd/Ctrl+N opens an empty chat with the cursor in the composer: you start by typing. Under the composer are the session's settings, already chosen, each a click (or a key) to change:
+
+- **Project:** filled in from what you type, updating as you go; "New project" or "No project" when nothing fits.
+- **Machine:** the least busy online machine with the project's repo.
+- **Model, permissions, worktree:** whatever you used last.
+
 ## Quick capture
 
 Press a global shortcut from anywhere, type an idea, press Enter, and an agent starts on it in the right project. You never have to switch to the app.
@@ -41,7 +49,7 @@ Press a global shortcut from anywhere, type an idea, press Enter, and an agent s
 - **Low confidence** never guesses silently: when no project is clearly ahead, the prompt shows the top choices and waits for one key.
 - **Change your mind:** "Move to project" works on any session, keeping its history.
 - **Context comes along:** the shortcut can attach the current browser URL or selected text, if you allow it.
-- **What the model sees:** project names, their repos and recent session titles, plus your prompt. Without a decision model configured, captures land in the Inbox.
+- **What the model sees:** project names, their repos and recent session titles, plus your prompt. Without a decision model configured, captures start with no project.
 - **Platform note:** global shortcuts work directly on macOS and Windows; on Linux under Wayland they go through the desktop's global-shortcuts permission prompt.
 
 ## Markdown viewer
@@ -91,16 +99,15 @@ Agents on remote machines start dev servers you cannot otherwise reach.
 
 A panel shows the live view of the session's agent browser (see Daemon, Browser for agents), with take-over and an annotate-and-send tool. Forwarded previews open in your own browser by default and here on request.
 
-## Side chat, sharing and the inbox
+## Side chat and sharing
 
 - **Side chat** (Cmd/Ctrl+;): ask a question with the session's full context without adding to it. It can be promoted into a real fork.
 - **Sharing:** export a session as Markdown, HTML or JSON, or create a read-only link through the hub. The decryption key rides in the link itself, so the hub still cannot read it.
-- **Inbox:** automation results, finished goals and merged PRs land in one list to review, continue or archive.
 - **Move to machine:** one command moves the current session to another machine, with a preview of what will be copied.
 
 ## Overview, search and limits
 
-- **Overview:** a board of every session across every machine, grouped by status; blocked sessions sort first, and one key jumps to the next one that needs you.
+- **Overview:** the same inbox as a board, for a wide window; one key jumps to the next session that needs you.
 - **Command palette** (Cmd/Ctrl+K): sessions, projects, docs, commands and settings, fuzzy matched.
 - **Search** (Cmd/Ctrl+Shift+F): full text across all sessions and docs from the local cache, filterable by project, machine, agent and date.
 - **Usage limits:** always in the status bar: each Claude and Codex account's windows (5-hour and weekly, or whatever the plan has) as percentages with reset countdowns, turning amber and red near the limit. Account-level and synced across devices; see Daemon, Usage limits.
@@ -114,7 +121,8 @@ Every action has a command, and every command can be bound in a keymap file. The
 | Command palette | Cmd/Ctrl+K |
 | Previous / next of my messages | Alt+Up / Alt+Down |
 | Next blocked session | Cmd/Ctrl+J |
-| New session in current project | Cmd/Ctrl+N |
+| New session | Cmd/Ctrl+N |
+| Close session | Cmd/Ctrl+W |
 | Toggle docs / diff / terminal | Cmd/Ctrl+1 / 2 / 3, Ctrl+\` |
 | Stage / unstage file in diff list | S / U |
 | Search everything | Cmd/Ctrl+Shift+F |

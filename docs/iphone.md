@@ -4,7 +4,8 @@ The iPhone app is a SwiftUI client for chatting, approving, reading docs and get
 
 ## Features
 
-- **Home:** projects and sessions with live status; blocked sessions pinned to the top.
+- **Sessions:** one list, and the whole app: Needs you, then Done (finished sessions, automation results, finished goals), then Working, lighter, at the bottom. Swipe to close; the aim is inbox zero, when everything is working or closed (decision [0036](decisions/0036-sessions-as-an-inbox.md)). No tab bar: search and New Session sit in the bottom toolbar, Settings behind a gear.
+- **New session:** opens an empty chat with the keyboard up. Project, machine, model, permissions and worktree sit under the composer, already chosen (project from what you type, the least busy machine, the rest as last time), one tap each to change.
 - **Chat:** full history from cache, live streaming, send, queue, interrupt, and jump between your own messages. Tool calls collapse as on desktop.
 - **Approvals:** inline in chat, and actionable straight from the notification (allow, deny) without opening the app.
 - **Notifications:** agent blocked, turn finished, error, limit nearly reached; configurable per project.
@@ -16,8 +17,7 @@ The iPhone app is a SwiftUI client for chatting, approving, reading docs and get
 - **Previews:** open a session's forwarded dev server in Safari.
 - **Face ID lock:** optional.
 - **Long chats stay fast:** the app renders from its cache and pages history in, so even old chats open instantly.
-- **Inbox:** automation results and finished goals, ready to continue or discard.
-- **Goals:** progress and the time a paused run resumes after a limit reset.
+- **Goals:** progress, and the time a paused run resumes after a limit reset, in the session's row.
 - **Apple Watch:** session status, approvals with allow and deny buttons, and usage limits as a complication.
 - **Quick capture:** from the share sheet in Safari or any app, a Shortcuts action, the Action button or a home-screen widget, with the same project routing as desktop.
 

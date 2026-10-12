@@ -45,11 +45,18 @@ enum Fake {
                 status: .done, detail: "Draft ready in posts/one-core.md", age: "1h"),
         Session(id: "s7", title: "Upgrade the base image", project: "infra", machine: "devbox", agent: "codex",
                 status: .waiting, detail: "Paused at the usage limit · resumes 3:10 pm", age: "2h"),
+        Session(id: "s8", title: "Nightly dependency check", project: "dent", machine: "mac-mini", agent: "claude",
+                status: .done, detail: "Automation · 3 updates available, PR ready", age: "6:00"),
+        Session(id: "s9", title: "Goal: docs site builds clean", project: "website", machine: "studio", agent: "codex",
+                status: .done, detail: "Goal finished after 4 runs", age: "Yest."),
     ]
 
     static var needs: [Session] { sessions.filter { $0.status == .needs } }
     static var working: [Session] { sessions.filter { $0.status == .working } }
-    static var recent: [Session] { sessions.filter { $0.status == .done || $0.status == .waiting } }
+    /// Finished and waiting for you to steer or close: sessions, automation results, goals.
+    static var done: [Session] { sessions.filter { $0.status == .done } }
+    /// Nothing to do: running, or paused until a limit resets.
+    static var busy: [Session] { sessions.filter { $0.status == .working || $0.status == .waiting } }
     static let projects = ["dent", "website", "infra"]
 
     static let chat = sessions[0]

@@ -13,16 +13,16 @@ A project is a piece of work you are doing, like "AuthZ refactor" or a random id
 
 - A session runs on one machine but can work across several checkouts there, passed to the agent as additional working directories.
 - Picking a repo for a session on a machine without a checkout offers to clone it there.
-- Sessions can move between projects; a session started outside any project lands in an Inbox.
+- Sessions can move between projects; a session can also have no project.
 
 ## Starting from an idea
 
 A new idea should cost one keystroke, not a setup screen.
 
-- Cmd/Ctrl+N in the Inbox, or "New project" with just a name, starts a session immediately on your default machine.
+- Cmd/Ctrl+N opens a new session: you start typing, and the project fills in from what you type (decision [0036](decisions/0036-sessions-as-an-inbox.md)). It runs on the least busy machine, with the model, permissions and worktree you used last.
 - If the idea has no repo yet, the session gets a fresh scratch folder with `git init`, and the agent can create a remote later.
 - Promoting a scratch folder to a repo or adding existing repos happens whenever you want, without moving the session.
-- After your first message, a suggestion offers the project the session most likely belongs to, or a new project when it looks like a fresh idea. One key accepts; ignoring it leaves the session in the Inbox.
+- The project guess is shown under the composer before you send, and can be changed there, or later with "Move to project". When it looks like a fresh idea, it offers a new project.
 
 ## Worktrees
 
@@ -30,7 +30,7 @@ Agents create worktrees themselves, so dent detects rather than manages them.
 
 - The daemon watches `git worktree list` for each workspace and shows worktrees under their repo, linked to the session that created them.
 - Diffs, staging and docs work the same in a worktree as in the main checkout.
-- A "new session in a fresh worktree" option exists for when you want it, and finished worktrees can be cleaned up from the UI.
+- Whether a new session gets a fresh worktree is a setting under the composer that remembers your last choice. Closing a session offers to clean up its worktree.
 
 ## Project docs
 

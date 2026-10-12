@@ -17,9 +17,9 @@ const out = path.resolve(args[0] ?? "shots");
 const sh = (cmd, a) => execFileSync(cmd, a, { encoding: "utf8" });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const all = ["home", "home-projects", "home-usage", "empty", "chat", "chat-transcript", "chat-tools", "chat-working",
-  "chat-offline", "changes", "doc", "inbox", "settings", "settings-limited", "machine", "machine-remove",
-  "add", "code", "qr", "paired", "new", "chat-pr", "syncing", "welcome", "lock", "notify-actions", "island"];
+const all = ["home", "home-zero", "empty", "new", "new-typed", "chat", "chat-transcript", "chat-tools", "chat-working",
+  "chat-offline", "chat-pr", "changes", "doc", "settings", "settings-limited", "machine", "machine-remove",
+  "add", "code", "qr", "paired", "syncing", "welcome", "lock", "notify-actions", "island"];
 const screens = opt("--screens", all.join(",")).split(",");
 const looks = opt("--looks", "system,paper,serif,book").split(",");
 const appearance = opt("--appearance", "light");
@@ -40,7 +40,7 @@ for (const look of looks) {
   for (const screen of screens) {
     sh("xcrun", ["simctl", "launch", "--terminate-running-process", udid, "dev.dent.concepts", "-screen", screen, "-look", look]);
     // Sheets, pushes and the keyboard all animate in; let them settle.
-    await sleep(["code", "machine-remove", "add", "qr", "paired", "new", "empty-add"].includes(screen) ? 3200 : 2200);
+    await sleep(["code", "machine-remove", "add", "qr", "paired", "new", "new-typed", "empty-add"].includes(screen) ? 3200 : 2200);
     const file = path.join(out, `${look}-${screen}${tag ? "-" + tag : ""}.png`);
     sh("xcrun", ["simctl", "io", udid, "screenshot", file]);
     console.log(file);
