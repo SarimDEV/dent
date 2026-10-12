@@ -48,6 +48,7 @@ pub struct Opts {
     pub specimen: bool,
     pub stress: bool,
     pub verify: bool,
+    pub compare: bool,
     pub size: Option<(f32, f32)>,
 }
 
@@ -67,6 +68,7 @@ fn opts() -> Opts {
         specimen: false,
         stress: false,
         verify: false,
+        compare: false,
         size: None,
     };
     let mut it = std::env::args().skip(1);
@@ -92,6 +94,10 @@ fn opts() -> Opts {
             "--record" => o.record = it.next().map(Into::into),
             "--fps" => o.fps = true,
             "--specimen" => o.specimen = true,
+            "--compare" => {
+                o.specimen = true;
+                o.compare = true;
+            }
             "--verify" => {
                 o.specimen = true;
                 o.stress = true;
@@ -1235,7 +1241,9 @@ fn main() {
             })),
             titlebar: Some(TitlebarOptions {
                 title: Some(
-                    if o.stress {
+                    if o.compare {
+                        "dent · streaming, three ways"
+                    } else if o.stress {
                         "dent · spike 04 stress"
                     } else if o.specimen {
                         "dent · spike 04"
@@ -1249,6 +1257,35 @@ fn main() {
             focus: true,
             ..Default::default()
         };
+        if o.compare {
+            let (dark, record) = (o.dark, o.record.clone());
+            gpui_kit::open_window(options, cx, move |_, cx| {
+                use specimen::Reveal;
+                let panes = [Reveal::Raw, Reveal::Smooth, Reveal::Blocks]
+                    .into_iter()
+                    .map(|r| cx.new(|_| specimen::Specimen::pane(dark, r)))
+                    .collect();
+                let theme = if dark {
+                    theme::Theme::carbon()
+                } else {
+                    theme::Theme::paper()
+                };
+                cx.new(|_| specimen::Compare::new(panes, theme))
+            })
+            .expect("open window");
+            if let Some(path) = record {
+                demo::record(path, 10.5);
+            }
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(Duration::from_secs_f32(12.))
+                    .await;
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+            cx.activate(true);
+            return;
+        }
         if o.specimen {
             let (dark, bench, shots, stress, verify) =
                 (o.dark, o.bench, o.shots.clone(), o.stress, o.verify);

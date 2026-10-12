@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::*;
 
+use crate::Spike;
 use crate::fake::Row;
 use crate::theme::Status;
-use crate::{Spike, WINDOW};
 
 #[derive(Clone)]
 enum Act {
@@ -374,8 +374,8 @@ fn region() -> String {
 }
 
 /// Record the window region at 60 fps without the mouse pointer.
-fn record(path: PathBuf, secs: f32) {
-    let (x, y, w, h) = WINDOW;
+pub(crate) fn record(path: PathBuf, secs: f32) {
+    let (x, y, w, h) = crate::window();
     let s = 2.; // Retina backing scale
     let crop = format!("crop={}:{}:{}:{}", w * s, (h + 28.) * s, x * s, y * s);
     let _ = std::process::Command::new("ffmpeg")

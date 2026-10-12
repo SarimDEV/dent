@@ -19,3 +19,7 @@ ttf-parser = "=0.25.1"
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Hides the pointer while recording the streaming comparison.
+objc = "=0.2.7"

@@ -209,6 +209,21 @@ Checks on the row path:
 
 A table's length no longer matters, whether it's streaming or finished. All 14 interaction checks also pass with a 5,000-row table streaming in.
 
+## How streaming should feel
+
+`--compare` streams the specimen reply three ways, side by side, all fed the same bursty arrival timing: bursts of 4–22 characters every 25–70 ms, with a 200–450 ms pause every 23 bursts.
+- **As it arrives:** text appears when each burst lands, mid-word if need be.
+- **Smoothed:** arrivals are revealed a whole word at a time, at a pace that never trails them by much more than 0.25 s. New words fade in over 180 ms, tracked per inline in rendered characters, so markup never counts.
+- **Block by block:** a block appears once another block has started after it, fading in over 300 ms.
+
+The comparison panes hide hover-only actions, and the window hides the pointer while recording. The choice is the owner's, from a recording.
+
+**Starting the agent early.** This was measured without calling a model:
+- Claude Code takes a median of 626 ms (550–683) from launch to answering the `initialize` handshake.
+- `codex app-server` takes 30 ms to answer `initialize`.
+- Sessions already keep their process alive, so pre-starting Claude would save about 0.6 s on the first message of a new or resumed session only. Any startup work after the first prompt can't be measured without sending one.
+- Not worth another moving part yet; it's noted as an optional optimisation.
+
 ## What changes in the spec
 
 - **chat-rendering.md:**
@@ -232,4 +247,5 @@ cargo run -p spike-markdown --release -- tables     # row-at-a-time tables again
 just dev spike-gpui-chat --specimen [--dark] [--bench --shots DIR]
 just dev spike-gpui-chat --stress [--size WxH] [--dark] [--bench --shots DIR]   # STRESS_ROWS=n, STRESS_FILE=page.md
 just dev spike-gpui-chat --verify [--size WxH] [--dark] [--shots DIR]   # scripted wheel and click checks
+just dev spike-gpui-chat --compare [--dark] [--size WxH] [--record FILE]   # three ways to stream, side by side
 ```

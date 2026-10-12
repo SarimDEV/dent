@@ -24,8 +24,12 @@ use crate::ds::{CODE, LABEL, READING, Typed, radius, space};
 
 #[path = "chrome.rs"]
 mod chrome;
+#[path = "reveal.rs"]
+pub mod reveal;
 #[path = "verify.rs"]
 mod verify;
+
+pub use reveal::{Compare, Reveal};
 
 use crate::theme::{self, Theme};
 use chrome::{CopyText, Probes, TableData};
@@ -230,6 +234,18 @@ pub struct Specimen {
     copy_texts: HashMap<String, CopyText>,
     /// Top-level tables built row by row, by where their block starts.
     table_rows: HashMap<usize, TableBuild>,
+    pub reveal: Reveal,
+    arrivals: Vec<(f32, usize)>,
+    revealed: f32,
+    last_tick: Option<Instant>,
+    /// Per inline (block start, position): rendered length and when seen.
+    seen: HashMap<(usize, usize), Vec<(usize, Instant)>>,
+    inline_ix: usize,
+    block_start: usize,
+    /// Block mode: when each block was first shown.
+    first_seen: HashMap<usize, Instant>,
+    /// Something is mid-fade, so keep drawing.
+    fading: bool,
     /// How many frames had been drawn when streaming finished.
     draws_at_done: Option<usize>,
 }
@@ -288,8 +304,25 @@ impl Specimen {
             verify: verify.then(verify::Verify::default),
             copy_texts: HashMap::new(),
             table_rows: HashMap::new(),
+            reveal: Reveal::Rate,
+            arrivals: Vec::new(),
+            revealed: 0.,
+            last_tick: None,
+            seen: HashMap::new(),
+            inline_ix: 0,
+            block_start: 0,
+            first_seen: HashMap::new(),
+            fading: false,
             draws_at_done: None,
         }
+    }
+
+    /// A pane for `--compare`: the specimen message, revealed one way.
+    pub fn pane(dark: bool, reveal: Reveal) -> Self {
+        let mut s = Self::new(dark, false, None, false, false);
+        s.reveal = reveal;
+        s.arrivals = reveal::arrivals(MESSAGE);
+        s
     }
 
     fn typeset(&mut self, src: &str, display: bool) -> Option<Rc<DisplayList>> {
@@ -360,7 +393,7 @@ impl Specimen {
 
     fn advance(&mut self) -> bool {
         let msg = self.message;
-        let want = ((self.start.elapsed().as_secs_f32() - 0.4).max(0.) * self.rate) as usize;
+        let want = self.reveal_target();
         let mut at = self.streamer.text.len();
         if at >= msg.len() {
             if self.done_at.is_none() {
@@ -838,10 +871,20 @@ impl Frame {
             min: 0.,
         }
     }
-    fn flush(&mut self, t: &Theme) {
+    fn take_inline(&mut self) -> Option<Inline> {
         let inline = std::mem::take(&mut self.inline);
-        if !inline.text.is_empty() {
-            self.children.push(inline.element(t));
+        (!inline.text.is_empty()).then_some(inline)
+    }
+}
+
+impl Specimen {
+    /// Turn a frame's pending inline text into an element, fading in what's
+    /// new when revealing smoothly.
+    fn flush_frame(&mut self, f: &mut Frame) {
+        if let Some(inline) = f.take_inline() {
+            let t = self.theme;
+            let inline = self.fade_inline(inline);
+            f.children.push(inline.element(&t));
         }
     }
 }
@@ -951,6 +994,8 @@ impl Specimen {
     ) -> AnyElement {
         self.closed = done;
         self.hs_count = 0;
+        self.block_start = b.range.start;
+        self.inline_ix = 0;
         if let Some(Event::Start(Tag::Table(aligns))) = b.events.first() {
             return self.table_block(b, aligns, window, cx);
         }
@@ -976,7 +1021,7 @@ impl Specimen {
                     }
                     _ => {
                         if let Some(top) = stack.last_mut() {
-                            top.flush(&t);
+                            self.flush_frame(top);
                         }
                         stack.push(Frame::new(Some(tag.clone())));
                     }
@@ -1000,7 +1045,7 @@ impl Specimen {
                             }
                             (f.natural, f.min) = measure(&f.inline, window);
                         } else {
-                            f.flush(&t);
+                            self.flush_frame(&mut f);
                         }
                         let el = self.finish(f, &code, &code_lang, window, cx);
                         if let Some(parent) = stack.last_mut() {
@@ -1043,7 +1088,7 @@ impl Specimen {
                     {
                         let el = self.inline_math_line(l, &t);
                         if let Some(top) = stack.last_mut() {
-                            top.flush(&t);
+                            self.flush_frame(top);
                             top.children.push(el);
                         }
                         continue;
@@ -1065,7 +1110,7 @@ impl Specimen {
                         None => self.code_block(s, "tex", cx),
                     };
                     if let Some(top) = stack.last_mut() {
-                        top.flush(&t);
+                        self.flush_frame(top);
                         top.children.push(el);
                     }
                 }
@@ -1076,7 +1121,7 @@ impl Specimen {
                 }
                 Event::HardBreak => {
                     if let Some(top) = stack.last_mut() {
-                        top.flush(&t);
+                        self.flush_frame(top);
                     }
                 }
                 Event::Rule => {
@@ -1099,7 +1144,7 @@ impl Specimen {
             }
         }
         let mut root = stack.pop().unwrap_or_else(|| Frame::new(None));
-        root.flush(&t);
+        self.flush_frame(&mut root);
         div()
             .flex()
             .flex_col()
@@ -1229,6 +1274,9 @@ impl Specimen {
                         ),
                     t.surface,
                 );
+                if self.reveal != Reveal::Rate {
+                    return body;
+                }
                 let key = format!("copy-mermaid-{}", self.block_ix);
                 let copy = self.copy_button(key, "Copy source", chrome::text(src.to_string()), cx);
                 hover_actions(body, copy, self.block_ix, n)
@@ -1339,6 +1387,10 @@ impl Specimen {
                 ),
             t.surface,
         );
+        // The comparison panes are watched, not used: no hover actions.
+        if self.reveal != Reveal::Rate {
+            return body;
+        }
         let key = format!("copy-tex-{}-{n}", self.block_ix);
         let copy = self.copy_button(key, "Copy TeX", chrome::text(src.trim().to_string()), cx);
         hover_actions(body, copy, self.block_ix, n)
@@ -1478,15 +1530,38 @@ impl Render for Specimen {
         // Borrow the blocks rather than copy their events every frame: the
         // streamer is set aside while elements are built, then put back.
         let streamer = std::mem::take(&mut self.streamer);
-        let els: Vec<AnyElement> = streamer
-            .visible()
+        self.fading = false;
+        let blocks: Box<dyn Iterator<Item = &Block>> = if self.reveal == Reveal::Blocks {
+            // A block is shown once another block has started after it: only
+            // the one still being written is held back.
+            let shown = streamer.tail.len().saturating_sub(1);
+            Box::new(streamer.committed.iter().chain(&streamer.tail[..shown]))
+        } else {
+            Box::new(streamer.visible())
+        };
+        let els: Vec<AnyElement> = blocks
             .enumerate()
             .map(|(i, b)| {
                 self.block_ix = i;
-                self.block(b, i < n, window, cx)
+                let el = self.block(b, i < n, window, cx);
+                if self.reveal == Reveal::Blocks {
+                    let a = self.block_alpha(b.range.start);
+                    div().opacity(a).child(el).into_any_element()
+                } else {
+                    el
+                }
             })
             .collect();
         self.streamer = streamer;
+        if self.fading {
+            window.request_animation_frame();
+        }
+        // The panes follow the end of the reply, as a chat does.
+        if self.reveal != Reveal::Rate
+            && self.done_at.is_none_or(|d| d.elapsed().as_secs_f32() < 1.)
+        {
+            self.scroll.scroll_to_bottom();
+        }
         self.builds.push(built.elapsed().as_secs_f64() * 1e3);
         let panel = self.panel(window, cx);
         div()
@@ -1506,7 +1581,11 @@ impl Render for Specimen {
                     .restrict_scroll_to_axis()
                     .w_full()
                     .max_w(px(crate::ds::size::COLUMN + 64.))
-                    .px(px(space::S8))
+                    .px(px(if self.reveal == Reveal::Rate {
+                        space::S8
+                    } else {
+                        space::S4
+                    }))
                     .py(px(space::S6))
                     .ty(READING)
                     .flex()
