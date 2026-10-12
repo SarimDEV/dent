@@ -21,3 +21,8 @@ verify:
     cargo clippy --workspace --all-targets -- -D warnings
     cargo test --workspace --quiet
     scripts/check-boundaries.sh
+
+# Regenerate Codex app-server types from the installed (pinned) codex. Needs cargo-typify.
+gen-codex-types dir="spikes/codex-app-server":
+    python3 -I scripts/gen-codex-types.py {{dir}}
+    cargo fmt --all

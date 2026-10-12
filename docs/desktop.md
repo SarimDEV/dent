@@ -103,7 +103,7 @@ A panel shows the live view of the session's agent browser (see Daemon, Browser 
 - **Overview:** a board of every session across every machine, grouped by status; blocked sessions sort first, and one key jumps to the next one that needs you.
 - **Command palette** (Cmd/Ctrl+K): sessions, projects, docs, commands and settings, fuzzy matched.
 - **Search** (Cmd/Ctrl+Shift+F): full text across all sessions and docs from the local cache, filterable by project, machine, agent and date.
-- **Usage limits:** always in the status bar: Claude and Codex 5-hour and weekly usage as percentages with reset countdowns, per account, turning amber and red near the limit.
+- **Usage limits:** always in the status bar: each Claude and Codex account's windows (5-hour and weekly, or whatever the plan has) as percentages with reset countdowns, turning amber and red near the limit. Account-level and synced across devices; see Daemon, Usage limits.
 
 ## Shortcuts
 

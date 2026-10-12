@@ -52,4 +52,4 @@ claude -p --input-format stream-json --output-format stream-json --verbose \
 just dev spike-claude-stream --cwd /path/to/a/scratch/repo --model haiku
 ```
 
-Type a message. When it asks `approve? [y / n reason]`, answer on the next line. `/interrupt`, `/mode plan`, `/model sonnet`, `/context`, `/quit`. Raw traffic is recorded in `spikes/claude-stream/recordings/`.
+Type a message. When it asks `approve? [y / n reason]`, answer on the next line. `/interrupt`, `/mode plan`, `/model sonnet`, `/context`, `/usage` (account-level usage via `get_usage`; see decision 0031), `/quit`. Raw traffic is recorded in `spikes/claude-stream/recordings/`.

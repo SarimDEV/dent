@@ -7,7 +7,7 @@ dent borrows every hard engine and owns only the thin layers that make it dent: 
 | Area | Decision | If it breaks |
 | --- | --- | --- |
 | Claude Code | Drive `claude -p` stream-json directly; detect features from the `initialize` control response and `system/init` (commands, models, tools, version), not version numbers alone ([headless docs](https://code.claude.com/docs/en/headless)) | Fall back to a small Node sidecar on the official Agent SDK |
-| Codex | `codex app-server` over stdio, v2 methods only, no experimental API; Rust types generated in CI from its JSON schema at a pinned version ([app-server docs](https://learn.chatgpt.com/docs/app-server)) | Schema diff on every bump shows exactly what changed |
+| Codex | `codex app-server` over stdio, v2 methods only, no experimental API; Rust types generated from its JSON schema at a pinned version with typify plus a small generator for method dispatch, schema committed ([app-server docs](https://learn.chatgpt.com/docs/app-server)) | Schema diff on every bump shows exactly what changed |
 | Other agents | One ACP v1 client for everything else, crate pinned ([ACP](https://agentclientprotocol.com/protocol/initialization)) | ACP v2 is a draft; support v1 and v2 side by side when it lands |
 | Desktop UI | GPUI through gpui-component, with the GPUI snapshot pinned exactly and upgraded monthly ([gpui-component](https://github.com/longbridge/gpui-component)) | All logic lives in GPUI-free crates; Tauri is the escape hatch for the view layer |
 | Diff editor | Built on gpui-component's editor | Diffs computed with imara-diff, independent of the view |
@@ -40,7 +40,7 @@ dent borrows every hard engine and owns only the thin layers that make it dent: 
 
 ## Decisions this changes
 
-- **Claude usage limits are solved:** the stream emits `rate_limit_event` with five-hour and weekly utilisation and reset times, so the status line is only a fallback.
+- **Usage limits are solved:** Claude Code's `get_usage` and Codex's `account/rateLimits/read` return account-level usage from the provider, so readings match across machines; live sessions add `rate_limit_event` and `account/rateLimits/updated` between reads. The status line is not needed.
 - **The daemon no longer holds agent processes itself;** the session holder does, so daemon upgrades never interrupt work.
 - **Git writes shell out** instead of using a Rust git library, and checkpoints use a temporary index.
 - **Mermaid and math no longer need a script engine or web view** in the normal case.

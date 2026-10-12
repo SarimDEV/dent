@@ -2,7 +2,7 @@
 //!
 //! Type a message to send it. While an approval is pending, the next line
 //! answers it: `y` allows, `n [reason]` denies. Commands: `/interrupt`,
-//! `/mode <mode>`, `/model <model>`, `/context`, `/quit`.
+//! `/mode <mode>`, `/model <model>`, `/context`, `/usage`, `/quit`.
 //!
 //! Every raw line in both directions is recorded to `recordings/` for the
 //! future replay driver.
@@ -192,6 +192,9 @@ async fn main() -> Result<()> {
                 } else if line == "/interrupt" {
                     let id = d.control("interrupt", json!({})).await?;
                     pending_controls.insert(id, "interrupt".into());
+                } else if line == "/usage" {
+                    let id = d.control("get_usage", json!({ "skip_behaviors": true })).await?;
+                    pending_controls.insert(id, "get_usage".into());
                 } else if line == "/context" {
                     let id = d.control("get_context_usage", json!({})).await?;
                     pending_controls.insert(id, "get_context_usage".into());
@@ -319,6 +322,17 @@ fn render(ev: &Inbound, mid_text: &mut bool, pending: &mut HashMap<String, Strin
                 .unwrap_or_else(|| request_id.clone());
             match (what.as_str(), ok) {
                 ("initialize", true) => println!("  ⚙ initialized (claude pid {})", body["pid"]),
+                ("get_usage", true) => {
+                    let rl = &body["rate_limits"];
+                    for w in ["five_hour", "seven_day"] {
+                        if !rl[w].is_null() {
+                            println!(
+                                "  ⚙ account usage {w}: {}% (resets {})",
+                                rl[w]["utilization"], rl[w]["resets_at"]
+                            );
+                        }
+                    }
+                }
                 ("get_context_usage", true) => println!(
                     "  ⚙ context: {} / {} tokens ({}%)",
                     body["totalTokens"], body["maxTokens"], body["percentage"]

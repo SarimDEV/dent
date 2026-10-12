@@ -9,13 +9,31 @@ Each agent sits behind one `AgentDriver` trait: start a session, send a user mes
 | Driver | How it runs | Approvals | Limits |
 | --- | --- | --- | --- |
 | Claude Code | `claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-prompt-tool stdio` as a long-lived child process; NDJSON in and out ([docs](https://docs.claude.com/en/docs/claude-code/headless)) | `control_request` `can_use_tool` on stdout, answered with a `control_response` (`allow` with `updatedInput`, or `deny` with a message the agent sees) | `rate_limit_event` with `five_hour` and `seven_day` utilisation and reset times; sent when it changes, not every turn, so the daemon keeps the last value |
-| Codex | `codex app-server`: JSON-RPC over stdio, Codex's own rich-client interface ([app-server docs](https://learn.chatgpt.com/docs/app-server)) | Server-to-client `item/commandExecution/requestApproval` and `item/fileChange/requestApproval` ([types](https://docs.rs/codex-codes/0.129.1/codex_codes/protocol/)) | `account/rateLimits/read` plus the `account/rateLimits/updated` notification |
+| Codex | `codex app-server`: JSON-RPC over stdio, Codex's own rich-client interface ([app-server docs](https://learn.chatgpt.com/docs/app-server)) | Server-to-client `item/commandExecution/requestApproval` and `item/fileChange/requestApproval`, answered with `accept`, `acceptForSession`, `decline` or `cancel`. There is no reason field, so "deny with a reason" declines and then steers the turn with the reason (`turn/steer`) | `account/rateLimits/read` plus the `account/rateLimits/updated` notification (see Usage limits) |
 
 - Pin a tested version of each agent CLI per daemon release, and run a contract test suite against every new agent version before bumping. Codex's protocol is documented as unstable; Claude Code's stream format changes too.
-- Generate Codex's protocol types from its schema dump rather than hand-writing them.
+- Generate Codex's protocol types from its schema dump rather than hand-writing them (`scripts/gen-codex-types.py`; see [spike 02](spikes/02-codex-app-server.md)).
+- Model availability depends on the account: a ChatGPT sign-in rejects some models (for example the user's configured default), so the model picker comes from `model/list`, and a rejected model is shown as such rather than as a generic turn failure.
 - Use the agents' own credentials and login flows. The daemon never reads or reuses their tokens.
 - Agents keep their own transcripts. On restart the daemon resumes the agent's session by id (`--resume` for Claude Code, thread resume for Codex) and reconciles against its own event log.
 - The third driver is the Agent Client Protocol (ACP), which now has session resume, usage updates and a 1.0 Rust SDK ([updates](https://agentclientprotocol.com/updates)). One ACP driver brings in every agent that speaks it.
+
+## Usage limits
+
+Usage is account-level and read from the provider through each agent's own CLI, so it counts every way the account is used (the terminal, other machines, the web, dent) and reads the same on every device. dent never reads or refreshes agent tokens; the CLIs do.
+
+| Agent | Read | Live updates between reads |
+| --- | --- | --- |
+| Claude Code | `get_usage` control request (`skip_behaviors: true`) on a short-lived `claude -p --no-session-persistence --strict-mcp-config` process: `five_hour`, `seven_day`, per-model weekly windows, the `limits[]` rows with severity, and extra-usage spend | `rate_limit_event` from any running session |
+| Codex | `account/rateLimits/read` on `codex app-server`: `primary` and `secondary` windows with `usedPercent`, `windowDurationMins` and `resetsAt`, plus credits and per-model limits | `account/rateLimits/updated` from any running session |
+
+- **Windows are generic.** Plans differ (a free Codex plan has a single 30-day window), so windows are labelled by duration (5h, week, 30d), never hard-coded as "5-hour and weekly".
+- **Keyed by account, not machine.** Readings are stored per provider account (Claude's account UUID, Codex's account id) with the time they were fetched.
+- **Synced through the hub.** Each reading is shared state; the newest `fetched_at` wins, so the phone and every desktop show the newest reading from whichever machine took it. Machines signed in to the same account share one poller, chosen by the hub; the rest stay passive and contribute live updates. Without a hub, each desktop and daemon polls on its own.
+- **Polling:** read at startup (showing the last reading meanwhile), every 5 minutes while limits are visible, doubling while nothing changes up to 20 minutes; 15 minutes doubling to 40 in the background; wake at each window's reset plus 5 seconds to show it empty and confirm; never while the machine sleeps.
+- **Startup fallback:** before the first live read, Claude Code's own cached reading in `~/.claude.json` (`cachedUsageUtilization`, ignored if its account doesn't match).
+- **Signed out vs API key:** neither has plan limits; `claude auth status --json` and Codex's `account/read` tell them apart, and the status bar says which.
+- `get_usage` is undocumented, so it is covered by the per-version contract tests; if it breaks, the last `rate_limit_event` is the fallback.
 
 ## Session event log
 
