@@ -413,7 +413,7 @@ fn record(path: PathBuf, secs: f32) {
         .spawn();
 }
 
-fn still(path: PathBuf) {
+pub(crate) fn still(path: PathBuf) {
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(30));
         let _ = std::process::Command::new("screencapture")

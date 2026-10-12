@@ -1,0 +1,22 @@
+[package]
+name = "spike-markdown"
+description = "Phase 1 spike: RaTeX, merman and streaming Markdown against real transcripts."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pulldown-cmark = { version = "=0.13.4", default-features = false, features = ["simd"] }
+ratex-parser = "=0.1.14"
+ratex-layout = "=0.1.14"
+ratex-types = "=0.1.14"
+ratex-svg = "=0.1.14"
+merman = { version = "=0.8.0", default-features = false, features = ["all-diagrams", "svg", "layout-cytoscape"] }
+resvg = { version = "=0.46.0", default-features = false, features = ["text"] }
+rustybuzz = "=0.20.1"
+serde_json.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

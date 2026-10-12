@@ -13,3 +13,5 @@ Finished blocks must never move while streaming; the layer is small enough to ow
 ## Consequences
 
 Covered by every-prefix streaming tests.
+
+Confirmed in [spike 04](../spikes/04-markdown-math-mermaid.md): 6.66 million every-byte steps over real transcripts with no committed block changing; the terminator brings flicker from 32% of messages to 0.25%.

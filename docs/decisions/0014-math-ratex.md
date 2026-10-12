@@ -13,3 +13,5 @@ No script engine or web view needed in the normal case.
 ## Consequences
 
 Single-maintainer dependency; fallback is web-view KaTeX. Confirmed in Phase 1.
+
+Confirmed in [spike 04](../spikes/04-markdown-math-mermaid.md): every fixture typesets in about 70 µs and the display list is drawn natively in GPUI.

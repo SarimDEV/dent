@@ -13,8 +13,8 @@ dent borrows every hard engine and owns only the thin layers that make it dent: 
 | Diff editor | Built on gpui-component's editor | Diffs computed with imara-diff, independent of the view |
 | Terminal | alacritty\_terminal through a pinned fork | libghostty once it reaches 1.0 |
 | Markdown | pulldown-cmark, plus a stable-prefix streaming layer and a terminator that closes the unfinished tail | We own the streaming layer; it is small |
-| Math | RaTeX, pure Rust, with an iOS framework ([RaTeX](https://github.com/erweixin/RaTeX)); KaTeX on the web | Web-view KaTeX fallback |
-| Mermaid | merman, a headless Rust port producing SVG ([merman](https://github.com/Latias94/merman)) | Offline web view running mermaid.js |
+| Math | RaTeX, pure Rust, with an iOS framework ([RaTeX](https://github.com/erweixin/RaTeX)); its display list is drawn natively; KaTeX on the web. Confirmed in [spike 04](spikes/04-markdown-math-mermaid.md) | Web-view KaTeX fallback |
+| Mermaid | merman, a headless Rust port producing SVG ([merman](https://github.com/Latias94/merman)), rasterised by resvg with the bundled fonts; all 22 diagram types render. Confirmed in spike 04 | Offline web view running mermaid.js |
 | Highlighting | arborium tree-sitter grammars, with tokens carried in the block tree so iPhone and web need no highlighter ([arborium](https://fasterthanli.me/articles/introducing-arborium)) | Plain monospace code |
 | Vega-Lite | vl-convert on desktop and in the daemon, sending SVG to the phone ([vl-convert](https://github.com/vega/vl-convert)) | Show the data table instead |
 | Connectivity | iroh 1.0, stable wire format and API, Swift bindings, open-source relay ([iroh 1.0](https://iroh.computer/blog/v1)); n0's free public relays while building and sharing with a few friends; relays on Hetzner (about €5 a month each, set up by an agent) or n0's $19/month tier before public launch; relay addresses are a setting, never hard-coded | Self-hosted iroh relay; Tailscale stays an optional transport |

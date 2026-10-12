@@ -15,6 +15,7 @@ mod bench;
 mod demo;
 mod ds;
 mod fake;
+mod specimen;
 mod theme;
 
 use std::collections::HashMap;
@@ -44,6 +45,7 @@ pub struct Opts {
     pub demo: Option<String>,
     pub record: Option<std::path::PathBuf>,
     pub fps: bool,
+    pub specimen: bool,
 }
 
 fn opts() -> Opts {
@@ -59,6 +61,7 @@ fn opts() -> Opts {
         demo: None,
         record: None,
         fps: false,
+        specimen: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -82,6 +85,7 @@ fn opts() -> Opts {
             "--demo" => o.demo = it.next(),
             "--record" => o.record = it.next().map(Into::into),
             "--fps" => o.fps = true,
+            "--specimen" => o.specimen = true,
             other => eprintln!("ignoring unknown flag {other}"),
         }
     }
@@ -1183,12 +1187,13 @@ fn main() {
         .find(|p| p.name == o.fonts)
         .unwrap_or(&theme::PAIRINGS[0]);
     theme::FONTS.get_or_init(|| pairing);
-    if o.bench || o.demo.is_some() {
+    if o.bench || o.demo.is_some() || o.specimen {
         profiler::set_trace_enabled(true);
     }
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
         load_fonts(cx, o.font_dir.as_deref());
+        specimen::load_katex(cx);
         let (x, y, w, h) = WINDOW;
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
@@ -1196,12 +1201,28 @@ fn main() {
                 size: size(px(w), px(h)),
             })),
             titlebar: Some(TitlebarOptions {
-                title: Some("dent · spike 03".into()),
+                title: Some(
+                    if o.specimen {
+                        "dent · spike 04"
+                    } else {
+                        "dent · spike 03"
+                    }
+                    .into(),
+                ),
                 ..Default::default()
             }),
             focus: true,
             ..Default::default()
         };
+        if o.specimen {
+            let (dark, bench, shots) = (o.dark, o.bench, o.shots.clone());
+            gpui_kit::open_window(options, cx, move |_, cx| {
+                cx.new(|_| specimen::Specimen::new(dark, bench, shots))
+            })
+            .expect("open window");
+            cx.activate(true);
+            return;
+        }
         let (_, view) = gpui_kit::open_window(options, cx, |_, cx| cx.new(|_| Spike::new(&o)))
             .expect("open window");
         // Step the working square's ripple (steps.pixel) even when nothing else changes.

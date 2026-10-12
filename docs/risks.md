@@ -10,7 +10,7 @@ The biggest risk is Anthropic's terms for third-party apps that use subscription
 | GPUI is pre-1.0 with thin docs; Linux and Windows support is newer than macOS | Slower UI work, upstream breakage | Pin a Zed commit, keep UI code separate from the client core, spike the hardest views (chat list, diff) in phase 0 |
 | iOS cannot hold background connections | No notifications without a hosted relay; requires an Apple developer account | Hub push from the start of the iPhone phase |
 | The daemon is remote code execution by design | A stolen account or device controls every machine | New devices need approval on an existing device, two-factor sign-in, instant revocation, keys in the OS keychain |
-| Mermaid and math have no mature pure-Rust renderers | Slower or heavier markdown viewer | Render through an embedded JS engine off the UI thread, cache SVG by content hash |
+| ~~Mermaid and math have no mature pure-Rust renderers~~ Resolved in [spike 04](spikes/04-markdown-math-mermaid.md): RaTeX and merman cover the fixtures and render in milliseconds, natively | — | Cache by content hash; web-view fallbacks stay named in Durability |
 | Hub outage | Sign-in and new devices stop; relayed connections drop | Known devices connect directly from cache; the hub runs in two regions with a status page |
 | Relay bandwidth cost | Thin or negative margins on the paid hub | Direct connections first, relay only on failure, relay usage measured per account from day one |
 | Lost encryption keys | Locked out of synced state and backups | Recovery key at first sign-in; approval from any existing device |

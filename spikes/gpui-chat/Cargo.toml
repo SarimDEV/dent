@@ -9,6 +9,13 @@ publish.workspace = true
 [dependencies]
 gpui-kit = "=0.7.1"
 gpui-fps = "=0.7.1"
+# Spike 04: render Markdown, math and diagrams through the markdown spike.
+spike-markdown = { path = "../markdown" }
+pulldown-cmark = { version = "=0.13.4", default-features = false }
+ratex-types = "=0.1.14"
+ratex-katex-fonts = "=0.1.14"
+image = { version = "=0.25.10", default-features = false }
+ttf-parser = "=0.25.1"
 
 [lints]
 workspace = true

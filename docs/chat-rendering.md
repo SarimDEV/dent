@@ -27,10 +27,12 @@ Every message is parsed into a tree of typed blocks, and each block type has one
 | Engine | Used for | Why |
 | --- | --- | --- |
 | Native | Text, code, diffs, tables, terminal output, data trees, charts, stock cards, agent output | Fastest, fully themed, interactive |
-| Sandboxed script engine producing SVG | TeX math, Vega-Lite specs | Mature libraries without a browser |
-| Isolated, offline web view | Mermaid diagrams, HTML previews, rare formats | Formats that need a real browser layout |
+| Native from a Rust engine | TeX math (RaTeX's display list drawn as glyphs, rules and paths), Mermaid (merman to SVG, rasterised by resvg off the UI thread) | Themed and crisp, no browser ([spike 04](spikes/04-markdown-math-mermaid.md)) |
+| Sandboxed script engine producing SVG | Vega-Lite specs | Mature libraries without a browser |
+| Isolated, offline web view | HTML previews, rare formats, and the fallback if merman or RaTeX fails | Formats that need a real browser layout |
 
-Which library needs which engine is confirmed in phase 1; Mermaid, for example, measures text with a browser and cannot run headless.
+- **Math:** RaTeX's display list is drawn with GPUI primitives in the KaTeX fonts. Glyphs from the KaTeX Size fonts are drawn from their outlines, because GPUI does not load fonts without an `m` glyph. Inline math reserves its width with invisible characters in the paragraph and is drawn at the text baseline.
+- **Mermaid:** merman renders SVG with its resvg-safe preset, a host theme mapped from the palette tokens, and label widths measured with the bundled fonts. A recolour pass snaps any remaining colour to the nearest token (C4, sankey and architecture otherwise keep their own). A diagram renders once its fence closes.
 
 ## Initial catalogue
 
@@ -38,10 +40,10 @@ Which library needs which engine is confirmed in phase 1; Mermaid, for example, 
 | --- | --- | --- |
 | Text | Headings, inline styles, links, lists, task lists, quotes, alerts, footnotes, definition lists, collapsible sections, rules, emoji, CJK and right-to-left text | Native |
 | Code | Highlighted code blocks (tree-sitter), diffs, terminal output with ANSI colour, JSON, YAML and TOML trees, logs, file-and-line links | Native |
-| Math | Inline and display TeX, aligned equations, matrices, chemistry | Script to SVG |
+| Math | Inline and display TeX, aligned equations, matrices, chemistry | Native (RaTeX) |
 | Tables | Markdown tables, CSV and TSV blocks, sorting, wide tables with a pinned first column | Native |
 | Charts and markets | Line, bar, area and scatter charts, sparklines, Vega-Lite, stock cards, candlesticks | Native, Vega via script |
-| Diagrams | Mermaid (all diagram types), Graphviz | Web view or script |
+| Diagrams | Mermaid (all diagram types), Graphviz | Native (merman and resvg); Graphviz by script |
 | Media | Images (local paths resolved on the agent's machine, or URLs), SVG, GIF, video, audio, PDF and HTML previews | Native or web view |
 | References | Files, PRs, issues, commits, sessions, link previews | Native |
 | Agent output | Tool-call trees, todo lists, plans, test results, search results with citations, file trees, subagents, errors, thinking | Native |
@@ -54,7 +56,11 @@ Which library needs which engine is confirmed in phase 1; Mermaid, for example, 
 
 ## Streaming
 
-- Only the end of a message is re-parsed as tokens arrive; finished blocks never move.
+- Only the end of a message is re-parsed as tokens arrive; finished blocks never move. A top-level block is committed once the line that starts the next block is complete, because a half-typed line ("2" before "2.") can still join the block above.
+- A terminator rewrites the unfinished tail before parsing: it closes open emphasis, code spans and links, drops delimiters with no content yet, and holds back what is still ambiguous (a `$` or `[` that is not resolved, a fence or table row being typed, a bare list or heading marker, a setext underline).
+- Chunks that arrive within one frame are parsed together, off the UI thread.
+- `$…$` is math only when it looks like TeX: a span that starts with a digit or space and has no `\`, `^`, `_` or `{` stays text, because in real agent output these were prices. `$$…$$` is always math.
+- Tight and loose lists render with the same spacing, so a list turning loose mid-stream does not jump.
 - Every renderer has a partial state: an open code fence is already a code block, a half-written table shows its complete rows, and unfinished math or diagrams show their source dimmed until they close.
 - Nothing flickers between raw and rendered.
 
