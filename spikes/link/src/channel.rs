@@ -15,6 +15,20 @@ use crate::identity::{Identity, NOISE};
 
 /// Largest Noise message; payloads above it are split.
 const MAX: usize = 65535 - 16;
+/// Largest message before the channel is split for streaming: only small
+/// control messages (hello, pairing, welcome) travel then, and an unpaired
+/// peer must not be able to make us buffer more.
+const SMALL: usize = 256 << 10;
+/// Largest message afterwards.
+const LARGE: usize = 64 << 20;
+
+/// WebSocket limits: one frame is one Noise message, so nothing bigger is
+/// ever valid.
+pub fn ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_frame_size(Some(65535 + 64))
+        .max_message_size(Some(65535 + 64))
+}
 
 pub enum Ws {
     Server(WebSocketStream<TcpStream>),
@@ -124,6 +138,9 @@ impl Channel {
                 .map_err(|e| anyhow!("decrypt: {e}"))?;
             let (more, body) = out[..n].split_first().context("empty frame")?;
             plain.extend_from_slice(body);
+            if plain.len() > SMALL {
+                bail!("message over {SMALL} bytes before the link is set up");
+            }
             if *more == 0 {
                 break;
             }
@@ -218,6 +235,9 @@ impl Receiver {
                 .map_err(|e| anyhow!("decrypt: {e}"))?;
             let (more, body) = out[..n].split_first().context("empty frame")?;
             plain.extend_from_slice(body);
+            if plain.len() > LARGE {
+                bail!("message over {LARGE} bytes");
+            }
             if *more == 0 {
                 break;
             }

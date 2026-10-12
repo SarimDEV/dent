@@ -1264,7 +1264,12 @@ fn main() {
             ..Default::default()
         };
         if o.devices {
-            let (dark, demo, record) = (o.dark, o.demo.is_some(), o.record.clone());
+            let (dark, demo, record) = (o.dark, o.demo.clone(), o.record.clone());
+            let secs = if demo.as_deref() == Some("away") {
+                50.
+            } else {
+                25.
+            };
             gpui_kit::open_window(options, cx, move |window, cx| {
                 let view = cx.new(|cx| devices::DevicesView::new(dark, demo, cx));
                 let focus = view.read(cx).focus_handle();
@@ -1273,7 +1278,7 @@ fn main() {
             })
             .expect("open window");
             if let Some(path) = record {
-                demo::record(path, 25.);
+                demo::record(path, secs);
             }
             cx.on_window_closed(|cx, _| cx.quit()).detach();
             cx.activate(true);

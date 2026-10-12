@@ -13,13 +13,13 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::client::{self, Note, Tally};
 use crate::identity::{Identity, Peer, Trust};
-use crate::proto::{Down, Up, now_ms};
+use crate::proto::{Down, Up, new_id, now_ms};
 
-struct Daemon {
-    child: Child,
-    state: PathBuf,
-    lan: SocketAddr,
-    tailnet: Option<SocketAddr>,
+pub(crate) struct Daemon {
+    pub child: Child,
+    pub state: PathBuf,
+    pub lan: SocketAddr,
+    pub tailnet: Option<SocketAddr>,
 }
 
 impl Drop for Daemon {
@@ -30,23 +30,38 @@ impl Drop for Daemon {
 }
 
 #[derive(Clone)]
-struct Spec {
-    name: &'static str,
-    state: PathBuf,
-    lan_port: u16,
-    tailnet_port: Option<u16>,
-    sim: Option<(&'static str, &'static str)>,
-    mdns: bool,
+pub(crate) struct Spec {
+    pub name: &'static str,
+    pub state: PathBuf,
+    pub lan_port: u16,
+    pub tailnet_port: Option<u16>,
+    pub sim: Option<(&'static str, &'static str)>,
+    pub mdns: bool,
+    pub extra: Vec<String>,
 }
 
-fn free_port() -> u16 {
+impl Spec {
+    pub fn new(name: &'static str, state: PathBuf) -> Self {
+        Self {
+            name,
+            state,
+            lan_port: free_port(),
+            tailnet_port: None,
+            sim: None,
+            mdns: true,
+            extra: Vec::new(),
+        }
+    }
+}
+
+pub(crate) fn free_port() -> u16 {
     StdListener::bind("127.0.0.1:0")
         .and_then(|l| l.local_addr())
         .map(|a| a.port())
         .unwrap_or(7480)
 }
 
-fn lan_ip() -> std::net::IpAddr {
+pub(crate) fn lan_ip() -> std::net::IpAddr {
     // The address other machines on the network would use.
     let out = Command::new("ipconfig").args(["getifaddr", "en0"]).output();
     out.ok()
@@ -55,7 +70,7 @@ fn lan_ip() -> std::net::IpAddr {
         .unwrap_or([127, 0, 0, 1].into())
 }
 
-async fn spawn(spec: &Spec) -> Result<Daemon> {
+pub(crate) async fn spawn(spec: &Spec) -> Result<Daemon> {
     let exe = std::env::current_exe()?;
     let mut cmd = Command::new(exe);
     cmd.arg("daemon")
@@ -74,6 +89,7 @@ async fn spawn(spec: &Spec) -> Result<Daemon> {
     if !spec.mdns {
         cmd.arg("--no-mdns");
     }
+    cmd.args(&spec.extra);
     let child = cmd.spawn()?;
     let lan = SocketAddr::new(lan_ip(), spec.lan_port);
     let start = Instant::now();
@@ -93,22 +109,22 @@ async fn spawn(spec: &Spec) -> Result<Daemon> {
     })
 }
 
-fn signal(d: &Daemon, sig: &str) {
+pub(crate) fn signal(d: &Daemon, sig: &str) {
     let _ = Command::new("kill")
         .args([sig, &d.child.id().to_string()])
         .status();
 }
 
-fn code(state: &Path) -> String {
+pub(crate) fn code(state: &Path) -> String {
     std::fs::read_to_string(state.join("pairing-code")).unwrap_or_default()
 }
 
-struct Report {
-    rows: Vec<(bool, String, String)>,
+pub(crate) struct Report {
+    pub rows: Vec<(bool, String, String)>,
 }
 
 impl Report {
-    fn check(&mut self, name: &str, ok: bool, detail: String) {
+    pub fn check(&mut self, name: &str, ok: bool, detail: String) {
         println!("{} {name} ({detail})", if ok { "PASS" } else { "FAIL" });
         self.rows.push((ok, name.into(), detail));
     }
@@ -123,7 +139,7 @@ fn pct(v: &mut [f64], p: f64) -> f64 {
 }
 
 /// Collect notes until `stop` says so or `limit` passes.
-async fn collect(
+pub(crate) async fn collect(
     rx: &mut mpsc::UnboundedReceiver<Note>,
     limit: Duration,
     mut stop: impl FnMut(&Note) -> bool,
@@ -145,7 +161,7 @@ async fn collect(
     out
 }
 
-fn is_end(n: &Note) -> bool {
+pub(crate) fn is_end(n: &Note) -> bool {
     matches!(n, Note::Event(e) if e.kind == "end")
 }
 
@@ -162,6 +178,7 @@ pub async fn run() -> Result<()> {
         tailnet_port: Some(free_port()),
         sim: Some(("you@example.com", "you@example.com")),
         mdns: true,
+        extra: Vec::new(),
     };
 
     // 1. Finding the other machine on the LAN.
@@ -188,6 +205,7 @@ pub async fn run() -> Result<()> {
     let mut o = client::open(b.lan, &me).await?;
     let trusted_before = o.trusted;
     o.ch.send(&Up::Prompt {
+        id: new_id(),
         session: "s".into(),
         text: "hi".into(),
     })
@@ -219,7 +237,9 @@ pub async fn run() -> Result<()> {
         format!("rejected {wrong:?}, code changed {rotated}"),
     );
 
-    // 4. The right code pairs both ways.
+    // 4. The right code pairs both ways (after the pause that three wrong
+    // codes start).
+    tokio::time::sleep(Duration::from_millis(1100)).await;
     let mut o = client::open(b.lan, &me).await?;
     let t = Instant::now();
     let paired = client::pair(&mut o.ch, &code(&b.state)).await;
@@ -232,6 +252,7 @@ pub async fn run() -> Result<()> {
                 key: hex::encode(&o.ch.remote),
                 via: "code".into(),
                 addr: Some(b.lan.to_string()),
+                ..Default::default()
             },
         )?;
     }
@@ -333,6 +354,7 @@ pub async fn run() -> Result<()> {
     let (mut otx, _orx) =
         std::mem::replace(&mut o.ch, client::open(b.lan, &me).await?.ch).into_parts();
     otx.send(&Up::Prompt {
+        id: new_id(),
         session: "tap".into(),
         text: "pineapple-7731".into(),
     })
@@ -381,6 +403,7 @@ pub async fn run() -> Result<()> {
     let mut ctl = client::open(b.lan, &me).await?.ch;
     let sent = Instant::now();
     ctl.send(&Up::Prompt {
+        id: new_id(),
         session: "s1".into(),
         text: "summarise the repo".into(),
     })
@@ -473,6 +496,7 @@ pub async fn run() -> Result<()> {
         .await?
         .ch
         .send(&Up::Prompt {
+            id: new_id(),
             session: "s2".into(),
             text: "first".into(),
         })
@@ -501,6 +525,7 @@ pub async fn run() -> Result<()> {
         .await?
         .ch
         .send(&Up::Prompt {
+            id: new_id(),
             session: "s2".into(),
             text: "second".into(),
         })
@@ -537,6 +562,7 @@ pub async fn run() -> Result<()> {
         .await?
         .ch
         .send(&Up::Prompt {
+            id: new_id(),
             session: "s3".into(),
             text: "sleepy".into(),
         })
@@ -608,11 +634,11 @@ pub async fn run() -> Result<()> {
     let up = collect(
         &mut rx,
         Duration::from_secs(15),
-        |n| matches!(n, Note::Up { addr } if addr.port() == studio.lan_port),
+        |n| matches!(n, Note::Up { addr, .. } if addr.port() == studio.lan_port),
     )
     .await;
     let found_again = up.iter().find_map(|(t, n)| match n {
-        Note::Up { addr } if addr.port() == studio.lan_port => {
+        Note::Up { addr, .. } if addr.port() == studio.lan_port => {
             Some(t.duration_since(moved).as_millis())
         }
         _ => None,
@@ -651,6 +677,7 @@ pub async fn run() -> Result<()> {
     );
     collect(&mut rx, Duration::from_secs(2), |_| false).await;
     ctl.send(&Up::Prompt {
+        id: new_id(),
         session: "flaky".into(),
         text: "keep going".into(),
     })

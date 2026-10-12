@@ -45,8 +45,9 @@ All traffic is one protocol over QUIC, with a stream per subscription so a large
 
 A remote client must never show an idle session as working or leave a dead session on screen, so liveness is designed in rather than inferred.
 
-- Each machine shows connected, reconnecting, asleep or offline, with last seen time.
+- Each machine shows online, reconnecting, asleep, restarting, quit, offline, removed this device, or needs an update, with the time it changed. Asleep, restarting and quit are announced by the machine as it goes; offline means 10 s with no word. Last seen survives restarts of the app ([spike 05](spikes/05-direct-links.md#when-machines-go-away)).
 - A session on a sleeping machine shows "paused, machine asleep", never "working".
+- A prompt for a machine that's away is refused on the spot, never queued; one the machine never confirmed says so, and Retry runs it exactly once.
 - An approval answered on one device disappears from every other device immediately.
 - Stop is acknowledged by the daemon only once the agent process has actually stopped.
 

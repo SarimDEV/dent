@@ -35,10 +35,27 @@ async fn main() -> Result<()> {
                 tailnet: get("--tailnet").map(|a| a.parse()).transpose()?,
                 tailnet_impl,
                 advertise: !args.iter().any(|a| a == "--no-mdns"),
+                proto: match get("--proto").and_then(|p| p.parse().ok()) {
+                    Some(p) => (p, p),
+                    None => (spike_link::proto::PROTO, spike_link::proto::PROTO_MIN),
+                },
+                pair_ttl: std::time::Duration::from_secs(
+                    get("--pair-ttl")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(600),
+                ),
+                agent_ms: get("--agent-ms").and_then(|s| s.parse().ok()).unwrap_or(30),
             })
             .await
         }
-        Some("test") => harness::run().await,
+        Some("test") => match args.get(1).map(String::as_str) {
+            Some("edges") => spike_link::edges::run().await,
+            Some("links") => harness::run().await,
+            _ => {
+                harness::run().await?;
+                spike_link::edges::run().await
+            }
+        },
         Some("tailscale") => {
             use tailnet::Tailnet;
             let t = tailnet::Cli;
@@ -48,7 +65,7 @@ async fn main() -> Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: spike-link daemon --state DIR [--name N] [--lan ADDR] [--tailnet ADDR] | test | tailscale"
+                "usage: spike-link daemon --state DIR [--name N] [--lan ADDR] [--tailnet ADDR] [--proto N] [--pair-ttl S] [--agent-ms MS] | test [links|edges] | tailscale"
             );
             Ok(())
         }

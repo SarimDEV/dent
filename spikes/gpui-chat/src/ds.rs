@@ -16,6 +16,7 @@ pub mod space {
     pub const S4: f32 = 16.;
     pub const S6: f32 = 24.;
     pub const S8: f32 = 32.;
+    pub const S12: f32 = 48.;
 }
 
 pub mod size {
