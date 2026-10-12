@@ -8,7 +8,7 @@
 
 use std::ops::Range;
 
-use pulldown_cmark::{Event, Options, Parser};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 pub fn options() -> Options {
     Options::ENABLE_TABLES
@@ -78,6 +78,45 @@ pub struct Streamer {
     pub tail: Vec<Block>,
     /// Whether the terminator is applied (off only to measure its effect).
     pub terminate: bool,
+    /// Set while the tail is a table still receiving rows.
+    table: Option<TableTail>,
+}
+
+/// A table at the start of the tail, parsed a row at a time. A table can't
+/// commit until something follows it, so without this every chunk re-parses
+/// the whole table: a 5,000-row table cost milliseconds per chunk. Each
+/// complete row is parsed once, against the table's header, and appended.
+/// Anything that isn't a plain row line falls back to the full parse.
+#[derive(Debug)]
+struct TableTail {
+    /// The header and delimiter lines, newlines included.
+    head: String,
+    /// Absolute offset just past the last row parsed.
+    end: usize,
+}
+
+/// A line that can only be a table row once inside a table.
+fn is_row(line: &str) -> bool {
+    let t = line.trim_start_matches(' ');
+    line.len() - t.len() < 4 && t.starts_with('|')
+}
+
+/// The events of the single body row in a parse of header + one row.
+fn single_row(parsed: &[Block]) -> Option<Vec<Event<'static>>> {
+    let [block] = parsed else { return None };
+    let ev = &block.events;
+    if !matches!(ev.first(), Some(Event::Start(Tag::Table(_)))) {
+        return None;
+    }
+    let head_end = ev
+        .iter()
+        .position(|e| matches!(e, Event::End(TagEnd::TableHead)))?;
+    let body = &ev[head_end + 1..ev.len() - 1];
+    let rows = body
+        .iter()
+        .filter(|e| matches!(e, Event::Start(Tag::TableRow)))
+        .count();
+    (rows == 1).then(|| body.to_vec())
 }
 
 impl Streamer {
@@ -90,6 +129,10 @@ impl Streamer {
 
     pub fn push(&mut self, chunk: &str) {
         self.text.push_str(chunk);
+        if self.push_table_rows() {
+            return;
+        }
+        self.table = None;
         let tail = &self.text[self.stable..];
         let mut parsed = blocks(tail, self.stable);
         // Commit every block whose successor starts on a complete line: a
@@ -112,14 +155,104 @@ impl Streamer {
         } else {
             parsed
         };
+        self.table = self.table_tail();
+    }
+
+    /// The fast path: the tail is a table and every new complete line is a
+    /// row. Returns false to fall back to the full parse.
+    fn push_table_rows(&mut self) -> bool {
+        let Some(table) = &self.table else {
+            return false;
+        };
+        let complete = self.text.rfind('\n').map_or(0, |i| i + 1);
+        let partial = &self.text[complete..];
+        if !(partial.is_empty() || is_row(partial)) {
+            return false;
+        }
+        let mut at = table.end;
+        let mut rows = Vec::new();
+        while at < complete {
+            let Some(nl) = self.text[at..complete].find('\n') else {
+                return false;
+            };
+            let line = &self.text[at..at + nl + 1];
+            if !is_row(line) {
+                return false;
+            }
+            let Some(row) = single_row(&blocks(&format!("{}{line}", table.head), 0)) else {
+                return false;
+            };
+            rows.push(row);
+            at += nl + 1;
+        }
+        let Some(block) = self.tail.first_mut() else {
+            return false;
+        };
+        let Some(end) = block.events.pop() else {
+            return false;
+        };
+        for row in rows {
+            block.events.extend(row);
+        }
+        block.events.push(end);
+        block.range.end = at;
+        if let Some(t) = &mut self.table {
+            t.end = at;
+        }
+        true
+    }
+
+    /// Whether the tail, as just parsed, can continue on the fast path: a
+    /// single table, starting at the tail, ending on a complete row line,
+    /// with nothing after it but a row being typed.
+    fn table_tail(&self) -> Option<TableTail> {
+        if !self.terminate {
+            return None;
+        }
+        let [block] = self.tail.as_slice() else {
+            return None;
+        };
+        if block.range.start != self.stable
+            || !matches!(block.events.first(), Some(Event::Start(Tag::Table(_))))
+        {
+            return None;
+        }
+        let complete = self.text.rfind('\n').map_or(0, |i| i + 1);
+        let partial = &self.text[complete..];
+        if complete <= self.stable || !(partial.is_empty() || is_row(partial)) {
+            return None;
+        }
+        let src = &self.text[self.stable..complete];
+        // The last complete line must be a row: a blank line ends the table.
+        let last = src.strip_suffix('\n')?.rsplit('\n').next()?;
+        if !is_row(last) {
+            return None;
+        }
+        let mut lines = src.split_inclusive('\n');
+        let head = format!("{}{}", lines.next()?, lines.next()?);
+        Some(TableTail {
+            head,
+            end: complete,
+        })
     }
 
     /// The message is complete: commit the tail as parsed, unterminated.
     pub fn finish(&mut self) {
+        self.table = None;
         let rest = blocks(&self.text[self.stable..], self.stable);
         self.committed.extend(rest);
         self.tail.clear();
         self.stable = self.text.len();
+    }
+
+    /// Bytes before this are committed.
+    pub fn stable(&self) -> usize {
+        self.stable
+    }
+
+    /// Whether the next push can take the row-at-a-time table path.
+    pub fn on_table_path(&self) -> bool {
+        self.table.is_some()
     }
 
     pub fn visible(&self) -> impl Iterator<Item = &Block> {
@@ -205,7 +338,8 @@ fn in_display_math(s: &str) -> bool {
 fn in_table(s: &str) -> bool {
     s.lines().any(|l| {
         let t = l.trim();
-        t.starts_with('|') && t.contains("--") && t.chars().all(|c| "|-: ".contains(c))
+        // GFM allows a single dash per cell: `| - | :-: |`.
+        t.starts_with('|') && t.contains('-') && t.chars().all(|c| "|-: ".contains(c))
     })
 }
 
@@ -369,4 +503,46 @@ fn scan(para: &str) -> Vec<(&'static str, usize)> {
         i += len;
     }
     stack
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The row-at-a-time path must render exactly what the full parse of
+    /// the terminated tail would, after every byte.
+    #[test]
+    fn table_rows_match_full_parse() {
+        let cases = [
+            "| a | b |\n|:--|--:|\n| **x** `y\\|z` | [l](https://e.x) |\n| 1 |\n| 1 | 2 | 3 |\n\nAfter.\n",
+            "| a |\n| - |\n| 1 |\n\n| b |\n| - |\n| 2 |\n",
+            "| a |\n| - |\n| 1 |\nloose\n| 2 |\n- item\n",
+            "  | a |\n  | - |\n   | 1 |\n    | 2 |\n",
+        ];
+        for text in cases {
+            let mut s = Streamer::new(true);
+            for (i, ch) in text.char_indices() {
+                s.push(&text[i..i + ch.len_utf8()]);
+                let want = blocks(&terminate(&s.text[s.stable..]), s.stable);
+                let got: Vec<_> = s.tail.iter().map(|b| &b.events).collect();
+                let want: Vec<_> = want.iter().map(|b| &b.events).collect();
+                assert_eq!(got, want, "{text:?} at byte {i}");
+            }
+            s.finish();
+            let once = blocks(text, 0);
+            assert!(
+                s.committed
+                    .iter()
+                    .map(|b| &b.events)
+                    .eq(once.iter().map(|b| &b.events))
+            );
+        }
+    }
+
+    #[test]
+    fn single_dash_delimiter_is_a_table() {
+        assert!(in_table("| a |\n| - |\n"));
+        assert!(in_table("| a | b |\n| :-: | -: |\n"));
+        assert!(!in_table("| a |\n"));
+    }
 }

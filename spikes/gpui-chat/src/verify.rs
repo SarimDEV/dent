@@ -203,6 +203,14 @@ impl Specimen {
                     format!("table moved {moved:.0} pt, chat moved {page:.0} pt"),
                 );
                 v.snap.insert("page", self.page_y());
+                // Start near the end so the handoff is tested at any table size.
+                if let Some(state) = self.table_lists.get(&v.tall) {
+                    let n = state.item_count();
+                    state.scroll_to(ListOffset {
+                        item_ix: n.saturating_sub(16),
+                        offset_in_item: px(0.),
+                    });
+                }
                 if let Some(at) = self.probe_at(&format!("table-body-{}", v.tall)) {
                     v.wait = wheel(window, at, 0., -200., 30);
                 }

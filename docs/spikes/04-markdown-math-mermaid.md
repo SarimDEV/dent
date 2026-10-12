@@ -184,20 +184,30 @@ Past 13 body rows, a table shows its header and 10½ rows, and scrolls inside th
 - **A GPUI bug: a zero-movement wheel event cancels a frame's list scrolling.** The list merges a frame's wheel movements by sign, and `0.0.signum()` is `+1`. So the zero-movement "gesture ended" event a trackpad sends discarded the last movement in that frame. Zero-movement events over a table are now kept away from the list.
 - **The side panel blocks pointer input to the chat behind it.** Without that, scrolling the panel also scrolled the chat.
 
+**Streaming tables, row by row.** A table can't be committed until something follows it, so every chunk used to re-parse the whole table, and the renderer re-measured every cell each frame. Now both work a row at a time:
+- **Parser:** while the tail is a table and each new complete line is a row, that row is parsed once against the table's header and appended. Anything else falls back to the full parse: a blank line, a line without a leading pipe, a list or a heading.
+- **Renderer:** each complete row is measured once and shared. The renderer also borrows the parsed blocks instead of copying their events every frame.
+
+Checks on the row path:
+- `tables` streams 11 awkward shapes, each in 20 chunkings: ragged rows, escaped pipes, inline code, maths, links, indentation, a row without a pipe, two tables, and a table followed by a list or a heading. After every chunk it compares the row path with the full parse it replaces. Result: 45,170 steps and 0 mismatches. Unit tests cover the same cases byte by byte.
+- The comparison also caught a bug in the old terminator. It recognised a delimiter row only with `--`, but GFM allows a single `-`, so every last row of such a table was hidden as an unconfirmed header. It's fixed.
+- The full replay of real messages still has 0 committed blocks changed and 0 final mismatches. Flicker went from 0.23% to 0.22% of messages.
+
+| Parser, 8-byte chunks | Before | After |
+| --- | --- | --- |
+| 2,000-row table, last 10% of pushes (p50) | 2.6 ms | 0.00 ms |
+| 2,000-row table, worst push | 4.8 ms | 0.12 ms |
+
 **Frame times, release build, whole stress page:**
 
-| Tall table rows | Frames while streaming (p50 / p99) | Once finished (p50 / p99 / max) |
+| Tall table rows | While streaming (p50 / p99) | Once finished (p50 / p99 / max) |
 | --- | --- | --- |
-| 60 | 0.1 / 4.1 ms | 4.1 / 5.2 / 5.3 ms |
-| 1,000 | 4.9 / 6.4 ms | 4.2 / 5.7 / 5.9 ms |
-| 5,000 | 11.1 / 23.8 ms | 3.6 / 6.1 / 7.1 ms |
+| 60 | 1.3 / 3.8 ms | 3.4 / 5.3 / 5.7 ms |
+| 1,000 | 3.3 / 6.2 ms | 3.5 / 5.1 / 5.8 ms |
+| 5,000 | 3.5 / 6.8 ms (was 11 / 24) | 3.2 / 5.4 / 5.7 ms |
+| 10,000 | 3.7 / 7.4 ms | 3.3 / 6.0 / 6.2 ms |
 
-- **Once finished,** a table's size no longer matters. It is measured once and cached, and only its visible rows are drawn.
-- **While streaming,** a table up to about 1,000 rows stays in budget. A 5,000-row table doesn't, because the unfinished tail block is re-parsed and re-measured on every frame. The fix, when it's needed, is to commit table rows as each one completes.
-
-![1440×860: the column stays 720 pt wide; wide blocks scroll inside it](img/04-stress-wide.jpg)
-
-Still open at the edges: a period can wrap alone after an unbreakable word, which is GPUI's line breaker. A tall display formula centres vertically against its tallest part. At 1440 the wide table could break out of the 720 pt column instead of scrolling; that's a design choice left for the chat-list work.
+A table's length no longer matters, whether it's streaming or finished. All 14 interaction checks also pass with a 5,000-row table streaming in.
 
 ## What changes in the spec
 
@@ -218,6 +228,7 @@ cargo run -p spike-markdown --release -- stream     # replay invariants (add --b
 cargo run -p spike-markdown --release -- math       # RaTeX fixtures and corpus spans
 cargo run -p spike-markdown --release -- mermaid DIR  # all diagram types, Paper and Carbon PNGs
 cargo run -p spike-markdown --release -- worst      # huge single-block tails
+cargo run -p spike-markdown --release -- tables     # row-at-a-time tables against the full parse
 just dev spike-gpui-chat --specimen [--dark] [--bench --shots DIR]
 just dev spike-gpui-chat --stress [--size WxH] [--dark] [--bench --shots DIR]   # STRESS_ROWS=n, STRESS_FILE=page.md
 just dev spike-gpui-chat --verify [--size WxH] [--dark] [--shots DIR]   # scripted wheel and click checks

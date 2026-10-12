@@ -19,6 +19,7 @@ fn main() -> anyhow::Result<()> {
         "math" => math::run(&corpus::load(), args.get(1).map(String::as_str)),
         "mermaid" => mermaid::run(&corpus::load(), args.get(1).map(String::as_str))?,
         "worst" => worst(),
+        "tables" => tables(),
         "dump" => {
             let t = math::typeset(args.get(1).map(String::as_str).unwrap_or("x"), true)
                 .map_err(anyhow::Error::msg)?;
@@ -265,6 +266,150 @@ fn worst() {
         println!(
             "{name:10} {:>4} KB: push p50 {:.2} ms, last 10% p50 {:.2} ms, max {:.2} ms",
             text.len() / 1024,
+            pct(&mut times.clone(), 50.),
+            pct(&mut times[times.len() - last..].to_vec(), 50.),
+            pct(&mut times, 100.)
+        );
+    }
+}
+
+/// Streams tables of every awkward shape in small random chunks and, after
+/// every chunk, compares the tail with the full parse it replaces (the
+/// terminated tail parsed whole). Then times a 5,000-row table.
+fn tables() {
+    let cases = [
+        (
+            "plain",
+            "| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n\nAfter.\n".to_string(),
+        ),
+        (
+            "inline",
+            "| a | b |\n|:--|--:|\n| **x** `y\\|z` | [l](https://e.x) $x^2$ |\n| ~~s~~ | *e* |\n"
+                .to_string(),
+        ),
+        (
+            "ragged",
+            "| a | b | c |\n| - | - | - |\n| 1 |\n| 1 | 2 | 3 | 4 |\n|  |  |  |\n".to_string(),
+        ),
+        (
+            "no pipe row",
+            "| a | b |\n| --- | --- |\n| 1 | 2 |\nloose row\n| 3 | 4 |\n".to_string(),
+        ),
+        (
+            "ends in list",
+            "| a |\n| - |\n| 1 |\n- item\n- item\n".to_string(),
+        ),
+        (
+            "ends in heading",
+            "| a |\n| - |\n| 1 |\n# Heading\n".to_string(),
+        ),
+        (
+            "indented",
+            "  | a | b |\n  | --- | --- |\n  | 1 | 2 |\n   | 3 | 4 |\n    | 5 | 6 |\n".to_string(),
+        ),
+        (
+            "after text",
+            "Intro line.\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n".to_string(),
+        ),
+        (
+            "two tables",
+            "| a |\n| - |\n| 1 |\n\n| b |\n| - |\n| 2 |\n| 3 |\n".to_string(),
+        ),
+        (
+            "unicode",
+            "| név | 值 |\n| --- | --- |\n| ✓ émoji 🎉 | ü |\n| \\| | `|` |\n".to_string(),
+        ),
+        (
+            "long",
+            format!(
+                "| # | Event | Duration |\n| ---: | --- | ---: |\n{}",
+                (1..=300)
+                    .map(|r| format!("| {r} | event **{r}** `x` | {}.{} ms |\n", r % 9, r % 7))
+                    .collect::<String>()
+            ),
+        ),
+    ];
+    let mut seed = 7u64;
+    let mut rand = move |n: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % n as u64) as usize
+    };
+    let (mut steps, mut bad, mut fast) = (0, 0, 0);
+    for (name, text) in &cases {
+        for round in 0..20 {
+            let mut s = stream::Streamer::new(true);
+            let mut at = 0;
+            while at < text.len() {
+                let mut end = (at + 1 + if round == 0 { 0 } else { rand(12) }).min(text.len());
+                while !text.is_char_boundary(end) {
+                    end += 1;
+                }
+                s.push(&text[at..end]);
+                at = end;
+                steps += 1;
+                fast += s.on_table_path() as usize;
+                let want = stream::blocks(&stream::terminate(&s.text[s.stable()..]), s.stable());
+                let got: Vec<_> = s.tail.iter().map(|b| &b.events).collect();
+                let want: Vec<_> = want.iter().map(|b| &b.events).collect();
+                if got != want {
+                    bad += 1;
+                    if bad <= 1 {
+                        println!(
+                            "MISMATCH {name} at byte {at}: text {:?} stable {}",
+                            s.text,
+                            s.stable()
+                        );
+                        let show = |v: &Vec<&Vec<pulldown_cmark::Event>>| {
+                            v.iter()
+                                .flat_map(|e| e.iter())
+                                .filter_map(|e| match e {
+                                    pulldown_cmark::Event::Text(t) => Some(t.to_string()),
+                                    pulldown_cmark::Event::Start(pulldown_cmark::Tag::TableRow) => {
+                                        Some("/".into())
+                                    }
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        };
+                        println!(" got {}\nwant {}", show(&got), show(&want));
+                    }
+                }
+            }
+            s.finish();
+            let once = stream::blocks(text, 0);
+            if s.committed
+                .iter()
+                .map(|b| &b.events)
+                .ne(once.iter().map(|b| &b.events))
+            {
+                bad += 1;
+                println!("FINAL MISMATCH {name}");
+            }
+        }
+    }
+    println!("{steps} steps, {fast} on the row path, {bad} mismatches");
+
+    for rows in [1000, 5000] {
+        let text = format!(
+            "| a | b | c |\n| --- | --- | --- |\n{}",
+            "| **cell** | `code` | 12.5 ms |\n".repeat(rows)
+        );
+        let mut s = stream::Streamer::new(true);
+        let mut times = Vec::new();
+        let mut at = 0;
+        while at < text.len() {
+            let end = (at + 8).min(text.len());
+            let t = Instant::now();
+            s.push(&text[at..end]);
+            times.push(t.elapsed().as_secs_f64() * 1e3);
+            at = end;
+        }
+        let last = times.len() / 10;
+        println!(
+            "{rows} rows: push p50 {:.3} ms, last 10% p50 {:.3} ms, max {:.2} ms",
             pct(&mut times.clone(), 50.),
             pct(&mut times[times.len() - last..].to_vec(), 50.),
             pct(&mut times, 100.)

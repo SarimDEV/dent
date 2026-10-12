@@ -34,8 +34,9 @@ pub fn text(s: String) -> CopyText {
 /// A table's rows and shared column widths, kept so the inline view, the
 /// side panel and copying all read the same data.
 pub struct TableData {
-    pub head: Vec<Cell>,
-    pub rows: Vec<Vec<Cell>>,
+    pub head: Rc<[Cell]>,
+    /// Shared per row, so a table growing by one row doesn't copy the rest.
+    pub rows: Vec<Rc<[Cell]>>,
     pub widths: Vec<f32>,
     pub mins: Vec<f32>,
     pub aligns: Vec<Alignment>,
@@ -44,12 +45,13 @@ pub struct TableData {
 }
 
 impl TableData {
-    pub fn new(mut rows: Vec<Vec<Cell>>, aligns: &[Alignment]) -> Self {
+    pub fn new(head: Rc<[Cell]>, rows: Vec<Rc<[Cell]>>, aligns: &[Alignment]) -> Self {
         let pad = 2. * space::S2;
-        let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+        let all = || std::iter::once(&head).chain(&rows);
+        let cols = all().map(|r| r.len()).max().unwrap_or(0);
         let mut widths = vec![0f32; cols];
         let mut mins = vec![0f32; cols];
-        for row in &rows {
+        for row in all() {
             for (c, cell) in row.iter().enumerate() {
                 widths[c] = widths[c].max(cell.natural.min(CELL_MAX) + pad);
                 mins[c] = mins[c].max(cell.min.min(CELL_MIN_CAP) + pad);
@@ -59,11 +61,6 @@ impl TableData {
             mins[c] = mins[c].max(widths[c].min(CELL_PROSE_MIN + pad));
             widths[c] = widths[c].max(mins[c]);
         }
-        let head = if rows.is_empty() {
-            Vec::new()
-        } else {
-            rows.remove(0)
-        };
         Self {
             head,
             rows,
@@ -381,11 +378,9 @@ impl Specimen {
         aligns: &[Alignment],
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let data = Rc::new(TableData::new(rows, aligns));
-        // A committed table never changes: measure it once.
-        if self.closed {
-            self.table_cache.insert(self.block_start, data.clone());
-        }
+        let mut rows = rows.into_iter().map(Rc::from);
+        let head = rows.next().unwrap_or_else(|| Rc::from(Vec::new()));
+        let data = Rc::new(TableData::new(head, rows.collect(), aligns));
         self.table_view(data, cx)
     }
 

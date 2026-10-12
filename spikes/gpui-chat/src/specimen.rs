@@ -228,9 +228,8 @@ pub struct Specimen {
     probes: Probes,
     verify: Option<verify::Verify>,
     copy_texts: HashMap<String, CopyText>,
-    /// Committed tables, measured once, by where their block starts.
-    table_cache: HashMap<usize, Rc<TableData>>,
-    block_start: usize,
+    /// Top-level tables built row by row, by where their block starts.
+    table_rows: HashMap<usize, TableBuild>,
     /// How many frames had been drawn when streaming finished.
     draws_at_done: Option<usize>,
 }
@@ -288,8 +287,7 @@ impl Specimen {
             probes: Probes::default(),
             verify: verify.then(verify::Verify::default),
             copy_texts: HashMap::new(),
-            table_cache: HashMap::new(),
-            block_start: 0,
+            table_rows: HashMap::new(),
             draws_at_done: None,
         }
     }
@@ -848,6 +846,101 @@ impl Frame {
     }
 }
 
+/// A top-level table's rows, measured as they arrive. A complete row never
+/// changes while the message streams, so each is measured once; a table
+/// growing by one row costs one row.
+#[derive(Default)]
+struct TableBuild {
+    head: Option<Rc<[Cell]>>,
+    rows: Vec<Rc<[Cell]>>,
+    data: Option<Rc<TableData>>,
+}
+
+impl Specimen {
+    fn table_block(
+        &mut self,
+        b: &Block,
+        aligns: &[pulldown_cmark::Alignment],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut build = self.table_rows.remove(&b.range.start).unwrap_or_default();
+        let mut start = 0;
+        let mut row = 0;
+        for (i, ev) in b.events.iter().enumerate() {
+            match ev {
+                Event::Start(Tag::TableHead | Tag::TableRow) => start = i + 1,
+                Event::End(TagEnd::TableHead) if build.head.is_none() => {
+                    build.head = Some(self.cells(&b.events[start..i], true, window).into());
+                }
+                Event::End(TagEnd::TableRow) => {
+                    if row >= build.rows.len() {
+                        let cells = self.cells(&b.events[start..i], false, window);
+                        build.rows.push(cells.into());
+                    }
+                    row += 1;
+                }
+                _ => {}
+            }
+        }
+        build.rows.truncate(row);
+        let data = match &build.data {
+            Some(d) if d.rows.len() == build.rows.len() => d.clone(),
+            _ => {
+                let head = build.head.clone().unwrap_or_else(|| Rc::from(Vec::new()));
+                Rc::new(TableData::new(head, build.rows.clone(), aligns))
+            }
+        };
+        build.data = Some(data.clone());
+        self.table_rows.insert(b.range.start, build);
+        self.table_view(data, cx)
+    }
+
+    /// The cells of one table row, measured. Header cells are medium weight.
+    fn cells(&mut self, events: &[Event<'static>], head: bool, window: &Window) -> Vec<Cell> {
+        let t = self.theme;
+        let mut cells = Vec::new();
+        let mut cur = Inline::default();
+        let mut st = Style::default();
+        for ev in events {
+            match ev {
+                Event::Start(Tag::TableCell) => cur = Inline::default(),
+                Event::End(TagEnd::TableCell) => {
+                    let mut inline = std::mem::take(&mut cur);
+                    if head {
+                        for r in &mut inline.runs {
+                            r.font.weight = FontWeight::MEDIUM;
+                        }
+                    }
+                    let (natural, min) = measure(&inline, window);
+                    cells.push(Cell {
+                        inline,
+                        natural,
+                        min,
+                    });
+                }
+                Event::Start(Tag::Strong) => st.strong = true,
+                Event::End(TagEnd::Strong) => st.strong = false,
+                Event::Start(Tag::Emphasis) => st.emph = true,
+                Event::End(TagEnd::Emphasis) => st.emph = false,
+                Event::Start(Tag::Strikethrough) => st.strike = true,
+                Event::End(TagEnd::Strikethrough) => st.strike = false,
+                Event::Start(Tag::Link { .. }) => st.link = true,
+                Event::End(TagEnd::Link) => st.link = false,
+                Event::Text(s) | Event::Html(s) | Event::InlineHtml(s) => cur.push(s, st, &t),
+                Event::Code(s) => cur.push(s, Style { code: true, ..st }, &t),
+                Event::InlineMath(s) => match self.typeset(s, false) {
+                    Some(l) => cur.push_math(l, s, window, &t),
+                    None => cur.push(&format!("${s}$"), Style { code: true, ..st }, &t),
+                },
+                Event::SoftBreak | Event::HardBreak => cur.push(" ", st, &t),
+                _ => {}
+            }
+        }
+        cells
+    }
+}
+
 impl Specimen {
     fn block(
         &mut self,
@@ -858,9 +951,8 @@ impl Specimen {
     ) -> AnyElement {
         self.closed = done;
         self.hs_count = 0;
-        self.block_start = b.range.start;
-        if done && let Some(data) = self.table_cache.get(&b.range.start).cloned() {
-            return self.table_view(data, cx);
+        if let Some(Event::Start(Tag::Table(aligns))) = b.events.first() {
+            return self.table_block(b, aligns, window, cx);
         }
         let t = self.theme;
         let mut stack = vec![Frame::new(None)];
@@ -1383,15 +1475,18 @@ impl Render for Specimen {
         let t = self.theme;
         let n = self.streamer.committed.len();
         let built = Instant::now();
-        let blocks: Vec<Block> = self.streamer.visible().cloned().collect();
-        let els: Vec<AnyElement> = blocks
-            .iter()
+        // Borrow the blocks rather than copy their events every frame: the
+        // streamer is set aside while elements are built, then put back.
+        let streamer = std::mem::take(&mut self.streamer);
+        let els: Vec<AnyElement> = streamer
+            .visible()
             .enumerate()
             .map(|(i, b)| {
                 self.block_ix = i;
                 self.block(b, i < n, window, cx)
             })
             .collect();
+        self.streamer = streamer;
         self.builds.push(built.elapsed().as_secs_f64() * 1e3);
         let panel = self.panel(window, cx);
         div()

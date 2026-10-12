@@ -93,6 +93,7 @@ The reading column is 720 pt wide at most and shrinks with the window down to 36
 - Only the end of a message is re-parsed as tokens arrive; finished blocks never move. A top-level block is committed once the line that starts the next block is complete, because a half-typed line ("2" before "2.") can still join the block above.
 - A terminator rewrites the unfinished tail before parsing: it closes open emphasis, code spans and links, drops delimiters with no content yet, and holds back what is still ambiguous (a `$` or `[` that is not resolved, a fence or table row being typed, a bare list or heading marker, a setext underline).
 - Chunks that arrive within one frame are parsed together, off the UI thread.
+- A table at the end of the stream is parsed and measured a row at a time. Each complete row is parsed once against the header and never again, so a table's length doesn't change the cost of a chunk. Anything that isn't a plain row line falls back to the full parse.
 - `$…$` is math only when it looks like TeX: a span that starts with a digit or space and has no `\`, `^`, `_` or `{` stays text, because in real agent output these were prices. `$$…$$` is always math.
 - Tight and loose lists render with the same spacing, so a list turning loose mid-stream does not jump.
 - Every renderer has a partial state: an open code fence is already a code block, a half-written table shows its complete rows, and unfinished math or diagrams show their source dimmed until they close.
@@ -105,7 +106,7 @@ The reading column is 720 pt wide at most and shrinks with the window down to 36
 - **Every prefix:** each fixture also renders at every streaming prefix, with no crash, no movement of finished blocks, and a final result identical to the non-streamed render.
 - **Real transcripts:** recorded Claude Code and Codex sessions replay through the renderer nightly and before releases.
 - **Fuzzing:** the parser and every renderer are fuzzed with malformed Markdown, huge tables, deep nesting, giant lines and invalid TeX or Mermaid; the result must be the fallback, never a crash or a hang.
-- **Performance:** a 1,000-block message and a 5,000-row table stay within the frame budget once finished. Committed blocks are measured once and cached, and a capped table draws only the rows in view. Each renderer stays inside its budget.
+- **Performance:** a 1,000-block message and a 10,000-row table stay within the frame budget, while streaming and once finished. Committed blocks are measured once and cached, and a capped table draws only the rows in view. Each renderer stays inside its budget.
 - **Interaction:** scripted wheel and click input, sent through the normal hit-testing, checks scroll handoff, sideways scrolling, every copy action, the side panel and search at three window sizes in both themes.
 - **Copy and access:** copying returns the original Markdown; every block has a text alternative and keyboard-reachable actions.
 - **Parity:** desktop, iPhone and web render the same fixtures, compared by text output and a screenshot review.
