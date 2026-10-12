@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>dent · Field Notes dark changes</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap">
+<style>
+body{margin:0}
+a{color:#ECE8DF}a:hover{color:#8F8A80}
+.mono{font-family:'Geist Mono',ui-monospace,monospace}
+.lbl{font-family:'Geist Mono',ui-monospace,monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#8F8A80}
+.px{width:10px;height:10px;flex:none;background-size:4px 4px}
+.px-work{background-image:repeating-conic-gradient(#4FD3EC 0 25%,#1C5B68 0 50%)}
+.px-need{background-image:repeating-conic-gradient(#F04FB8 0 25%,#5E1E48 0 50%)}
+.px-done{background-image:repeating-conic-gradient(#5FD86B 0 25%,#1F5426 0 50%)}
+.ln{display:flex;white-space:pre;font-family:'Geist Mono',ui-monospace,monospace;font-size:12px;line-height:1.75;color:#D9D4C9}
+.ln span:first-child{width:40px;flex:none;color:#5C584F;text-align:right;padding-right:14px}
+.add{background:#1A2E1C}
+.del{background:#35192A}
+.f{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:6px;font-family:'Geist Mono',ui-monospace,monospace;font-size:12px}
+button{font:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width:1440px;height:900px;position:relative;overflow:hidden;background:#161513;color:#ECE8DF;font-family:'Geist',system-ui,sans-serif;font-size:13px;display:flex;flex-direction:column">
+<svg aria-hidden="true" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;mix-blend-mode:screen;opacity:.07"><filter id="grainAcd"><feTurbulence type="fractalNoise" baseFrequency="0.95" numOctaves="2" stitchTiles="stitch"></feTurbulence><feColorMatrix type="saturate" values="0"></feColorMatrix></filter><rect width="100%" height="100%" filter="url(#grainAcd)"></rect></svg>
+<header style="height:46px;display:flex;align-items:center;gap:14px;padding:0 16px;border-bottom:1px solid #2E2C28;position:relative">
+<div style="display:flex;gap:8px" aria-hidden="true"><span style="width:12px;height:12px;border-radius:50%;background:#3A3833"></span><span style="width:12px;height:12px;border-radius:50%;background:#3A3833"></span><span style="width:12px;height:12px;border-radius:50%;background:#3A3833"></span></div>
+<div class="lbl" style="margin-left:16px;display:flex;gap:10px"><span style="color:#ECE8DF">AuthZ refactor</span><span>/</span><span>Migrate role checks to scopes</span></div>
+<span class="lbl" style="margin-left:auto">⌘K jump</span>
+</header>
+<div style="flex:1;display:flex;min-height:0;position:relative">
+<aside style="width:232px;flex:none;border-right:1px solid #2E2C28;padding:18px 10px;box-sizing:border-box;display:flex;flex-direction:column;gap:2px">
+<div style="padding:0 8px 6px;font-weight:600">AuthZ refactor</div>
+<a href="#" style="display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:8px;background:#1F1E1B;border:1px solid #2E2C28;text-decoration:none"><span class="px px-need"></span>Migrate role checks</a>
+<a href="#" style="display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:8px;text-decoration:none;border:1px solid transparent"><span class="px px-work"></span>Split policy engine</a>
+<a href="#" style="display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:8px;text-decoration:none;border:1px solid transparent;color:#8F8A80"><span class="px px-done"></span>Audit admin endpoints</a>
+</aside>
+<main style="width:460px;flex:none;border-right:1px solid #2E2C28;display:flex;flex-direction:column">
+<div style="flex:1;overflow:hidden;padding:24px 26px;display:flex;flex-direction:column;gap:18px">
+<div style="display:flex;flex-direction:column;gap:6px"><div class="lbl">You</div><p style="margin:0;font-size:14.5px;line-height:1.55">Replace the hasRole checks in the admin routes with scope checks. Keep the old behaviour behind a flag.</p></div>
+<div style="display:flex;flex-direction:column;gap:6px"><div class="lbl" style="display:flex;align-items:center;gap:8px"><span class="px px-work"></span>Claude</div><p style="margin:0;font-size:14.5px;line-height:1.55;color:#D9D4C9">I moved the checks into one guard and mapped each role to its scopes. All 211 tests pass. The diff is on the right.</p></div>
+<div style="border:1px solid #ECE8DF;border-radius:12px;background:#1F1E1B;padding:14px;display:flex;flex-direction:column;gap:10px;box-shadow:4px 4px 0 #F04FB8">
+<div style="display:flex;align-items:center;gap:10px"><span class="px px-need"></span><span style="font-weight:600">Your review</span><span class="lbl" style="margin-left:auto">1 comment</span></div>
+<div class="mono" style="font-size:12px;color:#8F8A80">guard.ts:14 · keep the legacy path logged so we can see who still hits it</div>
+<button style="align-self:flex-start;padding:7px 12px;border-radius:8px;border:1px solid #ECE8DF;background:#ECE8DF;color:#161513">Send review ⌘⏎</button>
+</div>
+</div>
+<div style="padding:0 18px 16px"><div style="border:1px solid #2E2C28;border-radius:12px;background:#1F1E1B;padding:12px 14px;display:flex"><label for="cAd" style="position:absolute;left:-9999px">Message</label><input id="cAd" placeholder="Reply, or / for commands" style="flex:1;border:0;background:transparent;font:inherit;font-size:14.5px;color:#ECE8DF;outline:none"></div></div>
+</main>
+<section aria-label="Changes" style="flex:1;min-width:0;display:flex;background:#1B1A17">
+<div style="width:250px;flex:none;border-right:1px solid #262420;padding:16px 12px;box-sizing:border-box;display:flex;flex-direction:column;gap:16px">
+<div>
+<div style="display:flex;align-items:center;padding:0 8px 6px"><span class="lbl">Staged · 1</span><a href="#" class="lbl" style="margin-left:auto;text-decoration:none">Unstage all</a></div>
+<div class="f"><span style="color:#5FD86B">M</span>src/auth/scopes.ts</div>
+</div>
+<div>
+<div style="display:flex;align-items:center;padding:0 8px 6px"><span class="lbl">Changes · 3</span><a href="#" class="lbl" style="margin-left:auto;text-decoration:none">Stage all</a></div>
+<div class="f" style="background:#ECE8DF;color:#161513"><span style="color:#9A6A00">M</span>src/auth/guard.ts</div>
+<div class="f"><span style="color:#F0B43A">M</span>routes/admin/users.ts</div>
+<div class="f"><span style="color:#5FD86B">A</span>test/fixtures/roles.ts</div>
+</div>
+<div style="margin-top:auto;display:flex;flex-direction:column;gap:8px">
+<label for="msgAd" class="lbl">Commit message</label>
+<textarea id="msgAd" style="height:64px;border:1px solid #2E2C28;border-radius:8px;background:#161513;font:inherit;padding:8px 10px;resize:none;color:#ECE8DF">Move admin routes to scope checks</textarea>
+<button style="padding:8px 12px;border-radius:8px;border:1px solid #ECE8DF;background:#ECE8DF;color:#161513">Commit and push</button>
+</div>
+</div>
+<div style="flex:1;min-width:0;display:flex;flex-direction:column">
+<div style="display:flex;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid #262420">
+<span class="mono" style="font-size:12.5px">src/auth/guard.ts</span><span class="mono" style="font-size:12px;color:#5FD86B">+38</span><span class="mono" style="font-size:12px;color:#F04FB8">−21</span>
+<span style="margin-left:auto;display:flex;gap:6px"><button class="mono" style="font-size:11px;padding:4px 8px;border-radius:6px;border:1px solid #ECE8DF;background:#ECE8DF;color:#161513">Inline</button><button class="mono" style="font-size:11px;padding:4px 8px;border-radius:6px;border:1px solid #2E2C28;background:transparent;color:#ECE8DF">Split</button><button class="mono" style="font-size:11px;padding:4px 8px;border-radius:6px;border:1px solid #2E2C28;background:transparent;color:#ECE8DF">Stage file</button></span>
+</div>
+<div style="padding:14px 0">
+<div class="ln"><span>10</span><span>export function requireAccess(req: Request, route: Route) {</span></div>
+<div class="ln del"><span>11</span><span>-  if (!hasRole(req.user, route.role)) {</span></div>
+<div class="ln del"><span>12</span><span>-    throw new Forbidden(route.role);</span></div>
+<div class="ln add"><span>11</span><span>+  const needed = scopesFor(route);</span></div>
+<div class="ln add"><span>12</span><span>+  if (!hasScopes(req.token, needed)) {</span></div>
+<div class="ln add"><span>13</span><span>+    if (flags.legacyRoles &amp;&amp; hasRole(req.user, route.role)) {</span></div>
+<div class="ln add" style="box-shadow:inset 3px 0 0 #F04FB8"><span>14</span><span>+      return;</span></div>
+<div style="margin:6px 20px 6px 54px;border:1px solid #ECE8DF;border-radius:10px;background:#161513;padding:10px 12px;display:flex;flex-direction:column;gap:6px">
+<div style="display:flex;gap:8px;align-items:center"><span class="lbl" style="color:#ECE8DF">You</span><span class="lbl">pending · sends with review</span></div>
+<div style="font-size:13.5px">Keep the legacy path logged so we can see who still hits it.</div>
+</div>
+<div class="ln add"><span>15</span><span>+    }</span></div>
+<div class="ln add"><span>16</span><span>+    throw new Forbidden(needed.join(' '));</span></div>
+<div class="ln"><span>17</span><span>  }</span></div>
+<div class="ln"><span>18</span><span>}</span></div>
+</div>
+</div>
+</section>
+</div>
+<footer class="mono" style="height:30px;display:flex;align-items:center;gap:18px;padding:0 16px;border-top:1px solid #2E2C28;font-size:11px;color:#8F8A80;position:relative">
+<span>mac-server · direct</span>
+<span style="margin-left:auto">claude 5h <span style="color:#ECE8DF">42%</span> · resets 2h 10m</span><span>week 61%</span><span>codex 12%</span>
+</footer>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

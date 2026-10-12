@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "spikes/*"]
+default-members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/SarimDEV/dent"
+publish = false
+
+[workspace.dependencies]
+dent-protocol = { path = "crates/protocol" }
+dent-client-core = { path = "crates/client-core" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+
+# Fast inner loop: light debug info for our code, optimised dependencies.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+[profile.release]
+lto = "thin"

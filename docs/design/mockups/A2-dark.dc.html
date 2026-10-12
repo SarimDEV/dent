@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>dent · Field Notes dark with docs</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap">
+<style>
+body{margin:0}
+a{color:#ECE8DF}a:hover{color:#8F8A80}
+.mono{font-family:'Geist Mono',ui-monospace,monospace}
+.lbl{font-family:'Geist Mono',ui-monospace,monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#8F8A80}
+.px{width:10px;height:10px;flex:none;background-size:4px 4px}
+.px-work{background-image:repeating-conic-gradient(#4FD3EC 0 25%,#1C5B68 0 50%)}
+.px-need{background-image:repeating-conic-gradient(#F04FB8 0 25%,#5E1E48 0 50%)}
+.px-done{background-image:repeating-conic-gradient(#5FD86B 0 25%,#1F5426 0 50%)}
+button{font:inherit;cursor:pointer}
+</style>
+</helmet>
+<div style="width:1440px;height:900px;position:relative;overflow:hidden;background:#161513;color:#ECE8DF;font-family:'Geist',system-ui,sans-serif;font-size:13px;display:flex;flex-direction:column">
+<svg aria-hidden="true" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;mix-blend-mode:screen;opacity:.07"><filter id="grainA2d"><feTurbulence type="fractalNoise" baseFrequency="0.95" numOctaves="2" stitchTiles="stitch"></feTurbulence><feColorMatrix type="saturate" values="0"></feColorMatrix></filter><rect width="100%" height="100%" filter="url(#grainA2d)"></rect></svg>
+
+<header style="height:46px;display:flex;align-items:center;gap:14px;padding:0 16px;border-bottom:1px solid #2E2C28;position:relative">
+<div style="display:flex;gap:8px" aria-hidden="true"><span style="width:12px;height:12px;border-radius:50%;background:#3A3833"></span><span style="width:12px;height:12px;border-radius:50%;background:#3A3833"></span><span style="width:12px;height:12px;border-radius:50%;background:#3A3833"></span></div>
+<div class="lbl" style="margin-left:16px;display:flex;gap:10px"><span style="color:#ECE8DF">AuthZ refactor</span><span>/</span><span>Migrate role checks to scopes</span></div>
+<button style="margin-left:auto;display:flex;align-items:center;gap:10px;width:300px;padding:6px 10px;border-radius:8px;border:1px solid #2E2C28;background:#1F1E1B;color:#8F8A80"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><circle cx="5" cy="5" r="3.6" fill="none" stroke="#8F8A80" stroke-width="1.2"></circle><path d="M8 8l3 3" stroke="#8F8A80" stroke-width="1.2"></path></svg><span>Jump to session or doc</span><span class="mono" style="margin-left:auto;font-size:11px">⌘K</span></button>
+</header>
+
+<div style="flex:1;display:flex;min-height:0;position:relative">
+<aside style="width:232px;flex:none;border-right:1px solid #2E2C28;padding:18px 10px;box-sizing:border-box;display:flex;flex-direction:column;gap:18px">
+<div style="display:flex;flex-direction:column;gap:2px">
+<div style="padding:0 8px 6px;font-weight:600">AuthZ refactor</div>
+<a href="#" style="display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:8px;background:#1F1E1B;border:1px solid #2E2C28;text-decoration:none"><span class="px px-need"></span><span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Migrate role checks</span></a>
+<a href="#" style="display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:8px;text-decoration:none;border:1px solid transparent"><span class="px px-work"></span><span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Split policy engine</span></a>
+<a href="#" style="display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:8px;text-decoration:none;border:1px solid transparent;color:#8F8A80"><span class="px px-done"></span><span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Audit admin endpoints</span></a>
+</div>
+<div style="display:flex;flex-direction:column;gap:2px">
+<div class="lbl" style="padding:0 8px 6px">Docs in this project</div>
+<a href="#" style="display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:8px;text-decoration:none;background:#24221F"><span class="mono" style="font-size:12px">plan.md</span><span class="lbl" style="margin-left:auto;color:#4FD3EC">live</span></a>
+<a href="#" style="display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:8px;text-decoration:none"><span class="mono" style="font-size:12px">scopes.md</span></a>
+<a href="#" style="display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:8px;text-decoration:none"><span class="mono" style="font-size:12px">rollout-notes.md</span></a>
+</div>
+</aside>
+
+<main style="width:560px;flex:none;border-right:1px solid #2E2C28;display:flex;flex-direction:column">
+<div style="flex:1;overflow:hidden;padding:24px 28px;display:flex;flex-direction:column;gap:18px">
+<div style="display:flex;flex-direction:column;gap:6px">
+<div class="lbl">You</div>
+<p style="margin:0;font-size:14.5px;line-height:1.55">Write the rollout plan into plan.md before you touch staging.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px">
+<div class="lbl" style="display:flex;align-items:center;gap:8px"><span class="px px-work"></span>Claude</div>
+<p style="margin:0;font-size:14.5px;line-height:1.55;color:#D9D4C9">Done. The plan is open on the right. It keeps the role flag on until the mobile clients ship, then removes it in two steps.</p>
+<div class="mono" style="font-size:12px;color:#8F8A80;display:flex;gap:10px"><span>wrote plan.md</span><span>·</span><span>+64 lines</span></div>
+</div>
+<div style="border:1px solid #ECE8DF;border-radius:12px;background:#1F1E1B;padding:14px;display:flex;flex-direction:column;gap:10px;box-shadow:4px 4px 0 #F04FB8">
+<div style="display:flex;align-items:center;gap:10px"><span class="px px-need"></span><span style="font-weight:600">Run on staging?</span></div>
+<div class="mono" style="font-size:12.5px;padding:8px 10px;background:#161513;border-radius:8px">pnpm db:migrate --env staging</div>
+<div style="display:flex;gap:8px"><button style="padding:7px 12px;border-radius:8px;border:1px solid #ECE8DF;background:#ECE8DF;color:#161513">Allow once</button><button style="padding:7px 12px;border-radius:8px;border:1px solid #3A3833;background:transparent;color:#ECE8DF">Deny…</button></div>
+</div>
+</div>
+<div style="padding:0 20px 16px">
+<div style="border:1px solid #2E2C28;border-radius:12px;background:#1F1E1B;padding:12px 14px;display:flex;align-items:center;gap:10px">
+<label for="composerA2d" style="position:absolute;left:-9999px">Message</label>
+<input id="composerA2d" placeholder="Reply, or / for commands" style="flex:1;border:0;background:transparent;font:inherit;font-size:14.5px;color:#ECE8DF;outline:none">
+<span class="mono" style="font-size:11px;color:#8F8A80">Opus 5.5</span>
+</div>
+</div>
+</main>
+
+<section aria-label="plan.md" style="flex:1;min-width:0;background:#1B1A17;display:flex;flex-direction:column">
+<div style="height:42px;display:flex;align-items:center;gap:10px;padding:0 24px;border-bottom:1px solid #262420">
+<span class="mono" style="font-size:12px">plan.md</span>
+<span class="lbl">auth-service</span>
+<span class="lbl" style="margin-left:auto;display:flex;align-items:center;gap:6px"><span class="px px-work" style="width:8px;height:8px"></span>updated 12s ago by Claude</span>
+</div>
+<article style="flex:1;overflow:hidden;padding:28px 44px;max-width:620px;line-height:1.6;font-size:14px;color:#D9D4C9">
+<h2 style="margin:0 0 6px;font-family:'Instrument Serif',serif;font-weight:400;font-size:34px;line-height:1.05;color:#ECE8DF">Scopes migration plan</h2>
+<p class="lbl" style="margin:0 0 18px">Draft · three phases</p>
+<p style="margin:0 0 14px">Admin routes move from role checks to scope checks. The old role path stays behind <span class="mono" style="font-size:12.5px;background:#2A2824;padding:1px 5px;border-radius:4px;color:#ECE8DF">AUTHZ_LEGACY_ROLES</span> until every client sends scopes.</p>
+<h3 style="margin:18px 0 8px;font-size:14px;font-weight:600;color:#ECE8DF">Phases</h3>
+<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:16px">
+<div style="display:flex;gap:10px;align-items:flex-start"><span style="width:12px;height:12px;margin-top:4px;border:1px solid #ECE8DF;background:#ECE8DF;flex:none;box-sizing:border-box"></span><span>Map roles to scopes and add the guard</span></div>
+<div style="display:flex;gap:10px;align-items:flex-start;background:#16313A;margin:0 -8px;padding:2px 8px"><span style="width:12px;height:12px;margin-top:4px;border:1px solid #ECE8DF;flex:none;box-sizing:border-box"></span><span style="color:#ECE8DF">Migrate staging, then production, behind the flag</span></div>
+<div style="display:flex;gap:10px;align-items:flex-start"><span style="width:12px;height:12px;margin-top:4px;border:1px solid #ECE8DF;flex:none;box-sizing:border-box"></span><span>Remove the flag after the mobile release</span></div>
+</div>
+<h3 style="margin:18px 0 8px;font-size:14px;font-weight:600;color:#ECE8DF">Role to scopes</h3>
+<table style="width:100%;border-collapse:collapse;font-size:13px">
+<thead><tr><th style="text-align:left;padding:7px 0;border-bottom:1px solid #ECE8DF;font-weight:500;color:#ECE8DF">Role</th><th style="text-align:left;padding:7px 0;border-bottom:1px solid #ECE8DF;font-weight:500;color:#ECE8DF">Scopes</th></tr></thead>
+<tbody>
+<tr><td class="mono" style="padding:7px 0;border-bottom:1px solid #2E2C28;font-size:12px">admin</td><td class="mono" style="padding:7px 0;border-bottom:1px solid #2E2C28;font-size:12px">users:write billing:read audit:read</td></tr>
+<tr><td class="mono" style="padding:7px 0;border-bottom:1px solid #2E2C28;font-size:12px">support</td><td class="mono" style="padding:7px 0;border-bottom:1px solid #2E2C28;font-size:12px">users:read audit:read</td></tr>
+<tr><td class="mono" style="padding:7px 0;font-size:12px">billing</td><td class="mono" style="padding:7px 0;font-size:12px">billing:write</td></tr>
+</tbody>
+</table>
+</article>
+</section>
+</div>
+
+<footer class="mono" style="height:30px;display:flex;align-items:center;gap:18px;padding:0 16px;border-top:1px solid #2E2C28;font-size:11px;color:#8F8A80;position:relative">
+<span>mac-server · direct</span>
+<span style="margin-left:auto">claude 5h <span style="color:#ECE8DF">42%</span> · resets 2h 10m</span><span>week 61%</span><span>codex 12%</span>
+</footer>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

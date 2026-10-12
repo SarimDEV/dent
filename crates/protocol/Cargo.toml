@@ -1,0 +1,13 @@
+[package]
+name = "dent-protocol"
+description = "Wire messages, event types and protocol versioning shared by every dent client and daemon."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

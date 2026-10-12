@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>dent chat rendering · Text and structure</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=Noto+Sans+JP:wght@400&family=Noto+Sans+Arabic:wght@400&display=swap">
+<style>
+body{margin:0}
+a{color:#171614;text-decoration-color:#B9B4A9;text-underline-offset:3px}a:hover{color:#6E6A62}
+.mono{font-family:'Geist Mono',ui-monospace,monospace}
+.lbl{font-family:'Geist Mono',ui-monospace,monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#6E6A62}
+.row{display:grid;grid-template-columns:240px minmax(0,760px);column-gap:56px;padding:36px 0;border-top:1px solid #DCD7CC}
+.side{display:flex;flex-direction:column;gap:8px}
+.side h3{margin:0;font-size:14px;font-weight:600}
+.side p{margin:0;font-size:12.5px;line-height:1.5;color:#6E6A62}
+.msg{font-size:15px;line-height:1.6}
+.msg p{margin:0 0 12px}
+.ic{font-family:'Geist Mono',ui-monospace,monospace;font-size:.86em;background:#E9E5DC;padding:1px 5px;border-radius:4px}
+.kbd{font-family:'Geist Mono',ui-monospace,monospace;font-size:11.5px;padding:1px 6px;border:1px solid #CFC9BC;border-bottom-width:2px;border-radius:5px;background:#FAF8F3}
+.px{width:10px;height:10px;flex:none;background-size:4px 4px;display:inline-block}
+.px-work{background-image:repeating-conic-gradient(#2BB8D6 0 25%,#9FE3F0 0 50%)}
+.px-need{background-image:repeating-conic-gradient(#E0309F 0 25%,#F4A6D6 0 50%)}
+.px-done{background-image:repeating-conic-gradient(#3FBF4F 0 25%,#A8E6AE 0 50%)}
+.px-wait{background-image:repeating-conic-gradient(#E8A317 0 25%,#F5D58C 0 50%)}
+.px-vio{background-image:repeating-conic-gradient(#6B4DFF 0 25%,#C8BCFF 0 50%)}
+.alert{border:1px solid #DCD7CC;border-radius:10px;background:#FAF8F3;padding:12px 14px;display:flex;flex-direction:column;gap:6px}
+.alert .h{display:flex;align-items:center;gap:8px}
+ul,ol{margin:0;padding-left:22px}
+li{margin:3px 0}
+</style>
+</helmet>
+<div style="width:1440px;height:2500px;position:relative;overflow:hidden;background:#F1EEE7;color:#171614;font-family:'Geist',system-ui,sans-serif;font-size:13px">
+<svg aria-hidden="true" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;mix-blend-mode:multiply;opacity:.12"><filter id="gR1"><feTurbulence type="fractalNoise" baseFrequency="0.95" numOctaves="2" stitchTiles="stitch"></feTurbulence><feColorMatrix type="saturate" values="0"></feColorMatrix></filter><rect width="100%" height="100%" filter="url(#gR1)"></rect></svg>
+<div style="position:relative;padding:64px 120px 40px">
+<div class="lbl">Chat rendering · sheet 1</div>
+<h1 style="margin:10px 0 8px;font-family:'Instrument Serif',serif;font-weight:400;font-size:52px;line-height:1">Text and <em>structure</em></h1>
+<p style="margin:0 0 32px;max-width:640px;font-size:14px;line-height:1.55;color:#6E6A62">Everything Markdown can express, as it appears inside an agent's message. The right column is the 760 px chat column at its real size.</p>
+
+<div class="row">
+<div class="side"><h3>Headings</h3><p>H1 and H2 use the serif; H3 is a sans heading; H4 and below become mono labels so long answers never shout.</p></div>
+<div class="msg">
+<div style="font-family:'Instrument Serif',serif;font-size:32px;line-height:1.1;margin-bottom:10px">Scopes migration</div>
+<div style="font-family:'Instrument Serif',serif;font-size:24px;line-height:1.15;margin-bottom:10px">Rollout in three phases</div>
+<div style="font-size:16px;font-weight:600;margin-bottom:8px">Phase two: staging</div>
+<div class="lbl" style="color:#171614">Notes for reviewers</div>
+</div>
+</div>
+
+<div class="row">
+<div class="side"><h3>Paragraphs and inline styles</h3><p>Bold, italic, strikethrough, inline code, highlight, sub and superscript, keyboard keys, links and long URLs that wrap instead of overflowing.</p></div>
+<div class="msg">
+<p>Admin routes move from <strong>role checks</strong> to <em>scope checks</em>. <span style="text-decoration:line-through;color:#6E6A62">Keep the role table forever.</span> We drop the role table after launch. Run <span class="ic">pnpm test --filter auth</span> before you push.</p>
+<p><span style="background:#F7E7A6;padding:0 3px">Highlighted text</span> stands out without colour noise. Water is H<sub>2</sub>O, the bound is n<sup>2</sup>. Open the switcher with <span class="kbd">⌘</span> <span class="kbd">K</span>, or capture with <span class="kbd">⌘</span> <span class="kbd">⇧</span> <span class="kbd">Space</span>.</p>
+<p style="margin:0">See <a href="#">the rollout plan</a> and the full trace at <a href="#" class="mono" style="font-size:13px;word-break:break-all">https://dent.sh/sessions/S-0142/events?from=1043&amp;to=1288&amp;filter=tool_call&amp;machine=mac-server</a>.</p>
+</div>
+</div>
+
+<div class="row">
+<div class="side"><h3>Lists</h3><p>Unordered markers change by depth; ordered lists keep their numbering across nesting and code blocks.</p></div>
+<div class="msg" style="display:grid;grid-template-columns:1fr 1fr;gap:32px">
+<ul style="list-style:none;padding-left:0">
+<li style="display:flex;gap:10px"><span style="width:6px;height:6px;background:#171614;margin-top:9px;flex:none"></span><span>Map roles to scopes</span></li>
+<li style="display:flex;gap:10px"><span style="width:6px;height:6px;background:#171614;margin-top:9px;flex:none"></span><span>Add the guard
+<ul style="list-style:none;padding-left:0;margin-top:4px">
+<li style="display:flex;gap:10px"><span style="width:6px;height:6px;border:1px solid #171614;margin-top:9px;flex:none;box-sizing:border-box"></span><span>Admin routes</span></li>
+<li style="display:flex;gap:10px"><span style="width:6px;height:6px;border:1px solid #171614;margin-top:9px;flex:none;box-sizing:border-box"></span><span>Billing routes
+<ul style="list-style:none;padding-left:0;margin-top:4px"><li style="display:flex;gap:10px;color:#6E6A62"><span style="width:4px;height:4px;background:#6E6A62;margin-top:10px;flex:none"></span><span>Invoices endpoint</span></li></ul></span></li>
+</ul></span></li>
+<li style="display:flex;gap:10px"><span style="width:6px;height:6px;background:#171614;margin-top:9px;flex:none"></span><span>Remove the flag</span></li>
+</ul>
+<ol style="padding-left:0;list-style:none">
+<li style="display:flex;gap:10px"><span class="mono" style="font-size:12px;color:#6E6A62;width:18px;flex:none;padding-top:2px">1.</span><span>Back up the role table</span></li>
+<li style="display:flex;gap:10px"><span class="mono" style="font-size:12px;color:#6E6A62;width:18px;flex:none;padding-top:2px">2.</span><span>Run the migration
+<ol style="padding-left:0;list-style:none;margin-top:4px">
+<li style="display:flex;gap:10px"><span class="mono" style="font-size:12px;color:#6E6A62;width:18px;flex:none;padding-top:2px">a.</span><span>Staging</span></li>
+<li style="display:flex;gap:10px"><span class="mono" style="font-size:12px;color:#6E6A62;width:18px;flex:none;padding-top:2px">b.</span><span>Production</span></li>
+</ol></span></li>
+<li style="display:flex;gap:10px"><span class="mono" style="font-size:12px;color:#6E6A62;width:18px;flex:none;padding-top:2px">3.</span><span>Watch error rates for a day</span></li>
+</ol>
+</div>
+</div>
+
+<div class="row">
+<div class="side"><h3>Task lists</h3><p>Checkboxes the agent writes are shown as state, not controls, so ticking one can never silently disagree with the agent.</p></div>
+<div class="msg" style="display:flex;flex-direction:column;gap:6px">
+<div style="display:flex;gap:10px;align-items:center"><span style="width:14px;height:14px;background:#171614;display:flex;align-items:center;justify-content:center;flex:none"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 5.2l2 2 4-4.4" stroke="#FAF8F3" stroke-width="1.6" fill="none"></path></svg></span><span style="color:#6E6A62;text-decoration:line-through">Map roles to scopes</span></div>
+<div style="display:flex;gap:10px;align-items:center"><span style="width:14px;height:14px;background:#171614;display:flex;align-items:center;justify-content:center;flex:none"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 5.2l2 2 4-4.4" stroke="#FAF8F3" stroke-width="1.6" fill="none"></path></svg></span><span style="color:#6E6A62;text-decoration:line-through">Add the guard</span></div>
+<div style="display:flex;gap:10px;align-items:center"><span style="width:14px;height:14px;border:1.5px solid #171614;flex:none;box-sizing:border-box"></span><span>Migrate staging behind the flag</span></div>
+<div style="display:flex;gap:10px;align-items:center"><span style="width:14px;height:14px;border:1.5px solid #171614;flex:none;box-sizing:border-box"></span><span>Remove the flag after the mobile release</span></div>
+</div>
+</div>
+
+<div class="row">
+<div class="side"><h3>Block quotes</h3><p>Quoted text sits in the serif at a slightly larger size, with an optional attribution line.</p></div>
+<div class="msg">
+<div style="padding:4px 0 4px 22px;position:relative"><span aria-hidden="true" style="position:absolute;left:0;top:-6px;font-family:'Instrument Serif',serif;font-size:44px;line-height:1;color:#B9B4A9">“</span>
+<div style="font-family:'Instrument Serif',serif;font-size:21px;line-height:1.35">Any route that reads billing data must require billing:read, even for admins.</div>
+<div class="lbl" style="margin-top:8px">From docs/authz-policy.md · line 42</div></div>
+</div>
+</div>
+
+<div class="row">
+<div class="side"><h3>Alerts</h3><p>GitHub-style callouts: note, tip, important, warning and caution, each with its status square and its own label.</p></div>
+<div class="msg" style="display:flex;flex-direction:column;gap:10px">
+<div class="alert"><div class="h"><span class="px px-work"></span><span class="lbl" style="color:#171614">Note</span></div><div style="font-size:14.5px">The legacy flag defaults to on in every environment.</div></div>
+<div class="alert"><div class="h"><span class="px px-done"></span><span class="lbl" style="color:#171614">Tip</span></div><div style="font-size:14.5px">Run the guard tests alone with <span class="ic">pnpm test guard</span>.</div></div>
+<div class="alert"><div class="h"><span class="px px-vio"></span><span class="lbl" style="color:#171614">Important</span></div><div style="font-size:14.5px">Mobile clients older than 4.12 still send roles, not scopes.</div></div>
+<div class="alert" style="background:#FBF3E0;border-color:#EBD7A6"><div class="h"><span class="px px-wait"></span><span class="lbl" style="color:#171614">Warning</span></div><div style="font-size:14.5px">The migration locks the users table for about 40 seconds.</div></div>
+<div class="alert" style="background:#FBEAF3;border-color:#EFC3DC"><div class="h"><span class="px px-need"></span><span class="lbl" style="color:#171614">Caution</span></div><div style="font-size:14.5px">Do not run this against production without a backup.</div></div>
+</div>
+</div>
+
+<div class="row">
+<div class="side"><h3>Footnotes and definitions</h3><p>Footnote markers link to notes collected at the end of the message; definition lists set terms in the sans with indented meanings.</p></div>
+<div class="msg">
+<p>Scopes are checked on every request<sup><a href="#" class="mono" style="font-size:10px;text-decoration:none;padding:0 3px;background:#E9E5DC;border-radius:3px">1</a></sup> and cached for the life of the token<sup><a href="#" class="mono" style="font-size:10px;text-decoration:none;padding:0 3px;background:#E9E5DC;border-radius:3px">2</a></sup>.</p>
+<div style="display:grid;grid-template-columns:auto 1fr;column-gap:24px;row-gap:6px;margin:16px 0">
+<div style="font-weight:600">Scope</div><div>A permission string such as <span class="ic">users:write</span>.</div>
+<div style="font-weight:600">Role</div><div>A legacy bundle of scopes, kept only behind the flag.</div>
+</div>
+<div style="border-top:1px solid #DCD7CC;padding-top:10px;font-size:13px;color:#6E6A62;display:flex;flex-direction:column;gap:4px">
+<div><span class="mono" style="font-size:11px">1</span>  Except health checks, which are public.</div>
+<div><span class="mono" style="font-size:11px">2</span>  Tokens live for 15 minutes.</div>
+</div>
+</div>
+</div>
+
+<div class="row">
+<div class="side"><h3>Collapsible sections and rules</h3><p>HTML details blocks become disclosure rows; horizontal rules become a pixel rule.</p></div>
+<div class="msg" style="display:flex;flex-direction:column;gap:14px">
+<div style="border:1px solid #DCD7CC;border-radius:10px;background:#FAF8F3"><button style="width:100%;display:flex;align-items:center;gap:10px;padding:10px 14px;border:0;background:transparent;color:#171614;text-align:left"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5l4 3.5-4 3.5" stroke="#171614" stroke-width="1.4" fill="none"></path></svg><span>Why not keep roles?</span><span class="lbl" style="margin-left:auto">3 paragraphs</span></button></div>
+<div style="border:1px solid #DCD7CC;border-radius:10px;background:#FAF8F3"><button style="width:100%;display:flex;align-items:center;gap:10px;padding:10px 14px;border:0;border-bottom:1px solid #E6E2D9;background:transparent;color:#171614;text-align:left"><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 3l3.5 4 3.5-4" stroke="#171614" stroke-width="1.4" fill="none"></path></svg><span>Rollback plan</span></button><div style="padding:12px 14px;font-size:14.5px">Turn the flag back on; no data changes are needed because the role column stays until phase three.</div></div>
+<div aria-hidden="true" style="height:4px;background-image:repeating-linear-gradient(90deg,#B9B4A9 0 4px,transparent 4px 8px);margin:8px 0"></div>
+</div>
+</div>
+
+<div class="row">
+<div class="side"><h3>Any language</h3><p>Emoji, CJK and right-to-left text keep their own fonts, line breaking and direction.</p></div>
+<div class="msg" style="display:flex;flex-direction:column;gap:10px">
+<p style="margin:0">Shipped to staging 🚀 and all 211 tests pass ✅</p>
+<p style="margin:0;font-family:'Noto Sans JP',sans-serif">日本語の説明も、長い行で自然に折り返されます。スコープの移行は三段階で行います。</p>
+<p dir="rtl" lang="ar" style="margin:0;font-family:'Noto Sans Arabic',sans-serif;text-align:right">يتم نقل المسارات الإدارية إلى فحص النطاقات.</p>
+</div>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":2500}}'>
+class Component extends DCLogic {
+renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

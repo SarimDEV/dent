@@ -1,0 +1,18 @@
+[package]
+name = "dent-cli"
+description = "The dent command-line client for scripts and agents."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "dent"
+path = "src/main.rs"
+
+[dependencies]
+dent-protocol.workspace = true
+dent-client-core.workspace = true
+[lints]
+workspace = true

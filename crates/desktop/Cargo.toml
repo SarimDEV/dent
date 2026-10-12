@@ -1,0 +1,18 @@
+[package]
+name = "dent-desktop"
+description = "The dent desktop app (GPUI)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "dent-desktop"
+path = "src/main.rs"
+
+[dependencies]
+dent-protocol.workspace = true
+dent-client-core.workspace = true
+[lints]
+workspace = true

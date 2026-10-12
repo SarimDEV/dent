@@ -1,0 +1,13 @@
+[package]
+name = "dent-web"
+description = "wasm-bindgen facade over the dent client core for the browser client."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+dent-client-core.workspace = true
+[lints]
+workspace = true

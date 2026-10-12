@@ -1,0 +1,31 @@
+# Risks and open questions
+
+The biggest risk is Anthropic's terms for third-party apps that use subscription logins (see Durability). The usage-limit risk is now mostly resolved by the stream's rate-limit events.
+
+| Risk | Impact | Mitigation |
+| --- | --- | --- |
+| Claude limits only reach status line scripts ([example](https://wmedia.es/en/tips/claude-code-usage-limit-status-line)), and have dropped out of some versions ([issue](https://github.com/anthropics/claude-code/issues/45133)) | Always-visible Claude limits may be partial or unavailable | Phase 0 spike: check what headless stream-json reports; try a daemon-installed status line command that forwards to the daemon; show "unknown" rather than guessing |
+| Agent protocols change: Codex app-server is documented as unstable, Claude Code's stream format moves too | Broken sessions after an agent update | Pinned agent versions per daemon release, contract tests, generated Codex types |
+| Provider terms for driving subscription CLIs from a third-party app | Public release could conflict with a provider's terms | Drive only the official CLIs with their own login; review each provider's terms before going public |
+| GPUI is pre-1.0 with thin docs; Linux and Windows support is newer than macOS | Slower UI work, upstream breakage | Pin a Zed commit, keep UI code separate from the client core, spike the hardest views (chat list, diff) in phase 0 |
+| iOS cannot hold background connections | No notifications without a hosted relay; requires an Apple developer account | Hub push from the start of the iPhone phase |
+| The daemon is remote code execution by design | A stolen account or device controls every machine | New devices need approval on an existing device, two-factor sign-in, instant revocation, keys in the OS keychain |
+| Mermaid and math have no mature pure-Rust renderers | Slower or heavier markdown viewer | Render through an embedded JS engine off the UI thread, cache SVG by content hash |
+| Hub outage | Sign-in and new devices stop; relayed connections drop | Known devices connect directly from cache; the hub runs in two regions with a status page |
+| Relay bandwidth cost | Thin or negative margins on the paid hub | Direct connections first, relay only on failure, relay usage measured per account from day one |
+| Lost encryption keys | Locked out of synced state and backups | Recovery key at first sign-in; approval from any existing device |
+| The web client is a third UI | More work, and drift from the desktop | Shares the client core; scoped to chat, approvals, docs and diffs |
+
+**Decided**
+
+- **Name:** dent, at dent.sh.
+- **Sign-in:** GitHub, Google, and email and password at launch; providers are pluggable, and single sign-on for company teams comes later.
+- **Hub pricing:** free for up to 3 machines, then a subscription.
+- **Project docs folder:** \~/dent/projects/\<project>/docs on every machine hosting the project, synced between them.
+- **Multiple accounts per agent:** yes, with limits shown per account.
+- **Relays:** n0's free public relays during development and early sharing; own relays on Hetzner before public launch.
+- **License:** MIT for the daemon, session holder, client core, desktop, iPhone and web apps and the CLI; AGPL-3.0 for the hub, so anyone running a modified hosted copy must publish their changes.
+
+**Open questions**
+
+- **Hub price** above the free tier: deferred until closer to launch.

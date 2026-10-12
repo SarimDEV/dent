@@ -1,0 +1,17 @@
+[package]
+name = "dent-hub"
+description = "The dent hub: accounts, devices, relay, push, shared state and backup. AGPL-3.0."
+version.workspace = true
+edition.workspace = true
+license = "AGPL-3.0-only"
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "dent-hub"
+path = "src/main.rs"
+
+[dependencies]
+dent-protocol.workspace = true
+[lints]
+workspace = true

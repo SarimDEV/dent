@@ -1,0 +1,13 @@
+[package]
+name = "dent-client-core"
+description = "Connections, sync, cache, search and the Markdown block tree. No direct I/O, so it binds to iOS and WebAssembly."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+dent-protocol.workspace = true
+[lints]
+workspace = true

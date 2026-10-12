@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>dent chat rendering · Charts and markets</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap">
+<style>
+body{margin:0}
+a{color:#171614;text-decoration-color:#B9B4A9;text-underline-offset:3px}a:hover{color:#6E6A62}
+.mono{font-family:'Geist Mono',ui-monospace,monospace}
+.lbl{font-family:'Geist Mono',ui-monospace,monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#6E6A62}
+.row{display:grid;grid-template-columns:240px minmax(0,760px);column-gap:56px;padding:36px 0;border-top:1px solid #DCD7CC}
+.side{display:flex;flex-direction:column;gap:8px}
+.side h3{margin:0;font-size:14px;font-weight:600}
+.side p{margin:0;font-size:12.5px;line-height:1.5;color:#6E6A62}
+.cb{border:1px solid #DCD7CC;border-radius:10px;background:#FAF8F3;overflow:hidden}
+.cbh{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid #E6E2D9}
+.tb{font-family:'Geist Mono',ui-monospace,monospace;font-size:11px;padding:3px 8px;border-radius:6px;border:1px solid #DCD7CC;background:transparent;color:#171614;cursor:pointer}
+.num{font-variant-numeric:tabular-nums}
+</style>
+</helmet>
+<div style="width:1440px;height:2300px;position:relative;overflow:hidden;background:#F1EEE7;color:#171614;font-family:'Geist',system-ui,sans-serif;font-size:13px">
+<svg aria-hidden="true" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;mix-blend-mode:multiply;opacity:.12"><filter id="gR5"><feTurbulence type="fractalNoise" baseFrequency="0.95" numOctaves="2" stitchTiles="stitch"></feTurbulence><feColorMatrix type="saturate" values="0"></feColorMatrix></filter><rect width="100%" height="100%" filter="url(#gR5)"></rect></svg>
+<div style="position:relative;padding:64px 120px 40px">
+<div class="lbl">Chat rendering · sheet 3 · interactive</div>
+<h1 style="margin:10px 0 8px;font-family:'Instrument Serif',serif;font-weight:400;font-size:52px;line-height:1">Charts and <em>markets</em></h1>
+<p style="margin:0 0 32px;max-width:640px;font-size:14px;line-height:1.55;color:#6E6A62">Charts are drawn natively from data, so they are crisp, themed and interactive. Press Play and hover the stock chart or switch its range.</p>
+
+<div class="row">
+<div class="side"><h3>Stock card</h3><p>Built from market data the agent's tool returned, or refreshed from a market-data source you configure. Hover for any point; ranges switch in place. Areas are stippled, never gradient-filled.</p><p class="lbl" style="margin-top:6px">Sample data · fictional ticker</p></div>
+<div class="cb">
+<div style="padding:18px 20px 6px;display:flex;align-items:flex-start;gap:16px">
+<div>
+<div style="display:flex;align-items:center;gap:10px"><span style="font-weight:600;font-size:15px">Acme Robotics</span><span class="lbl">ACME · NASDAQ</span></div>
+<div style="display:flex;align-items:baseline;gap:12px;margin-top:6px">
+<span class="num" style="font-family:'Instrument Serif',serif;font-size:44px;line-height:1">{{priceText}}</span>
+<span class="mono num" style="font-size:13px;color:{{chgColor}}">{{chgText}}</span>
+<span class="lbl">{{whenText}}</span>
+</div>
+</div>
+<div style="margin-left:auto;display:flex;gap:4px" role="group" aria-label="Range">
+<sc-for list="{{ranges}}" as="r" hint-placeholder-count="6"><button onClick="{{r.pick}}" class="tb" style="{{r.style}}">{{r.label}}</button></sc-for>
+</div>
+</div>
+<div style="position:relative;margin:8px 20px 0" onMouseMove="{{move}}" onMouseLeave="{{leave}}">
+<svg width="100%" viewBox="0 0 718 230" role="img" aria-label="ACME price chart" style="display:block">
+<defs><pattern id="stip" width="4" height="4" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r=".8" fill="#171614" fill-opacity=".32"></circle></pattern></defs>
+<line x1="0" x2="660" y1="{{g1}}" y2="{{g1}}" stroke="#E6E2D9"></line>
+<line x1="0" x2="660" y1="{{g2}}" y2="{{g2}}" stroke="#E6E2D9"></line>
+<line x1="0" x2="660" y1="{{g3}}" y2="{{g3}}" stroke="#E6E2D9"></line>
+<text x="668" y="{{g1t}}" font-family="Geist Mono" font-size="10" fill="#6E6A62">{{l1}}</text>
+<text x="668" y="{{g2t}}" font-family="Geist Mono" font-size="10" fill="#6E6A62">{{l2}}</text>
+<text x="668" y="{{g3t}}" font-family="Geist Mono" font-size="10" fill="#6E6A62">{{l3}}</text>
+<path d="{{area}}" fill="url(#stip)"></path>
+<path d="{{line}}" fill="none" stroke="#171614" stroke-width="1.5" stroke-linejoin="round"></path>
+<sc-if value="{{showHover}}" hint-placeholder-val="{{ false }}">
+<line x1="{{hx}}" x2="{{hx}}" y1="0" y2="220" stroke="#171614" stroke-dasharray="2 3"></line>
+<rect x="{{hdx}}" y="{{hdy}}" width="9" height="9" fill="#2BB8D6" stroke="#171614"></rect>
+</sc-if>
+</svg>
+</div>
+<div class="mono" style="display:flex;justify-content:space-between;padding:4px 78px 12px 20px;font-size:10.5px;color:#6E6A62"><span>{{t0}}</span><span>{{t1}}</span><span>{{t2}}</span><span>{{t3}}</span></div>
+<div style="display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border-top:1px solid #E6E2D9">
+<div style="padding:10px 14px;border-right:1px solid #E6E2D9"><div class="lbl">Open</div><div class="mono num" style="margin-top:3px">{{open}}</div></div>
+<div style="padding:10px 14px;border-right:1px solid #E6E2D9"><div class="lbl">High</div><div class="mono num" style="margin-top:3px">{{high}}</div></div>
+<div style="padding:10px 14px;border-right:1px solid #E6E2D9"><div class="lbl">Low</div><div class="mono num" style="margin-top:3px">{{low}}</div></div>
+<div style="padding:10px 14px;border-right:1px solid #E6E2D9"><div class="lbl">Volume</div><div class="mono num" style="margin-top:3px">48.2M</div></div>
+<div style="padding:10px 14px;border-right:1px solid #E6E2D9"><div class="lbl">Mkt cap</div><div class="mono num" style="margin-top:3px">312.6B</div></div>
+<div style="padding:10px 14px"><div class="lbl">P/E</div><div class="mono num" style="margin-top:3px">28.4</div></div>
+</div>
+<div class="cbh" style="border-top:1px solid #E6E2D9;border-bottom:0"><span class="lbl">From the agent's market-data call · 2:14 pm</span><span style="margin-left:auto;display:flex;gap:6px"><button class="tb">Refresh</button><button class="tb">Data</button><button class="tb">Copy</button></span></div>
+</div>
+</div>
+
+<div class="row">
+<div class="side"><h3>Line chart</h3><p>From a chart block or a Vega-Lite spec. Axes in mono, values in tabular figures, the latest point labelled directly instead of a legend.</p></div>
+<div class="cb">
+<div class="cbh"><span style="font-weight:600">Weekly sign-ups</span><span class="lbl">12 weeks</span><span style="margin-left:auto;display:flex;gap:6px"><button class="tb">Data</button><button class="tb">Spec</button><button class="tb">Copy image</button></span></div>
+<svg width="100%" viewBox="0 0 760 250" role="img" aria-label="Weekly sign-ups rose from 420 to 905 over 12 weeks" style="display:block">
+<line x1="48" x2="720" y1="40" y2="40" stroke="#E6E2D9"></line><line x1="48" x2="720" y1="110" y2="110" stroke="#E6E2D9"></line><line x1="48" x2="720" y1="180" y2="180" stroke="#E6E2D9"></line>
+<text x="40" y="44" text-anchor="end" font-family="Geist Mono" font-size="10" fill="#6E6A62">900</text><text x="40" y="114" text-anchor="end" font-family="Geist Mono" font-size="10" fill="#6E6A62">650</text><text x="40" y="184" text-anchor="end" font-family="Geist Mono" font-size="10" fill="#6E6A62">400</text>
+<path d="{{suArea}}" fill="url(#stip2)"></path>
+<defs><pattern id="stip2" width="4" height="4" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r=".8" fill="#2BB8D6" fill-opacity=".55"></circle></pattern></defs>
+<path d="{{suLine}}" fill="none" stroke="#171614" stroke-width="1.5"></path>
+<rect x="715" y="34.6" width="9" height="9" fill="#2BB8D6" stroke="#171614"></rect>
+<text x="712" y="26" text-anchor="end" font-family="Geist Mono" font-size="11" fill="#171614">905</text>
+<text x="48" y="210" font-family="Geist Mono" font-size="10" fill="#6E6A62">Jul 20</text><text x="384" y="210" text-anchor="middle" font-family="Geist Mono" font-size="10" fill="#6E6A62">Aug 31</text><text x="720" y="210" text-anchor="end" font-family="Geist Mono" font-size="10" fill="#6E6A62">Oct 5</text>
+</svg>
+</div>
+</div>
+
+<div class="row">
+<div class="side"><h3>Bar chart</h3><p>Horizontal when labels are long, sorted by value, values printed at the bar end. The slowest bar takes the attention colour only when the agent flags it.</p></div>
+<div class="cb">
+<div class="cbh"><span style="font-weight:600">Test time by package</span><span class="lbl">seconds</span><span style="margin-left:auto;display:flex;gap:6px"><button class="tb">Data</button><button class="tb">Copy</button></span></div>
+<div style="padding:16px 20px;display:flex;flex-direction:column;gap:10px">
+<sc-for list="{{bars}}" as="b" hint-placeholder-count="5">
+<div style="display:grid;grid-template-columns:150px 1fr 56px;align-items:center;gap:12px">
+<span class="mono" style="font-size:12px">{{b.name}}</span>
+<span style="height:14px;display:block;width:{{b.w}};background:{{b.fill}};background-size:4px 4px"></span>
+<span class="mono num" style="font-size:12px;text-align:right">{{b.v}}</span>
+</div>
+</sc-for>
+</div>
+</div>
+</div>
+
+<div class="row">
+<div class="side"><h3>Inline figures</h3><p>Small numbers inside prose get a sparkline or a delta chip, so trends read without breaking the sentence.</p></div>
+<div style="font-size:15px;line-height:1.9">
+p95 latency for admin routes went from <span class="mono num">231 ms</span> to <span class="mono num">182 ms</span>
+<svg width="64" height="16" viewBox="0 0 64 16" role="img" aria-label="falling trend" style="vertical-align:middle"><polyline points="0,3 9,4 18,2 27,6 36,8 45,9 54,12 64,13" fill="none" stroke="#171614" stroke-width="1.3"></polyline><rect x="60" y="11" width="4" height="4" fill="#3FBF4F"></rect></svg>
+<span class="mono num" style="font-size:12px;padding:1px 6px;border-radius:4px;background:#E2F2DE;color:#23602F">−21%</span>
+this week, while error rate stayed flat at <span class="mono num">0.02%</span>.
+</div>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":2300}}'>
+class Component extends DCLogic {
+constructor(props) {
+super(props);
+this.state = { range: '1M', hover: null };
+}
+series(range) {
+var cfg = { '1D': [78, 0.012, 0.010], '5D': [60, 0.03, 0.02], '1M': [64, 0.07, 0.03], '6M': [90, 0.16, 0.05], '1Y': [104, 0.34, 0.06], '5Y': [120, 1.6, 0.09] }[range];
+var n = cfg[0], trend = cfg[1], amp = cfg[2];
+var seed = range.charCodeAt(0) * 131 + range.charCodeAt(1) * 7 + 17;
+var rnd = function () { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+var v = 100, out = [];
+for (var i = 0; i < n; i++) { v = v * (1 + trend / n + (rnd() - 0.5) * amp); out.push(v); }
+var k = 184.32 / out[n - 1];
+return out.map(function (x) { return x * k; });
+}
+label(range, i, n) {
+var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+if (range === '1D') { var mins = 570 + Math.round(i * 390 / (n - 1)); var h = Math.floor(mins / 60), m = mins % 60; var ap = h >= 12 ? 'pm' : 'am'; var hh = h > 12 ? h - 12 : h; return hh + ':' + (m < 10 ? '0' : '') + m + ' ' + ap; }
+var span = { '5D': 7, '1M': 30, '6M': 182, '1Y': 365, '5Y': 1826 }[range];
+var end = Date.UTC(2026, 9, 9);
+var d = new Date(end - (n - 1 - i) * (span / (n - 1)) * 86400000);
+if (range === '5Y') return months[d.getUTCMonth()] + ' ' + d.getUTCFullYear();
+return months[d.getUTCMonth()] + ' ' + d.getUTCDate();
+}
+renderVals() {
+var self = this;
+var range = this.state.range;
+var s = this.series(range);
+var n = s.length;
+var min = Math.min.apply(null, s), max = Math.max.apply(null, s);
+var lo = min - (max - min) * 0.08, hi = max + (max - min) * 0.08;
+var W = 660, top = 12, bot = 212;
+var X = function (i) { return i / (n - 1) * W; };
+var Y = function (v) { return top + (1 - (v - lo) / (hi - lo)) * (bot - top); };
+var pts = s.map(function (v, i) { return X(i).toFixed(1) + ' ' + Y(v).toFixed(1); });
+var line = 'M' + pts.join(' L');
+var area = line + ' L' + W + ' ' + bot + ' L0 ' + bot + ' Z';
+var h = this.state.hover;
+var idx = h === null ? n - 1 : Math.max(0, Math.min(n - 1, h));
+var price = s[idx];
+var chg = price - s[0], pct = chg / s[0] * 100;
+var up = chg >= 0;
+var f2 = function (x) { return x.toFixed(2); };
+var lvl = [hi - (hi - lo) * 0.1, (hi + lo) / 2, lo + (hi - lo) * 0.1];
+var ranges = ['1D', '5D', '1M', '6M', '1Y', '5Y'].map(function (r) {
+return { label: r, pick: function () { self.setState({ range: r, hover: null }); }, style: r === range ? 'background:#171614;color:#FAF8F3;border-color:#171614' : '' };
+});
+var su = [420, 460, 445, 510, 580, 560, 640, 700, 690, 760, 820, 905];
+var sx = function (i) { return 48 + i / 11 * 672; };
+var sy = function (v) { return 180 - (v - 400) / 500 * 140; };
+var suLine = 'M' + su.map(function (v, i) { return sx(i).toFixed(1) + ' ' + sy(v).toFixed(1); }).join(' L');
+var suArea = suLine + ' L720 180 L48 180 Z';
+var bdata = [['e2e', 31.0], ['billing-api', 14.6], ['scopes', 9.8], ['guard', 4.2], ['legacy-roles', 1.1]];
+var bars = bdata.map(function (b, i) {
+return { name: b[0], v: b[1].toFixed(1), w: (b[1] / 31 * 100).toFixed(1) + '%', fill: i === 0 ? 'repeating-conic-gradient(#E8A317 0 25%,#F5D58C 0 50%)' : 'repeating-conic-gradient(#171614 0 25%,#6E6A62 0 50%)' };
+});
+return {
+ranges: ranges, line: line, area: area,
+priceText: f2(price),
+chgText: (up ? '+' : '−') + f2(Math.abs(chg)) + ' (' + (up ? '+' : '−') + Math.abs(pct).toFixed(2) + '%)',
+chgColor: up ? '#23602F' : '#A3196B',
+whenText: h === null ? (range === '1D' ? 'today' : 'past ' + range) : this.label(range, idx, n),
+showHover: h !== null,
+hx: X(idx).toFixed(1), hdx: (X(idx) - 4.5).toFixed(1), hdy: (Y(price) - 4.5).toFixed(1),
+g1: Y(lvl[0]).toFixed(1), g2: Y(lvl[1]).toFixed(1), g3: Y(lvl[2]).toFixed(1),
+g1t: (Y(lvl[0]) + 3).toFixed(1), g2t: (Y(lvl[1]) + 3).toFixed(1), g3t: (Y(lvl[2]) + 3).toFixed(1),
+l1: f2(lvl[0]), l2: f2(lvl[1]), l3: f2(lvl[2]),
+t0: this.label(range, 0, n), t1: this.label(range, Math.round((n - 1) / 3), n), t2: this.label(range, Math.round((n - 1) * 2 / 3), n), t3: this.label(range, n - 1, n),
+open: f2(s[0]), high: f2(max), low: f2(min),
+move: function (e) { var r = e.currentTarget.getBoundingClientRect(); var t = (e.clientX - r.left) / (r.width * 660 / 718); self.setState({ hover: Math.round(Math.max(0, Math.min(1, t)) * (n - 1)) }); },
+leave: function () { self.setState({ hover: null }); },
+suLine: suLine, suArea: suArea, bars: bars
+};
+}
+}
+</script>
+</body>
+</html>

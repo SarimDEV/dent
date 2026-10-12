@@ -1,0 +1,17 @@
+[package]
+name = "dent-session-holder"
+description = "Tiny, rarely changed process that owns agent processes and PTYs so daemon upgrades never interrupt them."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "dent-session-holder"
+path = "src/main.rs"
+
+[dependencies]
+
+[lints]
+workspace = true

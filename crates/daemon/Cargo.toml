@@ -1,0 +1,17 @@
+[package]
+name = "dent-daemon"
+description = "The per-machine dent daemon: agent drivers, event log, git, files and checkpoints."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "dent-daemon"
+path = "src/main.rs"
+
+[dependencies]
+dent-protocol.workspace = true
+[lints]
+workspace = true

@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>dent chat rendering · Code, math and tables</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=STIX+Two+Text:ital@0;1&display=swap">
+<style>
+body{margin:0}
+a{color:#171614;text-decoration-color:#B9B4A9;text-underline-offset:3px}a:hover{color:#6E6A62}
+.mono{font-family:'Geist Mono',ui-monospace,monospace}
+.lbl{font-family:'Geist Mono',ui-monospace,monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#6E6A62}
+.row{display:grid;grid-template-columns:240px minmax(0,760px);column-gap:56px;padding:36px 0;border-top:1px solid #DCD7CC}
+.side{display:flex;flex-direction:column;gap:8px}
+.side h3{margin:0;font-size:14px;font-weight:600}
+.side p{margin:0;font-size:12.5px;line-height:1.5;color:#6E6A62}
+.msg{font-size:15px;line-height:1.6}
+.ic{font-family:'Geist Mono',ui-monospace,monospace;font-size:.86em;background:#E9E5DC;padding:1px 5px;border-radius:4px}
+.cb{border:1px solid #DCD7CC;border-radius:10px;background:#FAF8F3;overflow:hidden}
+.cbh{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid #E6E2D9}
+.tb{font-family:'Geist Mono',ui-monospace,monospace;font-size:11px;padding:3px 8px;border-radius:6px;border:1px solid #DCD7CC;background:transparent;color:#171614;cursor:pointer}
+.code{padding:10px 0;font-family:'Geist Mono',ui-monospace,monospace;font-size:12.5px;line-height:1.7}
+.l{display:flex;white-space:pre}
+.l .n{width:44px;flex:none;text-align:right;padding-right:16px;color:#B0AA9E}
+.k{color:#A3247A}.s{color:#2F7D3A}.nu{color:#A35F00}.fn{color:#1D6F8C}.t{color:#6A3FB5}.c{color:#8D877C;font-style:italic}
+.add{background:#E2F2DE}.del{background:#F6E0EC}
+.math{font-family:'STIX Two Text',serif}
+.mi{font-style:italic}
+.frac{display:inline-flex;flex-direction:column;align-items:center;vertical-align:middle;margin:0 3px}
+.frac>span:first-child{padding:0 4px 2px;border-bottom:1.2px solid #171614}
+.frac>span:last-child{padding:2px 4px 0}
+.sqrt{display:inline-flex;align-items:stretch}
+.sqrt>span:last-child{border-top:1.2px solid #171614;padding:1px 2px 0 2px}
+th{font-weight:500;text-align:left}
+td,th{padding:9px 14px;border-bottom:1px solid #E6E2D9;white-space:nowrap}
+.num{text-align:right;font-variant-numeric:tabular-nums;font-family:'Geist Mono',ui-monospace,monospace;font-size:12.5px}
+.px{width:9px;height:9px;flex:none;background-size:3px 3px;display:inline-block}
+.px-work{background-image:repeating-conic-gradient(#2BB8D6 0 25%,#9FE3F0 0 50%)}
+.px-need{background-image:repeating-conic-gradient(#E0309F 0 25%,#F4A6D6 0 50%)}
+.px-done{background-image:repeating-conic-gradient(#3FBF4F 0 25%,#A8E6AE 0 50%)}
+</style>
+</helmet>
+<div style="width:1440px;height:2900px;position:relative;overflow:hidden;background:#F1EEE7;color:#171614;font-family:'Geist',system-ui,sans-serif;font-size:13px">
+<svg aria-hidden="true" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;mix-blend-mode:multiply;opacity:.12"><filter id="gR2"><feTurbulence type="fractalNoise" baseFrequency="0.95" numOctaves="2" stitchTiles="stitch"></feTurbulence><feColorMatrix type="saturate" values="0"></feColorMatrix></filter><rect width="100%" height="100%" filter="url(#gR2)"></rect></svg>
+<div style="position:relative;padding:64px 120px 40px">
+<div class="lbl">Chat rendering · sheet 2</div>
+<h1 style="margin:10px 0 8px;font-family:'Instrument Serif',serif;font-weight:400;font-size:52px;line-height:1">Code, math and <em>tables</em></h1>
+<p style="margin:0 0 32px;max-width:640px;font-size:14px;line-height:1.55;color:#6E6A62">The structured blocks agents produce most. Every block has the same header: what it is, then its actions on the right.</p>
+
+<div class="row">
+<div class="side"><h3>Code block</h3><p>File name when the agent gives one, language otherwise. Line numbers, copy, wrap and open-in-file. Paths like <span class="ic">guard.ts:14</span> anywhere in chat open the file at that line.</p></div>
+<div class="cb">
+<div class="cbh"><span class="mono" style="font-size:12px">src/auth/guard.ts</span><span class="lbl">TypeScript · 14 lines</span><span style="margin-left:auto;display:flex;gap:6px"><button class="tb">Wrap</button><button class="tb">Open</button><button class="tb">Copy</button></span></div>
+<div class="code">
+<div class="l"><span class="n">1</span><span><span class="k">import</span> { <span class="t">Request</span>, <span class="t">Route</span> } <span class="k">from</span> <span class="s">"./types"</span>;</span></div>
+<div class="l"><span class="n">2</span><span><span class="k">import</span> { scopesFor, hasScopes } <span class="k">from</span> <span class="s">"./scopes"</span>;</span></div>
+<div class="l"><span class="n">3</span><span> </span></div>
+<div class="l"><span class="n">4</span><span><span class="c">// Every admin route checks scopes; roles stay behind the flag.</span></span></div>
+<div class="l"><span class="n">5</span><span><span class="k">export function</span> <span class="fn">requireAccess</span>(req: <span class="t">Request</span>, route: <span class="t">Route</span>) {</span></div>
+<div class="l"><span class="n">6</span><span>  <span class="k">const</span> needed = <span class="fn">scopesFor</span>(route);</span></div>
+<div class="l"><span class="n">7</span><span>  <span class="k">if</span> (<span class="fn">hasScopes</span>(req.token, needed)) <span class="k">return</span>;</span></div>
+<div class="l"><span class="n">8</span><span>  <span class="k">if</span> (flags.legacyRoles &amp;&amp; <span class="fn">hasRole</span>(req.user, route.role)) {</span></div>
+<div class="l"><span class="n">9</span><span>    log.<span class="fn">warn</span>(<span class="s">"legacy role used"</span>, { route: route.id });</span></div>
+<div class="l"><span class="n">10</span><span>    <span class="k">return</span>;</span></div>
+<div class="l"><span class="n">11</span><span>  }</span></div>
+<div class="l"><span class="n">12</span><span>  <span class="k">throw new</span> <span class="t">Forbidden</span>(needed.<span class="fn">join</span>(<span class="s">" "</span>), { status: <span class="nu">403</span> });</span></div>
+<div class="l"><span class="n">13</span><span>}</span></div>
+</div>
+</div>
+</div>
+
+<div class="row">
+<div class="side"><h3>Diff block</h3><p>A unified diff renders with the same colours as the changes panel, and can open there.</p></div>
+<div class="cb">
+<div class="cbh"><span class="mono" style="font-size:12px">routes/admin/users.ts</span><span class="mono" style="font-size:11.5px;color:#3FBF4F">+2</span><span class="mono" style="font-size:11.5px;color:#E0309F">−2</span><span style="margin-left:auto;display:flex;gap:6px"><button class="tb">Open in changes</button><button class="tb">Copy</button></span></div>
+<div class="code">
+<div class="l"><span class="n">18</span><span>router.<span class="fn">get</span>(<span class="s">"/admin/users"</span>,</span></div>
+<div class="l del"><span class="n">19</span><span>-  <span class="fn">requireRole</span>(<span class="s">"admin"</span>),</span></div>
+<div class="l del"><span class="n">20</span><span>-  listUsers);</span></div>
+<div class="l add"><span class="n">19</span><span>+  <span class="fn">requireAccess</span>({ scopes: [<span class="s">"users:read"</span>] }),</span></div>
+<div class="l add"><span class="n">20</span><span>+  listUsers);</span></div>
+</div>
+</div>
+</div>
+
+<div class="row">
+<div class="side"><h3>Terminal output</h3><p>Command output keeps its ANSI colours, mapped to theme colours. Long output folds to its tail, with the exit code always visible.</p></div>
+<div class="cb" style="background:#171614;border-color:#171614;color:#ECE8DF">
+<div class="cbh" style="border-color:#2E2C28"><span class="mono" style="font-size:12px;color:#ECE8DF">$ pnpm test --filter auth</span><span class="lbl" style="color:#8F8A80">exit 0 · 38s</span><span style="margin-left:auto;display:flex;gap:6px"><button class="tb" style="border-color:#3A3833;color:#ECE8DF">Show all 412 lines</button><button class="tb" style="border-color:#3A3833;color:#ECE8DF">Copy</button></span></div>
+<div class="code" style="padding:12px 16px">
+<div class="l"><span style="color:#8F8A80">… 404 lines above</span></div>
+<div class="l"><span><span style="background:#5FD86B;color:#161513;padding:0 4px">PASS</span> test/guard.test.ts (14 tests)</span></div>
+<div class="l"><span><span style="background:#5FD86B;color:#161513;padding:0 4px">PASS</span> test/scopes.test.ts (31 tests)</span></div>
+<div class="l"><span><span style="background:#F0B43A;color:#161513;padding:0 4px">SKIP</span> test/legacy-roles.test.ts <span style="color:#8F8A80">(flag off)</span></span></div>
+<div class="l"> </div>
+<div class="l"><span>Tests: <span style="color:#5FD86B">211 passed</span>, <span style="color:#F0B43A">3 skipped</span>, 214 total</span></div>
+<div class="l"><span style="color:#8F8A80">Time:  38.2 s</span></div>
+</div>
+</div>
+</div>
+
+<div class="row">
+<div class="side"><h3>Structured data</h3><p>JSON, YAML and TOML are parsed and shown as a collapsible tree, with a raw toggle. Invalid data falls back to a plain code block.</p></div>
+<div class="cb">
+<div class="cbh"><span class="lbl" style="color:#171614">JSON</span><span class="lbl">3 keys</span><span style="margin-left:auto;display:flex;gap:6px"><button class="tb" style="background:#171614;color:#FAF8F3;border-color:#171614">Tree</button><button class="tb">Raw</button><button class="tb">Copy</button></span></div>
+<div class="code" style="padding:12px 16px">
+<div class="l"><span><span style="color:#6E6A62">▾</span> <span class="fn">route</span>: <span class="s">"GET /admin/users"</span></span></div>
+<div class="l"><span><span style="color:#6E6A62">▾</span> <span class="fn">scopes</span>: <span style="color:#6E6A62">[2]</span></span></div>
+<div class="l"><span>    <span style="color:#B0AA9E">0</span>  <span class="s">"users:read"</span></span></div>
+<div class="l"><span>    <span style="color:#B0AA9E">1</span>  <span class="s">"audit:read"</span></span></div>
+<div class="l"><span><span style="color:#6E6A62">▸</span> <span class="fn">legacy</span>: <span style="color:#6E6A62">{ enabled, roles: [3] }</span></span></div>
+</div>
+</div>
+</div>
+
+<div class="row">
+<div class="side"><h3>Math</h3><p>Inline and display TeX, typeset in the math face. Display equations centre, number when labelled, and keep a TeX toggle for copying. Wide equations scroll inside their own box.</p></div>
+<div class="msg" style="display:flex;flex-direction:column;gap:18px">
+<p style="margin:0">The error falls as <span class="math" style="font-size:17px"><span class="mi">O</span>(1/<span class="sqrt"><span>√</span><span class="mi">n</span></span>)</span>, so quadrupling the sample halves it.</p>
+<div style="border:1px solid #DCD7CC;border-radius:10px;background:#FAF8F3;padding:22px 20px;position:relative;display:flex;align-items:center;justify-content:center">
+<div class="math" style="font-size:24px;display:flex;align-items:center;gap:6px"><span class="mi">x</span> = <span class="frac"><span>−<span class="mi">b</span> ± <span class="sqrt"><span>√</span><span><span class="mi">b</span><sup style="font-size:.6em">2</sup> − 4<span class="mi">ac</span></span></span></span><span>2<span class="mi">a</span></span></span></div>
+<span class="mono" style="position:absolute;right:18px;font-size:12px;color:#6E6A62">(1)</span>
+<span style="position:absolute;right:12px;top:8px;display:flex;gap:6px"><button class="tb">TeX</button><button class="tb">Copy</button></span>
+</div>
+<div style="border:1px solid #DCD7CC;border-radius:10px;background:#FAF8F3;padding:22px 20px;display:flex;align-items:center;justify-content:center;gap:56px">
+<div class="math" style="font-size:22px;display:flex;align-items:center;gap:8px">
+<span style="display:inline-flex;flex-direction:column;align-items:center;line-height:1"><span style="font-size:12px"><span class="mi">n</span></span><span style="font-size:34px">∑</span><span style="font-size:12px"><span class="mi">i</span>=1</span></span><span class="mi">i</span> = <span class="frac"><span><span class="mi">n</span>(<span class="mi">n</span>+1)</span><span>2</span></span>
+</div>
+<div class="math" style="font-size:22px;display:flex;align-items:center;gap:10px">
+<span class="mi">R</span> =
+<span style="display:inline-grid;grid-template-columns:repeat(2,minmax(0,auto));column-gap:18px;row-gap:2px;padding:2px 8px;border-left:1.4px solid #171614;border-right:1.4px solid #171614;border-radius:4px"><span>cos <span class="mi">θ</span></span><span>−sin <span class="mi">θ</span></span><span>sin <span class="mi">θ</span></span><span>cos <span class="mi">θ</span></span></span>
+</div>
+</div>
+</div>
+</div>
+
+<div class="row">
+<div class="side"><h3>Tables</h3><p>Column alignment from Markdown, numbers in tabular figures, status cells as chips. Tables sort by header click; wide tables scroll with the first column pinned; long ones show ten rows and a count.</p></div>
+<div class="msg" style="display:flex;flex-direction:column;gap:18px">
+<div class="cb">
+<div class="cbh"><span class="lbl" style="color:#171614">Table</span><span class="lbl">4 of 4 rows</span><span style="margin-left:auto;display:flex;gap:6px"><button class="tb">Copy as CSV</button><button class="tb">Copy</button></span></div>
+<table style="width:100%;border-collapse:collapse;font-size:13.5px">
+<thead><tr><th style="color:#6E6A62">Route <span aria-hidden="true">↓</span></th><th style="color:#6E6A62">Scopes</th><th class="num" style="color:#6E6A62;font-family:'Geist',sans-serif;font-size:13.5px">p95 ms</th><th class="num" style="color:#6E6A62;font-family:'Geist',sans-serif;font-size:13.5px">Calls/day</th><th style="color:#6E6A62">Status</th></tr></thead>
+<tbody>
+<tr><td class="mono" style="font-size:12.5px">GET /admin/users</td><td><span class="ic">users:read</span></td><td class="num">42</td><td class="num">18,204</td><td><span style="display:inline-flex;align-items:center;gap:6px"><span class="px px-done"></span>Migrated</span></td></tr>
+<tr><td class="mono" style="font-size:12.5px">POST /admin/users</td><td><span class="ic">users:write</span></td><td class="num">118</td><td class="num">1,092</td><td><span style="display:inline-flex;align-items:center;gap:6px"><span class="px px-done"></span>Migrated</span></td></tr>
+<tr><td class="mono" style="font-size:12.5px">GET /admin/billing</td><td><span class="ic">billing:read</span></td><td class="num">96</td><td class="num">4,418</td><td><span style="display:inline-flex;align-items:center;gap:6px"><span class="px px-work"></span>In progress</span></td></tr>
+<tr><td class="mono" style="font-size:12.5px;border-bottom:0">DELETE /admin/users/:id</td><td style="border-bottom:0"><span class="ic">users:delete</span></td><td class="num" style="border-bottom:0">131</td><td class="num" style="border-bottom:0">37</td><td style="border-bottom:0"><span style="display:inline-flex;align-items:center;gap:6px"><span class="px px-need"></span>Needs review</span></td></tr>
+</tbody>
+</table>
+</div>
+<div class="cb" style="position:relative">
+<div class="cbh"><span class="lbl" style="color:#171614">Table</span><span class="lbl">12 columns · 10 of 48 rows</span><span class="lbl" style="margin-left:auto">scroll →</span></div>
+<div style="display:flex;font-size:13px">
+<div style="flex:none;border-right:1px solid #DCD7CC;background:#FAF8F3"><div style="padding:9px 14px;color:#6E6A62;border-bottom:1px solid #E6E2D9">Service</div><div class="mono" style="padding:9px 14px;font-size:12.5px;border-bottom:1px solid #E6E2D9">auth-service</div><div class="mono" style="padding:9px 14px;font-size:12.5px">billing-api</div></div>
+<div style="flex:1;overflow:hidden;position:relative;display:grid;grid-template-columns:repeat(7,minmax(110px,1fr))">
+<div style="padding:9px 14px;color:#6E6A62;border-bottom:1px solid #E6E2D9">Region</div><div style="padding:9px 14px;color:#6E6A62;border-bottom:1px solid #E6E2D9;text-align:right">Pods</div><div style="padding:9px 14px;color:#6E6A62;border-bottom:1px solid #E6E2D9;text-align:right">CPU</div><div style="padding:9px 14px;color:#6E6A62;border-bottom:1px solid #E6E2D9;text-align:right">Memory</div><div style="padding:9px 14px;color:#6E6A62;border-bottom:1px solid #E6E2D9;text-align:right">Errors</div><div style="padding:9px 14px;color:#6E6A62;border-bottom:1px solid #E6E2D9">Owner</div><div style="padding:9px 14px;color:#6E6A62;border-bottom:1px solid #E6E2D9">Version</div>
+<div style="padding:9px 14px;border-bottom:1px solid #E6E2D9">us-west-2</div><div class="num" style="padding:9px 14px;border-bottom:1px solid #E6E2D9">12</div><div class="num" style="padding:9px 14px;border-bottom:1px solid #E6E2D9">41%</div><div class="num" style="padding:9px 14px;border-bottom:1px solid #E6E2D9">2.1 GB</div><div class="num" style="padding:9px 14px;border-bottom:1px solid #E6E2D9">0.02%</div><div style="padding:9px 14px;border-bottom:1px solid #E6E2D9">platform</div><div class="mono" style="padding:9px 14px;border-bottom:1px solid #E6E2D9;font-size:12.5px">4.12.0</div>
+<div style="padding:9px 14px">eu-west-1</div><div class="num" style="padding:9px 14px">8</div><div class="num" style="padding:9px 14px">37%</div><div class="num" style="padding:9px 14px">1.8 GB</div><div class="num" style="padding:9px 14px">0.05%</div><div style="padding:9px 14px">payments</div><div class="mono" style="padding:9px 14px;font-size:12.5px">2.30.1</div>
+<div aria-hidden="true" style="position:absolute;right:0;top:0;bottom:0;width:64px;background:linear-gradient(90deg,rgba(250,248,243,0),#FAF8F3)"></div>
+</div>
+</div>
+<div style="padding:9px 14px;border-top:1px solid #E6E2D9;display:flex"><button class="tb">Show all 48 rows</button></div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":2900}}'>
+class Component extends DCLogic {
+renderVals() { return {}; }
+}
+</script>
+</body>
+</html>
