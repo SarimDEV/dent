@@ -1,0 +1,109 @@
+import SwiftUI
+
+// Fake data for the concepts: three machines, three projects, a handful of
+// sessions in every state, and one chat that shows every kind of item.
+
+struct Machine: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let status: Status
+    let detail: String
+    let address: String
+    let via: String
+}
+
+struct Session: Identifiable, Hashable {
+    let id: String
+    let title: String
+    let project: String
+    let machine: String
+    let agent: String
+    let status: Status
+    let detail: String
+    let age: String
+}
+
+enum Fake {
+    static let machines = [
+        Machine(id: "studio", name: "studio", status: .done, detail: "Online · 18 ms", address: "192.168.0.39:7480", via: "This network"),
+        Machine(id: "mini", name: "mac-mini", status: .waiting, detail: "Asleep · wakes for new work", address: "mac-mini.tail3f.ts.net", via: "Tailscale"),
+        Machine(id: "devbox", name: "devbox", status: .offline, detail: "Offline since 9:12", address: "10.0.4.12:7480", via: "Tailscale"),
+    ]
+
+    static let sessions = [
+        Session(id: "s1", title: "Fix reply tail lost on reconnect", project: "dent", machine: "studio", agent: "claude",
+                status: .needs, detail: "Wants to run cargo test -p spike-core", age: "now"),
+        Session(id: "s2", title: "Pricing page copy", project: "website", machine: "studio", agent: "codex",
+                status: .needs, detail: "Asks: keep the free tier wording?", age: "4m"),
+        Session(id: "s3", title: "Batch events during catch-up", project: "dent", machine: "studio", agent: "claude",
+                status: .working, detail: "Editing spikes/link/src/daemon/push.rs", age: "1m"),
+        Session(id: "s4", title: "Rotate the staging certificates", project: "infra", machine: "mac-mini", agent: "codex",
+                status: .working, detail: "Running terraform plan", age: "6m"),
+        Session(id: "s5", title: "Dark mode for the docs viewer", project: "dent", machine: "studio", agent: "claude",
+                status: .done, detail: "Changed 4 files · tests pass", age: "22m"),
+        Session(id: "s6", title: "Blog post: one core, three places", project: "website", machine: "studio", agent: "claude",
+                status: .done, detail: "Draft ready in posts/one-core.md", age: "1h"),
+        Session(id: "s7", title: "Upgrade the base image", project: "infra", machine: "devbox", agent: "codex",
+                status: .waiting, detail: "Paused at the usage limit · resumes 3:10 pm", age: "2h"),
+    ]
+
+    static var needs: [Session] { sessions.filter { $0.status == .needs } }
+    static var working: [Session] { sessions.filter { $0.status == .working } }
+    static var recent: [Session] { sessions.filter { $0.status == .done || $0.status == .waiting } }
+    static let projects = ["dent", "website", "infra"]
+
+    static let chat = sessions[0]
+}
+
+/// One chat, every kind of item.
+enum Item: Identifiable {
+    case user(String)
+    case text(String)
+    case list([String])
+    case code(lang: String, text: String)
+    case tools(summary: String, lines: [String])
+    case edit(file: String, added: Int, removed: Int)
+    case approval(command: String, why: String)
+    case pr(number: Int, title: String)
+    case working(String)
+
+    var id: String {
+        switch self {
+        case .user(let s), .text(let s): s
+        case .list(let l): l.joined()
+        case .code(_, let t): t
+        case .tools(let s, _): s
+        case .edit(let f, _, _): f
+        case .approval(let c, _): c
+        case .working(let w): w
+        case .pr(let n, _): "pr\(n)"
+        }
+    }
+}
+
+enum Chat {
+    static let items: [Item] = [
+        .user("The phone drops the last few lines of a reply when the link flaps. Find out why and fix it."),
+        .tools(summary: "Read 4 files, searched twice", lines: [
+            "read  spikes/core/src/link.rs",
+            "read  spikes/core/src/chat.rs",
+            "grep  \"resume\" spikes/",
+            "read  spikes/link/src/daemon/session.rs",
+            "grep  \"after:\" spikes/core",
+            "read  spikes/core/src/proto.rs",
+        ]),
+        .text("Found it. On reconnect the phone asks to resume from the last event it **rendered**, not the last one it **received**. Anything that arrived in the final frame before the drop is skipped."),
+        .list([
+            "Track the highest event received, before rendering",
+            "Resume from that, not from the rendered count",
+            "Add a test that cuts the link mid-frame",
+        ]),
+        .code(lang: "rust", text: "fn resume(&self) -> Up {\n    Up::Follow { after: self.received }\n}"),
+        .edit(file: "spikes/core/src/link.rs", added: 12, removed: 3),
+        .approval(command: "cargo test -p spike-core", why: "Runs the core's tests, including the new one that cuts the link mid-frame."),
+    ]
+
+    static let doc = """
+    The phone drops the tail of a reply when the link flaps, because it resumes from what it rendered rather than what it received.
+    """
+}

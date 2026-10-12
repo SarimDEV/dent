@@ -1,0 +1,45 @@
+# Phone design concepts: every screen with fake data, built only from
+# stock SwiftUI components. `node shoot.mjs` captures them in the simulator.
+name: Concepts
+options:
+  bundleIdPrefix: dev.dent
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    DEVELOPMENT_TEAM: ""
+targets:
+  Concepts:
+    type: application
+    platform: iOS
+    sources:
+      - Concepts
+      - path: ../../assets/fonts
+        buildPhase: resources
+        includes: ["*.ttf"]
+    info:
+      path: Concepts/Info.plist
+      properties:
+        CFBundleDisplayName: dent
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIAppFonts:
+          - Literata-Regular.ttf
+          - Literata-Medium.ttf
+          - Literata-Italic.ttf
+          - IBMPlexSans-Regular.ttf
+          - IBMPlexSans-Medium.ttf
+          - IBMPlexSans-SemiBold.ttf
+          - CommitMono-400-Regular.ttf
+          - InstrumentSerif-Regular.ttf
+          - InstrumentSerif-Italic.ttf
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dent.concepts
+        TARGETED_DEVICE_FAMILY: "1"
