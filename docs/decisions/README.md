@@ -33,3 +33,4 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0029. Pin everything, upgrade on a calendar](0029-pin-everything.md)
 - [0030. Core runtime dependencies: tokio, serde, anyhow](0030-core-runtime-deps.md)
 - [0031. Usage limits come from the agent CLIs, per account, synced via the hub](0031-usage-limits-through-agent-clis.md)
+- [0032. Bundle the Field Notes fonts](0032-bundle-field-notes-fonts.md)

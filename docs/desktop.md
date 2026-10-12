@@ -132,4 +132,4 @@ Motion is spring-based, short and always interruptible: input during an animatio
 
 - Panels slide and resize, messages settle in as they stream, status dots pulse gently while working.
 - Reduced-motion settings swap motion for fades.
-- Frame time is measured in development builds, with a visible overlay and a CI check on scripted interactions.
+- Frame time is measured in development builds, with a visible overlay (gpui-fps) and a CI check on scripted interactions. Scripted input goes through `Window::dispatch_event` with real wheel and key events; `ListState::scroll_by` is not a substitute on a bottom-aligned list ([spike 03](spikes/03-gpui-chat-and-diff.md)).

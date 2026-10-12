@@ -33,5 +33,12 @@ debug = "line-tables-only"
 opt-level = 2
 debug = false
 
+# GPUI renders far too slowly unoptimised; gpui-component sets the same.
+[profile.dev.package.gpui-pre]
+opt-level = 3
+
+[profile.dev.package.gpui-pre-platform]
+opt-level = 3
+
 [profile.release]
 lto = "thin"

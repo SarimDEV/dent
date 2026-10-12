@@ -4,7 +4,7 @@ Status: accepted (2026-10-11) · Spec: [durability.md](../durability.md)
 
 ## Decision
 
-The desktop app uses GPUI via gpui-component, with the GPUI snapshot pinned exactly and upgraded monthly. Only the `desktop` crate may import GPUI.
+The desktop app uses GPUI via gpui-component, with the GPUI snapshot pinned exactly and upgraded monthly. Today: `gpui-kit =0.7.1`, which pins `gpui-pre =0.3.8`; GPUI is built at opt-level 3 even in dev builds. [Spike 03](../spikes/03-gpui-chat-and-diff.md) measured 100k-event chat and 100k-line diff well inside the frame budget. Only the `desktop` crate may import GPUI.
 
 ## Why
 
