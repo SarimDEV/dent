@@ -345,7 +345,7 @@ impl Render for DevicesView {
             &t,
             square(&t, Some(t.done.0)),
             me.0.clone(),
-            format!("This Mac · {}", &me.1),
+            format!("This Mac · {}", me.1),
             div()
                 .ty(LABEL)
                 .text_color(t.quiet)
