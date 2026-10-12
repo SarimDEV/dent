@@ -43,3 +43,22 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.dent.concepts
         TARGETED_DEVICE_FAMILY: "1"
+  ConceptsUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    dependencies:
+      - target: Concepts
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dent.concepts.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Concepts
+schemes:
+  Concepts:
+    build:
+      targets:
+        Concepts: all
+        ConceptsUITests: [test]
+    test:
+      targets: [ConceptsUITests]

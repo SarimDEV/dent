@@ -10,7 +10,7 @@ There is one list of sessions, on the desktop and the phone, sorted by what it n
 2. **Done:** finished and waiting for you to steer it or close it. Automation results and finished goals land here too; there is no separate inbox.
 3. **Working:** running, or paused until a usage limit resets. Shown lighter, at the bottom, because there's nothing to do yet.
 
-Closing a session takes it out of the list (it stays searchable, and its worktree is offered for cleanup). **Inbox zero** is when everything is working or closed.
+Closing a session archives it: it leaves the list, stays searchable, and can always be reopened. An Undo appears for a few seconds after each close, and a Closed list at the end of the session list reopens anything. There is no "close all", because a bulk action you can't easily take back has no place in a list you clear every day. A closed session's worktree is offered for cleanup separately, never deleted as part of closing. **Inbox zero** is when everything is working or closed.
 
 A new session opens straight into an empty chat with the cursor in the composer. Under the composer, its settings are already chosen and each one is a single tap to change:
 

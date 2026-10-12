@@ -146,25 +146,53 @@ enum Status: Hashable {
 
 /// The status mark. Never colour alone: the square has a pattern per status
 /// and rows always say the status in words next to it.
+///
+/// Motion: a working square "drifts" (its checker steps at 8 fps); a square
+/// that turns done "confirms" with one small pop. Reduce Motion stills both.
 struct Mark: View {
     @Environment(\.look) private var look
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .body) private var side: CGFloat = 10
     var status: Status
+    /// Pop once on appearing: a row that just moved to Done is a new view.
+    var popOnAppear = false
+    @State private var pop: CGFloat = 1
+
     var body: some View {
-        if look.squares {
-            Pixel(status: status).frame(width: side, height: side).accessibilityHidden(true)
-        } else {
-            Image(systemName: status.symbol)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(status.color)
-                .accessibilityHidden(true)
+        Group {
+            if look.squares {
+                if status == .working && !reduceMotion {
+                    TimelineView(.periodic(from: .now, by: 0.125)) { ctx in
+                        Pixel(status: status, phase: Int(ctx.date.timeIntervalSinceReferenceDate * 8) % 2)
+                    }
+                } else {
+                    Pixel(status: status)
+                }
+            } else {
+                Image(systemName: status.symbol)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(status.color)
+                    .symbolEffect(.pulse, isActive: status == .working && !reduceMotion)
+            }
         }
+        .frame(width: side, height: side)
+        .scaleEffect(pop)
+        .accessibilityHidden(true)
+        .onChange(of: status) { _, new in if new == .done { confirm() } }
+        .onAppear { if popOnAppear && status == .done { confirm() } }
+    }
+
+    private func confirm() {
+        guard !reduceMotion else { return }
+        pop = 0.6
+        withAnimation(.spring(duration: 0.3, bounce: 0.2)) { pop = 1 }
     }
 }
 
-/// A 10 pt square drawn as a 4×4 pixel pattern, one pattern per status.
+/// A square drawn as a 4×4 pixel pattern, one pattern per status.
 struct Pixel: View {
     var status: Status
+    var phase = 0
     var body: some View {
         Canvas { ctx, size in
             let c = size.width / 4
@@ -172,7 +200,7 @@ struct Pixel: View {
                 let on: Bool = switch status {
                 case .needs: true                                   // solid
                 case .done: x <= y                                  // a corner step
-                case .working: (x + y) % 2 == 0                     // checker
+                case .working: (x + y + phase) % 2 == 0             // checker, drifting
                 case .waiting: x % 2 == 0 && y % 2 == 0             // dots
                 case .idle, .offline: x == 0 || y == 0 || x == 3 || y == 3  // outline
                 }

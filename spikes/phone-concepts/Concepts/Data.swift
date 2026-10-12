@@ -14,13 +14,15 @@ struct Machine: Identifiable, Hashable {
 
 struct Session: Identifiable, Hashable {
     let id: String
-    let title: String
-    let project: String
-    let machine: String
-    let agent: String
-    let status: Status
-    let detail: String
-    let age: String
+    var title: String
+    var project: String
+    var machine: String
+    var agent: String
+    var status: Status
+    var detail: String
+    var age: String
+    /// Closed is archived: off the list, searchable, and can be reopened.
+    var closed = false
 }
 
 enum Fake {
@@ -73,6 +75,15 @@ enum Item: Identifiable {
     case approval(command: String, why: String)
     case pr(number: Int, title: String)
     case working(String)
+    /// An approval after you answered it, folded to one line.
+    case resolved(String)
+    /// A reply that streams in, word by word.
+    case reply(String)
+    /// A message sent while the agent works, waiting its turn.
+    case queued(String)
+
+    var isReply: Bool { if case .reply = self { true } else { false } }
+    var isQueued: Bool { if case .queued = self { true } else { false } }
 
     var id: String {
         switch self {
@@ -84,6 +95,9 @@ enum Item: Identifiable {
         case .approval(let c, _): c
         case .working(let w): w
         case .pr(let n, _): "pr\(n)"
+        case .resolved(let r): "resolved-" + r
+        case .reply(let r): "reply-" + r
+        case .queued(let q): "queued-" + q
         }
     }
 }

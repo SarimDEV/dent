@@ -4,7 +4,7 @@ The iPhone app is a SwiftUI client for chatting, approving, reading docs and get
 
 ## Features
 
-- **Sessions:** one list, and the whole app: Needs you, then Done (finished sessions, automation results, finished goals), then Working, lighter, at the bottom. Swipe to close; the aim is inbox zero, when everything is working or closed (decision [0036](decisions/0036-sessions-as-an-inbox.md)). No tab bar: search and New Session sit in the bottom toolbar, Settings behind a gear.
+- **Sessions:** one list, and the whole app: Needs you, then Done (finished sessions, automation results, finished goals), then Working, lighter, at the bottom. Swipe to close, which archives: an Undo appears, and the Closed list at the bottom reopens anything. The aim is inbox zero, when everything is working or closed (decision [0036](decisions/0036-sessions-as-an-inbox.md)). No tab bar: search and New Session sit in the bottom toolbar, Settings behind a gear.
 - **New session:** opens an empty chat with the keyboard up. Project, machine, model, permissions and worktree sit under the composer, already chosen (project from what you type, the least busy machine, the rest as last time), one tap each to change.
 - **Chat:** full history from cache, live streaming, send, queue, interrupt, and jump between your own messages. Tool calls collapse as on desktop.
 - **Approvals:** inline in chat, and actionable straight from the notification (allow, deny) without opening the app.

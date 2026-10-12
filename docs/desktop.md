@@ -4,7 +4,7 @@ The desktop app is a GPUI client for macOS, Linux and Windows, built around a ch
 
 ## Layout
 
-- **Sidebar:** one list of sessions across every machine, sorted as an inbox (decision [0036](decisions/0036-sessions-as-an-inbox.md)): Needs you, then Done, then Working, lighter, at the bottom. Each row shows its status, project and machine. Closing a session takes it off the list; inbox zero is when everything is working or closed. Machines and their connection state sit at the bottom.
+- **Sidebar:** one list of sessions across every machine, sorted as an inbox (decision [0036](decisions/0036-sessions-as-an-inbox.md)): Needs you, then Done, then Working, lighter, at the bottom. Each row shows its status, project and machine. Closing a session archives it, with an Undo, and the Closed list reopens anything; inbox zero is when everything is working or closed. Machines and their connection state sit at the bottom.
 - **Main:** the selected session's chat.
 - **Side panel:** docs, diff or terminal, toggled and resized by keyboard; can pop out into its own window.
 - **Status bar:** usage limits, machine connectivity, blocked-session count.

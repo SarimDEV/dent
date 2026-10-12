@@ -17,7 +17,7 @@ const out = path.resolve(args[0] ?? "shots");
 const sh = (cmd, a) => execFileSync(cmd, a, { encoding: "utf8" });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const all = ["home", "home-zero", "empty", "new", "new-typed", "chat", "chat-transcript", "chat-tools", "chat-working",
+const all = ["home", "home-zero", "closed", "many", "empty", "new", "new-typed", "chat", "chat-transcript", "chat-tools", "chat-working",
   "chat-offline", "chat-pr", "changes", "doc", "settings", "settings-limited", "machine", "machine-remove",
   "add", "code", "qr", "paired", "syncing", "welcome", "lock", "notify-actions", "island"];
 const screens = opt("--screens", all.join(",")).split(",");
@@ -47,3 +47,6 @@ for (const look of looks) {
   }
 }
 sh("xcrun", ["simctl", "terminate", udid, "dev.dent.concepts"]);
+// Leave the simulator as we found it, so tests run at the default size.
+sh("xcrun", ["simctl", "ui", udid, "appearance", "light"]);
+sh("xcrun", ["simctl", "ui", udid, "content_size", "large"]);

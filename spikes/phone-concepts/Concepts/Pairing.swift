@@ -184,14 +184,23 @@ struct Paired: View {
 /// what you type. Tap any of them to change it.
 struct NewSession: View {
     var typed: Bool
+    var start: (String, String?) -> Void = { _, _ in }
     @Environment(\.look) private var look
     @ScaledMetric(relativeTo: .body) private var control: CGFloat = 44
     @Environment(\.dynamicTypeSize) private var size
+    @Environment(\.dismiss) private var dismiss
+    @Environment(Store.self) private var store
     @State private var draft: String
+    @State private var guessed: String?
+    /// Once you pick a project yourself, the guess stops.
+    @State private var picked: String?
     @FocusState private var focused: Bool
 
-    init(typed: Bool) {
+    var project: String? { picked ?? guessed }
+
+    init(typed: Bool, start: @escaping (String, String?) -> Void = { _, _ in }) {
         self.typed = typed
+        self.start = start
         _draft = State(initialValue: typed ? "The usage line under Sessions cuts off at large text sizes. Make it wrap instead." : "")
     }
 
@@ -201,9 +210,10 @@ struct NewSession: View {
             .navigationTitle("New Session")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button(role: .cancel) {} }
+                ToolbarItem(placement: .cancellationAction) { Button(role: .cancel) { dismiss() } }
             }
             .safeAreaBar(edge: .bottom) {
+                let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(alignment: .bottom, spacing: 6) {
                         TextField("What should it do?", text: $draft, axis: .vertical)
@@ -211,24 +221,47 @@ struct NewSession: View {
                             .lineLimit(size.isAccessibilitySize ? 1...3 : 1...8)
                             .focused($focused)
                             .padding(.leading, 16).padding(.vertical, 11)
-                        if !draft.isEmpty {
-                            Button {} label: {
+                            .accessibilityIdentifier("new-composer")
+                        if !text.isEmpty {
+                            Button { store.composeDraft = ""; start(text, project) } label: {
                                 Image(systemName: "arrow.up").font(.body.weight(.bold)).foregroundStyle(look.onTint)
                                     .frame(width: min(control - 12, 44), height: min(control - 12, 44))
                             }
                             .buttonStyle(.borderedProminent)
                             .buttonBorderShape(.circle)
                             .accessibilityLabel("Start")
+                            .accessibilityIdentifier("start")
                             .padding(6)
+                            .transition(.scale(scale: 0.6).combined(with: .opacity))
                         }
                     }
+                    .animation(.snappy(duration: 0.18), value: text.isEmpty)
                     .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 22))
-                    Defaults(project: typed ? "dent" : nil)
+                    Defaults(project: project, pick: { picked = $0 })
                 }
                 .padding(.horizontal, 16)
-                .padding(.bottom, 4)
+                .padding(.bottom, 12)
             }
-            .onAppear { focused = true }
+            .onAppear {
+                if draft.isEmpty { draft = store.composeDraft }
+                focused = true
+            }
+            .onChange(of: draft) { _, new in store.composeDraft = new }
+            // The guess settles after a pause in typing, so the chip doesn't flicker.
+            .task(id: draft) {
+                try? await Task.sleep(for: .milliseconds(400))
+                if !Task.isCancelled { guessed = guess }
+            }
+    }
+
+    /// The project, guessed from what's typed so far. The real app asks the
+    /// decision model; this stands in with keywords.
+    var guess: String? {
+        let t = draft.lowercased()
+        if ["website", "pricing", "blog", "landing"].contains(where: t.contains) { return "website" }
+        if ["terraform", "certificate", "staging", "ci ", "runner"].contains(where: t.contains) { return "infra" }
+        if ["session", "phone", "daemon", "usage", "dent", "reconnect", "core"].contains(where: t.contains) { return "dent" }
+        return nil
     }
 }
 
@@ -236,6 +269,7 @@ struct NewSession: View {
 /// a second line. At accessibility sizes they fold into one menu.
 struct Defaults: View {
     var project: String?
+    var pick: (String) -> Void = { _ in }
     @Environment(\.look) private var look
     @Environment(\.dynamicTypeSize) private var size
 
@@ -251,7 +285,12 @@ struct Defaults: View {
             .padding(.horizontal, 4)
         } else {
             Flow(spacing: 8, lineSpacing: 8) {
-                Menu { projectPicker } label: { Label(project ?? "Project from message", systemImage: "sparkles") }
+                Menu { projectPicker } label: {
+                    Label(project ?? "Project from message", systemImage: "sparkles")
+                        .contentTransition(.opacity)
+                        .animation(.snappy(duration: 0.2), value: project)
+                }
+                .accessibilityIdentifier("chip-project")
                 Menu { machinePicker } label: { Label("studio", systemImage: "desktopcomputer") }
                 Menu { modelPicker } label: { Text("Opus 5.5") }
                 Menu { accessPicker } label: { Label("Full access", systemImage: "lock.open") }
@@ -266,7 +305,7 @@ struct Defaults: View {
     }
 
     var projectPicker: some View {
-        Picker("Project", selection: .constant(project ?? "auto")) {
+        Picker("Project", selection: Binding(get: { project ?? "auto" }, set: { pick($0) })) {
             Text("From Message").tag("auto")
             ForEach(Fake.projects, id: \.self) { Text($0).tag($0) }
             Text("New Project").tag("new")
