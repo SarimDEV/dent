@@ -75,9 +75,86 @@ pub enum Status {
     Idle,
 }
 
-pub const SANS: &str = "Geist";
-pub const MONO: &str = "Geist Mono";
-pub const SERIF: &str = "Instrument Serif";
+/// Font roles, chosen at startup so different pairings can be compared.
+pub struct Fonts {
+    pub name: &'static str,
+    /// Interface chrome.
+    pub sans: &'static str,
+    /// Chat message text.
+    pub body: &'static str,
+    /// Code, commands, diffs.
+    pub mono: &'static str,
+    /// Small uppercase metadata labels.
+    pub label: &'static str,
+    /// Session titles and display.
+    pub serif: &'static str,
+}
+
+/// The first entry is the default and is bundled; the rest load from
+/// `--font-dir` for comparison (see docs/decisions/0032).
+pub const PAIRINGS: &[Fonts] = &[
+    Fonts {
+        name: "book",
+        sans: "IBM Plex Sans",
+        body: "Literata",
+        mono: "CommitMono",
+        label: "CommitMono",
+        serif: "Instrument Serif",
+    },
+    Fonts {
+        name: "geist",
+        sans: "Geist",
+        body: "Geist",
+        mono: "Geist Mono",
+        label: "Geist Mono",
+        serif: "Instrument Serif",
+    },
+    Fonts {
+        name: "plex",
+        sans: "IBM Plex Sans",
+        body: "IBM Plex Sans",
+        mono: "IBM Plex Mono",
+        label: "IBM Plex Mono",
+        serif: "Instrument Serif",
+    },
+    Fonts {
+        name: "atkinson",
+        sans: "Atkinson Hyperlegible Next",
+        body: "Atkinson Hyperlegible Next",
+        mono: "Atkinson Hyperlegible Mono",
+        label: "Atkinson Hyperlegible Mono",
+        serif: "Instrument Serif",
+    },
+    Fonts {
+        name: "fira",
+        sans: "Fira Sans",
+        body: "Fira Sans",
+        mono: "Fira Mono",
+        label: "Departure Mono",
+        serif: "Instrument Serif",
+    },
+];
+
+pub static FONTS: std::sync::OnceLock<&'static Fonts> = std::sync::OnceLock::new();
+
+fn fonts() -> &'static Fonts {
+    FONTS.get().copied().unwrap_or(&PAIRINGS[0])
+}
+pub fn sans() -> &'static str {
+    fonts().sans
+}
+pub fn body() -> &'static str {
+    fonts().body
+}
+pub fn mono() -> &'static str {
+    fonts().mono
+}
+pub fn label() -> &'static str {
+    fonts().label
+}
+pub fn serif() -> &'static str {
+    fonts().serif
+}
 
 /// A 12px status square. Each status has its own pattern so it never relies on
 /// colour alone: working = 2px dither, needs you = solid, done = dots,

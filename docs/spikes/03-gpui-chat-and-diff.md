@@ -37,7 +37,7 @@ Paper and Carbon measure the same. One frame in warm-up (~22 ms) is the first dr
 - **Chat list:** GPUI's `list` with `ListState` (variable heights, bottom-aligned) only measures what it shows, so opening 100k rows is constant-time. Streaming uses `splice(last..last+1, 1)` to re-measure just the growing message, and finished rows never move.
 - **Gotcha:** `ListState::scroll_by` does nothing on a bottom-aligned list that is following its tail (the position is re-derived from the end each frame). Real wheel input works. The bench drives scrolling with synthetic `ScrollWheelEvent`s through `Window::dispatch_event`, which also proves the automation-socket idea: input can be scripted precisely.
 - **Diff view:** a plain `uniform_list` with fixed 20 px rows handles 100k lines trivially. Editing the modified side (gpui-component's editor) is not tested yet; that belongs to the Review phase.
-- **Fonts:** Geist, Geist Mono and Instrument Serif load from bytes with `text_system().add_fonts`, so the app bundles them (`assets/fonts/`, SIL OFL) instead of needing them installed.
+- **Fonts:** fonts load from bytes with `text_system().add_fonts`, so the app bundles them (`assets/fonts/`, SIL OFL). The spike later compared five pairings with `--fonts` and `--font-dir`; Book won (decision 0032). Variable fonts render only their default instance, so bundle static weights.
 - **Status squares:** distinct patterns work at 12 px: working = 2 px dither, needs you = solid, done = four dots, waiting and idle = outlines.
 - **Screenshots:** `screencapture -R` on a fixed window rectangle is enough for the spike. Real screenshot tests should render offscreen.
 

@@ -19,7 +19,7 @@ use std::time::Instant;
 use fake::{DiffLine, LineKind, Row, SessionRow};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use theme::{MONO, SANS, SERIF, Status, Theme, status_square};
+use theme::{Status, Theme, body, label, mono, sans, serif, status_square};
 
 pub static PROCESS_START: OnceLock<Instant> = OnceLock::new();
 /// Time spent generating fake data, which a real client would not do.
@@ -31,6 +31,9 @@ pub struct Opts {
     pub events: usize,
     pub diff_lines: usize,
     pub shots: Option<std::path::PathBuf>,
+    pub fonts: String,
+    pub shot_only: bool,
+    pub font_dir: Option<std::path::PathBuf>,
 }
 
 fn opts() -> Opts {
@@ -40,6 +43,9 @@ fn opts() -> Opts {
         events: 100_000,
         diff_lines: 100_000,
         shots: None,
+        fonts: "book".into(),
+        shot_only: false,
+        font_dir: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -54,6 +60,12 @@ fn opts() -> Opts {
                     .unwrap_or(o.diff_lines)
             }
             "--shots" => o.shots = it.next().map(Into::into),
+            "--shot" => {
+                o.bench = true;
+                o.shot_only = true;
+            }
+            "--fonts" => o.fonts = it.next().unwrap_or_default(),
+            "--font-dir" => o.font_dir = it.next().map(Into::into),
             other => eprintln!("ignoring unknown flag {other}"),
         }
     }
@@ -102,7 +114,9 @@ impl Spike {
             sessions: Rc::new(sessions),
             sidebar_scroll: UniformListScrollHandle::new(),
             streaming: None,
-            bench: o.bench.then(|| bench::Bench::new(o.shots.clone())),
+            bench: o
+                .bench
+                .then(|| bench::Bench::new(o.shots.clone(), o.shot_only)),
         }
     }
 
@@ -121,7 +135,7 @@ impl Spike {
                     .px_4()
                     .pt_4()
                     .pb_2()
-                    .font_family(MONO)
+                    .font_family(label())
                     .text_size(px(10.5))
                     .text_color(t.quiet)
                     .child("PROJECTS · 1,000 SESSIONS"),
@@ -149,7 +163,7 @@ impl Spike {
                                 )
                                 .child(
                                     div()
-                                        .font_family(MONO)
+                                        .font_family(label())
                                         .text_size(px(10.))
                                         .text_color(t.quiet)
                                         .child(s.machine.clone()),
@@ -169,7 +183,7 @@ impl Spike {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .font_family(MONO)
+                    .font_family(label())
                     .text_size(px(10.5))
                     .text_color(t.quiet)
                     .child(machine_row("laptop", Status::Done, "connected", &t))
@@ -201,7 +215,7 @@ impl Spike {
                     .gap_3()
                     .child(
                         div()
-                            .font_family(SERIF)
+                            .font_family(serif())
                             .text_size(px(30.))
                             .text_color(t.ink)
                             .child("Event log compaction"),
@@ -209,7 +223,7 @@ impl Spike {
                     .child(
                         div()
                             .pb_1()
-                            .font_family(MONO)
+                            .font_family(label())
                             .text_size(px(10.5))
                             .text_color(t.quiet)
                             .child(format!("CLAUDE · MAC-MINI · {} EVENTS", group(rows.len()))),
@@ -245,7 +259,7 @@ impl Spike {
                     .border_color(t.hairline)
                     .flex()
                     .justify_between()
-                    .font_family(MONO)
+                    .font_family(mono())
                     .text_size(px(11.))
                     .child(
                         div()
@@ -274,7 +288,7 @@ impl Spike {
                                 .h(px(20.))
                                 .flex()
                                 .items_center()
-                                .font_family(MONO)
+                                .font_family(mono())
                                 .text_size(px(12.))
                                 .when_some(bg, |d, bg| d.bg(bg))
                                 .child(
@@ -322,7 +336,7 @@ impl Spike {
             .gap_4()
             .border_t_1()
             .border_color(t.hairline)
-            .font_family(MONO)
+            .font_family(label())
             .text_size(px(10.5))
             .text_color(t.quiet)
             .child(
@@ -394,6 +408,7 @@ fn chat_row(row: &Row, stream: Option<SharedString>, t: &Theme) -> Div {
                     .bg(t.raised)
                     .border_1()
                     .border_color(t.hairline)
+                    .font_family(body())
                     .text_size(px(15.))
                     .text_color(t.ink)
                     .child(text.clone()),
@@ -404,6 +419,7 @@ fn chat_row(row: &Row, stream: Option<SharedString>, t: &Theme) -> Div {
                 .flex()
                 .flex_col()
                 .gap_3()
+                .font_family(body())
                 .text_size(px(15.))
                 .line_height(px(23.))
                 .text_color(t.ink)
@@ -422,7 +438,7 @@ fn chat_row(row: &Row, stream: Option<SharedString>, t: &Theme) -> Div {
                 .flex()
                 .items_center()
                 .gap_2()
-                .font_family(MONO)
+                .font_family(mono())
                 .text_size(px(12.))
                 .text_color(t.quiet)
                 .child("├─")
@@ -450,7 +466,7 @@ fn chat_row(row: &Row, stream: Option<SharedString>, t: &Theme) -> Div {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .font_family(MONO)
+                            .font_family(label())
                             .text_size(px(10.5))
                             .text_color(t.quiet)
                             .child(status_square(Status::Needs, t))
@@ -458,7 +474,7 @@ fn chat_row(row: &Row, stream: Option<SharedString>, t: &Theme) -> Div {
                     )
                     .child(
                         div()
-                            .font_family(MONO)
+                            .font_family(mono())
                             .text_size(px(13.))
                             .text_color(t.ink)
                             .child(cmd.clone()),
@@ -515,6 +531,7 @@ fn composer(t: &Theme) -> impl IntoElement {
                 .gap_2()
                 .child(
                     div()
+                        .font_family(body())
                         .text_size(px(15.))
                         .text_color(t.quiet)
                         .child("Reply, or Cmd+Enter to steer…"),
@@ -523,7 +540,7 @@ fn composer(t: &Theme) -> impl IntoElement {
                     div()
                         .flex()
                         .gap_3()
-                        .font_family(MONO)
+                        .font_family(label())
                         .text_size(px(10.5))
                         .text_color(t.quiet)
                         .child("OPUS · HIGH")
@@ -547,7 +564,7 @@ impl Render for Spike {
             .flex_col()
             .bg(t.surface)
             .text_color(t.ink)
-            .font_family(SANS)
+            .font_family(sans())
             .text_size(px(13.))
             .child(
                 div()
@@ -562,21 +579,36 @@ impl Render for Spike {
     }
 }
 
-fn load_fonts(cx: &mut App) {
+fn load_fonts(cx: &mut App, extra: Option<&std::path::Path>) {
     let fonts: Vec<std::borrow::Cow<'static, [u8]>> = vec![
-        include_bytes!("../../../assets/fonts/Geist-Regular.ttf")
+        include_bytes!("../../../assets/fonts/Literata-Regular.ttf")
             .as_slice()
             .into(),
-        include_bytes!("../../../assets/fonts/Geist-Medium.ttf")
+        include_bytes!("../../../assets/fonts/Literata-Italic.ttf")
             .as_slice()
             .into(),
-        include_bytes!("../../../assets/fonts/Geist-SemiBold.ttf")
+        include_bytes!("../../../assets/fonts/Literata-Medium.ttf")
             .as_slice()
             .into(),
-        include_bytes!("../../../assets/fonts/GeistMono-Regular.ttf")
+        include_bytes!("../../../assets/fonts/Literata-MediumItalic.ttf")
             .as_slice()
             .into(),
-        include_bytes!("../../../assets/fonts/GeistMono-Medium.ttf")
+        include_bytes!("../../../assets/fonts/IBMPlexSans-Regular.ttf")
+            .as_slice()
+            .into(),
+        include_bytes!("../../../assets/fonts/IBMPlexSans-Medium.ttf")
+            .as_slice()
+            .into(),
+        include_bytes!("../../../assets/fonts/IBMPlexSans-SemiBold.ttf")
+            .as_slice()
+            .into(),
+        include_bytes!("../../../assets/fonts/CommitMono-400-Regular.ttf")
+            .as_slice()
+            .into(),
+        include_bytes!("../../../assets/fonts/CommitMono-400-Italic.ttf")
+            .as_slice()
+            .into(),
+        include_bytes!("../../../assets/fonts/CommitMono-700-Regular.ttf")
             .as_slice()
             .into(),
         include_bytes!("../../../assets/fonts/InstrumentSerif-Regular.ttf")
@@ -586,20 +618,46 @@ fn load_fonts(cx: &mut App) {
             .as_slice()
             .into(),
     ];
+    let mut fonts = fonts;
+    // Candidate fonts for comparison, loaded from a folder at runtime.
+    if let Some(dir) = extra {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("ttf" | "otf")
+            ) && let Ok(bytes) = std::fs::read(&path)
+            {
+                fonts.push(bytes.into());
+            }
+        }
+    }
     if let Err(e) = cx.text_system().add_fonts(fonts) {
         eprintln!("font load failed: {e:#}");
+    }
+    let names = cx.text_system().all_font_names();
+    let f = theme::FONTS.get().copied().unwrap_or(&theme::PAIRINGS[0]);
+    for family in [f.sans, f.body, f.mono, f.label, f.serif] {
+        if !names.iter().any(|n| n == family) {
+            eprintln!("font family {family:?} not found");
+        }
     }
 }
 
 fn main() {
     PROCESS_START.get_or_init(Instant::now);
     let o = opts();
+    let pairing = theme::PAIRINGS
+        .iter()
+        .find(|p| p.name == o.fonts)
+        .unwrap_or(&theme::PAIRINGS[0]);
+    theme::FONTS.get_or_init(|| pairing);
     if o.bench {
         profiler::set_trace_enabled(true);
     }
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
-        load_fonts(cx);
+        load_fonts(cx, o.font_dir.as_deref());
         let (x, y, w, h) = WINDOW;
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {

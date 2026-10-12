@@ -36,9 +36,18 @@ dent uses the Field Notes direction: warm paper in light mode, warm carbon in da
 
 ## Type
 
-- **Interface:** Geist, 13 px in chrome and 15 px in chat.
-- **Labels and code:** Geist Mono; metadata as small uppercase labels.
-- **Display:** Instrument Serif for session titles, doc headings and the quick switcher's query, with italics for emphasis.
+The default pairing is called Book: agent replies read like a page, and the interface stays quiet around them.
+
+| Role | Face | Size |
+| --- | --- | --- |
+| Chat (messages, docs body) | Literata | 15 px, 23 px line height |
+| Interface chrome | IBM Plex Sans | 13 px |
+| Code, commands, diffs | Commit Mono | 12 px |
+| Labels (small uppercase metadata) | Commit Mono | 10.5 px, letter-spaced |
+| Display (session titles, doc headings, quick switcher query) | Instrument Serif, italics for emphasis | 30 px titles |
+
+- All five faces are bundled (SIL Open Font License), so nothing depends on installed fonts.
+- Fonts are theme settings per role, never hard-coded, so a theme can swap any of them. Plex, Fira with Departure Mono pixel labels, and Atkinson Hyperlegible were the runners-up and make good alternative themes.
 
 ## Texture and motion
 
@@ -56,7 +65,7 @@ dent uses the Field Notes direction: warm paper in light mode, warm carbon in da
 
 dent has its own small theme format and imports themes from other ecosystems, rather than copying any one app's format.
 
-- **Format:** about 40 named colours with dent meanings (the palette tokens above plus syntax colours keyed to tree-sitter names), and dent's style settings: grain amount, status patterns, corner radius and motion speed. Theme files reload live as they are edited.
+- **Format:** about 40 named colours with dent meanings (the palette tokens above plus syntax colours keyed to tree-sitter names), and dent's style settings: a font per role (chat, chrome, code, labels, display), grain amount, status patterns, corner radius and motion speed. Theme files reload live as they are edited.
 - **Defaults:** Field Notes Paper and Field Notes Carbon, following the system appearance.
 
 | Source | What it brings | How |

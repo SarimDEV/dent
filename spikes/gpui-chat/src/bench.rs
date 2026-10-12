@@ -27,6 +27,13 @@ enum Phase {
     Done,
 }
 
+/// Screenshot only: settle, scroll a little so a mix of rows shows, shoot.
+const SHOT_PLAN: &[(Phase, u32)] = &[
+    (Phase::Warmup, 30),
+    (Phase::Shot("chat"), 40),
+    (Phase::Done, 1),
+];
+
 const PLAN: &[(Phase, u32)] = &[
     (Phase::Warmup, 30),
     (Phase::Shot("chat-bottom"), 40),
@@ -43,6 +50,7 @@ const PLAN: &[(Phase, u32)] = &[
 ];
 
 pub struct Bench {
+    plan: &'static [(Phase, u32)],
     step: usize,
     frame_in_step: u32,
     collector: FrameTimingCollector,
@@ -56,8 +64,9 @@ pub struct Bench {
 }
 
 impl Bench {
-    pub fn new(shots: Option<PathBuf>) -> Self {
+    pub fn new(shots: Option<PathBuf>, shot_only: bool) -> Self {
         Self {
+            plan: if shot_only { SHOT_PLAN } else { PLAN },
             step: 0,
             frame_in_step: 0,
             collector: FrameTimingCollector::new(),
@@ -71,7 +80,7 @@ impl Bench {
     }
 
     fn label(&self) -> String {
-        format!("{:?}", PLAN[self.step].0)
+        format!("{:?}", self.plan[self.step].0)
     }
 
     /// Attribute frames drawn since the last poll to the current phase.
@@ -107,7 +116,7 @@ pub fn step(app: &mut Spike, window: &mut Window, cx: &mut Context<Spike>) {
         return;
     };
     b.collect();
-    let (phase, frames) = PLAN[b.step];
+    let (phase, frames) = b.plan[b.step];
     let n = b.frame_in_step;
     match phase {
         Phase::Warmup | Phase::Done => {}
@@ -116,7 +125,8 @@ pub fn step(app: &mut Spike, window: &mut Window, cx: &mut Context<Spike>) {
                 && let Some(dir) = &b.shots
             {
                 let suffix = if app.theme.dark { "carbon" } else { "paper" };
-                shoot(dir.join(format!("{name}-{suffix}.png")));
+                let fonts = crate::theme::FONTS.get().map(|f| f.name).unwrap_or("book");
+                shoot(dir.join(format!("{fonts}-{name}-{suffix}.png")));
             }
         }
         Phase::Open => {
@@ -162,7 +172,7 @@ pub fn step(app: &mut Spike, window: &mut Window, cx: &mut Context<Spike>) {
         b.step += 1;
         b.frame_in_step = 0;
     }
-    if PLAN[b.step.min(PLAN.len() - 1)].0 == Phase::Done && b.step >= PLAN.len() - 1 {
+    if b.plan[b.step.min(b.plan.len() - 1)].0 == Phase::Done && b.step >= b.plan.len() - 1 {
         report(&b, app);
         cx.quit();
         return;
