@@ -22,6 +22,11 @@ enum Act {
     Press,
     /// The pressed approval resolves into a one-line tool call.
     Resolve(&'static str),
+    /// A tool starts running: name, detail, expected ms.
+    Run(&'static str, &'static str, f32),
+    /// The running tool finishes with this result.
+    Finish(&'static str),
+    Usage(u32),
     Status(Status),
     Blocked(usize),
     /// A trackpad flick into history: wheel deltas that decay like momentum.
@@ -44,9 +49,14 @@ pub struct Demo {
     stream_next: f32,
     flick_v: f32,
     approval_row: Option<usize>,
+    /// Draw times (ms) of every frame in the scene, reported on exit.
+    collector: gpui_kit::profiler::FrameTimingCollector,
+    draws: Vec<f64>,
 }
 
 const WORDS_PER_SEC: f32 = 16.;
+/// Seconds of "Thinking" before a reply's first word.
+const THINK: f32 = 0.9;
 /// Seconds the recorder runs before the scene clock starts.
 pub const LEAD: f32 = 1.5;
 /// Seconds the window stays open after the scene when recording.
@@ -82,17 +92,13 @@ fn scene(name: &str) -> (Vec<(f32, Act)>, f32) {
                 ),
                 (
                     8.1,
-                    Tool(
-                        "Bash",
-                        "cargo test -p dent-daemon compaction",
-                        "41 passed · 2.3s",
-                        true,
-                    ),
+                    Run("Bash", "cargo test -p dent-daemon compaction", 1800.),
                 ),
-                (8.3, Status(crate::theme::Status::Done)),
-                (8.4, Blocked(0)),
+                (9.7, Finish("41 passed · 1.6 s")),
+                (9.8, Status(crate::theme::Status::Done)),
+                (9.9, Usage(6)),
             ],
-            9.6,
+            11.2,
         ),
         "approval" => (
             vec![
@@ -105,19 +111,19 @@ fn scene(name: &str) -> (Vec<(f32, Act)>, f32) {
                 (1.35, Status(crate::theme::Status::Needs)),
                 (1.35, Blocked(1)),
                 (3.0, Press),
-                (3.35, Resolve("git push origin compaction")),
-                (3.4, Status(crate::theme::Status::Working)),
-                (3.4, Blocked(0)),
+                (3.25, Resolve("git push origin compaction")),
+                (3.3, Status(crate::theme::Status::Working)),
+                (3.3, Blocked(0)),
                 (
-                    3.9,
+                    4.1,
                     Stream(
                         "Pushed. The PR is open and CI has started; I'll watch the checks and tell you if anything fails.",
                     ),
                 ),
-                (6.2, EndStream),
-                (6.3, Status(crate::theme::Status::Done)),
+                (6.6, EndStream),
+                (6.7, Status(crate::theme::Status::Done)),
             ],
-            7.4,
+            7.8,
         ),
         "scroll" => (
             vec![
@@ -158,6 +164,8 @@ impl Demo {
             stream_next: 0.,
             flick_v: 0.,
             approval_row: None,
+            collector: gpui_kit::profiler::FrameTimingCollector::new(),
+            draws: Vec::new(),
         }
     }
 }
@@ -203,15 +211,18 @@ pub fn step(app: &mut Spike, window: &mut Window, cx: &mut Context<Spike>) {
             Act::Stream(text) => {
                 app.push_row(Row::Assistant(vec![]));
                 app.streaming = Some(String::new());
+                app.stream_words.clear();
                 d.stream_words = text.split(' ').collect();
                 d.stream_ix = 0;
-                d.stream_next = t;
+                // A beat of "Thinking" before the first word.
+                d.stream_next = t + THINK;
             }
             Act::EndStream => {
                 if let Some(s) = app.streaming.take() {
                     let last = app.rows.len() - 1;
                     app.replace_row(last, Row::Assistant(vec![s.into()]));
                     app.appeared.remove(&last);
+                    app.stream_words.clear();
                 }
             }
             Act::Approval(cmd) => {
@@ -226,18 +237,34 @@ pub fn step(app: &mut Spike, window: &mut Window, cx: &mut Context<Spike>) {
             }
             Act::Resolve(cmd) => {
                 if let Some(ix) = d.approval_row.take() {
-                    app.pressed = None;
-                    app.replace_row(
+                    app.folding = Some((ix, Instant::now(), cmd.into()));
+                }
+            }
+            Act::Run(name, detail, expected) => {
+                app.push_row(Row::Tool {
+                    name: name.into(),
+                    detail: detail.into(),
+                    result: "".into(),
+                    ok: true,
+                });
+                app.running = Some((app.rows.len() - 1, Instant::now(), expected));
+            }
+            Act::Finish(result) => {
+                if let Some((ix, _, _)) = app.running.take()
+                    && let Row::Tool { name, detail, .. } = app.rows[ix].clone()
+                {
+                    app.complete_row(
                         ix,
                         Row::Tool {
-                            name: "Bash".into(),
-                            detail: cmd.into(),
-                            result: "allowed once".into(),
+                            name,
+                            detail,
+                            result: result.into(),
                             ok: true,
                         },
                     );
                 }
             }
+            Act::Usage(pct) => app.usage = pct,
             Act::Status(s) => app.current = s,
             Act::Blocked(n) => app.blocked = n,
             Act::Flick(v) => d.flick_v = v,
@@ -263,7 +290,9 @@ pub fn step(app: &mut Spike, window: &mut Window, cx: &mut Context<Spike>) {
             if !s.is_empty() {
                 s.push(' ');
             }
+            let start = s.len();
             s.push_str(d.stream_words[d.stream_ix]);
+            app.stream_words.push((start, s.len(), Instant::now()));
             d.stream_ix += 1;
             d.stream_next += 1. / WORDS_PER_SEC;
         }
@@ -279,12 +308,43 @@ pub fn step(app: &mut Spike, window: &mut Window, cx: &mut Context<Spike>) {
 
     // Keep the window up until well after the recorder stops, so a clip can
     // never run past the window and capture whatever is behind it.
+    for ev in d.collector.collect_unseen() {
+        if let gpui_kit::profiler::FrameEvent::Draw(f) = ev {
+            d.draws.push(f.draw_duration().as_secs_f64() * 1e3);
+        }
+    }
     let hold = if d.record.is_some() { HOLD } else { 0. };
     if t >= d.length + hold {
+        report(&d.name, &mut d.draws);
         cx.quit();
         return;
     }
     app.demo = Some(d);
+}
+
+/// Frame draw times for the scene, so every motion is measured (design-system.md, Cost rules).
+fn report(name: &str, draws: &mut [f64]) {
+    if draws.is_empty() {
+        return;
+    }
+    let slow: Vec<String> = draws
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| **m > 8.3)
+        .map(|(i, m)| format!("{i}:{m:.1}"))
+        .collect();
+    eprintln!("frames over 8.3 ms (index:ms): {slow:?}");
+    draws.sort_by(f64::total_cmp);
+    let at = |q: f64| draws[((draws.len() - 1) as f64 * q) as usize];
+    println!(
+        "{{\"scene\":\"{name}\",\"frames\":{},\"p50_ms\":{:.2},\"p95_ms\":{:.2},\"p99_ms\":{:.2},\"max_ms\":{:.2},\"over_8ms\":{}}}",
+        draws.len(),
+        at(0.5),
+        at(0.95),
+        at(0.99),
+        at(1.),
+        draws.iter().filter(|m| **m > 8.3).count()
+    );
 }
 
 /// GPUI hides the pointer on typing until the mouse moves; one synthetic

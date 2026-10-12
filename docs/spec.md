@@ -6,6 +6,7 @@ The spec is split by area. Each file is the source of truth for its area; a chan
 | --- | --- |
 | Goals, non-goals, principles | [overview.md](overview.md) |
 | Field Notes visual direction, palette, type, theming | [design.md](design.md) |
+| Design system: spacing, sizes, type scale, states, motion | [design-system.md](design-system.md) |
 | Pieces and repository layout | [architecture.md](architecture.md) |
 | Daemon: drivers, event log, git, terminals, checkpoints, CLI, automations | [daemon.md](daemon.md) |
 | Hub, sync, connections, encryption, push, hosted services | [hub.md](hub.md) |

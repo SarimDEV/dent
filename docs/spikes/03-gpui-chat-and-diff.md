@@ -41,16 +41,34 @@ Paper and Carbon measure the same. One frame in warm-up (~22 ms) is the first dr
 - **Status squares:** distinct patterns work at 12 px: working = 2 px dither, needs you = solid, done = four dots, waiting and idle = outlines.
 - **Screenshots:** `screencapture -R` on a fixed window rectangle is enough for the spike. Real screenshot tests should render offscreen.
 
-## Motion (added after the first pass)
+## Motion and the design system (added after the first pass)
 
-The spike now implements the Field Notes motion from docs/design.md, at no measurable frame cost:
+The spike was rebuilt on the tokens in [docs/design-system.md](../design-system.md): one 44 px header height across all panels, five type sizes, a radius scale with nesting, ink-alpha state colours, and the motion vocabulary below. Every motion is opacity, offset, colour or flat quads.
 
-- **Dither dissolve:** new rows, the live pill and theme switches resolve in through an 8×8 Bayer pattern over 220 ms, painted as quads on a canvas.
-- **Working square drift:** the working status dither steps every 420 ms; a slow repaint timer keeps it moving when nothing else changes.
-- **Streaming cursor:** a block cursor in the working colour at the end of the streaming text.
-- **Approval resolve:** the pressed button flashes the done colour, then the card folds into a one-line tool call and the blocked count updates.
-- **Title and live pill:** the serif title eases from 30 to 19 px while you read history and a LIVE pill appears; both return at the tail. The chat uses GPUI's `FollowMode::Tail`, which follows new rows, stops when you scroll up, and re-engages at the bottom.
-- **Grain:** pre-rendered 256 px tiles (`scripts/gen-grain.py`) behind everything. The first pass was far too strong; alpha is now 12/255 on Paper and 7/255 on Carbon.
+- **Arrive:** new rows fade in and rise 6 px over 180 ms.
+- **Stream:** each new word fades in over 180 ms; a block cursor in the working colour breathes; "Thinking" shimmers before the first word.
+- **Resolve:** approval cards arrive through the 8×8 Bayer dither (240 ms, 3 px cells).
+- **Fold:** an approved card fades its content and collapses to one line, which then shows the tool call.
+- **Confirm:** a finished tool's done square pops from 60% on a spring (0.3 s, bounce 0.2).
+- **Progress:** a running tool shows a hairline fill towards 90% of its expected time and a counting timer.
+- **Tick:** event, usage and blocked counts roll digit by digit.
+- **Compact:** the serif title springs from 28 to 20 px while you read history and a live pill slides in. The chat uses GPUI's `FollowMode::Tail`.
+- **Theme switch:** every colour tweens from Paper to Carbon (or back) over 200 ms, and the grain crossfades.
+- **Drift:** the working square's dither ripples outward, stepped at 8 fps.
+
+Frame draw times per scripted scene (`--demo NAME` prints them; debug build, 1360 × 780 window):
+
+| Scene | Frames | p50 | p95 | Over 8.3 ms |
+| --- | --- | --- | --- | --- |
+| Stream (thinking, words, progress, tick) | 668 | 4.5 ms | 4.8 ms | 1 (first frame) |
+| Approval (resolve, press, fold) | 468 | 4.6 ms | 5.0 ms | 3 |
+| Scroll (flick, compact, live) | 432 | 4.5 ms | 5.0 ms | 1 (first frame) |
+| Theme switch, twice | 323 | 4.3 ms | 4.7 ms | 4: first frame, plus three ~8.7 ms frames on the first switch only |
+
+- **The dither does not scale to a full window.** As the theme-switch effect it was 30,000 quads a frame at 6 px cells and up to 55 ms per frame. Merging runs of covered cells helped but stayed over budget below 12 px cells. It is now kept for small surfaces, and the theme switch is a colour tween.
+- **The first theme switch costs about 4 ms extra for three frames,** and later switches don't. Removing the grain made no difference, so it looks like a one-time glyph cost for the other text colour. Under the 60 Hz budget; left alone.
+- **No transforms on divs in this GPUI:** presses inset a background layer by 1 px instead of scaling, and rises use relative offsets, so neighbours never move. GPUI does provide analytic springs, which the title and Confirm use.
+- **Rows in motion are remeasured each frame** (`ListState::splice` on just those rows); settled rows stay cached.
 
 `--demo stream|approval|scroll|theme|rest [--record FILE.mov]` plays a scripted scene. `scripts/record-demos.sh` records every scene with ffmpeg (pointer hidden with one synthetic keypress, since this macOS ignores ffmpeg's hide-cursor flag) and writes X-ready MP4s, posters and stills to the gitignored `media/` folder. The window stays open 1.5 s after the recorder stops, so a clip can never capture what is behind the window.
 

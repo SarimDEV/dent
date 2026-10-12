@@ -13,6 +13,7 @@
 mod anim;
 mod bench;
 mod demo;
+mod ds;
 mod fake;
 mod theme;
 
@@ -21,10 +22,11 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use ds::{CODE, DISPLAY, DISPLAY_COMPACT, LABEL, READING, Typed, UI, motion, radius, size, space};
 use fake::{DiffLine, LineKind, Row, SessionRow};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use theme::{Status, Theme, body, label, mono, sans, serif, status_square};
+use theme::{Status, Theme, status_square, status_square_at};
 
 pub static PROCESS_START: OnceLock<Instant> = OnceLock::new();
 /// Time spent generating fake data, which a real client would not do.
@@ -98,23 +100,46 @@ pub struct Spike {
     pub sidebar_scroll: UniformListScrollHandle,
     /// Text being streamed into the last assistant row.
     pub streaming: Option<String>,
+    /// Byte range and arrival time of each streamed word, for the Stream fade.
+    pub stream_words: Vec<(usize, usize, Instant)>,
     pub bench: Option<bench::Bench>,
     pub demo: Option<demo::Demo>,
-    /// Rows that appeared recently, for the dither dissolve.
+    /// Rows that appeared recently (Arrive, Resolve, Confirm).
     pub appeared: HashMap<usize, Instant>,
+    /// Rows that finished in place: only their square pops (Confirm).
+    pub confirmed: HashMap<usize, Instant>,
     /// An approval button that was just pressed (row, when).
     pub pressed: Option<(usize, Instant)>,
+    /// An approval folding into a one-line tool call (row, when, command).
+    pub folding: Option<(usize, Instant, SharedString)>,
+    /// A running tool line (row, started, expected ms), for Progress.
+    pub running: Option<(usize, Instant, f32)>,
     /// Status of the open session (sidebar row 0).
     pub current: Status,
     pub blocked: usize,
-    /// 0 = full serif title at the live tail, 1 = compact while reading history.
-    pub title_t: f32,
+    pub usage: u32,
+    ticks: Ticks,
+    /// 0 = full title at the live tail, 1 = compact while reading history.
+    title: anim::Spring,
     pub show_fps: bool,
-    /// Old surface colour dissolving away after a theme switch.
-    pub theme_fade: Option<(Instant, Hsla)>,
+    /// A theme colour tween in flight: started, from, to.
+    pub theme_shift: Option<(Instant, Theme, Theme)>,
+    /// How much of the Carbon grain shows (0 = Paper's), tweened with the theme.
+    carbon: f32,
     pub grain: (Arc<Image>, Arc<Image>),
     last_frame: Instant,
 }
+
+struct Ticks {
+    events: anim::Tick,
+    blocked: anim::Tick,
+    usage: anim::Tick,
+}
+
+/// How long a row keeps animating after it appears (Arrive + Confirm).
+const SETTLE_MS: f32 = 500.;
+/// The approval card's fixed height, so Fold can collapse it without measuring.
+const CARD_H: f32 = 110.;
 
 impl Spike {
     fn new(o: &Opts) -> Self {
@@ -132,11 +157,18 @@ impl Spike {
         let chat = ListState::new(rows.len(), ListAlignment::Bottom, px(1200.));
         // Chat follows the live tail, stops when you scroll up, and re-engages at the bottom.
         chat.set_follow_mode(FollowMode::Tail);
+        let blocked = 2;
+        let usage = 5;
         Self {
             theme: if o.dark {
                 Theme::carbon()
             } else {
                 Theme::paper()
+            },
+            ticks: Ticks {
+                events: anim::Tick::new(group(rows.len())),
+                blocked: anim::Tick::new(blocked.to_string()),
+                usage: anim::Tick::new(format!("{usage}%")),
             },
             rows: Rc::new(rows),
             chat,
@@ -145,17 +177,23 @@ impl Spike {
             sessions: Rc::new(sessions),
             sidebar_scroll: UniformListScrollHandle::new(),
             streaming: None,
+            stream_words: Vec::new(),
             demo: o
                 .demo
                 .as_deref()
                 .map(|name| demo::Demo::new(name, o.record.clone())),
             appeared: HashMap::new(),
+            confirmed: HashMap::new(),
             pressed: None,
+            folding: None,
+            running: None,
             current: Status::Done,
-            blocked: 2,
-            title_t: 0.,
+            blocked,
+            usage,
+            title: anim::Spring::snappy(0.),
             show_fps: o.fps,
-            theme_fade: None,
+            theme_shift: None,
+            carbon: if o.dark { 1. } else { 0. },
             grain: (
                 Arc::new(Image::from_bytes(
                     ImageFormat::Png,
@@ -173,7 +211,7 @@ impl Spike {
         }
     }
 
-    /// Append a row at the live tail; it resolves in with the dither dissolve.
+    /// Append a row at the live tail; it arrives (or resolves, for approvals).
     pub fn push_row(&mut self, row: Row) {
         let ix = self.rows.len();
         Rc::make_mut(&mut self.rows).push(row);
@@ -181,35 +219,123 @@ impl Spike {
         self.appeared.insert(ix, Instant::now());
     }
 
-    /// Replace a row in place (e.g. an approval resolving into a tool line).
+    /// Replace a row in place (e.g. an approval folding into a tool line).
     pub fn replace_row(&mut self, ix: usize, row: Row) {
         Rc::make_mut(&mut self.rows)[ix] = row;
         self.chat.splice(ix..ix + 1, 1);
         self.appeared.insert(ix, Instant::now());
     }
 
+    /// Finish a row in place: no arrival, just the Confirm pop.
+    pub fn complete_row(&mut self, ix: usize, row: Row) {
+        Rc::make_mut(&mut self.rows)[ix] = row;
+        self.chat.splice(ix..ix + 1, 1);
+        self.confirmed.insert(ix, Instant::now());
+    }
+
+    /// Switch Paper and Carbon with a colour tween. Switching again mid-tween
+    /// retargets from the colours on screen.
     pub fn switch_theme(&mut self) {
-        self.theme_fade = Some((Instant::now(), self.theme.surface));
-        self.theme = if self.theme.dark {
-            Theme::paper()
-        } else {
-            Theme::carbon()
+        let to_dark = match &self.theme_shift {
+            Some((_, _, to)) => !to.dark,
+            None => !self.theme.dark,
         };
+        let to = if to_dark {
+            Theme::carbon()
+        } else {
+            Theme::paper()
+        };
+        self.theme_shift = Some((Instant::now(), self.theme, to));
     }
 
     fn animating(&self) -> bool {
-        let target = if self.at_live_tail() { 0. } else { 1. };
         self.appeared
             .values()
-            .any(|s| anim::progress(*s, anim::DISSOLVE_MS) < 1.)
-            || self.theme_fade.is_some()
+            .chain(self.confirmed.values())
+            .any(|s| anim::progress(*s, SETTLE_MS) < 1.)
+            || self.theme_shift.is_some()
             || self.pressed.is_some()
-            || (self.title_t - target).abs() > 0.001
+            || self.folding.is_some()
+            || self.running.is_some()
             || self.streaming.is_some()
+            || self.ticks.events.animating()
+            || self.ticks.blocked.animating()
+            || self.ticks.usage.animating()
     }
 
     fn at_live_tail(&self) -> bool {
         self.chat.is_following_tail()
+    }
+
+    /// Advance springs and one-shot motions; returns true while anything moves.
+    fn advance(&mut self) -> bool {
+        let dt = self.last_frame.elapsed().as_secs_f32().min(0.05);
+        self.last_frame = Instant::now();
+        let target = if self.at_live_tail() { 0. } else { 1. };
+        let title_moving = self.title.step(target, dt);
+        self.appeared
+            .retain(|_, s| anim::progress(*s, SETTLE_MS) < 1.);
+        self.confirmed
+            .retain(|_, s| anim::progress(*s, SETTLE_MS) < 1.);
+        if let Some((_, s)) = self.pressed
+            && s.elapsed() > Duration::from_millis(600)
+        {
+            self.pressed = None;
+        }
+        // Fold finished: the card becomes a tool line, which arrives.
+        if let Some((ix, s, cmd)) = self.folding.clone()
+            && anim::progress(s, motion::FAST * 0.5 + motion::SLOW) >= 1.
+        {
+            self.folding = None;
+            self.replace_row(
+                ix,
+                Row::Tool {
+                    name: "Bash".into(),
+                    detail: cmd,
+                    result: "allowed once".into(),
+                    ok: true,
+                },
+            );
+        }
+        if let Some((s, from, to)) = self.theme_shift {
+            let k = anim::ease_out(anim::progress(s, motion::THEME));
+            self.theme = Theme::mix(&from, &to, k);
+            let (a, b) = (from.dark as u8 as f32, to.dark as u8 as f32);
+            self.carbon = a + (b - a) * k;
+            if k >= 1. {
+                self.theme = to;
+                self.theme_shift = None;
+            }
+        }
+        // Rows mid-motion are remeasured each frame; settled rows stay cached.
+        let moving: Vec<usize> = self
+            .appeared
+            .keys()
+            .chain(self.confirmed.keys())
+            .copied()
+            .chain(self.pressed.map(|p| p.0))
+            .chain(self.folding.as_ref().map(|f| f.0))
+            .chain(self.running.map(|r| r.0))
+            .collect();
+        for ix in moving {
+            if ix < self.rows.len() {
+                self.chat.splice(ix..ix + 1, 1);
+            }
+        }
+        self.ticks.events.set(group(self.rows.len()));
+        self.ticks.blocked.set(self.blocked.to_string());
+        self.ticks.usage.set(format!("{}%", self.usage));
+        title_moving || self.animating()
+    }
+
+    fn header(&self) -> Div {
+        div()
+            .h(px(size::HEADER))
+            .flex_none()
+            .flex()
+            .items_center()
+            .border_b_1()
+            .border_color(self.theme.hairline)
     }
 
     fn sidebar(&self) -> impl IntoElement {
@@ -224,14 +350,16 @@ impl Spike {
             .border_r_1()
             .border_color(t.hairline)
             .child(
-                div()
-                    .px_4()
-                    .pt_4()
-                    .pb_2()
-                    .font_family(label())
-                    .text_size(px(10.5))
-                    .text_color(t.quiet)
-                    .child("PROJECTS · 1,000 SESSIONS"),
+                self.header()
+                    .px(px(space::S4))
+                    .justify_between()
+                    .ty(LABEL)
+                    .child(div().text_color(t.quiet).child("PROJECTS"))
+                    .child(
+                        div()
+                            .text_color(t.faint)
+                            .child(format!("{} sessions", group(sessions.len()))),
+                    ),
             )
             .child(
                 uniform_list("sessions", sessions.len(), move |range, _, _| {
@@ -240,25 +368,30 @@ impl Spike {
                             let s = &sessions[i];
                             div()
                                 .id(i)
-                                .h(px(30.))
-                                .px_4()
+                                .w_full()
+                                .overflow_hidden()
+                                .h(px(size::ROW))
+                                .px(px(space::S4))
                                 .flex()
                                 .items_center()
-                                .gap_2()
-                                .when(i == 0, |d| d.bg(t.raised))
+                                .gap(px(space::S2))
+                                .when(i == 0, |d| d.bg(t.selected()))
+                                .hover(|d| d.bg(t.hover()))
                                 .child(status_square(if i == 0 { current } else { s.status }, &t))
                                 .child(
                                     div()
                                         .flex_1()
+                                        .min_w_0()
                                         .truncate()
+                                        .ty(UI)
                                         .text_color(t.ink)
                                         .child(s.title.clone()),
                                 )
                                 .child(
                                     div()
-                                        .font_family(label())
-                                        .text_size(px(10.))
-                                        .text_color(t.quiet)
+                                        .flex_none()
+                                        .ty(LABEL)
+                                        .text_color(t.faint)
                                         .child(s.machine.clone()),
                                 )
                         })
@@ -269,38 +402,62 @@ impl Spike {
             )
             .child(
                 div()
-                    .px_4()
-                    .py_3()
+                    .px(px(space::S4))
+                    .py(px(space::S3))
                     .border_t_1()
                     .border_color(t.hairline)
                     .flex()
                     .flex_col()
-                    .gap_1()
-                    .font_family(label())
-                    .text_size(px(10.5))
-                    .text_color(t.quiet)
+                    .gap(px(space::S1))
+                    .ty(LABEL)
+                    .child(
+                        div()
+                            .text_color(t.quiet)
+                            .pb(px(space::S1))
+                            .child("MACHINES"),
+                    )
                     .child(machine_row("laptop", Status::Done, "connected", &t))
                     .child(machine_row("mac-mini", Status::Working, "connected", &t))
-                    .child(machine_row("ec2-runner", Status::Idle, "asleep · 12m", &t)),
+                    .child(machine_row("ec2-runner", Status::Idle, "asleep 12m", &t)),
             )
     }
 
-    fn chat(&self, streaming: Option<&str>) -> impl IntoElement {
+    fn chat(&self) -> impl IntoElement {
         let t = self.theme;
         let rows = self.rows.clone();
         let last = rows.len().saturating_sub(1);
-        let stream: Option<SharedString> = streaming.map(|s| s.to_string().into());
+        let stream: Option<SharedString> = self.streaming.as_ref().map(|s| s.clone().into());
+        let words: Rc<Vec<(usize, usize, f32)>> = Rc::new(
+            self.stream_words
+                .iter()
+                .map(|(a, b, s)| (*a, *b, s.elapsed().as_secs_f32() * 1000.))
+                .filter(|w| w.2 < motion::BASE)
+                .collect(),
+        );
         // Row effects are captured by value so the list closure stays 'static.
         let appeared: HashMap<usize, f32> = self
             .appeared
             .iter()
-            .map(|(ix, s)| (*ix, anim::progress(*s, anim::DISSOLVE_MS)))
-            .filter(|(_, p)| *p < 1.)
+            .map(|(ix, s)| (*ix, s.elapsed().as_secs_f32() * 1000.))
             .collect();
-        let pressed = self.pressed.map(|(ix, s)| (ix, s.elapsed().as_secs_f32()));
-        // The serif title shrinks while reading history and returns at the live tail.
-        let k = anim::ease_out(self.title_t);
-        let title_size = 30. - 11. * k;
+        let confirmed: HashMap<usize, f32> = self
+            .confirmed
+            .iter()
+            .map(|(ix, s)| (*ix, s.elapsed().as_secs_f32() * 1000.))
+            .collect();
+        let pressed = self
+            .pressed
+            .map(|(ix, s)| (ix, s.elapsed().as_secs_f32() * 1000.));
+        let folding = self
+            .folding
+            .as_ref()
+            .map(|(ix, s, _)| (*ix, s.elapsed().as_secs_f32() * 1000.));
+        let running = self
+            .running
+            .map(|(ix, s, exp)| (ix, s.elapsed().as_secs_f32() * 1000., exp));
+        // The serif title compacts while reading history; the live pill arrives.
+        let k = self.title.value().clamp(0., 1.);
+        let title = lerp_type(DISPLAY, DISPLAY_COMPACT, k);
         div()
             .flex_1()
             .h_full()
@@ -308,50 +465,55 @@ impl Spike {
             .flex_col()
             .min_w_0()
             .child(
-                div()
-                    .px_8()
-                    .pt(px(20. - 8. * k))
-                    .pb(px(12. - 4. * k))
-                    .border_b_1()
-                    .border_color(t.hairline)
-                    .flex()
-                    .items_end()
-                    .gap_3()
+                self.header()
+                    .px(px(space::S8))
+                    .gap(px(space::S3))
                     .child(
                         div()
-                            .font_family(serif())
-                            .text_size(px(title_size))
-                            .line_height(px(title_size * 1.1))
-                            .text_color(t.ink)
-                            .child("Event log compaction"),
-                    )
-                    .child(
-                        div()
-                            .pb(px(4. - 2. * k))
-                            .font_family(label())
-                            .text_size(px(10.5))
-                            .text_color(t.quiet)
-                            .child(format!("CLAUDE · MAC-MINI · {} EVENTS", group(rows.len()))),
+                            .flex()
+                            .items_end()
+                            .gap(px(space::S3))
+                            .child(
+                                div()
+                                    .ty(title)
+                                    .text_color(t.ink)
+                                    .child("Event log compaction"),
+                            )
+                            .child(
+                                div()
+                                    .pb(px(5. - 2. * k))
+                                    .flex()
+                                    .gap(px(space::S1H))
+                                    .ty(LABEL)
+                                    .text_color(t.quiet)
+                                    .child("claude")
+                                    .child(div().text_color(t.faint).child("·"))
+                                    .child("mac-mini")
+                                    .child(div().text_color(t.faint).child("·"))
+                                    .child(self.ticks.events.render(LABEL, t.quiet))
+                                    .child("events"),
+                            ),
                     )
                     .child(div().flex_1())
-                    .when(k > 0.02, |d| {
+                    .when(k > 0.01, |d| {
                         d.child(
                             div()
                                 .relative()
-                                .mb(px(2.))
-                                .px_2()
-                                .py(px(3.))
-                                .rounded(px(4.))
-                                .bg(t.ink)
-                                .text_color(t.surface)
-                                .font_family(label())
-                                .text_size(px(10.))
+                                .top(px((1. - k) * motion::NUDGE))
+                                .opacity(k)
+                                .h(px(size::CONTROL_SM))
+                                .px(px(space::S2))
+                                .rounded(px(radius::SM))
+                                .bg(t.raised)
+                                .border_1()
+                                .border_color(t.hairline)
                                 .flex()
                                 .items_center()
-                                .gap_1()
+                                .gap(px(space::S1H))
+                                .ty(LABEL)
+                                .text_color(t.ink)
                                 .child(status_square(self.current, &t))
-                                .child("LIVE ↓")
-                                .child(anim::dissolve(k, t.surface, 2.)),
+                                .child("live ↓"),
                         )
                     }),
             )
@@ -360,8 +522,12 @@ impl Spike {
                     let row = &rows[i];
                     let fx = RowFx {
                         stream: if i == last { stream.clone() } else { None },
-                        appear: appeared.get(&i).copied(),
-                        pressed: pressed.and_then(|(ix, secs)| (ix == i).then_some(secs)),
+                        words: words.clone(),
+                        age: appeared.get(&i).copied(),
+                        confirmed: confirmed.get(&i).copied(),
+                        pressed: pressed.and_then(|(ix, ms)| (ix == i).then_some(ms)),
+                        fold: folding.and_then(|(ix, ms)| (ix == i).then_some(ms)),
+                        running: running.and_then(|(ix, ms, exp)| (ix == i).then_some((ms, exp))),
                     };
                     chat_row(row, fx, &t).into_any_element()
                 })
@@ -382,24 +548,20 @@ impl Spike {
             .border_l_1()
             .border_color(t.hairline)
             .child(
-                div()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(t.hairline)
-                    .flex()
+                self.header()
+                    .px(px(space::S4))
                     .justify_between()
-                    .font_family(mono())
-                    .text_size(px(11.))
                     .child(
                         div()
+                            .ty(CODE)
                             .text_color(t.ink)
                             .child("crates/daemon/src/event_log.rs"),
                     )
                     .child(
                         div()
-                            .text_color(t.quiet)
-                            .child(format!("{} LINES", group(lines.len()))),
+                            .ty(LABEL)
+                            .text_color(t.faint)
+                            .child(format!("{} lines", group(lines.len()))),
                     ),
             )
             .child(
@@ -407,39 +569,39 @@ impl Spike {
                     range
                         .map(|i| {
                             let l = &lines[i];
-                            let (bg, sign) = match l.kind {
-                                LineKind::Added => (Some(t.added), "+"),
-                                LineKind::Removed => (Some(t.removed), "−"),
-                                LineKind::Context => (None, " "),
+                            let (bg, bar, sign) = match l.kind {
+                                LineKind::Added => (Some(t.added), Some(t.done.0), "+"),
+                                LineKind::Removed => (Some(t.removed), Some(t.needs.0), "−"),
+                                LineKind::Context => (None, None, " "),
                             };
                             let num = |n: Option<u32>| n.map(|n| n.to_string()).unwrap_or_default();
                             div()
                                 .id(i)
-                                .h(px(20.))
+                                .h(px(size::LINE))
                                 .flex()
                                 .items_center()
-                                .font_family(mono())
-                                .text_size(px(12.))
+                                .ty(CODE)
                                 .when_some(bg, |d, bg| d.bg(bg))
+                                .child(div().w(px(2.)).h_full().when_some(bar, |d, bar| d.bg(bar)))
                                 .child(
                                     div()
-                                        .w(px(48.))
-                                        .pr_2()
+                                        .w(px(40.))
+                                        .pr(px(space::S2))
                                         .flex()
                                         .justify_end()
-                                        .text_color(t.quiet)
+                                        .text_color(t.faint)
                                         .child(num(l.old)),
                                 )
                                 .child(
                                     div()
-                                        .w(px(48.))
-                                        .pr_2()
+                                        .w(px(40.))
+                                        .pr(px(space::S2))
                                         .flex()
                                         .justify_end()
-                                        .text_color(t.quiet)
+                                        .text_color(t.faint)
                                         .child(num(l.new)),
                                 )
-                                .child(div().w(px(16.)).text_color(t.quiet).child(sign))
+                                .child(div().w(px(space::S4)).text_color(t.faint).child(sign))
                                 .child(
                                     div()
                                         .flex_1()
@@ -458,39 +620,37 @@ impl Spike {
 
     fn status_bar(&self) -> impl IntoElement {
         let t = self.theme;
+        let item = || div().flex().items_center().gap(px(space::S1H));
         div()
-            .h(px(28.))
-            .px_4()
+            .h(px(size::STATUS))
+            .flex_none()
+            .px(px(space::S4))
             .flex()
             .items_center()
-            .gap_4()
+            .gap(px(space::S6))
             .border_t_1()
             .border_color(t.hairline)
-            .font_family(label())
-            .text_size(px(10.5))
+            .ty(LABEL)
             .text_color(t.quiet)
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
+                item()
                     .child(status_square(Status::Working, &t))
-                    .child("CLAUDE 5H 5% · WEEK 11%"),
+                    .child("claude 5h")
+                    .child(meter(self.usage as f32 / 100., &t))
+                    .child(self.ticks.usage.render(LABEL, t.quiet))
+                    .child(div().text_color(t.faint).child("·"))
+                    .child("week 11%"),
             )
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
+                item()
                     .child(status_square(Status::Waiting, &t))
-                    .child("CODEX 30D 1%"),
+                    .child("codex 30d")
+                    .child(meter(0.01, &t))
+                    .child("1%"),
             )
             .child(div().flex_1())
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
+                item()
                     .child(status_square(
                         if self.blocked > 0 {
                             Status::Needs
@@ -499,11 +659,8 @@ impl Spike {
                         },
                         &t,
                     ))
-                    .child(if self.blocked > 0 {
-                        format!("{} BLOCKED", self.blocked)
-                    } else {
-                        "NONE BLOCKED".to_string()
-                    }),
+                    .child(self.ticks.blocked.render(LABEL, t.quiet))
+                    .child("blocked"),
             )
     }
 }
@@ -520,6 +677,23 @@ fn group(n: usize) -> String {
     out
 }
 
+fn lerp_type(a: ds::Type, b: ds::Type, k: f32) -> ds::Type {
+    ds::Type {
+        family: a.family,
+        size: a.size + (b.size - a.size) * k,
+        line: a.line + (b.line - a.line) * k,
+    }
+}
+
+/// A 32 × 4 usage meter.
+fn meter(frac: f32, t: &Theme) -> impl IntoElement {
+    div()
+        .w(px(32.))
+        .h(px(4.))
+        .bg(t.hairline)
+        .child(div().h_full().w(px(32. * frac.clamp(0.04, 1.))).bg(t.quiet))
+}
+
 fn machine_row(
     name: &'static str,
     status: Status,
@@ -529,73 +703,85 @@ fn machine_row(
     div()
         .flex()
         .items_center()
-        .gap_2()
+        .gap(px(space::S2))
+        .text_color(t.quiet)
         .child(status_square(status, t))
         .child(div().flex_1().child(name))
-        .child(state)
+        .child(div().text_color(t.faint).child(state))
 }
 
-/// Per-row animation state.
+/// Per-row animation state, captured by value.
 pub struct RowFx {
     /// Text streaming into this row, if it is the live tail.
     pub stream: Option<SharedString>,
-    /// Dissolve progress if the row appeared recently.
-    pub appear: Option<f32>,
-    /// Seconds since the approval's primary button was pressed.
+    /// Recently streamed words: byte range and age in ms.
+    pub words: Rc<Vec<(usize, usize, f32)>>,
+    /// Ms since the row appeared.
+    pub age: Option<f32>,
+    /// Ms since the row finished in place.
+    pub confirmed: Option<f32>,
+    /// Ms since the approval's primary button was pressed.
     pub pressed: Option<f32>,
+    /// Ms since the approval started folding.
+    pub fold: Option<f32>,
+    /// Running tool: ms elapsed and ms expected.
+    pub running: Option<(f32, f32)>,
 }
 
 fn chat_row(row: &Row, fx: RowFx, t: &Theme) -> Div {
     let el = chat_row_inner(row, &fx, t);
-    match fx.appear {
-        Some(p) => el.relative().child(anim::dissolve(p, t.surface, 3.)),
-        None => el,
+    let Some(age) = fx.age else { return el };
+    match row {
+        // Approvals are rare and important: they Resolve through the dither.
+        Row::Approval(_) => el.relative().child(anim::dissolve(
+            anim::ease_out(age / motion::SLOW),
+            t.surface,
+            3.,
+        )),
+        // Everything else Arrives: fade and a small rise, no relayout.
+        _ => {
+            let k = anim::ease_out(age / motion::BASE);
+            el.relative().top(px((1. - k) * motion::RISE)).opacity(k)
+        }
     }
 }
 
+fn column(t: &Theme) -> (Div, Div) {
+    let _ = t;
+    (
+        div().w_full().flex().justify_center().px(px(space::S8)),
+        div().w_full().max_w(px(size::COLUMN)),
+    )
+}
+
 fn chat_row_inner(row: &Row, fx: &RowFx, t: &Theme) -> Div {
-    let stream = fx.stream.clone();
-    let column = div().w_full().flex().justify_center().px_8();
-    let inner = div().w_full().max_w(px(720.));
+    let (column, inner) = column(t);
     match row {
-        Row::User(text) => column.py_2().child(
+        Row::User(text) => column.pt(px(space::S4)).pb(px(space::S2)).child(
             inner.flex().justify_end().child(
                 div()
                     .max_w(px(560.))
-                    .px_4()
-                    .py_2()
-                    .rounded(px(10.))
+                    .px(px(space::S3))
+                    .py(px(space::S2))
+                    .rounded(px(radius::LG))
                     .bg(t.raised)
                     .border_1()
                     .border_color(t.hairline)
-                    .font_family(body())
-                    .text_size(px(15.))
+                    .ty(READING)
                     .text_color(t.ink)
                     .child(text.clone()),
             ),
         ),
-        Row::Assistant(paras) => column.py_2().child(
+        Row::Assistant(paras) => column.py(px(space::S2)).child(
             inner
                 .flex()
                 .flex_col()
-                .gap_3()
-                .font_family(body())
-                .text_size(px(15.))
-                .line_height(px(23.))
+                .gap(px(space::S3))
+                .ty(READING)
                 .text_color(t.ink)
-                .children(match stream {
-                    // A block cursor in the working colour while the reply streams.
-                    Some(s) => {
-                        vec![
-                            div().child(StyledText::new(format!("{s} ▍")).with_highlights([(
-                                s.len() + 1..s.len() + 1 + "▍".len(),
-                                HighlightStyle {
-                                    color: Some(t.working.0),
-                                    ..Default::default()
-                                },
-                            )])),
-                        ]
-                    }
+                .children(match &fx.stream {
+                    Some(s) if s.is_empty() => vec![thinking(t)],
+                    Some(s) => vec![streamed(s, &fx.words, t)],
                     None => paras.iter().map(|p| div().child(p.clone())).collect(),
                 }),
         ),
@@ -604,136 +790,266 @@ fn chat_row_inner(row: &Row, fx: &RowFx, t: &Theme) -> Div {
             detail,
             result,
             ok,
-        } => column.py(px(3.)).child(
-            inner
-                .flex()
-                .items_center()
-                .gap_2()
-                .font_family(mono())
-                .text_size(px(12.))
-                .text_color(t.quiet)
-                .child("├─")
-                .child(div().text_color(t.ink).child(name.clone()))
-                .child(div().flex_1().truncate().child(detail.clone()))
-                .child(status_square(
-                    if *ok { Status::Done } else { Status::Needs },
-                    t,
-                ))
-                .child(result.clone()),
-        ),
-        Row::Approval(cmd) => column.py_2().child(
-            inner.child(
-                div()
-                    .p_3()
-                    .rounded(px(8.))
-                    .bg(t.raised)
-                    .border_1()
-                    .border_color(t.needs.0)
+        } => {
+            // Confirm: the square pops in when the line arrives.
+            let pop = fx
+                .confirmed
+                .or(fx.age)
+                .map(|ms| anim::pop(ms / 1000.))
+                .unwrap_or(1.);
+            column.child(
+                inner
+                    .relative()
+                    .h(px(size::LINE))
                     .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .font_family(label())
-                            .text_size(px(10.5))
-                            .text_color(t.quiet)
-                            .child(status_square(Status::Needs, t))
-                            .child("NEEDS YOU · RUN COMMAND"),
-                    )
-                    .child(
-                        div()
-                            .font_family(mono())
-                            .text_size(px(13.))
-                            .text_color(t.ink)
-                            .child(cmd.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .text_size(px(12.))
-                            .child(match fx.pressed {
-                                // Pressed: the button sinks and flashes the done colour.
-                                Some(secs) => {
-                                    let k = (secs / 0.18).clamp(0., 1.);
-                                    button("Allow once", true, t)
-                                        .bg(t.done.0)
-                                        .border_color(t.done.0)
-                                        .mt(px(1. - k))
-                                        .child(
-                                            div()
-                                                .font_family(label())
-                                                .text_size(px(10.))
-                                                .child(" ✓"),
-                                        )
-                                }
-                                None => button("Allow once", true, t),
-                            })
-                            .child(button("Allow for session", false, t))
-                            .child(button("Deny…", false, t)),
-                    ),
-            ),
-        ),
+                    .items_center()
+                    .gap(px(space::S2))
+                    .ty(CODE)
+                    .text_color(t.quiet)
+                    .child(div().text_color(t.faint).child("├─"))
+                    .child(div().text_color(t.ink).child(name.clone()))
+                    .child(div().flex_1().min_w_0().truncate().child(detail.clone()))
+                    .map(|d| match fx.running {
+                        // Progress: a hairline fill towards 90% of the expected time, then holds.
+                        Some((ms, expected)) => d
+                            .child(status_square(Status::Working, t))
+                            .child(format_ms(ms))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .bottom_0()
+                                    .left_0()
+                                    .h(px(1.))
+                                    .w(relative((ms / expected).min(1.) * 0.9))
+                                    .bg(t.working.0),
+                            ),
+                        None => d
+                            .child(status_square_at(
+                                if *ok { Status::Done } else { Status::Needs },
+                                t,
+                                0.6 + 0.4 * pop,
+                            ))
+                            .child(result.clone()),
+                    }),
+            )
+        }
+        Row::Approval(cmd) => {
+            // Fold: content fades out, then the card collapses to one line.
+            let (fade, collapse) = match fx.fold {
+                Some(ms) => (
+                    anim::ease_out(ms / motion::FAST),
+                    // The collapse overlaps the fade so the card never sits empty.
+                    anim::ease_in_out((ms - motion::FAST * 0.5) / motion::SLOW),
+                ),
+                None => (0., 0.),
+            };
+            let pad = space::S2 * (1. - collapse);
+            column.py(px(pad)).child(
+                inner.child(
+                    div()
+                        .h(px(CARD_H + (size::LINE - CARD_H) * collapse))
+                        .overflow_hidden()
+                        .rounded(px(radius::LG))
+                        .bg(t.wash(t.needs.0).opacity(1. - collapse))
+                        .border_1()
+                        .border_color(t.edge(t.needs.0).opacity(1. - collapse))
+                        .child(
+                            div()
+                                .opacity(1. - fade)
+                                .p(px(space::S3))
+                                .flex()
+                                .flex_col()
+                                .gap(px(space::S2))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(space::S1H))
+                                        .ty(LABEL)
+                                        .child(status_square(Status::Needs, t))
+                                        .child(div().text_color(t.ink).child("NEEDS YOU"))
+                                        .child(div().text_color(t.faint).child("·"))
+                                        .child(div().text_color(t.quiet).child("run command")),
+                                )
+                                .child(div().ty(CODE).text_color(t.ink).child(cmd.clone()))
+                                .child(
+                                    div()
+                                        .pt(px(space::S1))
+                                        .flex()
+                                        .gap(px(space::S2))
+                                        .child(button("Allow once", Some("⏎"), true, fx.pressed, t))
+                                        .child(button("Allow for session", None, false, None, t))
+                                        .child(button("Deny", Some("esc"), false, None, t)),
+                                ),
+                        ),
+                ),
+            )
+        }
     }
 }
 
-fn button(label: &'static str, primary: bool, t: &Theme) -> Div {
-    let d = div()
-        .px_3()
-        .py_1()
-        .rounded(px(6.))
-        .border_1()
-        .border_color(t.hairline)
-        .child(label);
-    if primary {
-        d.bg(t.ink).text_color(t.surface)
+fn format_ms(ms: f32) -> String {
+    if ms < 10_000. {
+        format!("{} ms", (ms / 10.).round() as u32 * 10)
     } else {
-        d.text_color(t.ink)
+        format!("{:.1} s", ms / 1000.)
     }
+}
+
+/// Streamed text: each new word fades in; a block cursor breathes at the end.
+fn streamed(s: &SharedString, words: &[(usize, usize, f32)], t: &Theme) -> Div {
+    let cursor = "▍";
+    let text = format!("{s} {cursor}");
+    let mut hl: Vec<(std::ops::Range<usize>, HighlightStyle)> = words
+        .iter()
+        .filter(|(_, end, _)| *end <= s.len())
+        .map(|(a, b, ms)| {
+            let k = anim::ease_out(ms / motion::BASE);
+            (
+                *a..*b,
+                HighlightStyle {
+                    color: Some(t.ink.opacity(0.2 + 0.8 * k)),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    let secs = crate::PROCESS_START
+        .get()
+        .map(|p| p.elapsed().as_secs_f32())
+        .unwrap_or(0.);
+    let breathe = 0.55 + 0.45 * (secs * std::f32::consts::TAU / 1.1).cos();
+    hl.push((
+        s.len() + 1..s.len() + 1 + cursor.len(),
+        HighlightStyle {
+            color: Some(t.working.0.opacity(breathe)),
+            ..Default::default()
+        },
+    ));
+    div().child(StyledText::new(text).with_highlights(hl))
+}
+
+/// Before the first word: "Thinking" with a band of ink sweeping across it.
+fn thinking(t: &Theme) -> Div {
+    let label = "Thinking";
+    let secs = crate::PROCESS_START
+        .get()
+        .map(|p| p.elapsed().as_secs_f32())
+        .unwrap_or(0.);
+    let center = (secs / 1.6).fract() * (label.len() as f32 + 6.) - 3.;
+    let hl: Vec<_> = label
+        .char_indices()
+        .map(|(i, c)| {
+            let k = (1. - ((i as f32 - center).abs() / 3.)).clamp(0., 1.);
+            (
+                i..i + c.len_utf8(),
+                HighlightStyle {
+                    color: Some(t.faint.blend(t.ink.opacity(k))),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    div()
+        .italic()
+        .child(StyledText::new(label).with_highlights(hl))
+}
+
+/// Buttons press by insetting their background layer 1px (reads as 0.97), so
+/// neighbours never move.
+fn button(
+    text: &'static str,
+    key: Option<&'static str>,
+    primary: bool,
+    pressed_ms: Option<f32>,
+    t: &Theme,
+) -> Div {
+    let inset = match pressed_ms {
+        Some(ms) => {
+            let down = anim::ease_out(ms / motion::FAST);
+            let up = anim::ease_out((ms - 300.) / motion::BASE);
+            down - up
+        }
+        None => 0.,
+    };
+    let (bg, fg, key_fg) = if primary {
+        (t.ink, t.surface, t.surface.opacity(0.55))
+    } else {
+        (gpui_kit::transparent_black(), t.ink, t.faint)
+    };
+    div()
+        .relative()
+        .h(px(size::CONTROL))
+        .px(px(space::S3))
+        .flex()
+        .items_center()
+        .gap(px(space::S2))
+        .ty(UI)
+        .text_color(fg)
+        .child(
+            div()
+                .absolute()
+                .top(px(inset))
+                .bottom(px(inset))
+                .left(px(inset))
+                .right(px(inset))
+                .rounded(px(radius::SM))
+                .bg(bg)
+                .when(!primary, |d| {
+                    d.border_1().border_color(t.edge(t.ink).opacity(0.5))
+                })
+                .when(pressed_ms.is_some(), |d| {
+                    d.bg(if primary {
+                        t.ink.opacity(0.85)
+                    } else {
+                        t.press()
+                    })
+                }),
+        )
+        .child(div().relative().child(text))
+        .when_some(key, |d, k| {
+            d.child(div().relative().ty(LABEL).text_color(key_fg).child(k))
+        })
 }
 
 fn composer(t: &Theme) -> impl IntoElement {
+    // The box is one gutter wider than the column so its text lines up with messages.
     div()
         .w_full()
         .flex()
         .justify_center()
-        .px_8()
-        .pb_4()
-        .pt_2()
+        .px(px(space::S4))
+        .pb(px(space::S4))
+        .pt(px(space::S2))
         .child(
             div()
                 .w_full()
-                .max_w(px(720.))
-                .px_4()
-                .py_3()
-                .rounded(px(12.))
+                .max_w(px(size::COLUMN + 2. * space::S4))
+                .px(px(space::S4))
+                .py(px(space::S3))
+                .rounded(px(radius::XL))
                 .bg(t.raised)
                 .border_1()
                 .border_color(t.hairline)
                 .flex()
                 .flex_col()
-                .gap_2()
+                .gap(px(space::S2))
                 .child(
                     div()
-                        .font_family(body())
-                        .text_size(px(15.))
-                        .text_color(t.quiet)
-                        .child("Reply, or Cmd+Enter to steer…"),
+                        .ty(READING)
+                        .text_color(t.faint)
+                        .child("Reply, or ⌘⏎ to steer"),
                 )
                 .child(
                     div()
                         .flex()
-                        .gap_3()
-                        .font_family(label())
-                        .text_size(px(10.5))
+                        .gap(px(space::S3))
+                        .ty(LABEL)
                         .text_color(t.quiet)
-                        .child("OPUS · HIGH")
-                        .child("ASK")
+                        .child("opus · high")
+                        .child("ask")
                         .child(div().flex_1())
-                        .child("CONTEXT 38%"),
+                        .child(div().text_color(t.faint).child("context 38%")),
                 ),
         )
 }
@@ -746,36 +1062,26 @@ impl Render for Spike {
         if self.demo.is_some() {
             demo::step(self, window, cx);
         }
-        // Ease the title towards its target (critically damped, ~180 ms).
-        let dt = self.last_frame.elapsed().as_secs_f32().min(0.05);
-        self.last_frame = Instant::now();
-        let target = if self.at_live_tail() { 0. } else { 1. };
-        self.title_t += (target - self.title_t) * (1. - (-dt / 0.06).exp());
-        if (target - self.title_t).abs() < 0.001 {
-            self.title_t = target;
-        }
-        self.appeared
-            .retain(|_, s| anim::progress(*s, anim::DISSOLVE_MS) < 1.);
-        if let Some((_, s)) = self.pressed
-            && s.elapsed() > Duration::from_millis(600)
-        {
-            self.pressed = None;
-        }
-        let fade = self.theme_fade.map(|(s, c)| (anim::progress(s, 450.), c));
-        if matches!(fade, Some((p, _)) if p >= 1.) {
-            self.theme_fade = None;
-        }
-        if self.animating() || self.demo.is_some() {
+        if self.advance() || self.demo.is_some() {
             window.request_animation_frame();
         }
-
         let t = self.theme;
-        let streaming = self.streaming.clone();
-        let grain = if t.dark {
-            self.grain.1.clone()
-        } else {
-            self.grain.0.clone()
+        // Static grain, tiled once behind everything (no live blur, no per-frame
+        // cost). During a theme tween both grains show, crossfading.
+        let grain_layer = |image: Arc<Image>, opacity: f32| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .overflow_hidden()
+                .opacity(opacity)
+                .flex()
+                .flex_wrap()
+                .children((0..24).map(move |_| img(image.clone()).size(px(256.)).flex_none()))
         };
+        let (paper_grain, carbon_grain) = (self.grain.0.clone(), self.grain.1.clone());
+        let carbon = self.carbon;
         div()
             .relative()
             .size_full()
@@ -783,33 +1089,21 @@ impl Render for Spike {
             .flex_col()
             .bg(t.surface)
             .text_color(t.ink)
-            .font_family(sans())
-            .text_size(px(13.))
-            // Static grain, tiled once behind everything (no live blur, no per-frame cost).
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
-                    .overflow_hidden()
-                    .flex()
-                    .flex_wrap()
-                    .children((0..24).map(move |_| img(grain.clone()).size(px(256.)).flex_none())),
-            )
+            .ty(UI)
+            .when(carbon < 1., |d| {
+                d.child(grain_layer(paper_grain, 1. - carbon))
+            })
+            .when(carbon > 0., |d| d.child(grain_layer(carbon_grain, carbon)))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .flex()
                     .child(self.sidebar())
-                    .child(self.chat(streaming.as_deref()))
+                    .child(self.chat())
                     .child(self.diff_panel()),
             )
             .child(self.status_bar())
-            .when_some(fade, |d, (p, old)| {
-                d.child(anim::dissolve(anim::ease_out(p), old, 4.))
-            })
             .when(self.show_fps, |d| {
                 d.child(gpui_fps::fps_monitor(window, cx))
             })
@@ -889,7 +1183,7 @@ fn main() {
         .find(|p| p.name == o.fonts)
         .unwrap_or(&theme::PAIRINGS[0]);
     theme::FONTS.get_or_init(|| pairing);
-    if o.bench {
+    if o.bench || o.demo.is_some() {
         profiler::set_trace_enabled(true);
     }
     gpui_kit::application().run(move |cx| {
@@ -910,12 +1204,12 @@ fn main() {
         };
         let (_, view) = gpui_kit::open_window(options, cx, |_, cx| cx.new(|_| Spike::new(&o)))
             .expect("open window");
-        // Repaint slowly so the working square drifts even when nothing else changes.
+        // Step the working square's ripple (steps.pixel) even when nothing else changes.
         let view = view.downgrade();
         cx.spawn(async move |cx| {
             loop {
                 cx.background_executor()
-                    .timer(Duration::from_millis(theme::DRIFT_MS as u64))
+                    .timer(Duration::from_secs_f32(1. / ds::motion::PIXEL_FPS))
                     .await;
                 if view.update(cx, |_, cx| cx.notify()).is_err() {
                     break;

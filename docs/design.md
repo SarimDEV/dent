@@ -1,5 +1,7 @@
 # Design direction
 
+The tokens and rules that build this look (spacing, type scale, states, motion) are in [design-system.md](design-system.md).
+
 dent uses the Field Notes direction: warm paper in light mode, warm carbon in dark mode, fine grain, ink type, and status shown as small dithered pixel squares. HTML/CSS mockups of the main screen, docs, quick switcher and changes panel in both modes are in [design/mockups/](design/mockups/). They were written for a canvas runtime, so treat them as the exact reference for colours, type, sizes and layout rather than pages to open directly.
 
 ## Why Field Notes
@@ -23,6 +25,7 @@ dent uses the Field Notes direction: warm paper in light mode, warm carbon in da
 | Panel | #FAF8F3 | #1B1A17 | Docs and changes panels |
 | Ink | #171614 | #ECE8DF | Text, primary buttons |
 | Quiet ink | #6E6A62 | #8F8A80 | Labels, metadata |
+| Faint ink | #8C877D | #706B63 | Line numbers, placeholders, separators (3:1, never for reading) |
 | Hairline | #DCD7CC | #2E2C28 | Borders, dividers |
 | Working | #2BB8D6 | #4FD3EC | Agent is working |
 | Needs you | #E0309F | #F04FB8 | Blocked, approval, question |
@@ -40,11 +43,11 @@ The default pairing is called Book: agent replies read like a page, and the inte
 
 | Role | Face | Size |
 | --- | --- | --- |
-| Chat (messages, docs body) | Literata | 15 px, 23 px line height |
-| Interface chrome | IBM Plex Sans | 13 px |
-| Code, commands, diffs | Commit Mono | 12 px |
-| Labels (small uppercase metadata) | Commit Mono | 10.5 px, letter-spaced |
-| Display (session titles, doc headings, quick switcher query) | Instrument Serif, italics for emphasis | 30 px titles |
+| Chat (messages, docs body) | Literata | 15 px, 24 px line height |
+| Interface chrome | IBM Plex Sans | 13 px, 20 px line height |
+| Code, commands, diffs | Commit Mono | 12 px, 20 px line height |
+| Labels (metadata; uppercase only for section labels) | Commit Mono | 11 px |
+| Display (session titles, doc headings, quick switcher query) | Instrument Serif, italics for emphasis | 28 px titles, 20 px compact |
 
 - All five faces are bundled (SIL Open Font License), so nothing depends on installed fonts.
 - Fonts are theme settings per role, never hard-coded, so a theme can swap any of them. Plex, Fira with Departure Mono pixel labels, and Atkinson Hyperlegible were the runners-up and make good alternative themes.
@@ -52,7 +55,7 @@ The default pairing is called Book: agent replies read like a page, and the inte
 ## Texture and motion
 
 - Grain is a pre-rendered noise texture: multiplied at low opacity on Paper, screened at lower opacity on Carbon.
-- Panels and new messages resolve in with a short dither dissolve; a working session's square drifts slowly; reduced-motion settings make all of it instant.
+- Approval cards resolve in with a short dither dissolve, the theme switch is a 200 ms colour tween, and a working session's square ripples slowly; reduced-motion settings make all of it instant. The full motion vocabulary and its rules are in [design-system.md](design-system.md).
 - Nothing blurs live behind scrolling content, and every effect is held to the frame budgets in Reliability requirements.
 
 ## Fixes before building

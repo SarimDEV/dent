@@ -10,6 +10,8 @@ pub struct Theme {
     pub panel: Hsla,
     pub ink: Hsla,
     pub quiet: Hsla,
+    /// Line numbers, placeholders, separators: 3:1, never for reading.
+    pub faint: Hsla,
     pub hairline: Hsla,
     pub working: (Hsla, Hsla),
     pub needs: (Hsla, Hsla),
@@ -35,6 +37,7 @@ impl Theme {
             panel: c(0xFAF8F3),
             ink: c(0x171614),
             quiet: c(0x6E6A62),
+            faint: c(0x8C877D),
             hairline: c(0xDCD7CC),
             working: (c(0x2BB8D6), c(0x9FE3F0)),
             needs: (c(0xE0309F), c(0xF4A6D6)),
@@ -54,6 +57,7 @@ impl Theme {
             panel: c(0x1B1A17),
             ink: c(0xECE8DF),
             quiet: c(0x8F8A80),
+            faint: c(0x706B63),
             hairline: c(0x2E2C28),
             working: (c(0x4FD3EC), c(0x1D5864)),
             needs: (c(0xF04FB8), c(0x6A1F50)),
@@ -62,6 +66,74 @@ impl Theme {
             idle: (c(0x6B675F), c(0x2E2C28)),
             added: c(0x1A2E1C),
             removed: c(0x35192A),
+        }
+    }
+}
+
+/// Colours mix in RGB so a tween never swings through other hues.
+fn mix(a: Hsla, b: Hsla, k: f32) -> Hsla {
+    let (a, b) = (a.to_rgb(), b.to_rgb());
+    let l = |x: f32, y: f32| x + (y - x) * k;
+    Rgba {
+        r: l(a.r, b.r),
+        g: l(a.g, b.g),
+        b: l(a.b, b.b),
+        a: l(a.a, b.a),
+    }
+    .into()
+}
+
+impl Theme {
+    /// Every token part way from `a` to `b`, for the theme colour tween.
+    pub fn mix(a: &Theme, b: &Theme, k: f32) -> Theme {
+        let p = |x: (Hsla, Hsla), y: (Hsla, Hsla)| (mix(x.0, y.0, k), mix(x.1, y.1, k));
+        Theme {
+            dark: if k < 0.5 { a.dark } else { b.dark },
+            surface: mix(a.surface, b.surface, k),
+            raised: mix(a.raised, b.raised, k),
+            panel: mix(a.panel, b.panel, k),
+            ink: mix(a.ink, b.ink, k),
+            quiet: mix(a.quiet, b.quiet, k),
+            faint: mix(a.faint, b.faint, k),
+            hairline: mix(a.hairline, b.hairline, k),
+            working: p(a.working, b.working),
+            needs: p(a.needs, b.needs),
+            done: p(a.done, b.done),
+            waiting: p(a.waiting, b.waiting),
+            idle: p(a.idle, b.idle),
+            added: mix(a.added, b.added, k),
+            removed: mix(a.removed, b.removed, k),
+        }
+    }
+}
+
+/// State tokens are ink at an alpha, so one value works on every surface.
+impl Theme {
+    fn a(&self, paper: f32, carbon: f32) -> f32 {
+        if self.dark { carbon } else { paper }
+    }
+    pub fn hover(&self) -> Hsla {
+        self.ink.opacity(self.a(0.05, 0.06))
+    }
+    pub fn press(&self) -> Hsla {
+        self.ink.opacity(self.a(0.09, 0.10))
+    }
+    pub fn selected(&self) -> Hsla {
+        self.ink.opacity(self.a(0.07, 0.08))
+    }
+    pub fn wash(&self, signal: Hsla) -> Hsla {
+        signal.opacity(self.a(0.07, 0.12))
+    }
+    pub fn edge(&self, signal: Hsla) -> Hsla {
+        signal.opacity(self.a(0.45, 0.5))
+    }
+    pub fn signal(&self, s: Status) -> (Hsla, Hsla) {
+        match s {
+            Status::Working => self.working,
+            Status::Needs => self.needs,
+            Status::Done => self.done,
+            Status::Waiting => self.waiting,
+            Status::Idle => self.idle,
         }
     }
 }
@@ -156,50 +228,55 @@ pub fn serif() -> &'static str {
     fonts().serif
 }
 
-/// How often the working square's dither steps.
-pub const DRIFT_MS: u128 = 420;
-
 /// A 12px status square. Each status has its own pattern so it never relies on
-/// colour alone: working = 2px dither, needs you = solid, done = dots,
+/// colour alone: working = rippling dither, needs you = solid, done = dots,
 /// waiting = outline, idle = quiet outline.
 pub fn status_square(status: Status, t: &Theme) -> Div {
-    let (signal, partner) = match status {
-        Status::Working => t.working,
-        Status::Needs => t.needs,
-        Status::Done => t.done,
-        Status::Waiting => t.waiting,
-        Status::Idle => t.idle,
-    };
-    match status {
-        Status::Needs => div().size(px(12.)).bg(signal),
-        // Fine 2px dither of signal and partner that drifts slowly while working.
+    status_square_at(status, t, 1.)
+}
+
+/// The square drawn at `scale` of its size inside a fixed 12px box, for the
+/// Confirm pop; neighbours never move.
+pub fn status_square_at(status: Status, t: &Theme, scale: f32) -> Div {
+    let (signal, partner) = t.signal(status);
+    let s = crate::ds::size::SQUARE * scale;
+    let mark = match status {
+        Status::Needs => div().size(px(s)).bg(signal),
+        // Rings of a 2px dither ripple outward, stepped like pixel animation.
         Status::Working => {
-            let phase = crate::PROCESS_START
+            let step = crate::PROCESS_START
                 .get()
-                .map(|s| (s.elapsed().as_millis() / DRIFT_MS) as usize)
+                .map(|p| (p.elapsed().as_secs_f32() * crate::ds::motion::PIXEL_FPS) as usize)
                 .unwrap_or(0);
             div()
-                .size(px(12.))
+                .size(px(s))
                 .flex()
                 .flex_col()
-                .children((0..6).map(move |y| {
-                    div().flex().children((0..6).map(move |x| {
-                        div().size(px(2.)).bg(if (x + y + phase).is_multiple_of(2) {
-                            signal
-                        } else {
-                            partner
-                        })
+                .children((0..6).map(move |y: usize| {
+                    div().flex().children((0..6).map(move |x: usize| {
+                        let ring = x.min(5 - x).min(y.min(5 - y));
+                        let lit = (ring + step).is_multiple_of(3);
+                        div()
+                            .size(px(s / 6.))
+                            .bg(if lit { signal } else { partner })
                     }))
                 }))
         }
         // Four round dots on a clear ground.
         Status::Done => div()
-            .size(px(12.))
+            .size(px(s))
             .flex()
             .flex_wrap()
-            .gap(px(2.))
-            .p(px(1.))
-            .children((0..4).map(move |_| div().size(px(4.)).rounded_full().bg(signal))),
-        Status::Waiting | Status::Idle => div().size(px(12.)).border_2().border_color(signal),
-    }
+            .gap(px(s / 6.))
+            .p(px(s / 12.))
+            .children((0..4).map(move |_| div().size(px(s / 3.)).rounded_full().bg(signal))),
+        Status::Waiting | Status::Idle => div().size(px(s)).border_2().border_color(signal),
+    };
+    div()
+        .size(px(crate::ds::size::SQUARE))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(mark)
 }
