@@ -100,6 +100,54 @@ How the layer works:
 
 The specimen rebuilds every block's elements each frame. The real chat caches committed blocks, as spike 03's list already does.
 
+## Stress: every block at its limits
+
+`--stress` renders a page where every block is pushed past its limits:
+- a link and a word with no break points;
+- a heading that wraps over several lines;
+- inline maths wider than a line, and display maths wider than the column;
+- a tall continued fraction beside a 6×4 matrix;
+- a table with long cells, one 14 columns wide, and one with 60 rows;
+- a code line of 240 characters;
+- a diagram wider than the column and one taller than the window;
+- lists nested six deep, and quotes nested three deep.
+
+It was captured at 1440×860, 900×700, 420×700 and 360×560, in Paper and Carbon. Each capture is the dent window only, taken a viewport at a time.
+
+![Before and after at 420×700: the same page, three screens each](img/04-stress-before-after.jpg)
+
+What broke, and the fix for each:
+
+| Problem | Fix |
+| --- | --- |
+| Table columns didn't line up: each row sized its own cells | All rows share measured column widths: natural width capped at 320 pt, never below the longest word (capped at 160 pt), prose never below 140 pt |
+| Long cells, wide tables, display maths and the matrix were clipped with no way to see the rest | Wide content scrolls sideways inside its block, with an edge fade where there is more |
+| Inline maths wider than the line ran off the edge and left a blank gap | Over 260 pt it gets a line of its own, which scrolls |
+| Code lines wrapped | Code never wraps; it scrolls |
+| A wide diagram shrank until its labels were unreadable | Shrink to fit, but never below 75%; then scroll |
+| Header words and inline code broke mid-word (`Colum`/`n`, `endpoin`/`t`) | Measure each word in its run's font, headers in medium weight, plus 2 pt of slack |
+| Right-aligned columns ignored `---:` | Alignment is honoured |
+| **Six-deep nested lists cost 4.8 ms per frame; seven deep cost 9.5 ms** | List items are padded blocks with the marker out of flow, not flex rows. Seven deep now costs 0.87 ms |
+
+The nested-list cost was the real surprise. Each flex row measures its text again at every level, so the cost doubled with each level of nesting:
+
+| List depth | 2 | 3 | 4 | 5 | 6 | 7 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Before (ms per frame) | 0.99 | 1.90 | 2.56 | 4.02 | 4.93 | 9.46 |
+| After | 0.44 | | 0.64 | | 0.75 | 0.87 |
+
+Frame times for the whole stress page, release build, with every block rebuilt every frame:
+
+| Run | p50 | p99 | Over 8.3 ms |
+| --- | --- | --- | --- |
+| Paper and Carbon, all four sizes | 3.5 ms | 4.8–5.1 ms | 0 |
+
+**Very tall tables still cost too much.** The spike lays out and paints the whole page every frame. Each table row costs about 0.03 ms, so 240 rows reach 8.3 ms at p50 and 1,000 rows reach 14 ms. Element building is only 0.5–1.4 ms of that; the rest is layout and paint of rows that are off screen. The production chat already virtualises messages. It also needs committed blocks cached so they aren't laid out again, and rows culled within a block taller than the viewport. This is now a requirement for the chat list.
+
+![1440×860: the column stays 720 pt wide; wide blocks scroll inside it](img/04-stress-wide.jpg)
+
+Still open at the edges: a period can wrap alone after an unbreakable word, which is GPUI's line breaker. A tall display formula centres vertically against its tallest part. At 1440 the wide table could break out of the 720 pt column instead of scrolling; that's a design choice left for the chat-list work.
+
 ## What changes in the spec
 
 - **chat-rendering.md:**
@@ -120,4 +168,5 @@ cargo run -p spike-markdown --release -- math       # RaTeX fixtures and corpus 
 cargo run -p spike-markdown --release -- mermaid DIR  # all diagram types, Paper and Carbon PNGs
 cargo run -p spike-markdown --release -- worst      # huge single-block tails
 just dev spike-gpui-chat --specimen [--dark] [--bench --shots DIR]
+just dev spike-gpui-chat --stress [--size WxH] [--dark] [--bench --shots DIR]   # STRESS_ROWS=n, STRESS_FILE=page.md
 ```

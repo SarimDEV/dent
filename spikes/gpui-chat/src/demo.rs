@@ -369,7 +369,7 @@ fn hide_pointer(window: &mut Window, cx: &mut Context<Spike>) {
 
 /// The whole window, including the title bar.
 fn region() -> String {
-    let (x, y, w, h) = WINDOW;
+    let (x, y, w, h) = crate::window();
     format!("{},{},{},{}", x, y, w, h + 28.)
 }
 

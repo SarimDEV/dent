@@ -46,6 +46,8 @@ pub struct Opts {
     pub record: Option<std::path::PathBuf>,
     pub fps: bool,
     pub specimen: bool,
+    pub stress: bool,
+    pub size: Option<(f32, f32)>,
 }
 
 fn opts() -> Opts {
@@ -62,6 +64,8 @@ fn opts() -> Opts {
         record: None,
         fps: false,
         specimen: false,
+        stress: false,
+        size: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -86,6 +90,16 @@ fn opts() -> Opts {
             "--record" => o.record = it.next().map(Into::into),
             "--fps" => o.fps = true,
             "--specimen" => o.specimen = true,
+            "--stress" => {
+                o.specimen = true;
+                o.stress = true;
+            }
+            "--size" => {
+                o.size = it.next().and_then(|v| {
+                    let (w, h) = v.split_once('x')?;
+                    Some((w.parse().ok()?, h.parse().ok()?))
+                })
+            }
             other => eprintln!("ignoring unknown flag {other}"),
         }
     }
@@ -93,6 +107,15 @@ fn opts() -> Opts {
 }
 
 pub const WINDOW: (f32, f32, f32, f32) = (40., 40., 1360., 780.);
+
+/// `--size` overrides the window size; screenshots follow it.
+pub static SIZE: std::sync::OnceLock<(f32, f32)> = std::sync::OnceLock::new();
+
+pub fn window() -> (f32, f32, f32, f32) {
+    let (x, y, w, h) = WINDOW;
+    let (w, h) = SIZE.get().copied().unwrap_or((w, h));
+    (x, y, w, h)
+}
 
 pub struct Spike {
     pub theme: Theme,
@@ -1194,7 +1217,10 @@ fn main() {
         gpui_kit::init(cx);
         load_fonts(cx, o.font_dir.as_deref());
         specimen::load_katex(cx);
-        let (x, y, w, h) = WINDOW;
+        if let Some(s) = o.size {
+            let _ = SIZE.set(s);
+        }
+        let (x, y, w, h) = window();
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
                 origin: point(px(x), px(y)),
@@ -1202,7 +1228,9 @@ fn main() {
             })),
             titlebar: Some(TitlebarOptions {
                 title: Some(
-                    if o.specimen {
+                    if o.stress {
+                        "dent · spike 04 stress"
+                    } else if o.specimen {
                         "dent · spike 04"
                     } else {
                         "dent · spike 03"
@@ -1215,9 +1243,9 @@ fn main() {
             ..Default::default()
         };
         if o.specimen {
-            let (dark, bench, shots) = (o.dark, o.bench, o.shots.clone());
+            let (dark, bench, shots, stress) = (o.dark, o.bench, o.shots.clone(), o.stress);
             gpui_kit::open_window(options, cx, move |_, cx| {
-                cx.new(|_| specimen::Specimen::new(dark, bench, shots))
+                cx.new(|_| specimen::Specimen::new(dark, bench, shots, stress))
             })
             .expect("open window");
             cx.activate(true);

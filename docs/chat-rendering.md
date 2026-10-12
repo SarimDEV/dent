@@ -34,6 +34,24 @@ Every message is parsed into a tree of typed blocks, and each block type has one
 - **Math:** RaTeX's display list is drawn with GPUI primitives in the KaTeX fonts. Glyphs from the KaTeX Size fonts are drawn from their outlines, because GPUI does not load fonts without an `m` glyph. Inline math reserves its width with invisible characters in the paragraph and is drawn at the text baseline.
 - **Mermaid:** merman renders SVG with its resvg-safe preset, a host theme mapped from the palette tokens, and label widths measured with the bundled fonts. A recolour pass snaps any remaining colour to the nearest token (C4, sankey and architecture otherwise keep their own). A diagram renders once its fence closes.
 
+## Sizes and overflow
+
+The reading column is 720 pt wide at most and shrinks with the window down to 360 pt. Nothing is ever clipped without a way to see it ([spike 04, stress](spikes/04-markdown-math-mermaid.md#stress-every-block-at-its-limits)).
+
+- **Wide content scrolls sideways inside its block**, with a fade on whichever edge has more to see. This covers tables, display maths, code and diagrams. The page itself never scrolls sideways.
+- **Tables:**
+  - All rows share one set of column widths, so columns line up.
+  - Each column starts at its natural width, capped at 320 pt so long text wraps. Columns grow and shrink in proportion.
+  - A column never gets narrower than its longest word, capped at 160 pt. A column of prose never goes below 140 pt. Below those limits the table scrolls instead.
+  - Widths are measured in each run's own font, with header cells in medium weight.
+  - Column alignment from the Markdown is honoured.
+- **Code never wraps.** Long lines scroll inside the block.
+- **Display maths** is centred when it fits and scrolls when it doesn't.
+- **Inline maths wider than 260 pt** gets a line of its own at text size, which scrolls. The sentence continues on the next line.
+- **Diagrams** shrink to fit the column, but never below 75% of their natural size, so labels stay readable. Past that they scroll. Tall diagrams keep their natural size.
+- **Long links and words** wrap at the window edge.
+- **Nesting:** list items are padded blocks with the marker positioned out of flow, never flex rows. Nested flex rows re-measure their text at every level, which doubled the frame cost per level.
+
 ## Initial catalogue
 
 | Category | Types | Engine |
@@ -67,11 +85,11 @@ Every message is parsed into a tree of typed blocks, and each block type has one
 ## Testing
 
 - **Spec suites:** all CommonMark and GitHub Flavored Markdown spec examples pass.
-- **Golden images:** every fixture renders at three column widths in Paper and Carbon, compared pixel by pixel in CI; changes need approval.
+- **Golden images:** every fixture, plus the stress page (too wide, too tall, too long, too deep), renders at three column widths in Paper and Carbon, compared pixel by pixel in CI; changes need approval.
 - **Every prefix:** each fixture also renders at every streaming prefix, with no crash, no movement of finished blocks, and a final result identical to the non-streamed render.
 - **Real transcripts:** recorded Claude Code and Codex sessions replay through the renderer nightly and before releases.
 - **Fuzzing:** the parser and every renderer are fuzzed with malformed Markdown, huge tables, deep nesting, giant lines and invalid TeX or Mermaid; the result must be the fallback, never a crash or a hang.
-- **Performance:** a 1,000-block message scrolls within the frame budget, and each renderer stays inside its budget.
+- **Performance:** a 1,000-block message and a 2,000-row table scroll within the frame budget. Committed blocks are cached rather than laid out again, and rows of a block taller than the viewport are culled. Each renderer stays inside its budget.
 - **Copy and access:** copying returns the original Markdown; every block has a text alternative and keyboard-reachable actions.
 - **Parity:** desktop, iPhone and web render the same fixtures, compared by text output and a screenshot review.
 - **Specimen gallery:** a debug screen in the app shows every fixture in both themes, for visual review.

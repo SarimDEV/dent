@@ -3,6 +3,9 @@
 //! list and Mermaid rasterised off the UI thread.
 //!
 //! `just dev spike-gpui-chat --specimen [--dark] [--bench] [--shots DIR]`
+//! `just dev spike-gpui-chat --stress [--size WxH]`: every block at its limits.
+//! `STRESS_ROWS=n` sets the tall table's rows; `STRESS_FILE=path` replaces
+//! the stress page with any Markdown file.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -12,7 +15,7 @@ use std::time::Instant;
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Tag, TagEnd};
 use ratex_types::display_item::{DisplayItem, DisplayList};
 use ratex_types::path_command::PathCommand;
 use spike_markdown::stream::{Block, Streamer};
@@ -67,6 +70,118 @@ flowchart LR
 /// Characters per second while streaming, roughly an agent's pace.
 const RATE: f32 = 260.;
 
+/// Every block at its limits: too wide, too tall, too long, too deep.
+/// Written for the spike; no transcript content.
+pub fn stress() -> String {
+    let part = std::env::var("STRESS_PART").unwrap_or_default();
+    if let Ok(f) = std::env::var("STRESS_FILE") {
+        return std::fs::read_to_string(f).unwrap_or_default();
+    }
+    if part == "head" {
+        return STRESS_HEAD.into();
+    }
+    if part == "tail" {
+        return STRESS_TAIL.into();
+    }
+    let mut s = String::from(STRESS_HEAD);
+    s.push_str("\n### A table wider than any window\n\n|");
+    for c in 1..=14 {
+        s.push_str(&format!(" Column {c} |"));
+    }
+    s.push_str("\n|");
+    for _ in 1..=14 {
+        s.push_str(" --- |");
+    }
+    for r in 1..=3 {
+        s.push_str("\n|");
+        for c in 1..=14 {
+            s.push_str(&format!(" r{r}c{c} value |"));
+        }
+    }
+    s.push_str("\n\n### A table taller than the window\n\n| # | Event | Duration |\n| ---: | --- | ---: |\n");
+    let rows: usize = std::env::var("STRESS_ROWS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    for r in 1..=rows {
+        s.push_str(&format!(
+            "| {r} | event number {r} | {}.{} ms |\n",
+            r % 9,
+            r % 7
+        ));
+    }
+    s.push_str(STRESS_TAIL);
+    s
+}
+
+const STRESS_HEAD: &str = r#"# Stress: every block at its limits
+
+A link with no spaces: https://example.com/a/very/long/path/that/never/breaks/because/it/has/no/spaces/at/all/and/keeps/going?query=parameters&and=more&still=more and a word that won't break: Pneumonoultramicroscopicsilicovolcanoconiosis.
+
+## A heading that goes on far longer than any heading should, so it has to wrap across several lines when the window is narrow
+
+Inline maths wider than a line: $\sum_{i=1}^{n} \sum_{j=1}^{m} \left( a_{ij} x_i y_j + b_{ij} x_i^2 + c_{ij} y_j^2 + d_{ij} \right) = \int_0^\infty e^{-t^2} \, dt \cdot \prod_{k=1}^{K} \frac{k}{k+1}$ and the sentence continues after it.
+
+Display maths wider than the column:
+
+$$
+f(x) = a_0 + a_1 x + a_2 x^2 + a_3 x^3 + a_4 x^4 + a_5 x^5 + a_6 x^6 + a_7 x^7 + a_8 x^8 + a_9 x^9 + a_{10} x^{10} + a_{11} x^{11} + a_{12} x^{12} + a_{13} x^{13} + a_{14} x^{14} + a_{15} x^{15}
+$$
+
+Tall maths:
+
+$$
+x = a_0 + \cfrac{1}{a_1 + \cfrac{1}{a_2 + \cfrac{1}{a_3 + \cfrac{1}{a_4 + \cfrac{1}{a_5 + \cfrac{1}{a_6}}}}}}
+\qquad
+\begin{pmatrix} a_{11} & a_{12} & a_{13} & a_{14} \\ a_{21} & a_{22} & a_{23} & a_{24} \\ a_{31} & a_{32} & a_{33} & a_{34} \\ a_{41} & a_{42} & a_{43} & a_{44} \\ a_{51} & a_{52} & a_{53} & a_{54} \\ a_{61} & a_{62} & a_{63} & a_{64} \end{pmatrix}
+$$
+
+A table with long cells:
+
+| Setting | What it does | Example |
+| --- | --- | --- |
+| `retry` | Retries a failed request with exponential backoff, starting at 100 ms and doubling until it reaches the ceiling set below, then gives up and reports the last error to every client that asked | `3` |
+| `endpoint` | Where requests go | https://example.com/api/v2/sessions/0123456789abcdef0123456789abcdef/events?after=1000000 |
+"#;
+
+const STRESS_TAIL: &str = r#"
+A code block with long lines:
+
+```rust
+fn configure(builder: &mut Builder) -> Result<Config, Error> { builder.with_timeout(Duration::from_secs(30)).with_retry(Retry::exponential(Duration::from_millis(100), Duration::from_secs(10))).with_endpoint("https://example.com/api/v2/sessions").build() }
+let short = 1;
+```
+
+A diagram wider than the column:
+
+```mermaid
+flowchart LR
+  A[Request] --> B[Parse] --> C[Validate] --> D[Authorise] --> E[Load session] --> F[Append event] --> G[Fan out] --> H[Persist] --> I[Acknowledge] --> J[Done]
+```
+
+A diagram taller than the window:
+
+```mermaid
+flowchart TD
+  A[Start] --> B[Step one] --> C[Step two] --> D[Step three] --> E[Step four] --> F[Step five] --> G[Step six] --> H[Step seven] --> I[Step eight] --> J[Step nine] --> K[Step ten] --> L[Step eleven] --> M[Done]
+```
+
+Deep nesting:
+
+- one
+  - two
+    - three
+      - four
+        - five
+          - six, with a sentence long enough to wrap when it is indented this far in a narrow window
+
+> A quote
+> > inside a quote
+> > > inside a quote, with `code` and **bold** and a long enough line to wrap at least once in the narrowest window.
+
+The end.
+"#;
+
 enum Diagram {
     Pending,
     Ready(Arc<RenderImage>, f32, f32),
@@ -75,6 +190,8 @@ enum Diagram {
 
 pub struct Specimen {
     theme: Theme,
+    message: &'static str,
+    rate: f32,
     start: Instant,
     streamer: Streamer,
     math: HashMap<(String, bool), Option<Rc<DisplayList>>>,
@@ -87,12 +204,27 @@ pub struct Specimen {
     /// Whether the block being built is committed (its fences are closed).
     closed: bool,
     scroll: ScrollHandle,
-    shot: u8,
+    shot: usize,
+    /// When the current page was scrolled into place.
+    paged_at: Option<Instant>,
+    offsets: Vec<f32>,
+    /// Horizontal scroll state for wide content, by (block, nth in block).
+    hscrolls: HashMap<(usize, usize), ScrollHandle>,
+    block_ix: usize,
+    hs_count: usize,
+    builds: Vec<f64>,
 }
 
 impl Specimen {
-    pub fn new(dark: bool, bench: bool, shots: Option<PathBuf>) -> Self {
+    pub fn new(dark: bool, bench: bool, shots: Option<PathBuf>, stress: bool) -> Self {
         Self {
+            message: if stress {
+                Box::leak(self::stress().into_boxed_str())
+            } else {
+                MESSAGE
+            },
+            // The stress page streams too, just fast.
+            rate: if stress { 20_000. } else { RATE },
             theme: if dark {
                 Theme::carbon()
             } else {
@@ -110,6 +242,12 @@ impl Specimen {
             closed: false,
             scroll: ScrollHandle::new(),
             shot: 0,
+            paged_at: None,
+            offsets: Vec::new(),
+            hscrolls: HashMap::new(),
+            block_ix: 0,
+            hs_count: 0,
+            builds: Vec::new(),
         }
     }
 
@@ -180,24 +318,25 @@ impl Specimen {
     }
 
     fn advance(&mut self) -> bool {
-        let want = ((self.start.elapsed().as_secs_f32() - 0.4).max(0.) * RATE) as usize;
+        let msg = self.message;
+        let want = ((self.start.elapsed().as_secs_f32() - 0.4).max(0.) * self.rate) as usize;
         let mut at = self.streamer.text.len();
-        if at >= MESSAGE.len() {
+        if at >= msg.len() {
             if self.done_at.is_none() {
                 self.streamer.finish();
                 self.done_at = Some(Instant::now());
             }
             return false;
         }
-        let mut end = want.min(MESSAGE.len());
-        while !MESSAGE.is_char_boundary(end) {
+        let mut end = want.min(msg.len());
+        while !msg.is_char_boundary(end) {
             end += 1;
         }
         if end > at {
-            self.streamer.push(&MESSAGE[at..end]);
+            self.streamer.push(&msg[at..end]);
             at = end;
         }
-        at < MESSAGE.len()
+        at < msg.len()
     }
 }
 
@@ -223,6 +362,12 @@ const DISPLAY_EM: f32 = 19.;
 
 impl Inline {
     fn push(&mut self, s: &str, st: Style, t: &Theme) {
+        // Text resuming after a formula on its own line starts flush left.
+        let s = if self.text.is_empty() {
+            s.trim_start()
+        } else {
+            s
+        };
         if s.is_empty() {
             return;
         }
@@ -573,34 +718,67 @@ fn rgba_of(c: &ratex_types::color::Color) -> Hsla {
     .into()
 }
 
-fn display_math(list: Rc<DisplayList>, t: &Theme) -> AnyElement {
-    let w = list.width as f32 * DISPLAY_EM;
-    let h = (list.height + list.depth) as f32 * DISPLAY_EM;
-    let ink = t.ink;
-    div()
-        .w_full()
-        .flex()
-        .justify_center()
-        .py(px(space::S2))
-        .child(
-            canvas(
-                |_, _, _| (),
-                move |bounds, _, window, cx| {
-                    paint_math(window, cx, &list, bounds.origin, DISPLAY_EM, ink)
-                },
-            )
-            .w(px(w))
-            .h(px(h)),
-        )
-        .into_any_element()
-}
-
 /// One container being built while walking a block's events.
 struct Frame {
     tag: Option<Tag<'static>>,
     children: Vec<AnyElement>,
     inline: Inline,
-    rows: Vec<Vec<AnyElement>>,
+    rows: Vec<Vec<Cell>>,
+    /// A table cell's natural width and its longest word.
+    natural: f32,
+    min: f32,
+}
+
+/// A table cell before its column width is known.
+struct Cell {
+    children: Vec<AnyElement>,
+    natural: f32,
+    min: f32,
+}
+
+/// Columns never get wider than this before their text wraps…
+const CELL_MAX: f32 = 320.;
+/// …and a single long word never forces a column wider than this.
+const CELL_MIN_CAP: f32 = 160.;
+/// A column of prose never squeezes below this; the table scrolls first.
+const CELL_PROSE_MIN: f32 = 140.;
+/// Inline maths wider than this gets a line of its own, which scrolls.
+const INLINE_MAX: f32 = 260.;
+/// Diagrams shrink to fit, but not below this scale; then they scroll.
+const DIAGRAM_MIN_SCALE: f32 = 0.75;
+
+/// Natural width and longest-word width of a cell's inline content.
+fn measure(inline: &Inline, window: &Window) -> (f32, f32) {
+    if inline.text.is_empty() {
+        return (0., 0.);
+    }
+    let size = px(READING.size);
+    let ts = window.text_system();
+    let natural = ts
+        .shape_line(inline.text.clone().into(), size, &inline.runs, None)
+        .width
+        .as_f32();
+    // Longest word, each measured in its own run's font (code is wider).
+    let mut min = 0f32;
+    let mut at = 0;
+    for run in &inline.runs {
+        let seg = &inline.text[at..at + run.len];
+        at += run.len;
+        for w in seg.split_whitespace() {
+            let r = TextRun {
+                len: w.len(),
+                ..run.clone()
+            };
+            min = min.max(
+                ts.shape_line(w.to_string().into(), size, &[r], None)
+                    .width
+                    .as_f32(),
+            );
+        }
+    }
+    // Shaping rounds differently from wrapping; a hair of slack keeps a
+    // word that exactly fits from breaking.
+    (natural + 2., min + 2.)
 }
 
 impl Frame {
@@ -610,6 +788,8 @@ impl Frame {
             children: Vec::new(),
             inline: Inline::default(),
             rows: Vec::new(),
+            natural: 0.,
+            min: 0.,
         }
     }
     fn flush(&mut self, t: &Theme) {
@@ -629,6 +809,7 @@ impl Specimen {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.closed = done;
+        self.hs_count = 0;
         let t = self.theme;
         let mut stack = vec![Frame::new(None)];
         let mut st = Style::default();
@@ -663,6 +844,18 @@ impl Specimen {
                     TagEnd::Link => st.link = false,
                     _ => {
                         let Some(mut f) = stack.pop() else { break };
+                        if matches!(f.tag, Some(Tag::TableCell)) {
+                            // Header cells are medium weight, so measure them that way.
+                            let head = stack
+                                .last()
+                                .is_some_and(|p| matches!(p.tag, Some(Tag::TableHead)));
+                            if head {
+                                for r in &mut f.inline.runs {
+                                    r.font.weight = FontWeight::MEDIUM;
+                                }
+                            }
+                            (f.natural, f.min) = measure(&f.inline, window);
+                        }
                         f.flush(&t);
                         let el = self.finish(f, &code, &code_lang, window, cx);
                         if let Some(parent) = stack.last_mut() {
@@ -698,6 +891,18 @@ impl Specimen {
                 }
                 Event::InlineMath(s) => {
                     let list = self.typeset(s, false);
+                    // Too wide to sit in a line: give it its own, which scrolls.
+                    if let Some(l) = list
+                        .clone()
+                        .filter(|l| l.width as f32 * INLINE_EM > INLINE_MAX)
+                    {
+                        let el = self.inline_math_line(l, &t);
+                        if let Some(top) = stack.last_mut() {
+                            top.flush(&t);
+                            top.children.push(el);
+                        }
+                        continue;
+                    }
                     if let Some(top) = stack.last_mut() {
                         match list {
                             Some(l) => top.inline.push_math(l, window, &t),
@@ -710,12 +915,13 @@ impl Specimen {
                 }
                 Event::DisplayMath(s) => {
                     let list = self.typeset(s, true);
+                    let el = match list {
+                        Some(l) => self.display_math(l, &t),
+                        None => self.code_block(s, "tex"),
+                    };
                     if let Some(top) = stack.last_mut() {
                         top.flush(&t);
-                        top.children.push(match list {
-                            Some(l) => display_math(l, &t),
-                            None => code_block(s, "tex", &t),
-                        });
+                        top.children.push(el);
                     }
                 }
                 Event::SoftBreak => {
@@ -789,11 +995,21 @@ impl Specimen {
                         Some(n) => format!("{}.", n + i as u64),
                         None => "•".into(),
                     };
+                    // A padded block with the marker out of flow, not a flex
+                    // row: nested flex rows re-measure their text at every
+                    // level, which doubles the cost per level of nesting.
                     div()
-                        .flex()
-                        .gap(px(space::S2))
-                        .child(div().w(px(18.)).flex_none().text_color(t.quiet).child(mark))
-                        .child(div().flex_1().min_w_0().child(item))
+                        .relative()
+                        .pl(px(18. + space::S2))
+                        .child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .top_0()
+                                .text_color(t.quiet)
+                                .child(mark),
+                        )
+                        .child(item)
                 });
                 Built::El(
                     div()
@@ -804,13 +1020,7 @@ impl Specimen {
                         .into_any_element(),
                 )
             }
-            Some(Tag::Item) => Built::El(
-                div()
-                    .flex()
-                    .flex_col()
-                    .children(f.children)
-                    .into_any_element(),
-            ),
+            Some(Tag::Item) => Built::El(div().children(f.children).into_any_element()),
             Some(Tag::BlockQuote(_)) => Built::El(
                 div()
                     .border_l_2()
@@ -829,45 +1039,21 @@ impl Specimen {
                     Built::El(
                         div()
                             .opacity(0.5)
-                            .child(code_block(code, lang, &t))
+                            .child(self.code_block(code, lang))
                             .into_any_element(),
                     )
                 } else {
-                    Built::El(code_block(code, lang, &t))
+                    Built::El(self.code_block(code, lang))
                 }
             }
-            Some(Tag::TableCell) => Built::Cell(
-                div()
-                    .flex_1()
-                    .px(px(space::S2))
-                    .py(px(space::S1))
-                    .children(f.children)
-                    .into_any_element(),
-            ),
+            Some(Tag::TableCell) => Built::Cell(Cell {
+                children: f.children,
+                natural: f.natural,
+                min: f.min,
+            }),
             Some(Tag::TableHead) => Built::Row(f.rows.into_iter().flatten().collect()),
             Some(Tag::TableRow) => Built::Row(f.rows.into_iter().flatten().collect()),
-            Some(Tag::Table(_)) => {
-                let n = f.rows.len();
-                Built::El(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .border_1()
-                        .border_color(t.hairline)
-                        .rounded(px(radius::MD))
-                        .overflow_hidden()
-                        .children(f.rows.into_iter().enumerate().map(|(i, cells)| {
-                            div()
-                                .flex()
-                                .when(i == 0, |d| {
-                                    d.bg(t.ink.opacity(0.04)).font_weight(FontWeight::MEDIUM)
-                                })
-                                .when(i + 1 < n, |d| d.border_b_1().border_color(t.hairline))
-                                .children(cells)
-                        }))
-                        .into_any_element(),
-                )
-            }
+            Some(Tag::Table(aligns)) => Built::El(self.table(f.rows, &aligns)),
             _ => Built::El(div().children(f.children).into_any_element()),
         }
     }
@@ -875,18 +1061,32 @@ impl Specimen {
     fn mermaid(&mut self, src: &str, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme;
         self.diagram(src, cx);
-        match self.diagrams.get(src) {
-            Some(Diagram::Ready(img_, w, h)) => div()
-                .w_full()
-                .flex()
-                .justify_center()
-                .child(img(ImageSource::Render(img_.clone())).w(px(*w)).h(px(*h)))
-                .into_any_element(),
+        match self.diagrams.get(src).map(|d| match d {
+            Diagram::Ready(i, w, h) => Diagram::Ready(i.clone(), *w, *h),
+            Diagram::Failed(e) => Diagram::Failed(e.clone()),
+            Diagram::Pending => Diagram::Pending,
+        }) {
+            // Shrink to fit the column, but never so far that labels get
+            // unreadable; past that the diagram scrolls sideways.
+            Some(Diagram::Ready(img_, w, h)) => self.hscroll(
+                div()
+                    .w_full()
+                    .min_w(px(w * DIAGRAM_MIN_SCALE))
+                    .flex()
+                    .justify_center()
+                    .child(
+                        img(ImageSource::Render(img_))
+                            .w_full()
+                            .max_w(px(w))
+                            .aspect_ratio(w / h),
+                    ),
+                t.surface,
+            ),
             Some(Diagram::Failed(e)) => {
                 div()
                     .flex()
                     .flex_col()
-                    .child(code_block(src, "mermaid", &t))
+                    .child(self.code_block(src, "mermaid"))
                     .child(
                         div()
                             .ty(LABEL)
@@ -897,7 +1097,7 @@ impl Specimen {
             .into_any_element(),
             _ => div()
                 .opacity(0.5)
-                .child(code_block(src, "mermaid", &t))
+                .child(self.code_block(src, "mermaid"))
                 .into_any_element(),
         }
     }
@@ -905,47 +1105,201 @@ impl Specimen {
 
 enum Built {
     El(AnyElement),
-    Cell(AnyElement),
-    Row(Vec<AnyElement>),
+    Cell(Cell),
+    Row(Vec<Cell>),
     #[allow(dead_code)]
-    Rows(Vec<Vec<AnyElement>>),
+    Rows(Vec<Vec<Cell>>),
 }
 
-fn code_block(src: &str, lang: &str, t: &Theme) -> AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .bg(t.raised)
-        .border_1()
-        .border_color(t.hairline)
-        .rounded(px(radius::LG))
-        .child(
+impl Specimen {
+    /// Wrap content that may be wider than the column in a horizontal
+    /// scroller, with a fade on whichever edge has more to see.
+    fn hscroll(&mut self, child: impl IntoElement, bg: Hsla) -> AnyElement {
+        let key = (self.block_ix, self.hs_count);
+        self.hs_count += 1;
+        let handle = self.hscrolls.entry(key).or_default().clone();
+        let max = handle.max_offset().x.as_f32();
+        let x = -handle.offset().x.as_f32();
+        let fade = |right: bool| {
+            let (a, b) = if right {
+                (bg.opacity(0.), bg)
+            } else {
+                (bg, bg.opacity(0.))
+            };
             div()
-                .px(px(space::S3))
-                .py(px(space::S1))
-                .border_b_1()
-                .border_color(t.hairline)
-                .ty(LABEL)
-                .text_color(t.quiet)
-                .child(if lang.is_empty() {
-                    "code".to_string()
-                } else {
-                    lang.to_string()
-                }),
-        )
-        .child(
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .w(px(28.))
+                .when(right, |d| d.right_0())
+                .when(!right, |d| d.left_0())
+                .bg(linear_gradient(
+                    90.,
+                    linear_color_stop(a, 0.),
+                    linear_color_stop(b, 1.),
+                ))
+        };
+        div()
+            .relative()
+            .w_full()
+            .child(
+                div()
+                    .id(SharedString::from(format!("h{}-{}", key.0, key.1)))
+                    .track_scroll(&handle)
+                    .overflow_x_scroll()
+                    .w_full()
+                    .child(child),
+            )
+            .when(max > 0.5 && x < max - 0.5, |d| d.child(fade(true)))
+            .when(x > 0.5, |d| d.child(fade(false)))
+            .into_any_element()
+    }
+
+    fn display_math(&mut self, list: Rc<DisplayList>, t: &Theme) -> AnyElement {
+        let w = list.width as f32 * DISPLAY_EM;
+        let h = (list.height + list.depth) as f32 * DISPLAY_EM;
+        let ink = t.ink;
+        self.hscroll(
             div()
-                .px(px(space::S3))
+                .w_full()
+                .min_w(px(w))
+                .flex()
+                .justify_center()
                 .py(px(space::S2))
-                .ty(CODE)
-                .text_color(t.ink)
-                .children(
-                    src.trim_end_matches('\n')
-                        .split('\n')
-                        .map(|l| div().child(l.to_string())),
+                .child(
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, _, window, cx| {
+                            paint_math(window, cx, &list, bounds.origin, DISPLAY_EM, ink)
+                        },
+                    )
+                    .flex_none()
+                    .w(px(w))
+                    .h(px(h)),
                 ),
+            t.surface,
         )
-        .into_any_element()
+    }
+
+    /// Inline maths too wide for a line, at text size on a line of its own.
+    fn inline_math_line(&mut self, list: Rc<DisplayList>, t: &Theme) -> AnyElement {
+        let w = list.width as f32 * INLINE_EM;
+        let h = (list.height + list.depth) as f32 * INLINE_EM;
+        let ink = t.ink;
+        self.hscroll(
+            div().py(px(space::S1)).child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, cx| {
+                        paint_math(window, cx, &list, bounds.origin, INLINE_EM, ink)
+                    },
+                )
+                .flex_none()
+                .w(px(w + 2.))
+                .h(px(h)),
+            ),
+            t.surface,
+        )
+    }
+
+    /// Columns share one set of widths so they line up: each starts at its
+    /// natural width (capped, so long text wraps) and grows or shrinks in
+    /// proportion, never below its longest word. Past that, the table
+    /// scrolls sideways.
+    fn table(&mut self, rows: Vec<Vec<Cell>>, aligns: &[Alignment]) -> AnyElement {
+        let t = self.theme;
+        let pad = 2. * space::S2;
+        let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+        let mut natural = vec![0f32; cols];
+        let mut min = vec![0f32; cols];
+        for row in &rows {
+            for (c, cell) in row.iter().enumerate() {
+                natural[c] = natural[c].max(cell.natural.min(CELL_MAX) + pad);
+                min[c] = min[c].max(cell.min.min(CELL_MIN_CAP) + pad);
+            }
+        }
+        for c in 0..cols {
+            min[c] = min[c].max(natural[c].min(CELL_PROSE_MIN + pad));
+            natural[c] = natural[c].max(min[c]);
+        }
+        let total_min: f32 = min.iter().sum::<f32>() + 2.;
+        let total: f32 = natural.iter().sum::<f32>() + 2.;
+        let n = rows.len();
+        let table = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w(px(total_min))
+            .max_w(px(total))
+            .border_1()
+            .border_color(t.hairline)
+            .rounded(px(radius::MD))
+            .children(rows.into_iter().enumerate().map(|(i, cells)| {
+                div()
+                    .flex()
+                    .when(i == 0, |d| {
+                        d.bg(t.ink.opacity(0.04)).font_weight(FontWeight::MEDIUM)
+                    })
+                    .when(i + 1 < n, |d| d.border_b_1().border_color(t.hairline))
+                    .children(cells.into_iter().enumerate().map(|(c, cell)| {
+                        let w = natural.get(c).copied().unwrap_or(pad);
+                        div()
+                            .flex_basis(px(w))
+                            .flex_grow(w)
+                            .flex_shrink(1.)
+                            .min_w(px(min.get(c).copied().unwrap_or(pad)))
+                            .px(px(space::S2))
+                            .py(px(space::S1))
+                            .map(|d| match aligns.get(c) {
+                                Some(Alignment::Right) => d.text_right(),
+                                Some(Alignment::Center) => d.text_center(),
+                                _ => d,
+                            })
+                            .children(cell.children)
+                    }))
+            }));
+        self.hscroll(table, t.surface)
+    }
+
+    /// Code never wraps; long lines scroll sideways inside the block.
+    fn code_block(&mut self, src: &str, lang: &str) -> AnyElement {
+        let t = self.theme;
+        let body = div()
+            .px(px(space::S3))
+            .py(px(space::S2))
+            .ty(CODE)
+            .text_color(t.ink)
+            .children(
+                src.trim_end_matches('\n')
+                    .split('\n')
+                    .map(|l| div().whitespace_nowrap().child(l.to_string())),
+            );
+        let body = self.hscroll(body, t.raised);
+        div()
+            .flex()
+            .flex_col()
+            .bg(t.raised)
+            .border_1()
+            .border_color(t.hairline)
+            .rounded(px(radius::LG))
+            .overflow_hidden()
+            .child(
+                div()
+                    .px(px(space::S3))
+                    .py(px(space::S1))
+                    .border_b_1()
+                    .border_color(t.hairline)
+                    .ty(LABEL)
+                    .text_color(t.quiet)
+                    .child(if lang.is_empty() {
+                        "code".to_string()
+                    } else {
+                        lang.to_string()
+                    }),
+            )
+            .child(body)
+            .into_any_element()
+    }
 }
 
 impl Render for Specimen {
@@ -970,12 +1324,17 @@ impl Render for Specimen {
         }
         let t = self.theme;
         let n = self.streamer.committed.len();
+        let built = Instant::now();
         let blocks: Vec<Block> = self.streamer.visible().cloned().collect();
         let els: Vec<AnyElement> = blocks
             .iter()
             .enumerate()
-            .map(|(i, b)| self.block(b, i < n, window, cx))
+            .map(|(i, b)| {
+                self.block_ix = i;
+                self.block(b, i < n, window, cx)
+            })
             .collect();
+        self.builds.push(built.elapsed().as_secs_f64() * 1e3);
         div()
             .size_full()
             .bg(t.surface)
@@ -1010,29 +1369,66 @@ impl Specimen {
         if !settled || done.elapsed().as_secs_f32() < 0.6 {
             return;
         }
+        // Capture the page a viewport at a time, top to bottom, so the
+        // whole document can be stitched back together.
         if let Some(dir) = self.shots.clone() {
             let _ = std::fs::create_dir_all(&dir);
-            let name = if self.theme.dark { "carbon" } else { "paper" };
-            let t = done.elapsed().as_secs_f32();
-            if self.shot == 0 {
-                crate::demo::still(dir.join(format!("04-specimen-{name}-top.png")));
-                self.shot = 1;
-            } else if self.shot == 1 && t > 0.9 {
-                let max = self.scroll.max_offset();
-                self.scroll.set_offset(point(px(0.), -max.y));
-                self.shot = 2;
-            } else if self.shot == 2 && t > 1.2 {
-                crate::demo::still(dir.join(format!("04-specimen-{name}-bottom.png")));
-                self.shot = 3;
-            }
-            if self.shot < 3 || t < 1.5 {
-                return;
+            let name = format!(
+                "{}-{}-{}x{}",
+                if self.rate > RATE {
+                    "04-stress"
+                } else {
+                    "04-specimen"
+                },
+                if self.theme.dark { "carbon" } else { "paper" },
+                crate::window().2,
+                crate::window().3
+            );
+            let max = self.scroll.max_offset().y.as_f32();
+            let view = self.scroll.bounds().size.height.as_f32();
+            match self.paged_at {
+                None => {
+                    // Pages overlap a little so window corners never land in the stitch.
+                    let y = (self.shot as f32 * (view - 60.)).min(max);
+                    self.scroll.set_offset(point(px(0.), px(-y)));
+                    self.offsets.push(y);
+                    self.paged_at = Some(Instant::now());
+                    return;
+                }
+                Some(at) if at.elapsed().as_secs_f32() < 0.3 => return,
+                Some(at) if at.elapsed().as_secs_f32() < 0.5 => {
+                    if self.offsets.len() == self.shot + 1 {
+                        crate::demo::still(dir.join(format!("{name}-p{:02}.png", self.shot)));
+                        self.offsets.push(f32::NAN);
+                    }
+                    return;
+                }
+                Some(_) => {
+                    self.offsets.pop();
+                    let y = self.offsets[self.shot];
+                    self.shot += 1;
+                    self.paged_at = None;
+                    if y < max {
+                        return;
+                    }
+                    let meta = format!(
+                        "{{\"view\": {view}, \"max\": {max}, \"offsets\": {:?}}}",
+                        self.offsets
+                    );
+                    let _ = std::fs::write(dir.join(format!("{name}.json")), meta);
+                }
             }
         } else if done.elapsed().as_secs_f32() < 1.2 {
             return;
         }
         let mut d = self.draws.clone();
         let over = d.iter().filter(|&&x| x > 8.3).count();
+        let mut bl = self.builds.clone();
+        eprintln!(
+            "build p50 {:.2} ms p99 {:.2} ms",
+            spike_markdown::pct(&mut bl.clone(), 50.),
+            spike_markdown::pct(&mut bl, 99.)
+        );
         println!(
             "{{\"frames\": {}, \"p50\": {:.2}, \"p95\": {:.2}, \"p99\": {:.2}, \"max\": {:.2}, \"over_8_3ms\": {over}}}",
             d.len(),
