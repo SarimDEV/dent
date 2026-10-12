@@ -1,0 +1,23 @@
+[package]
+name = "spike-link"
+description = "Phase 1 spike: devices find, pair with and stream from each other directly over the LAN or Tailscale."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+futures-util = "=0.3.34"
+hex = "=0.4.3"
+hmac = "=0.12.1"
+if-addrs = "=0.15.0"
+mdns-sd = "=0.21.5"
+rand = "=0.8.8"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "=0.10.9"
+snow = "=0.9.6"
+spake2 = "=0.4.0"
+tokio = { workspace = true, features = ["net", "signal"] }
+tokio-tungstenite = "=0.26.2"
