@@ -31,3 +31,4 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0027. Project docs folder at ~/dent/projects/<project>/docs](0027-project-docs-folder.md)
 - [0028. Multiple accounts per agent](0028-multiple-agent-accounts.md)
 - [0029. Pin everything, upgrade on a calendar](0029-pin-everything.md)
+- [0030. Core runtime dependencies: tokio, serde, anyhow](0030-core-runtime-deps.md)

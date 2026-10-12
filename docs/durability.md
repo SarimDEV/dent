@@ -6,7 +6,7 @@ dent borrows every hard engine and owns only the thin layers that make it dent: 
 
 | Area | Decision | If it breaks |
 | --- | --- | --- |
-| Claude Code | Drive `claude -p` stream-json directly; detect features from `system/init` capabilities, not version numbers ([headless docs](https://code.claude.com/docs/en/headless)) | Fall back to a small Node sidecar on the official Agent SDK |
+| Claude Code | Drive `claude -p` stream-json directly; detect features from the `initialize` control response and `system/init` (commands, models, tools, version), not version numbers alone ([headless docs](https://code.claude.com/docs/en/headless)) | Fall back to a small Node sidecar on the official Agent SDK |
 | Codex | `codex app-server` over stdio, v2 methods only, no experimental API; Rust types generated in CI from its JSON schema at a pinned version ([app-server docs](https://learn.chatgpt.com/docs/app-server)) | Schema diff on every bump shows exactly what changed |
 | Other agents | One ACP v1 client for everything else, crate pinned ([ACP](https://agentclientprotocol.com/protocol/initialization)) | ACP v2 is a draft; support v1 and v2 side by side when it lands |
 | Desktop UI | GPUI through gpui-component, with the GPUI snapshot pinned exactly and upgraded monthly ([gpui-component](https://github.com/longbridge/gpui-component)) | All logic lives in GPUI-free crates; Tauri is the escape hatch for the view layer |

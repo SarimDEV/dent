@@ -4,7 +4,7 @@ The biggest risk is Anthropic's terms for third-party apps that use subscription
 
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
-| Claude limits only reach status line scripts ([example](https://wmedia.es/en/tips/claude-code-usage-limit-status-line)), and have dropped out of some versions ([issue](https://github.com/anthropics/claude-code/issues/45133)) | Always-visible Claude limits may be partial or unavailable | Phase 0 spike: check what headless stream-json reports; try a daemon-installed status line command that forwards to the daemon; show "unknown" rather than guessing |
+| ~~Claude limits only reach status line scripts~~ Resolved in [spike 01](spikes/01-claude-code-stream-json.md): headless stream-json emits `rate_limit_event` with five-hour and seven-day utilisation and reset times | — | Keep the last value per account; show "unknown" until the first event |
 | Agent protocols change: Codex app-server is documented as unstable, Claude Code's stream format moves too | Broken sessions after an agent update | Pinned agent versions per daemon release, contract tests, generated Codex types |
 | Provider terms for driving subscription CLIs from a third-party app | Public release could conflict with a provider's terms | Drive only the official CLIs with their own login; review each provider's terms before going public |
 | GPUI is pre-1.0 with thin docs; Linux and Windows support is newer than macOS | Slower UI work, upstream breakage | Pin a Zed commit, keep UI code separate from the client core, spike the hardest views (chat list, diff) in phase 0 |

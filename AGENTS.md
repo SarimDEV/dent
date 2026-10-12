@@ -37,7 +37,7 @@ All under `crates/`. Package names are prefixed `dent-`.
 | `cli` | `dent` binary: scripts, agents, `dent daemon install`, `dent doctor` | `client-core`, `protocol` |
 | `hub` | Hosted/self-hosted hub. **AGPL-3.0**; everything else is MIT | `protocol` |
 
-`spikes/` holds throwaway Phase 1 experiments (each its own crate in the workspace). `ios/` (Xcode) and `relay/` (deployment files) come later.
+`spikes/` holds throwaway Phase 1 experiments (each its own crate, named `spike-*`, with a findings note in `docs/spikes/`). Spikes may use any dependency without a decision record and are excluded from the default build; production crates never depend on them. `ios/` (Xcode) and `relay/` (deployment files) come later.
 
 Boundaries enforced by `just verify`: logic crates never import GPUI.
 

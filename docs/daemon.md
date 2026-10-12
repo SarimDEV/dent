@@ -8,7 +8,7 @@ Each agent sits behind one `AgentDriver` trait: start a session, send a user mes
 
 | Driver | How it runs | Approvals | Limits |
 | --- | --- | --- | --- |
-| Claude Code | `claude -p --input-format stream-json --output-format stream-json --verbose` as a long-lived child process; NDJSON in and out ([docs](https://docs.claude.com/en/docs/claude-code/headless)) | Tool-permission requests over the same stream's control channel, answered by the daemon | Only exposed through the status line JSON (`rate_limits.five_hour`, `rate_limits.seven_day`); see Risks |
+| Claude Code | `claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-prompt-tool stdio` as a long-lived child process; NDJSON in and out ([docs](https://docs.claude.com/en/docs/claude-code/headless)) | `control_request` `can_use_tool` on stdout, answered with a `control_response` (`allow` with `updatedInput`, or `deny` with a message the agent sees) | `rate_limit_event` with `five_hour` and `seven_day` utilisation and reset times; sent when it changes, not every turn, so the daemon keeps the last value |
 | Codex | `codex app-server`: JSON-RPC over stdio, Codex's own rich-client interface ([app-server docs](https://learn.chatgpt.com/docs/app-server)) | Server-to-client `item/commandExecution/requestApproval` and `item/fileChange/requestApproval` ([types](https://docs.rs/codex-codes/0.129.1/codex_codes/protocol/)) | `account/rateLimits/read` plus the `account/rateLimits/updated` notification |
 
 - Pin a tested version of each agent CLI per daemon release, and run a contract test suite against every new agent version before bumping. Codex's protocol is documented as unstable; Claude Code's stream format changes too.
@@ -124,13 +124,13 @@ Subagent output is kept as a tree, not flattened into the parent's stream.
 
 ## Turn status and notifications
 
-You are notified when an agent is blocked or has finished and is waiting for your next prompt, and never while it is just waiting on something it started. Status comes from the agents' own signals first; exact fields are confirmed in the phase 0 spike.
+You are notified when an agent is blocked or has finished and is waiting for your next prompt, and never while it is just waiting on something it started. Status comes from the agents' own signals first. Claude Code's fields were confirmed in [spike 01](spikes/01-claude-code-stream-json.md); an interrupted turn ends with `result` subtype `error_during_execution` and `terminal_reason` `aborted_streaming`, which is not an error and not a notification.
 
 | Situation | Claude Code signal | Codex signal | Notify |
 | --- | --- | --- | --- |
 | Working, including waiting on a command or build it started | Stream events still flowing, or a tool call without its result | Item events in progress | No |
-| Blocked on an approval | Permission request on the control channel | `item/commandExecution/requestApproval`, `item/fileChange/requestApproval` | Yes, time-sensitive |
-| Turn ended while background work it started is still running | Background shell or subagent still tracked | Not applicable | No; notify once that work ends and the turn is truly over |
+| Blocked on an approval | `control_request` with subtype `can_use_tool` | `item/commandExecution/requestApproval`, `item/fileChange/requestApproval` | Yes, time-sensitive |
+| Turn ended while background work it started is still running | `result` arrives while `system/background_tasks_changed` lists tasks; when they finish, `task_notification` arrives and the agent starts a follow-up turn on its own (a new `system/init`) | Not applicable | No; notify when the follow-up turn's `result` arrives with no background tasks left |
 | Finished, waiting for your next prompt | `result` message ends the turn | `turn/completed` | Yes |
 | Error or usage limit hit | Error result or limit event | Error notification | Yes |
 
