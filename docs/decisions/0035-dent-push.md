@@ -30,7 +30,11 @@ Apple accepts pushes only when they're signed with the app's own key, and iOS ca
   - At around 50 notifications per active person per day, the free plan covers about 2,000 people.
   - The $5 plan covers about 6,000, and each further million requests costs well under a dollar.
   - The per-handle limits cap what any one person or abuser can spend.
-- **Price:** see Risks, open questions.
+- **Price:** free, with fair-use limits per phone (decided 2026-10-12). The paid tier stays for the relay and hub, which carry real bandwidth costs.
+- **Running out is always visible, never silent:**
+  - A phone over its limit: dent-push answers the daemon with "limited until <time>". The apps show "Phone notifications paused until 9:00, daily limit reached" in Settings › Notifications and once in the session. Everything still shows in the app.
+  - dent-push down or over its Cloudflare plan: daemons get an error or no answer, retry with backoff, and the apps show "Phone notifications are unavailable right now".
+  - For whoever runs it: Cloudflare usage alerts at 80% of the plan, and the worker counts sends per day, so moving to the $5 plan happens before anyone notices.
 - **Needs** an Apple developer account and a Cloudflare account. Keys live in Workers secrets.
 - **Unverified:** whether Workers' outbound fetch reaches APNs, which requires HTTP/2. A Workers-compatible APNs client exists, which suggests yes. This is the first thing to check, and a tiny VM is the fallback.
 - **A leaked handle** lets someone send rate-limited, undecryptable pushes to that one phone until it re-registers. Removing a device in dent deletes its handle on every daemon.

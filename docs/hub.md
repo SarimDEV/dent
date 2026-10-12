@@ -65,7 +65,7 @@ Phone notifications come from dent-push, a small stateless service on Cloudflare
 - A daemon encrypts each notification for the phone and sends it to dent-push with the handle; dent-push forwards it to Apple. It sees a token and the timing, never the content.
 - A notification service extension on the phone decrypts and shows the real text. Allow and Deny work from the notification.
 - Approvals that block an agent are sent as time-sensitive, so they break through Focus modes.
-- Limits per handle cap what any one phone, or anyone abusing a handle, can send.
+- Limits per handle cap what any one phone, or anyone abusing a handle, can send. A phone over its limit, or dent-push being unavailable, is shown plainly in the apps, never silently dropped.
 - Desktop clients use native OS notifications directly.
 
 ## Client cache
@@ -85,7 +85,7 @@ The local product is free; hosted conveniences are paid. Users always bring thei
 | --- | --- | --- |
 | Daemon, desktop and iPhone apps | Everything over LAN, Tailscale or a self-hosted hub | Free |
 | Hosted hub | Sign-in, device list, connections, relay, shared state, fleet updates | Free for up to 3 machines, then a subscription |
-| dent-push | Phone notifications and Live Activities | See Risks: open question |
+| dent-push | Phone notifications and Live Activities | Free, with fair-use limits per phone |
 | Web client | Open sessions from any browser, served by the hub | Included with the hub |
 | Encrypted session backup | History survives a lost or torn-down machine; new devices get full history at once | Subscription |
 | Hosted cloud machines | One click runs a session on a cloud box that auto-joins and tears down when idle | Usage-based |

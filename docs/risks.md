@@ -25,10 +25,9 @@ The biggest risk is Anthropic's terms for third-party apps that use subscription
 - **Project docs folder:** \~/dent/projects/\<project>/docs on every machine hosting the project, synced between them.
 - **Multiple accounts per agent:** yes, with limits shown per account.
 - **Connectivity:** LAN and Tailscale, direct and encrypted end to end, with code pairing on the LAN and automatic trust on your own Tailscale account; a relay comes later, free for up to 3 devices ([0033](decisions/0033-direct-websocket-hub-on-hold.md), [spike 05](spikes/05-direct-links.md)).
-- **Phone notifications:** dent-push, a stateless Cloudflare Worker separate from the hub, forwarding end-to-end encrypted notifications ([0035](decisions/0035-dent-push.md)).
+- **Phone notifications:** dent-push, a stateless Cloudflare Worker separate from the hub, forwarding end-to-end encrypted notifications. Free with fair-use limits per phone; hitting a limit is always shown, never silent ([0035](decisions/0035-dent-push.md)).
 - **License:** MIT for the daemon, session holder, client core, desktop, iPhone and web apps and the CLI; AGPL-3.0 for the hub, so anyone running a modified hosted copy must publish their changes.
 
 **Open questions**
 
 - **Hub price** above the free tier: deferred until closer to launch.
-- **dent-push price:** free with fair-use limits per phone, or part of the paid tier. It costs nothing up to about 2,000 active people and $5 a month up to about 6,000 ([0035](decisions/0035-dent-push.md)).
