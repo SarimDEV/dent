@@ -46,6 +46,8 @@ async fn main() -> Result<()> {
                 ),
                 agent_ms: get("--agent-ms").and_then(|s| s.parse().ok()).unwrap_or(30),
                 version: get("--version"),
+                agent_style: get("--agent-style").unwrap_or_else(|| "plain".into()),
+                push_url: get("--push-url"),
             })
             .await
         }
@@ -61,6 +63,7 @@ async fn main() -> Result<()> {
         Some("agent") => daemon::fake_agent(
             &get("--name").unwrap_or_default(),
             get("--ms").and_then(|s| s.parse().ok()).unwrap_or(30),
+            &get("--style").unwrap_or_default(),
         ),
         Some("test") => match args.get(1).map(String::as_str) {
             Some("edges") => spike_link::edges::run().await,
@@ -79,7 +82,7 @@ async fn main() -> Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: spike-link daemon --state DIR [--name N] [--lan ADDR] [--tailnet ADDR] [--proto N] [--pair-ttl S] [--agent-ms MS] [--version V] | test [links|edges] | tailscale"
+                "usage: spike-link daemon --state DIR [--name N] [--lan ADDR] [--tailnet ADDR] [--proto N] [--pair-ttl S] [--agent-ms MS] [--agent-style plain|markdown] [--push-url URL] [--version V] | test [links|edges] | tailscale"
             );
             Ok(())
         }

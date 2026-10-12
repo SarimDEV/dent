@@ -36,6 +36,8 @@ Apple accepts pushes only when they're signed with the app's own key, and iOS ca
   - dent-push down or over its Cloudflare plan: daemons get an error or no answer, retry with backoff, and the apps show "Phone notifications are unavailable right now".
   - For whoever runs it: Cloudflare usage alerts at 80% of the plan, and the worker counts sends per day, so moving to the $5 plan happens before anyone notices.
 - **Needs** an Apple developer account and a Cloudflare account. Keys live in Workers secrets.
-- **Unverified:** whether Workers' outbound fetch reaches APNs, which requires HTTP/2. A Workers-compatible APNs client exists, which suggests yes. This is the first thing to check, and a tiny VM is the fallback.
+- **Built and tested locally** in [spike 07](../spikes/07-client-core.md): [push/](../../push), 15 checks under wrangler against a stand-in for Apple. The daemon's notices travel end to end to the iOS simulator.
+- **The per-phone limits cost a Durable Object request per send,** as well as the Worker request. On the free plan both allow 100,000 a day, so the estimate above stands. On the $5 plan, Durable Object requests beyond 1 million a month are $0.15 per million.
+- **Unverified:** whether Workers' outbound fetch reaches APNs, which requires HTTP/2. A Workers-compatible APNs client exists, which suggests yes. Checking needs a deployed Worker and an Apple developer account; a tiny VM is the fallback.
 - **A leaked handle** lets someone send rate-limited, undecryptable pushes to that one phone until it re-registers. Removing a device in dent deletes its handle on every daemon.
 - Desktop clients keep using native OS notifications directly.

@@ -151,6 +151,8 @@ impl Daemon {
                     self.me.name.clone(),
                     "--ms".into(),
                     self.agent_ms.to_string(),
+                    "--style".into(),
+                    self.agent_style.clone(),
                     "--session".into(),
                     session.into(),
                 ];
@@ -308,6 +310,7 @@ impl Daemon {
             }
             if l.end {
                 self.append_from(&session, "end", "", src).await?;
+                self.notify_finished(&session).await;
                 self.stop_when_idle(id.to_string(), session.clone());
             }
         }
@@ -317,7 +320,7 @@ impl Daemon {
 
 /// The fake agent process: reads prompts on stdin, streams each reply a few
 /// words at a time, and exits when stdin closes.
-pub fn fake_agent(name: &str, ms: u64) -> Result<()> {
+pub fn fake_agent(name: &str, ms: u64, style: &str) -> Result<()> {
     use std::io::{BufRead, Write};
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
@@ -327,13 +330,17 @@ pub fn fake_agent(name: &str, ms: u64) -> Result<()> {
             .ok()
             .and_then(|v| v["prompt"].as_str().map(str::to_string))
             .unwrap_or_default();
-        let reply = format!(
-            "Running on {name}. You asked: \"{prompt}\". This reply streams from the other \
+        let reply = if style == "markdown" {
+            markdown_reply(name, &prompt)
+        } else {
+            format!(
+                "Running on {name}. You asked: \"{prompt}\". This reply streams from the other \
              machine a few words at a time, the way an agent's text arrives, so the \
              link can be checked without spending any usage. Each piece is logged \
              with a sequence number before it is sent, so a client that drops off \
              picks up exactly where it left off."
-        );
+            )
+        };
         let words: Vec<&str> = reply.split_inclusive(' ').collect();
         let (mut i, mut step) = (0, 0u64);
         while i < words.len() {
@@ -359,4 +366,55 @@ pub fn fake_agent(name: &str, ms: u64) -> Result<()> {
         out.flush()?;
     }
     Ok(())
+}
+
+/// What a real agent's answer looks like: headings, emphasis, a list, code
+/// and a quote, so clients can be checked drawing each kind of block.
+fn markdown_reply(name: &str, prompt: &str) -> String {
+    format!(
+        "Running on **{name}**. You asked: *{prompt}*\n\n\
+         ## What I found\n\n\
+         The retry loop in `sync.rs` reads the cursor *after* the reset, so a \
+         reconnect can resume from the wrong place.\n\n\
+         1. Read the cursor once, before the loop\n\
+         2. Pass it into `resume`\n\
+         3. Add a test that drops the link mid-reply\n\n\
+         ```rust\n\
+         fn resume(after: u64) -> Cursor {{\n    Cursor::from(after)\n}}\n\
+         ```\n\n\
+         > Each piece is logged with a sequence number before it's sent, so \
+         a client that drops off picks up exactly where it left off.\n\n\
+         That's the whole fix: **three lines** and a test."
+    )
+}
+
+impl Daemon {
+    /// Tell the phones a reply finished, with its first line.
+    pub(super) async fn notify_finished(&self, session: &str) {
+        let text: String = {
+            let sessions = self.sessions.lock().await;
+            let Some(s) = sessions.get(session) else {
+                return;
+            };
+            let mut parts: Vec<&str> = s
+                .events
+                .iter()
+                .rev()
+                .take_while(|e| e.kind != "user")
+                .filter(|e| e.kind == "delta")
+                .map(|e| e.text.as_str())
+                .collect();
+            parts.reverse();
+            parts.concat()
+        };
+        self.push.send(
+            "finished",
+            session,
+            spike_core::push::Notice {
+                title: format!("{} finished", self.me.name),
+                body: super::push::summary(&text),
+                session: session.into(),
+            },
+        );
+    }
 }

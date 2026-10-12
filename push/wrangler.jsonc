@@ -1,0 +1,21 @@
+// dent-push on Cloudflare Workers (decision 0035). Secrets, set with
+// `wrangler secret put`: SEAL_KEYS, SEAL_CURRENT, APNS_KEY, APNS_KEY_ID,
+// APNS_TEAM_ID. For local runs they go in .dev.vars (never committed).
+{
+  "name": "dent-push",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-01",
+  "durable_objects": {
+    "bindings": [{ "name": "LIMITER", "class_name": "Limiter" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Limiter"] }],
+  // Per sending address, on top of the per-phone limits.
+  "ratelimits": [
+    { "name": "PER_IP", "namespace_id": "1001", "simple": { "limit": 600, "period": 60 } }
+  ],
+  "vars": {
+    "APNS_TOPIC": "dev.dent.app",
+    "BURST": "30",
+    "DAILY": "500"
+  }
+}

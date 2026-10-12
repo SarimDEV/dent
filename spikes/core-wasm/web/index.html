@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>dent</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="brand">dent</div>
+    <div class="me label" id="me"></div>
+  </header>
+
+  <!-- One machine: its row, then whichever step it's at. -->
+  <section class="machine" id="machine" hidden>
+    <div class="row">
+      <span class="sq" id="sq"></span>
+      <div class="row-text">
+        <div class="name" id="name"></div>
+        <div class="sub" id="sub"></div>
+      </div>
+    </div>
+    <div class="notice" id="notice" hidden></div>
+  </section>
+
+  <section class="step" id="connect" hidden>
+    <div class="label">Add a machine</div>
+    <p class="hint">Run dent on the machine, then enter its address on your network or Tailscale.</p>
+    <form class="field" id="connect-form">
+      <input id="addr" class="input mono" placeholder="192.168.0.39:7480" autocomplete="off" spellcheck="false">
+      <button class="btn" id="connect-btn" type="submit">Connect</button>
+    </form>
+  </section>
+
+  <section class="step" id="code" hidden>
+    <div class="label">Pair</div>
+    <p class="hint" id="code-hint"></p>
+    <form class="field" id="code-form">
+      <input id="code-input" class="input code" inputmode="numeric" maxlength="6" placeholder="000000" autocomplete="one-time-code">
+      <button class="btn" id="pair-btn" type="submit">Pair</button>
+    </form>
+    <p class="error" id="code-error" hidden></p>
+  </section>
+
+  <main class="chat" id="chat" hidden></main>
+
+  <form class="composer" id="composer" hidden>
+    <textarea id="prompt" rows="1" placeholder="Ask studio…"></textarea>
+    <button class="btn" id="send" type="submit">Send</button>
+  </form>
+</div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

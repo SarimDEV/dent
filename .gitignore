@@ -2,3 +2,15 @@
 .DS_Store
 *.local.*
 /media
+# Built by spikes/core-wasm/build.sh and spikes/core-ffi/build.sh
+/spikes/core-wasm/web/pkg
+/spikes/core-wasm/web/fonts
+/spikes/core-ffi/ios/build
+/spikes/core-ffi/ios/Generated
+/spikes/core-ffi/ios/*.xcodeproj
+node_modules
+.wrangler
+.dev.vars
+# Written by xcodegen from project.yml
+/spikes/core-ffi/ios/*/Info.plist
+/spikes/core-ffi/ios/*/*.entitlements

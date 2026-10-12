@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+base64 = "=0.22.1"
 futures-util = "=0.3.34"
 hex = "=0.4.3"
 hmac = "=0.12.1"
@@ -20,6 +21,7 @@ serde_json.workspace = true
 sha2 = "=0.10.9"
 snow = "=0.9.6"
 spike-holder = { path = "../holder" }
+spike-core = { path = "../core" }
 spake2 = "=0.4.0"
 tokio = { workspace = true, features = ["net", "signal"] }
 tokio-tungstenite = "=0.26.2"

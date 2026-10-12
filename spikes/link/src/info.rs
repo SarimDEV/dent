@@ -194,6 +194,7 @@ pub fn health(running: u32) -> Health {
         battery,
         running,
         uptime_s,
+        push: None,
     }
 }
 

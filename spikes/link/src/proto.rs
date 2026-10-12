@@ -43,6 +43,12 @@ pub enum Up {
         session: String,
         after: u64,
     },
+    /// A phone's dent-push handle and the key its notifications are
+    /// encrypted with (hex).
+    Push {
+        handle: String,
+        key: String,
+    },
     /// This device removed the daemon: forget it on that side too.
     Forget,
     Ping {
@@ -154,6 +160,10 @@ pub struct Health {
     pub battery: Option<Battery>,
     pub running: u32,
     pub uptime_s: u64,
+    /// Why phone notifications aren't going out, when they aren't:
+    /// "limited:<until ms>" or "unavailable".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]

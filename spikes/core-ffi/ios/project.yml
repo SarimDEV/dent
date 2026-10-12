@@ -1,0 +1,107 @@
+# The spike's iPhone app, generated with xcodegen by ../build.sh.
+name: Dent
+options:
+  bundleIdPrefix: dev.dent
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    DEVELOPMENT_TEAM: ""
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    GENERATE_INFOPLIST_FILE: NO
+targets:
+  Dent:
+    type: application
+    platform: iOS
+    sources:
+      - Dent
+      - Generated/swift
+      - Notify/Seal.swift
+      - path: ../../../assets/fonts
+        buildPhase: resources
+        includes: ["*.ttf"]
+    dependencies:
+      - framework: build/DentCore.xcframework
+        embed: false
+      - sdk: Security.framework
+      - target: Notify
+    info:
+      path: Dent/Info.plist
+      properties:
+        CFBundleDisplayName: dent
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UIApplicationSupportsIndirectInputEvents: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIAppFonts:
+          - Literata-Regular.ttf
+          - Literata-Medium.ttf
+          - Literata-Italic.ttf
+          - Literata-MediumItalic.ttf
+          - IBMPlexSans-Regular.ttf
+          - IBMPlexSans-Medium.ttf
+          - CommitMono-400-Regular.ttf
+          - InstrumentSerif-Regular.ttf
+        NSBonjourServices: [_dent._tcp]
+        NSLocalNetworkUsageDescription: dent finds your machines on this network and talks to them directly.
+        # The link is encrypted end to end inside the WebSocket (Noise), so
+        # plain ws:// is fine; App Transport Security needs telling.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSAllowsArbitraryLoads: true
+        UIBackgroundModes: [remote-notification]
+    entitlements:
+      path: Dent/Dent.entitlements
+      properties:
+        aps-environment: development
+        com.apple.security.application-groups: [group.dev.dent.spike07]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dent.spike07
+        TARGETED_DEVICE_FAMILY: "1"
+  Notify:
+    type: app-extension
+    platform: iOS
+    sources: [Notify]
+    dependencies:
+      - sdk: CryptoKit.framework
+    info:
+      path: Notify/Info.plist
+      properties:
+        CFBundleDisplayName: dent notifications
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.usernotifications.service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).NotificationService
+    entitlements:
+      path: Notify/Notify.entitlements
+      properties:
+        com.apple.security.application-groups: [group.dev.dent.spike07]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dent.spike07.notify
+  DentUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    dependencies:
+      - target: Dent
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.dent.spike07.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Dent
+schemes:
+  Dent:
+    build:
+      targets:
+        Dent: all
+        DentUITests: [test]
+    test:
+      targets: [DentUITests]

@@ -1,0 +1,10 @@
+{
+  "name": "dent-spike-core-web",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Spike 07: the client core in the browser. Tests drive the installed Chrome; no browser download.",
+  "devDependencies": {
+    "playwright-core": "1.55.0"
+  }
+}

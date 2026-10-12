@@ -1,0 +1,19 @@
+[package]
+name = "spike-core-test"
+description = "Phase 1 spike: drives the I/O-free client core over real sockets against spike 05's daemon."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+futures-util = "=0.3.34"
+serde_json.workspace = true
+spike-core = { path = "../core" }
+spike-link = { path = "../link" }
+tokio = { workspace = true, features = ["net"] }
+tokio-tungstenite = "=0.26.2"
+
+[lints]
+workspace = true

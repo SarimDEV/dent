@@ -1,0 +1,18 @@
+{
+  "name": "dent-push",
+  "private": true,
+  "description": "Phone notifications for dent: forwards end-to-end encrypted notices to Apple. Stores nothing.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "check": "tsc --noEmit",
+    "test": "node test/run.mjs",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "4.20260702.1",
+    "typescript": "5.9.3",
+    "wrangler": "4.70.0"
+  }
+}

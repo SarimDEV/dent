@@ -2,6 +2,7 @@
 //! pairs with a code, runs a fake agent and serves sessions from a log.
 
 mod agents;
+mod push;
 pub use agents::{fake_agent, holder_dir};
 
 use std::collections::{HashMap, HashSet};
@@ -37,6 +38,10 @@ pub struct Config {
     pub agent_ms: u64,
     /// Reported dent version, overridable to show an upgrade.
     pub version: Option<String>,
+    /// "markdown" makes the fake agent answer the way a real one formats.
+    pub agent_style: String,
+    /// dent-push, for phone notifications when a reply finishes.
+    pub push_url: Option<String>,
 }
 
 struct Session {
@@ -65,6 +70,8 @@ struct Daemon {
     proto: (u32, u32),
     pair_ttl: Duration,
     agent_ms: u64,
+    agent_style: String,
+    push: push::Push,
     window: Mutex<Option<Window>>,
     sessions: Mutex<HashMap<String, Session>>,
     prompts: Mutex<HashMap<String, String>>,
@@ -123,6 +130,8 @@ pub async fn run(cfg: Config) -> Result<()> {
         proto: cfg.proto,
         pair_ttl: cfg.pair_ttl,
         agent_ms: cfg.agent_ms,
+        agent_style: cfg.agent_style.clone(),
+        push: push::Push::new(cfg.push_url.clone(), &cfg.state),
         window: Mutex::new(None),
         sessions: Mutex::new(HashMap::new()),
         prompts: Mutex::new(HashMap::new()),
@@ -543,6 +552,7 @@ impl Daemon {
                         .await?;
                 }
                 Up::Bulk { session, n } => self.bulk(&session, n).await?,
+                Up::Push { handle, key: k } => self.push.register(&fingerprint(&key), handle, k),
                 Up::Forget => {
                     Trust::load(&self.state).remove(&fingerprint(&key))?;
                     break Ok(());
@@ -656,14 +666,19 @@ impl Daemon {
     /// Health every few seconds to a watcher, and at once when the number
     /// of agents running changes.
     async fn health(&self, tx: Arc<Mutex<Sender>>) -> Result<()> {
-        let mut sent: Option<(u32, Instant)> = None;
+        let mut sent: Option<(u32, Option<String>, Instant)> = None;
         loop {
             let running = self.busy.lock().map(|b| b.len() as u32).unwrap_or(0);
-            let due = sent.is_none_or(|(n, at)| n != running || at.elapsed() >= HEALTH_EVERY);
+            let push = self.push.state();
+            let due = sent.as_ref().is_none_or(|(n, p, at)| {
+                *n != running || *p != push || at.elapsed() >= HEALTH_EVERY
+            });
             if due {
-                let h = tokio::task::spawn_blocking(move || crate::info::health(running)).await?;
+                let mut h =
+                    tokio::task::spawn_blocking(move || crate::info::health(running)).await?;
+                h.push = push.clone();
                 tx.lock().await.send(&Down::Health(h)).await?;
-                sent = Some((running, Instant::now()));
+                sent = Some((running, push, Instant::now()));
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
@@ -747,7 +762,12 @@ impl Daemon {
                 seq: s.events.len() as u64 + 1,
                 t: now_ms(),
                 kind: "delta".into(),
-                text: format!("event {i} with a line of text like an agent writes "),
+                // A paragraph every ten events, as real replies have.
+                text: if i % 10 == 9 {
+                    format!("event {i} with a line of text like an agent writes.\n\n")
+                } else {
+                    format!("event {i} with a line of text like an agent writes ")
+                },
                 src: None,
             };
             writeln!(s.log, "{}", serde_json::to_string(&ev)?)?;

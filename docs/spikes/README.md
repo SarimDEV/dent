@@ -10,4 +10,4 @@ Each spike is a small crate under `spikes/` plus a findings note here.
 | 04 | [RaTeX, merman and streaming Markdown against real transcripts](04-markdown-math-mermaid.md) | Done |
 | 05 | [Direct device links over the LAN and Tailscale, with pairing](05-direct-links.md) | Done |
 | 06 | [The session holder surviving a daemon upgrade](06-session-holder.md) | Done |
-| 07 | The client core built for iOS and WebAssembly | Next |
+| 07 | [The client core built for iOS and WebAssembly, and dent-push](07-client-core.md) | Done |
