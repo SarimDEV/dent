@@ -15,13 +15,20 @@ use std::time::Instant;
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Tag, TagEnd};
 use ratex_types::display_item::{DisplayItem, DisplayList};
 use ratex_types::path_command::PathCommand;
 use spike_markdown::stream::{Block, Streamer};
 
 use crate::ds::{CODE, LABEL, READING, Typed, radius, space};
+
+#[path = "chrome.rs"]
+mod chrome;
+#[path = "verify.rs"]
+mod verify;
+
 use crate::theme::{self, Theme};
+use chrome::{CopyText, Probes, TableData};
 
 /// Written for the spike; no transcript content.
 pub const MESSAGE: &str = r#"## Why the frame budget holds
@@ -213,10 +220,29 @@ pub struct Specimen {
     block_ix: usize,
     hs_count: usize,
     builds: Vec<f64>,
+    tables: HashMap<usize, Rc<TableData>>,
+    table_lists: HashMap<usize, ListState>,
+    panel: Option<usize>,
+    panel_list: ListState,
+    copied: Option<(String, Instant)>,
+    probes: Probes,
+    verify: Option<verify::Verify>,
+    copy_texts: HashMap<String, CopyText>,
+    /// Committed tables, measured once, by where their block starts.
+    table_cache: HashMap<usize, Rc<TableData>>,
+    block_start: usize,
+    /// How many frames had been drawn when streaming finished.
+    draws_at_done: Option<usize>,
 }
 
 impl Specimen {
-    pub fn new(dark: bool, bench: bool, shots: Option<PathBuf>, stress: bool) -> Self {
+    pub fn new(
+        dark: bool,
+        bench: bool,
+        shots: Option<PathBuf>,
+        stress: bool,
+        verify: bool,
+    ) -> Self {
         Self {
             message: if stress {
                 Box::leak(self::stress().into_boxed_str())
@@ -224,7 +250,13 @@ impl Specimen {
                 MESSAGE
             },
             // The stress page streams too, just fast.
-            rate: if stress { 20_000. } else { RATE },
+            rate: if verify {
+                3_000.
+            } else if stress {
+                20_000.
+            } else {
+                RATE
+            },
             theme: if dark {
                 Theme::carbon()
             } else {
@@ -248,6 +280,17 @@ impl Specimen {
             block_ix: 0,
             hs_count: 0,
             builds: Vec::new(),
+            tables: HashMap::new(),
+            table_lists: HashMap::new(),
+            panel: None,
+            panel_list: ListState::new(0, ListAlignment::Top, px(200.)),
+            copied: None,
+            probes: Probes::default(),
+            verify: verify.then(verify::Verify::default),
+            copy_texts: HashMap::new(),
+            table_cache: HashMap::new(),
+            block_start: 0,
+            draws_at_done: None,
         }
     }
 
@@ -325,6 +368,7 @@ impl Specimen {
             if self.done_at.is_none() {
                 self.streamer.finish();
                 self.done_at = Some(Instant::now());
+                self.draws_at_done = Some(self.draws.len());
             }
             return false;
         }
@@ -341,11 +385,13 @@ impl Specimen {
 }
 
 /// Inline content of one paragraph-like block, ready for a StyledText.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Inline {
     text: String,
     runs: Vec<TextRun>,
     math: Vec<(usize, Rc<DisplayList>)>,
+    /// The text as written, with maths as `$…$`, for copying.
+    plain: String,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -383,6 +429,7 @@ impl Inline {
             f.style = FontStyle::Italic;
         }
         self.text.push_str(s);
+        self.plain.push_str(s);
         self.runs.push(TextRun {
             len: s.len(),
             font: f,
@@ -402,7 +449,8 @@ impl Inline {
 
     /// Reserve exactly the formula's width with invisible word characters, so
     /// the line never breaks inside it, and remember where to draw it.
-    fn push_math(&mut self, list: Rc<DisplayList>, window: &Window, t: &Theme) {
+    fn push_math(&mut self, list: Rc<DisplayList>, src: &str, window: &Window, t: &Theme) {
+        self.plain.push_str(&format!("${src}$"));
         let width = px(list.width as f32 * INLINE_EM + 2.);
         let f = font(theme::body());
         let ts = window.text_system();
@@ -731,7 +779,7 @@ struct Frame {
 
 /// A table cell before its column width is known.
 struct Cell {
-    children: Vec<AnyElement>,
+    inline: Inline,
     natural: f32,
     min: f32,
 }
@@ -810,6 +858,10 @@ impl Specimen {
     ) -> AnyElement {
         self.closed = done;
         self.hs_count = 0;
+        self.block_start = b.range.start;
+        if done && let Some(data) = self.table_cache.get(&b.range.start).cloned() {
+            return self.table_view(data, cx);
+        }
         let t = self.theme;
         let mut stack = vec![Frame::new(None)];
         let mut st = Style::default();
@@ -855,8 +907,9 @@ impl Specimen {
                                 }
                             }
                             (f.natural, f.min) = measure(&f.inline, window);
+                        } else {
+                            f.flush(&t);
                         }
-                        f.flush(&t);
                         let el = self.finish(f, &code, &code_lang, window, cx);
                         if let Some(parent) = stack.last_mut() {
                             match el {
@@ -905,7 +958,7 @@ impl Specimen {
                     }
                     if let Some(top) = stack.last_mut() {
                         match list {
-                            Some(l) => top.inline.push_math(l, window, &t),
+                            Some(l) => top.inline.push_math(l, s, window, &t),
                             None => {
                                 top.inline
                                     .push(&format!("${s}$"), Style { code: true, ..st }, &t)
@@ -916,8 +969,8 @@ impl Specimen {
                 Event::DisplayMath(s) => {
                     let list = self.typeset(s, true);
                     let el = match list {
-                        Some(l) => self.display_math(l, &t),
-                        None => self.code_block(s, "tex"),
+                        Some(l) => self.display_math(l, s, cx),
+                        None => self.code_block(s, "tex", cx),
                     };
                     if let Some(top) = stack.last_mut() {
                         top.flush(&t);
@@ -1039,21 +1092,21 @@ impl Specimen {
                     Built::El(
                         div()
                             .opacity(0.5)
-                            .child(self.code_block(code, lang))
+                            .child(self.code_block(code, lang, cx))
                             .into_any_element(),
                     )
                 } else {
-                    Built::El(self.code_block(code, lang))
+                    Built::El(self.code_block(code, lang, cx))
                 }
             }
             Some(Tag::TableCell) => Built::Cell(Cell {
-                children: f.children,
+                inline: f.inline,
                 natural: f.natural,
                 min: f.min,
             }),
             Some(Tag::TableHead) => Built::Row(f.rows.into_iter().flatten().collect()),
             Some(Tag::TableRow) => Built::Row(f.rows.into_iter().flatten().collect()),
-            Some(Tag::Table(aligns)) => Built::El(self.table(f.rows, &aligns)),
+            Some(Tag::Table(aligns)) => Built::El(self.table(f.rows, &aligns, cx)),
             _ => Built::El(div().children(f.children).into_any_element()),
         }
     }
@@ -1068,25 +1121,31 @@ impl Specimen {
         }) {
             // Shrink to fit the column, but never so far that labels get
             // unreadable; past that the diagram scrolls sideways.
-            Some(Diagram::Ready(img_, w, h)) => self.hscroll(
-                div()
-                    .w_full()
-                    .min_w(px(w * DIAGRAM_MIN_SCALE))
-                    .flex()
-                    .justify_center()
-                    .child(
-                        img(ImageSource::Render(img_))
-                            .w_full()
-                            .max_w(px(w))
-                            .aspect_ratio(w / h),
-                    ),
-                t.surface,
-            ),
+            Some(Diagram::Ready(img_, w, h)) => {
+                let n = self.hs_count;
+                let body = self.hscroll(
+                    div()
+                        .w_full()
+                        .min_w(px(w * DIAGRAM_MIN_SCALE))
+                        .flex()
+                        .justify_center()
+                        .child(
+                            img(ImageSource::Render(img_))
+                                .w_full()
+                                .max_w(px(w))
+                                .aspect_ratio(w / h),
+                        ),
+                    t.surface,
+                );
+                let key = format!("copy-mermaid-{}", self.block_ix);
+                let copy = self.copy_button(key, "Copy source", chrome::text(src.to_string()), cx);
+                hover_actions(body, copy, self.block_ix, n)
+            }
             Some(Diagram::Failed(e)) => {
                 div()
                     .flex()
                     .flex_col()
-                    .child(self.code_block(src, "mermaid"))
+                    .child(self.code_block(src, "mermaid", cx))
                     .child(
                         div()
                             .ty(LABEL)
@@ -1097,7 +1156,7 @@ impl Specimen {
             .into_any_element(),
             _ => div()
                 .opacity(0.5)
-                .child(self.code_block(src, "mermaid"))
+                .child(self.code_block(src, "mermaid", cx))
                 .into_any_element(),
         }
     }
@@ -1147,6 +1206,8 @@ impl Specimen {
                     .id(SharedString::from(format!("h{}-{}", key.0, key.1)))
                     .track_scroll(&handle)
                     .overflow_x_scroll()
+                    // Vertical wheel motion belongs to the chat, never turned sideways.
+                    .restrict_scroll_to_axis()
                     .w_full()
                     .child(child),
             )
@@ -1155,11 +1216,18 @@ impl Specimen {
             .into_any_element()
     }
 
-    fn display_math(&mut self, list: Rc<DisplayList>, t: &Theme) -> AnyElement {
+    fn display_math(
+        &mut self,
+        list: Rc<DisplayList>,
+        src: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.theme;
         let w = list.width as f32 * DISPLAY_EM;
         let h = (list.height + list.depth) as f32 * DISPLAY_EM;
         let ink = t.ink;
-        self.hscroll(
+        let n = self.hs_count;
+        let body = self.hscroll(
             div()
                 .w_full()
                 .min_w(px(w))
@@ -1178,7 +1246,10 @@ impl Specimen {
                     .h(px(h)),
                 ),
             t.surface,
-        )
+        );
+        let key = format!("copy-tex-{}-{n}", self.block_ix);
+        let copy = self.copy_button(key, "Copy TeX", chrome::text(src.trim().to_string()), cx);
+        hover_actions(body, copy, self.block_ix, n)
     }
 
     /// Inline maths too wide for a line, at text size on a line of its own.
@@ -1202,67 +1273,8 @@ impl Specimen {
         )
     }
 
-    /// Columns share one set of widths so they line up: each starts at its
-    /// natural width (capped, so long text wraps) and grows or shrinks in
-    /// proportion, never below its longest word. Past that, the table
-    /// scrolls sideways.
-    fn table(&mut self, rows: Vec<Vec<Cell>>, aligns: &[Alignment]) -> AnyElement {
-        let t = self.theme;
-        let pad = 2. * space::S2;
-        let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
-        let mut natural = vec![0f32; cols];
-        let mut min = vec![0f32; cols];
-        for row in &rows {
-            for (c, cell) in row.iter().enumerate() {
-                natural[c] = natural[c].max(cell.natural.min(CELL_MAX) + pad);
-                min[c] = min[c].max(cell.min.min(CELL_MIN_CAP) + pad);
-            }
-        }
-        for c in 0..cols {
-            min[c] = min[c].max(natural[c].min(CELL_PROSE_MIN + pad));
-            natural[c] = natural[c].max(min[c]);
-        }
-        let total_min: f32 = min.iter().sum::<f32>() + 2.;
-        let total: f32 = natural.iter().sum::<f32>() + 2.;
-        let n = rows.len();
-        let table = div()
-            .flex()
-            .flex_col()
-            .w_full()
-            .min_w(px(total_min))
-            .max_w(px(total))
-            .border_1()
-            .border_color(t.hairline)
-            .rounded(px(radius::MD))
-            .children(rows.into_iter().enumerate().map(|(i, cells)| {
-                div()
-                    .flex()
-                    .when(i == 0, |d| {
-                        d.bg(t.ink.opacity(0.04)).font_weight(FontWeight::MEDIUM)
-                    })
-                    .when(i + 1 < n, |d| d.border_b_1().border_color(t.hairline))
-                    .children(cells.into_iter().enumerate().map(|(c, cell)| {
-                        let w = natural.get(c).copied().unwrap_or(pad);
-                        div()
-                            .flex_basis(px(w))
-                            .flex_grow(w)
-                            .flex_shrink(1.)
-                            .min_w(px(min.get(c).copied().unwrap_or(pad)))
-                            .px(px(space::S2))
-                            .py(px(space::S1))
-                            .map(|d| match aligns.get(c) {
-                                Some(Alignment::Right) => d.text_right(),
-                                Some(Alignment::Center) => d.text_center(),
-                                _ => d,
-                            })
-                            .children(cell.children)
-                    }))
-            }));
-        self.hscroll(table, t.surface)
-    }
-
     /// Code never wraps; long lines scroll sideways inside the block.
-    fn code_block(&mut self, src: &str, lang: &str) -> AnyElement {
+    fn code_block(&mut self, src: &str, lang: &str, cx: &mut Context<Self>) -> AnyElement {
         let t = self.theme;
         let body = div()
             .px(px(space::S3))
@@ -1274,7 +1286,14 @@ impl Specimen {
                     .split('\n')
                     .map(|l| div().whitespace_nowrap().child(l.to_string())),
             );
+        let key = format!("copy-code-{}-{}", self.block_ix, self.hs_count);
         let body = self.hscroll(body, t.raised);
+        let copy = self.copy_button(
+            key,
+            "Copy",
+            chrome::text(src.trim_end_matches('\n').to_string()),
+            cx,
+        );
         div()
             .flex()
             .flex_col()
@@ -1285,27 +1304,58 @@ impl Specimen {
             .overflow_hidden()
             .child(
                 div()
-                    .px(px(space::S3))
-                    .py(px(space::S1))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .pl(px(space::S3))
+                    .pr(px(space::S1))
+                    .py(px(2.))
                     .border_b_1()
                     .border_color(t.hairline)
-                    .ty(LABEL)
-                    .text_color(t.quiet)
-                    .child(if lang.is_empty() {
-                        "code".to_string()
-                    } else {
-                        lang.to_string()
-                    }),
+                    .child(
+                        div()
+                            .ty(LABEL)
+                            .text_color(t.quiet)
+                            .child(if lang.is_empty() {
+                                "code".to_string()
+                            } else {
+                                lang.to_string()
+                            }),
+                    )
+                    .child(copy),
             )
             .child(body)
             .into_any_element()
     }
 }
 
+/// Actions that appear in the top-right corner while the pointer is over
+/// a block with no header of its own (display maths, diagrams).
+fn hover_actions(body: AnyElement, actions: AnyElement, block: usize, n: usize) -> AnyElement {
+    let group = SharedString::from(format!("hover-{block}-{n}"));
+    div()
+        .group(group.clone())
+        .relative()
+        .child(body)
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .opacity(0.)
+                .group_hover(group, |s| s.opacity(1.))
+                .child(actions),
+        )
+        .into_any_element()
+}
+
 impl Render for Specimen {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let streaming = self.advance();
-        if self.bench {
+        if self.verify.is_some() {
+            self.verify_tick(window, cx);
+            window.request_animation_frame();
+        } else if self.bench {
             for e in self.collector.collect_unseen() {
                 if let profiler::FrameEvent::Draw(f) = e {
                     self.draws.push(f.draw_duration().as_secs_f64() * 1e3);
@@ -1319,9 +1369,17 @@ impl Render for Specimen {
                 .values()
                 .any(|d| matches!(d, Diagram::Pending))
             || self.bench
+            || self
+                .copied
+                .as_ref()
+                .is_some_and(|(_, at)| at.elapsed().as_secs_f32() < 1.3)
         {
             window.request_animation_frame();
         }
+        // Probes and copy texts describe this frame only; stale entries from
+        // streaming frames (when block numbers differed) would mislead.
+        self.probes.borrow_mut().clear();
+        self.copy_texts.clear();
         let t = self.theme;
         let n = self.streamer.committed.len();
         let built = Instant::now();
@@ -1335,8 +1393,10 @@ impl Render for Specimen {
             })
             .collect();
         self.builds.push(built.elapsed().as_secs_f64() * 1e3);
+        let panel = self.panel(window, cx);
         div()
             .size_full()
+            .relative()
             .bg(t.surface)
             .text_color(t.ink)
             .flex()
@@ -1346,6 +1406,9 @@ impl Render for Specimen {
                     .id("column")
                     .track_scroll(&self.scroll)
                     .overflow_y_scroll()
+                    // A sideways swipe is for wide blocks, never turned into
+                    // vertical scrolling of the chat.
+                    .restrict_scroll_to_axis()
                     .w_full()
                     .max_w(px(crate::ds::size::COLUMN + 64.))
                     .px(px(space::S8))
@@ -1356,6 +1419,7 @@ impl Render for Specimen {
                     .gap(px(space::S3))
                     .children(els),
             )
+            .children(panel)
     }
 }
 
@@ -1423,6 +1487,18 @@ impl Specimen {
         }
         let mut d = self.draws.clone();
         let over = d.iter().filter(|&&x| x > 8.3).count();
+        let after = self.draws_at_done.unwrap_or(0).min(d.len());
+        let mut settled = d[after..].to_vec();
+        eprintln!(
+            "streaming: {} frames p50 {:.2} p99 {:.2} · finished: {} frames p50 {:.2} p99 {:.2} max {:.2}",
+            after,
+            spike_markdown::pct(&mut d[..after].to_vec(), 50.),
+            spike_markdown::pct(&mut d[..after].to_vec(), 99.),
+            settled.len(),
+            spike_markdown::pct(&mut settled.clone(), 50.),
+            spike_markdown::pct(&mut settled.clone(), 99.),
+            spike_markdown::pct(&mut settled, 100.)
+        );
         let mut bl = self.builds.clone();
         eprintln!(
             "build p50 {:.2} ms p99 {:.2} ms",

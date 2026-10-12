@@ -45,12 +45,28 @@ The reading column is 720 pt wide at most and shrinks with the window down to 36
   - A column never gets narrower than its longest word, capped at 160 pt. A column of prose never goes below 140 pt. Below those limits the table scrolls instead.
   - Widths are measured in each run's own font, with header cells in medium weight.
   - Column alignment from the Markdown is honoured.
+  - **Tall tables scroll inside the chat.** Past 13 body rows, a table shows its header and 10½ rows. The half row peeking out signals more, along with an always-visible scrollbar, a fade on whichever edge has more, and a row count in the footer.
+  - The header stays put while the body scrolls. Only the rows in view are drawn, so a 5,000-row table costs no more than a short one once it has finished.
+  - **Scroll handoff:** the wheel scrolls the table until it reaches an end, then carries on to the chat. A sideways swipe moves wide content and never the chat. Vertical wheel motion is never turned into sideways scrolling.
+  - **While rows stream in,** a capped table keeps its height and the chat below it never moves. The count in the footer goes up.
+  - **Open** shows the whole table in a side panel, with every row reachable. In-app search reaches rows the cap keeps out of view, and scrolls both the chat and the table to the match.
 - **Code never wraps.** Long lines scroll inside the block.
 - **Display maths** is centred when it fits and scrolls when it doesn't.
 - **Inline maths wider than 260 pt** gets a line of its own at text size, which scrolls. The sentence continues on the next line.
 - **Diagrams** shrink to fit the column, but never below 75% of their natural size, so labels stay readable. Past that they scroll. Tall diagrams keep their natural size.
 - **Long links and words** wrap at the window edge.
 - **Nesting:** list items are padded blocks with the marker positioned out of flow, never flex rows. Nested flex rows re-measure their text at every level, which doubled the frame cost per level.
+
+## Block actions
+
+- **Copy is one click on every block that has source:**
+  - code blocks: the exact code, without fences;
+  - tables: Markdown or CSV;
+  - display maths: the TeX;
+  - diagrams: the Mermaid source.
+- Code and tables show their actions in a header or footer. Maths and diagrams have no chrome of their own, so their actions appear in the corner on hover.
+- "Copied" confirms for a moment, in place.
+- Copy text is built when clicked, never while drawing.
 
 ## Initial catalogue
 
@@ -89,7 +105,8 @@ The reading column is 720 pt wide at most and shrinks with the window down to 36
 - **Every prefix:** each fixture also renders at every streaming prefix, with no crash, no movement of finished blocks, and a final result identical to the non-streamed render.
 - **Real transcripts:** recorded Claude Code and Codex sessions replay through the renderer nightly and before releases.
 - **Fuzzing:** the parser and every renderer are fuzzed with malformed Markdown, huge tables, deep nesting, giant lines and invalid TeX or Mermaid; the result must be the fallback, never a crash or a hang.
-- **Performance:** a 1,000-block message and a 2,000-row table scroll within the frame budget. Committed blocks are cached rather than laid out again, and rows of a block taller than the viewport are culled. Each renderer stays inside its budget.
+- **Performance:** a 1,000-block message and a 5,000-row table stay within the frame budget once finished. Committed blocks are measured once and cached, and a capped table draws only the rows in view. Each renderer stays inside its budget.
+- **Interaction:** scripted wheel and click input, sent through the normal hit-testing, checks scroll handoff, sideways scrolling, every copy action, the side panel and search at three window sizes in both themes.
 - **Copy and access:** copying returns the original Markdown; every block has a text alternative and keyboard-reachable actions.
 - **Parity:** desktop, iPhone and web render the same fixtures, compared by text output and a screenshot review.
 - **Specimen gallery:** a debug screen in the app shows every fixture in both themes, for visual review.

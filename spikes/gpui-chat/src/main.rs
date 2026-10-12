@@ -47,6 +47,7 @@ pub struct Opts {
     pub fps: bool,
     pub specimen: bool,
     pub stress: bool,
+    pub verify: bool,
     pub size: Option<(f32, f32)>,
 }
 
@@ -65,6 +66,7 @@ fn opts() -> Opts {
         fps: false,
         specimen: false,
         stress: false,
+        verify: false,
         size: None,
     };
     let mut it = std::env::args().skip(1);
@@ -90,6 +92,11 @@ fn opts() -> Opts {
             "--record" => o.record = it.next().map(Into::into),
             "--fps" => o.fps = true,
             "--specimen" => o.specimen = true,
+            "--verify" => {
+                o.specimen = true;
+                o.stress = true;
+                o.verify = true;
+            }
             "--stress" => {
                 o.specimen = true;
                 o.stress = true;
@@ -1243,9 +1250,10 @@ fn main() {
             ..Default::default()
         };
         if o.specimen {
-            let (dark, bench, shots, stress) = (o.dark, o.bench, o.shots.clone(), o.stress);
+            let (dark, bench, shots, stress, verify) =
+                (o.dark, o.bench, o.shots.clone(), o.stress, o.verify);
             gpui_kit::open_window(options, cx, move |_, cx| {
-                cx.new(|_| specimen::Specimen::new(dark, bench, shots, stress))
+                cx.new(|_| specimen::Specimen::new(dark, bench, shots, stress, verify))
             })
             .expect("open window");
             cx.activate(true);

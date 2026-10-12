@@ -142,7 +142,58 @@ Frame times for the whole stress page, release build, with every block rebuilt e
 | --- | --- | --- | --- |
 | Paper and Carbon, all four sizes | 3.5 ms | 4.8–5.1 ms | 0 |
 
-**Very tall tables still cost too much.** The spike lays out and paints the whole page every frame. Each table row costs about 0.03 ms, so 240 rows reach 8.3 ms at p50 and 1,000 rows reach 14 ms. Element building is only 0.5–1.4 ms of that; the rest is layout and paint of rows that are off screen. The production chat already virtualises messages. It also needs committed blocks cached so they aren't laid out again, and rows culled within a block taller than the viewport. This is now a requirement for the chat list.
+**Very tall tables were too slow at first.** The whole page was laid out and painted every frame, at about 0.03 ms per table row. 240 rows reached 8.3 ms per frame at p50, and 1,000 rows reached 14 ms. The fix is next.
+
+## Tall tables: capped, scrollable, copyable
+
+Past 13 body rows, a table shows its header and 10½ rows, and scrolls inside the chat.
+- **It looks scrollable before anyone touches it:**
+  - a half row peeks out at the bottom;
+  - the scrollbar is always visible;
+  - a fade appears on whichever edge has more;
+  - the footer gives the row count.
+- **The footer** offers copy as Markdown, copy as CSV, and Open, which shows the whole table in a side panel.
+- **Other blocks:** code blocks get a Copy button in their header. Display maths (TeX) and diagrams (Mermaid source) get one on hover.
+
+![A 60-row table capped at 10½ rows, scrolled a little: top fade, scrollbar, half row, footer](img/04-table-capped.jpg)
+
+![Open: the whole table in a side panel, with the header pinned](img/04-table-panel.jpg)
+
+![Carbon: the table after Copy as CSV](img/04-table-copied-carbon.jpg)
+
+**Verified with real input.** `--verify` sends wheel and click events through GPUI's normal hit-testing. Wheel input arrives one event per frame, with the start, move and end phases a trackpad sends. The check reads back the scroll offsets and the clipboard, then restores the clipboard. All 14 checks pass at 360×560, 900×700 and 1440×860, and in Carbon:
+
+| Check | Result at 900×700 |
+| --- | --- |
+| Wheel over a capped table scrolls the table, not the chat | table 120 pt, chat 0 |
+| At the table's end, the wheel carries on to the chat | table at its end, chat 1,915 pt |
+| Scrolling back up moves the table before the chat | table 120 pt, chat 0 |
+| Vertical wheel over a wide table scrolls the chat, never the table sideways | chat 120 pt, table 0 |
+| A sideways swipe scrolls the wide table | table 180 pt, chat 0 |
+| Copy gives the table as Markdown; CSV gives CSV | exact match |
+| Copy on a code block gives exactly its code | exact match |
+| Open shows the table in a side panel, which scrolls without moving the chat | panel 1,350 pt, chat 0 |
+| Close dismisses the panel | ✓ |
+| Search reaches row 47 and scrolls the table to it | ✓ |
+| While rows stream in, the capped table keeps its height | 52 frames, all 403.5 pt |
+
+**What GPUI needed.** Each of these was caught by a check, not by looking at screenshots:
+- **Every scroller under the pointer takes the wheel.** GPUI doesn't stop a wheel event once one scroller uses it, so a table and the chat would scroll together. The table now handles this itself. It checks whether it can still move in the wheel's direction; if it can, it keeps the event. At either end, the event goes on to the chat.
+- **Horizontal scrollers turn vertical wheel motion into sideways scrolling**, and the vertical chat turned sideways swipes into vertical scrolling. Both are now locked to their own axis (`restrict_scroll_to_axis`).
+- **GPUI's list only knows the heights of rows it has drawn.** Its scroll end sat short of the real one, so the wheel handed off to the chat with rows still hidden. A uniform row-height hint fixes it.
+- **A GPUI bug: a zero-movement wheel event cancels a frame's list scrolling.** The list merges a frame's wheel movements by sign, and `0.0.signum()` is `+1`. So the zero-movement "gesture ended" event a trackpad sends discarded the last movement in that frame. Zero-movement events over a table are now kept away from the list.
+- **The side panel blocks pointer input to the chat behind it.** Without that, scrolling the panel also scrolled the chat.
+
+**Frame times, release build, whole stress page:**
+
+| Tall table rows | Frames while streaming (p50 / p99) | Once finished (p50 / p99 / max) |
+| --- | --- | --- |
+| 60 | 0.1 / 4.1 ms | 4.1 / 5.2 / 5.3 ms |
+| 1,000 | 4.9 / 6.4 ms | 4.2 / 5.7 / 5.9 ms |
+| 5,000 | 11.1 / 23.8 ms | 3.6 / 6.1 / 7.1 ms |
+
+- **Once finished,** a table's size no longer matters. It is measured once and cached, and only its visible rows are drawn.
+- **While streaming,** a table up to about 1,000 rows stays in budget. A 5,000-row table doesn't, because the unfinished tail block is re-parsed and re-measured on every frame. The fix, when it's needed, is to commit table rows as each one completes.
 
 ![1440×860: the column stays 720 pt wide; wide blocks scroll inside it](img/04-stress-wide.jpg)
 
@@ -169,4 +220,5 @@ cargo run -p spike-markdown --release -- mermaid DIR  # all diagram types, Paper
 cargo run -p spike-markdown --release -- worst      # huge single-block tails
 just dev spike-gpui-chat --specimen [--dark] [--bench --shots DIR]
 just dev spike-gpui-chat --stress [--size WxH] [--dark] [--bench --shots DIR]   # STRESS_ROWS=n, STRESS_FILE=page.md
+just dev spike-gpui-chat --verify [--size WxH] [--dark] [--shots DIR]   # scripted wheel and click checks
 ```
