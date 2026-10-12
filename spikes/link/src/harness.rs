@@ -161,6 +161,20 @@ pub(crate) async fn collect(
     out
 }
 
+/// Stop the holders the daemons under `root` started (they would exit on
+/// their own once idle). Their agents end when stdin closes.
+pub(crate) fn stop_holders(root: &std::path::Path) {
+    for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let lock = crate::daemon::holder_dir(&e.path()).join("holder.lock");
+        if let Ok(pid) = std::fs::read_to_string(&lock) {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", pid.trim()])
+                .status();
+            let _ = std::fs::remove_dir_all(crate::daemon::holder_dir(&e.path()));
+        }
+    }
+}
+
 pub(crate) fn is_end(n: &Note) -> bool {
     matches!(n, Note::Event(e) if e.kind == "end")
 }
@@ -530,13 +544,19 @@ pub async fn run() -> Result<()> {
             text: "second".into(),
         })
         .await?;
-    collect(&mut rx, Duration::from_secs(15), is_end).await;
+    // The first reply carried on through the crash; then the second.
+    let mut ends = 0;
+    collect(&mut rx, Duration::from_secs(15), |n| {
+        ends += is_end(n) as u32;
+        ends == 2
+    })
+    .await;
     let tl = tally.lock().await.clone();
     let logged = std::fs::read_to_string(b.state.join("sessions/s2.jsonl"))?
         .lines()
         .count() as u64;
     r.check(
-        "After a crash mid-reply, the stream resumes with no gaps or repeats",
+        "After a crash mid-reply, the reply carries on and the stream resumes with no gaps or repeats",
         tl.gaps == 0 && tl.dups == 0 && tl.last == logged,
         format!("back {reconnect:?} ms after the crash (800 ms of it down), received {} of {logged} logged events, {} gaps, {} repeats", tl.last, tl.gaps, tl.dups),
     );
@@ -743,6 +763,7 @@ pub async fn run() -> Result<()> {
 
     let ok = r.rows.iter().filter(|r| r.0).count();
     println!("{ok}/{} passed", r.rows.len());
+    stop_holders(&root);
     let _ = std::fs::remove_dir_all(&root);
     Ok(())
 }

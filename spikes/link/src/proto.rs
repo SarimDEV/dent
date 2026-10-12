@@ -105,6 +105,16 @@ pub struct Event {
     /// "user", "delta", "end" or "interrupted".
     pub kind: String,
     pub text: String,
+    /// For agent output: which process and where in its output this
+    /// ended, so a restarted daemon resumes from exactly there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src: Option<Source>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Source {
+    pub proc: String,
+    pub off: u64,
 }
 
 /// What a machine is, sent once when a connection opens.

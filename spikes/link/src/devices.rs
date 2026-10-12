@@ -122,6 +122,10 @@ pub struct Device {
     /// An offline paired machine with the same name: perhaps this is it,
     /// reinstalled with a new identity.
     pub same_name_as: Option<String>,
+    /// The dent version it last reported, kept across restarts.
+    pub version: Option<String>,
+    /// The version it ran before, and when it changed.
+    pub updated: Option<(String, u64)>,
 }
 
 impl Device {
@@ -377,6 +381,7 @@ impl Core {
                 addr: at.map(|a| a.to_string()),
                 paired_at: now,
                 last_seen: now,
+                version: d.version.clone().unwrap_or_default(),
             },
         );
         self.with(|l| {
@@ -418,11 +423,19 @@ impl Core {
             while let Some(n) = rx.recv().await {
                 let now = now_ms();
                 let mut stop = false;
+                let mut version = None;
                 core.update(&id, |d| match n {
                     Note::Up { addr, info } => {
                         d.status = Status::Online;
                         d.route = Some(addr);
                         d.last_ok = Some(addr);
+                        let v = info.dent_version.clone();
+                        if !v.is_empty() && d.version.as_deref() != Some(v.as_str()) {
+                            if let Some(old) = d.version.replace(v.clone()) {
+                                d.updated = Some((old, now));
+                            }
+                            version = Some(v);
+                        }
                         d.info = Some(*info);
                         d.last_seen = Some(now);
                     }
@@ -468,6 +481,14 @@ impl Core {
                     }
                     Note::Event(_) => {}
                 });
+                if let Some(v) = version {
+                    let id = id.clone();
+                    let _ = Trust::update(&core.dir, |p| {
+                        if let Some(peer) = p.get_mut(&id) {
+                            peer.version = v;
+                        }
+                    });
+                }
                 let d = core.device(&id);
                 if stop {
                     // The other side removed us: forget its key here too.
@@ -922,6 +943,8 @@ impl Core {
                     seen: now,
                     note: None,
                     same_name_as: None,
+                    version: None,
+                    updated: None,
                 });
                 // A paired machine's name comes from its own authenticated
                 // welcome, not from whoever announces its id.
@@ -1029,6 +1052,7 @@ pub fn start_with(dir: PathBuf, name: &str, opts: Options) -> anyhow::Result<Dev
             Via::Lan
         };
         let opt = |v: u64| (v > 0).then_some(v);
+        let opt_str = |v: String| (!v.is_empty()).then_some(v);
         core.with(|l| {
             l.keys.insert(id.clone(), key);
             l.devices.insert(
@@ -1057,6 +1081,8 @@ pub fn start_with(dir: PathBuf, name: &str, opts: Options) -> anyhow::Result<Dev
                     seen: 0,
                     note: None,
                     same_name_as: None,
+                    version: opt_str(peer.version),
+                    updated: None,
                 },
             );
         });

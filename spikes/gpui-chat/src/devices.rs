@@ -4,7 +4,8 @@
 //!
 //! `--devices --demo` plays a scripted walkthrough for recording;
 //! `--devices --demo away` plays machines going to sleep, crashing and
-//! removing this Mac, with stills written to `$STILLS` if set.
+//! removing this Mac, with stills written to `$STILLS` if set;
+//! `--devices --demo upgrade` updates dent on a machine mid-reply.
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -61,6 +62,13 @@ impl Machine {
 impl Drop for Machine {
     fn drop(&mut self) {
         self.stop();
+        // Its session holder outlives restarts by design; stop it with the
+        // window, since these machines are only stand-ins.
+        let dir = spike_link::daemon::holder_dir(&self.state);
+        if let Ok(pid) = std::fs::read_to_string(dir.join("holder.lock")) {
+            let _ = Command::new("kill").args(["-KILL", pid.trim()]).status();
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 
@@ -77,11 +85,13 @@ pub struct DevicesView {
     focus: FocusHandle,
     demo: Option<(Instant, usize)>,
     away: bool,
+    upgrade: bool,
     stills: Option<PathBuf>,
     /// When the current demo step began, in seconds.
     mark: f32,
     /// The machine whose details are open.
     open: Option<String>,
+    scroll: ScrollHandle,
 }
 
 fn port() -> u16 {
@@ -110,6 +120,8 @@ impl DevicesView {
                     format!("0.0.0.0:{lan}"),
                     "--agent-ms".into(),
                     "90".into(),
+                    "--version".into(),
+                    "0.1.0".into(),
                 ],
                 state: studio,
             },
@@ -183,10 +195,12 @@ impl DevicesView {
             target: None,
             focus: cx.focus_handle(),
             away: demo.as_deref() == Some("away"),
+            upgrade: demo.as_deref() == Some("upgrade"),
             demo: demo.map(|_| (Instant::now(), 0)),
             stills: std::env::var_os("STILLS").map(PathBuf::from),
             mark: 0.,
             open: None,
+            scroll: ScrollHandle::new(),
         }
     }
 
@@ -302,6 +316,10 @@ impl DevicesView {
         }
         if self.away {
             self.step_away(window);
+            return;
+        }
+        if self.upgrade {
+            self.step_upgrade(window);
             return;
         }
         let t = start.elapsed().as_secs_f32();
@@ -513,6 +531,122 @@ impl DevicesView {
         self.demo = Some((start, next));
         window.request_animation_frame();
     }
+
+    /// dent updates on studio while it's replying: the agent keeps running
+    /// in the session holder, and the reply finishes on the new version.
+    fn step_upgrade(&mut self, window: &mut Window) {
+        let Some((start, step)) = self.demo else {
+            return;
+        };
+        let t = start.elapsed().as_secs_f32();
+        let since = t - self.mark;
+        let status = |v: &Self, name: &str| v.by_name(name).map(|d| d.status);
+        let online = |v: &Self, name: &str| status(v, name) == Some(Status::Online);
+        let reply = |v: &Self| v.snap.replies.last().cloned();
+        // From the prompt to the finished reply, follow the reply.
+        if (6..=11).contains(&step) {
+            let max = self.scroll.max_offset().y;
+            self.scroll.set_offset(point(px(0.), -max));
+        }
+        let mut next = step;
+        match step {
+            0 if self.by_name("build-box").is_some() && self.by_name("studio").is_some() => {
+                if let Some(d) = self.by_name("build-box") {
+                    self.send(Cmd::Add(d.id));
+                }
+                next = 1;
+            }
+            1 if since >= 0.4 => {
+                if let Some(d) = self.by_name("studio") {
+                    self.send(Cmd::Add(d.id));
+                }
+                next = 2;
+            }
+            2 if self.pairing().is_some() && self.machines[0].code().len() == 6 => {
+                let code = self.machines[0].code();
+                let typed = (since / 0.12) as usize;
+                self.code = code.chars().take(typed.min(6)).collect();
+                if typed >= 8 {
+                    self.submit_code();
+                    next = 3;
+                }
+            }
+            3 if online(self, "studio")
+                && online(self, "build-box")
+                && self.snap.devices.iter().all(|d| d.health.is_some()) =>
+            {
+                self.open = self.by_name("studio").map(|d| d.id);
+                next = 4;
+            }
+            4 if since >= 1.2 => {
+                self.still("upgrade-1-details");
+                next = 5;
+            }
+            // Closed again, so the reply is in view.
+            5 if since >= 0.8 => {
+                self.open = None;
+                next = 50;
+            }
+            50 if since >= 0.6 => {
+                self.target = self.by_name("studio").map(|d| d.id);
+                let text = "Refactor the session store and run the tests";
+                let typed = (since / 0.025) as usize;
+                self.prompt = text.chars().take(typed).collect();
+                if typed > text.len() + 4 {
+                    self.submit_prompt();
+                    next = 6;
+                }
+            }
+            6 if reply(self).is_some_and(|r| r.text.len() > 110) => {
+                // The update installs and dent restarts to run it.
+                self.machines[0].signal("-USR2");
+                next = 7;
+            }
+            7 if matches!(status(self, "studio"), Some(Status::Stopped { .. })) => {
+                next = 8;
+            }
+            8 if since >= 0.6 => {
+                self.still("upgrade-2-restarting");
+                next = 9;
+            }
+            9 if since >= 1.4 => {
+                let m = &mut self.machines[0];
+                if let Some(v) = m.args.iter().position(|a| a == "--version") {
+                    m.args[v + 1] = "0.1.1".into();
+                }
+                m.start();
+                next = 10;
+            }
+            10 if online(self, "studio")
+                && reply(self).is_some_and(|r| r.state == ReplyState::Done) =>
+            {
+                next = 11;
+            }
+            11 if since >= 1.0 => {
+                self.still("upgrade-3-updated");
+                next = 110;
+            }
+            110 if since >= 1.5 => {
+                self.open = self.by_name("studio").map(|d| d.id);
+                next = 111;
+            }
+            111 if since >= 1.2 => {
+                self.still("upgrade-4-version");
+                next = 12;
+            }
+            // Held open until the recording has finished.
+            12 if t >= 32.5 => {
+                window.remove_window();
+                next = 13;
+            }
+            _ => {}
+        }
+        if next != step {
+            self.mark = t;
+        }
+        self.demo = Some((start, next));
+        window.request_animation_frame();
+    }
 }
 
 impl Render for DevicesView {
@@ -562,10 +696,14 @@ impl Render for DevicesView {
             .bg(t.surface)
             .text_color(t.ink)
             .overflow_y_scroll()
+            .track_scroll(&self.scroll)
             .flex()
-            .justify_center()
+            .flex_col()
+            .items_center()
             .child(
                 div()
+                    // Its own height, so the page scrolls rather than squeezes.
+                    .flex_none()
                     .w_full()
                     .max_w(px(size::COLUMN))
                     .px(px(gutter))
@@ -611,10 +749,14 @@ impl DevicesView {
         let (fill, status) = match &d.status {
             Status::Online => (
                 Some(t.done.0),
-                match d.rtt_ms {
-                    Some(0) => format!("Online over {via} · under 1 ms"),
-                    Some(r) => format!("Online over {via} · {r} ms"),
-                    None => format!("Online over {via}"),
+                match (&d.updated, &d.version, d.rtt_ms) {
+                    // Said for a while after it happens, then back to calm.
+                    (Some((_, at)), Some(v), _) if now.saturating_sub(*at) < 10 * 60_000 => {
+                        format!("Online · updated to dent {v}")
+                    }
+                    (_, _, Some(0)) => format!("Online over {via} · under 1 ms"),
+                    (_, _, Some(r)) => format!("Online over {via} · {r} ms"),
+                    _ => format!("Online over {via}"),
                 },
             ),
             Status::Connecting => (Some(t.working.0), "Connecting…".into()),
@@ -728,6 +870,13 @@ impl DevicesView {
                 sys.push(format!("{}, {} cores", i.model, i.cores));
             }
             rows.push(("System", sys));
+            if let Some(v) = &d.version {
+                let mut lines = vec![format!("dent {v}")];
+                if let Some((old, at)) = &d.updated {
+                    lines.push(format!("Updated from {old} {}", ago(now, *at)));
+                }
+                rows.push(("Version", lines));
+            }
             rows.push((
                 "Agents",
                 if i.agents.is_empty() {

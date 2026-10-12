@@ -45,9 +45,23 @@ async fn main() -> Result<()> {
                         .unwrap_or(600),
                 ),
                 agent_ms: get("--agent-ms").and_then(|s| s.parse().ok()).unwrap_or(30),
+                version: get("--version"),
             })
             .await
         }
+        // Started by the daemon: the session holder, and the fake agent it
+        // runs.
+        Some("holder") => {
+            let dir = PathBuf::from(get("--dir").context("--dir DIR")?);
+            tokio::task::spawn_blocking(move || {
+                spike_holder::holder::serve(spike_holder::holder::Options::new(dir))
+            })
+            .await?
+        }
+        Some("agent") => daemon::fake_agent(
+            &get("--name").unwrap_or_default(),
+            get("--ms").and_then(|s| s.parse().ok()).unwrap_or(30),
+        ),
         Some("test") => match args.get(1).map(String::as_str) {
             Some("edges") => spike_link::edges::run().await,
             Some("links") => harness::run().await,
@@ -65,7 +79,7 @@ async fn main() -> Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: spike-link daemon --state DIR [--name N] [--lan ADDR] [--tailnet ADDR] [--proto N] [--pair-ttl S] [--agent-ms MS] | test [links|edges] | tailscale"
+                "usage: spike-link daemon --state DIR [--name N] [--lan ADDR] [--tailnet ADDR] [--proto N] [--pair-ttl S] [--agent-ms MS] [--version V] | test [links|edges] | tailscale"
             );
             Ok(())
         }

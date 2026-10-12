@@ -14,6 +14,7 @@ The biggest risk is Anthropic's terms for third-party apps that use subscription
 | Hub outage | Sign-in and new devices stop; relayed connections drop | Known devices connect directly from cache; the hub runs in two regions with a status page |
 | Relay bandwidth cost | Thin or negative margins on the paid hub | Direct connections first, relay only on failure, relay usage measured per account from day one |
 | Lost encryption keys | Locked out of synced state and backups | Recovery key at first sign-in; approval from any existing device |
+| macOS asks before a launchd program reads Documents, Desktop or Downloads ([spike 06](spikes/06-session-holder.md)) | Agents can't work in projects there, or the person sees unexplained prompts | Install outside those folders; setup explains the prompt (or Full Disk Access) before the first agent works there; `dent doctor` checks it |
 | The web client is a third UI | More work, and drift from the desktop | Shares the client core; scoped to chat, approvals, docs and diffs |
 
 **Decided**

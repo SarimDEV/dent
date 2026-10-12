@@ -1,12 +1,15 @@
 //! The daemon side: listens on the LAN and on the tailnet, decides trust,
 //! pairs with a code, runs a fake agent and serves sessions from a log.
 
-use std::collections::HashMap;
+mod agents;
+pub use agents::{fake_agent, holder_dir};
+
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
@@ -32,6 +35,8 @@ pub struct Config {
     pub pair_ttl: Duration,
     /// Base delay between the fake agent's chunks.
     pub agent_ms: u64,
+    /// Reported dent version, overridable to show an upgrade.
+    pub version: Option<String>,
 }
 
 struct Session {
@@ -63,7 +68,9 @@ struct Daemon {
     window: Mutex<Option<Window>>,
     sessions: Mutex<HashMap<String, Session>>,
     prompts: Mutex<HashMap<String, String>>,
-    running: AtomicU32,
+    /// Sessions with a reply under way.
+    busy: std::sync::Mutex<HashSet<String>>,
+    agents: agents::Agents,
     /// Fired once on the way out, so every link can say why.
     bye: broadcast::Sender<String>,
     /// Set from goodbye until gone (or awake again): new links are refused,
@@ -119,21 +126,29 @@ pub async fn run(cfg: Config) -> Result<()> {
         window: Mutex::new(None),
         sessions: Mutex::new(HashMap::new()),
         prompts: Mutex::new(HashMap::new()),
-        running: AtomicU32::new(0),
+        busy: std::sync::Mutex::new(HashSet::new()),
+        agents: agents::Agents::default(),
         bye: broadcast::channel(4).0,
         leaving: std::sync::atomic::AtomicBool::new(false),
         unauthed: Arc::new(std::sync::Mutex::new(HashMap::new())),
         me,
     });
     d.load_prompts();
-    d.mark_interrupted().await;
+    // Agents that kept running through a restart carry on; anything else
+    // that was mid-reply is marked interrupted.
+    let resumed = d.resume_agents().await;
+    d.mark_interrupted(&resumed).await;
     // The spike has no screen: a window opens at start, and SIGHUP stands
     // in for the person opening Settings › Devices to show a new code.
     d.open_window().await?;
     {
         let d = d.clone();
+        let version = cfg.version.clone();
         tokio::task::spawn_blocking(move || {
-            let info = crate::info::info();
+            let mut info = crate::info::info();
+            if let Some(v) = version {
+                info.dent_version = v;
+            }
             if let Ok(mut i) = d.info.lock() {
                 *i = info;
             }
@@ -578,7 +593,12 @@ impl Daemon {
         drop(prompts);
         let d = self.clone();
         let s = session.clone();
-        tokio::spawn(async move { d.fake_agent(s, text).await });
+        tokio::spawn(async move {
+            if let Err(e) = d.run_agent(&s, &text).await {
+                let why = format!("dent couldn't start the agent: {e}");
+                let _ = d.append(&s, "interrupted", &why).await;
+            }
+        });
         Ok((session, false))
     }
 
@@ -598,7 +618,7 @@ impl Daemon {
 
     /// After a crash or power loss, replies that were mid-way are marked so
     /// every client shows them as interrupted, not still working.
-    async fn mark_interrupted(&self) {
+    async fn mark_interrupted(&self, resumed: &HashSet<String>) {
         let Ok(dir) = std::fs::read_dir(self.state.join("sessions")) else {
             return;
         };
@@ -616,7 +636,12 @@ impl Daemon {
                 .lines()
                 .rev()
                 .find_map(|l| serde_json::from_str::<Event>(l).ok());
-            if last.is_some_and(|e| e.kind == "user" || e.kind == "delta") {
+            let mid = last.is_some_and(|e| e.kind == "user" || e.kind == "delta");
+            if mid && resumed.contains(&id) {
+                if let Ok(mut b) = self.busy.lock() {
+                    b.insert(id);
+                }
+            } else if mid {
                 let _ = self
                     .append(
                         &id,
@@ -628,13 +653,19 @@ impl Daemon {
         }
     }
 
-    /// Health every few seconds to a watcher.
+    /// Health every few seconds to a watcher, and at once when the number
+    /// of agents running changes.
     async fn health(&self, tx: Arc<Mutex<Sender>>) -> Result<()> {
+        let mut sent: Option<(u32, Instant)> = None;
         loop {
-            let running = self.running.load(Ordering::Relaxed);
-            let h = tokio::task::spawn_blocking(move || crate::info::health(running)).await?;
-            tx.lock().await.send(&Down::Health(h)).await?;
-            tokio::time::sleep(HEALTH_EVERY).await;
+            let running = self.busy.lock().map(|b| b.len() as u32).unwrap_or(0);
+            let due = sent.is_none_or(|(n, at)| n != running || at.elapsed() >= HEALTH_EVERY);
+            if due {
+                let h = tokio::task::spawn_blocking(move || crate::info::health(running)).await?;
+                tx.lock().await.send(&Down::Health(h)).await?;
+                sent = Some((running, Instant::now()));
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
     }
 
@@ -669,6 +700,27 @@ impl Daemon {
     }
 
     async fn append(&self, id: &str, kind: &str, text: &str) -> Result<()> {
+        self.append_from(id, kind, text, None).await
+    }
+
+    async fn append_from(
+        &self,
+        id: &str,
+        kind: &str,
+        text: &str,
+        src: Option<crate::proto::Source>,
+    ) -> Result<()> {
+        if let Ok(mut b) = self.busy.lock() {
+            match kind {
+                "user" => {
+                    b.insert(id.to_string());
+                }
+                "end" | "interrupted" => {
+                    b.remove(id);
+                }
+                _ => {}
+            }
+        }
         let mut sessions = self.sessions.lock().await;
         let s = self.open(&mut sessions, id).await?;
         let ev = Event {
@@ -677,6 +729,7 @@ impl Daemon {
             t: now_ms(),
             kind: kind.into(),
             text: text.into(),
+            src,
         };
         writeln!(s.log, "{}", serde_json::to_string(&ev)?)?;
         s.log.flush()?;
@@ -695,6 +748,7 @@ impl Daemon {
                 t: now_ms(),
                 kind: "delta".into(),
                 text: format!("event {i} with a line of text like an agent writes "),
+                src: None,
             };
             writeln!(s.log, "{}", serde_json::to_string(&ev)?)?;
             s.events.push(ev.clone());
@@ -756,34 +810,5 @@ impl Daemon {
                 }
             }
         }
-    }
-
-    /// Stands in for an agent: streams a reply a few words at a time.
-    async fn fake_agent(&self, session: String, prompt: String) {
-        self.running.fetch_add(1, Ordering::Relaxed);
-        let reply = format!(
-            "Running on {}. You asked: \"{}\". This reply streams from the other \
-             machine a few words at a time, the way an agent's text arrives, so the \
-             link can be checked without spending any usage. Each piece is logged \
-             with a sequence number before it is sent, so a client that drops off \
-             picks up exactly where it left off.",
-            self.me.name, prompt
-        );
-        let words: Vec<&str> = reply.split_inclusive(' ').collect();
-        let mut i = 0;
-        let mut step = 0u64;
-        while i < words.len() {
-            let n = 1 + (step % 4) as usize;
-            let chunk: String = words[i..(i + n).min(words.len())].concat();
-            if self.append(&session, "delta", &chunk).await.is_err() {
-                break;
-            }
-            i += n;
-            step += 1;
-            let ms = self.agent_ms + (step * 17) % (self.agent_ms + 10);
-            tokio::time::sleep(Duration::from_millis(ms)).await;
-        }
-        let _ = self.append(&session, "end", "").await;
-        self.running.fetch_sub(1, Ordering::Relaxed);
     }
 }

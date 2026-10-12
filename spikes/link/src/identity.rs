@@ -72,6 +72,9 @@ pub struct Peer {
     pub paired_at: u64,
     #[serde(default)]
     pub last_seen: u64,
+    /// The dent version it last reported (clients only).
+    #[serde(default)]
+    pub version: String,
 }
 
 /// Only this user can read the private key.

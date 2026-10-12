@@ -7191,6 +7191,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "spike-holder"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "spike-link"
 version = "0.0.0"
 dependencies = [
@@ -7199,6 +7210,7 @@ dependencies = [
  "hex",
  "hmac",
  "if-addrs",
+ "libc",
  "mdns-sd",
  "rand 0.8.8",
  "serde",
@@ -7206,6 +7218,7 @@ dependencies = [
  "sha2 0.10.9",
  "snow",
  "spake2",
+ "spike-holder",
  "tokio",
  "tokio-tungstenite",
 ]

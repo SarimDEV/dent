@@ -1265,10 +1265,10 @@ fn main() {
         };
         if o.devices {
             let (dark, demo, record) = (o.dark, o.demo.clone(), o.record.clone());
-            let secs = if demo.as_deref() == Some("away") {
-                50.
-            } else {
-                25.
+            let secs = match demo.as_deref() {
+                Some("away") => 50.,
+                Some("upgrade") => 32.,
+                _ => 25.,
             };
             gpui_kit::open_window(options, cx, move |window, cx| {
                 let view = cx.new(|cx| devices::DevicesView::new(dark, demo, cx));

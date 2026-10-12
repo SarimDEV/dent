@@ -13,6 +13,7 @@ Every machine runs the same daemon, so a Mac server, a Linux box and a throwaway
 
 - On macOS the daemon can hold a sleep assertion while any agent is working, so a closed-lid laptop or a Mac server keeps going.
 - Each machine tells paired devices what it is (OS and version, chip and cores, dent version, agent CLIs and versions, network hardware addresses for Wake-on-LAN, time zone) and, every 5 seconds while watched, how it's doing (load, memory, disk, battery, agents running). Unpaired devices learn none of it. Shown in a machine's details in Settings › Devices ([spike 05](spikes/05-direct-links.md#what-each-machine-reports)).
+- After a machine updates dent, its status line says so for ten minutes ("updated to dent 0.1.1"), and its details say what it updated from and when. Replies running during the update carry on ([spike 06](spikes/06-session-holder.md)).
 
 ## Ephemeral machines
 

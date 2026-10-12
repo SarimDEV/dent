@@ -69,6 +69,7 @@ pub async fn run() -> Result<()> {
     manager(&root, &mut r).await?;
     let ok = r.rows.iter().filter(|r| r.0).count();
     println!("{ok}/{} passed", r.rows.len());
+    crate::harness::stop_holders(&root);
     let _ = std::fs::remove_dir_all(&root);
     Ok(())
 }
@@ -758,10 +759,11 @@ async fn manager(root: &Path, r: &mut Report) -> Result<()> {
         format!("{refused:?}; prompts that ran there: {ran}"),
     );
 
-    // It crashes mid-reply: reconnecting, then offline, then interrupted.
+    // dent crashes mid-reply: reconnecting, then offline. The agent runs on
+    // in the session holder, so after a restart the reply finishes.
     app.send(Cmd::Prompt(id.clone(), "crash test".into()));
     app.until(Duration::from_secs(5), |s| {
-        last_reply(s).is_some_and(|r| r.text.len() > 40)
+        last_reply(s).is_some_and(|r| r.text.contains("crash test"))
     })
     .await;
     signal(&b, "-KILL");
@@ -786,18 +788,53 @@ async fn manager(root: &Path, r: &mut Report) -> Result<()> {
         })
         .await;
     let ended = app
-        .until(Duration::from_secs(5), |s| {
+        .until(Duration::from_secs(10), |s| {
+            last_reply(s).is_some_and(|r| r.state == ReplyState::Done)
+        })
+        .await;
+    let (text, session) = last_reply(&app.snap())
+        .map(|r| (r.text, r.session))
+        .unwrap_or_default();
+    let full = reply_text(&log(&b.state, &session));
+    r.check(
+        "A crash shows reconnecting, then offline after 10 s; the agent keeps going and the reply finishes after a restart",
+        recon.is_some() && off.is_some() && up.is_some() && ended.is_some() && text == full && full.contains("crash test") && full.contains("left off."),
+        format!(
+            "reconnecting after {:?} ms (reply: {mid:?}); offline after {off_ms} ms; online {:?} ms after restart; reply finished whole: {}",
+            recon.map(ms),
+            up.map(ms),
+            ended.is_some() && text == full
+        ),
+    );
+
+    // The whole machine goes (dent and the holder with it, as in a power
+    // cut): after a restart the reply shows as interrupted.
+    app.send(Cmd::Prompt(id.clone(), "power cut".into()));
+    app.until(Duration::from_secs(5), |s| {
+        last_reply(s).is_some_and(|r| r.text.contains("power cut"))
+    })
+    .await;
+    signal(&b, "-KILL");
+    let holder = std::fs::read_to_string(crate::daemon::holder_dir(&b.state).join("holder.lock"))
+        .unwrap_or_default();
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", holder.trim()])
+        .status();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(b);
+    b = spawn(&studio).await?;
+    let cut = app
+        .until(Duration::from_secs(10), |s| {
             last_reply(s).is_some_and(|r| matches!(r.state, ReplyState::Interrupted(_)))
         })
         .await;
     r.check(
-        "A crash shows reconnecting, then offline after 10 s, and the cut-off reply as interrupted",
-        recon.is_some() && off.is_some() && up.is_some() && ended.is_some(),
+        "When the machine loses the agent too, the cut-off reply shows as interrupted",
+        cut.is_some() && !holder.trim().is_empty(),
         format!(
-            "reconnecting after {:?} ms (reply: {mid:?}); offline after {off_ms} ms; online {:?} ms after restart; reply marked interrupted: {}",
-            recon.map(ms),
-            up.map(ms),
-            ended.is_some()
+            "interrupted shown {:?} ms after dent restarted (holder pid {})",
+            cut.map(ms),
+            holder.trim()
         ),
     );
 
