@@ -156,6 +156,9 @@ pub fn serif() -> &'static str {
     fonts().serif
 }
 
+/// How often the working square's dither steps.
+pub const DRIFT_MS: u128 = 420;
+
 /// A 12px status square. Each status has its own pattern so it never relies on
 /// colour alone: working = 2px dither, needs you = solid, done = dots,
 /// waiting = outline, idle = quiet outline.
@@ -169,18 +172,26 @@ pub fn status_square(status: Status, t: &Theme) -> Div {
     };
     match status {
         Status::Needs => div().size(px(12.)).bg(signal),
-        // Fine 2px dither of signal and partner.
-        Status::Working => div()
-            .size(px(12.))
-            .flex()
-            .flex_col()
-            .children((0..6).map(move |y| {
-                div().flex().children((0..6).map(move |x| {
-                    div()
-                        .size(px(2.))
-                        .bg(if (x + y) % 2 == 0 { signal } else { partner })
+        // Fine 2px dither of signal and partner that drifts slowly while working.
+        Status::Working => {
+            let phase = crate::PROCESS_START
+                .get()
+                .map(|s| (s.elapsed().as_millis() / DRIFT_MS) as usize)
+                .unwrap_or(0);
+            div()
+                .size(px(12.))
+                .flex()
+                .flex_col()
+                .children((0..6).map(move |y| {
+                    div().flex().children((0..6).map(move |x| {
+                        div().size(px(2.)).bg(if (x + y + phase).is_multiple_of(2) {
+                            signal
+                        } else {
+                            partner
+                        })
+                    }))
                 }))
-            })),
+        }
         // Four round dots on a clear ground.
         Status::Done => div()
             .size(px(12.))

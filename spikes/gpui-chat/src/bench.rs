@@ -132,6 +132,7 @@ pub fn step(app: &mut Spike, window: &mut Window, cx: &mut Context<Spike>) {
         Phase::Open => {
             if n == 0 {
                 app.chat = ListState::new(app.rows.len(), ListAlignment::Bottom, px(1200.));
+                app.chat.set_follow_mode(FollowMode::Tail);
                 b.open = Some((Instant::now(), None));
             }
         }
@@ -183,7 +184,7 @@ pub fn step(app: &mut Spike, window: &mut Window, cx: &mut Context<Spike>) {
 
 /// Feed the window a trackpad-style wheel event, exactly as real input arrives.
 /// Positive `dy` scrolls content down (towards older messages in the chat).
-fn wheel(window: &mut Window, cx: &mut Context<Spike>, position: Point<Pixels>, dy: f32) {
+pub fn wheel(window: &mut Window, cx: &mut Context<Spike>, position: Point<Pixels>, dy: f32) {
     window.defer(cx, move |window, cx| {
         window.dispatch_event(
             PlatformInput::ScrollWheel(ScrollWheelEvent {
