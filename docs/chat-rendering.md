@@ -98,6 +98,12 @@ The reading column is 720 pt wide at most and shrinks with the window down to 36
 - Tight and loose lists render with the same spacing, so a list turning loose mid-stream does not jump.
 - Every renderer has a partial state: an open code fence is already a code block, a half-written table shows its complete rows, and unfinished math or diagrams show their source dimmed until they close.
 - Nothing flickers between raw and rendered.
+- **How text appears is a reading preference** ([0034](decisions/0034-streaming-reveal-setting.md)):
+  - **Word by word** (default): text appears as it arrives.
+  - **Word by word, smoothed:** whole words at a steady pace, at most about 0.25 s behind, with a 180 ms fade.
+  - **Block by block:** each block appears once the next has started, with a 300 ms fade.
+
+  Parsing and committing are the same for all three; only visibility changes.
 
 ## Testing
 

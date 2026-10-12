@@ -216,7 +216,17 @@ A table's length no longer matters, whether it's streaming or finished. All 14 i
 - **Smoothed:** arrivals are revealed a whole word at a time, at a pace that never trails them by much more than 0.25 s. New words fade in over 180 ms, tracked per inline in rendered characters, so markup never counts.
 - **Block by block:** a block appears once another block has started after it, fading in over 300 ms.
 
-The comparison panes hide hover-only actions, and the window hides the pointer while recording. The choice is the owner's, from a recording.
+The comparison panes hide hover-only actions, and the window hides the pointer while recording.
+
+**Outcome:** the owner watched the recordings:
+- word by word felt fastest;
+- block by block was the easiest to read;
+- smoothed was pleasant at half speed.
+
+The way text appears is now a setting, word by word by default ([0034](../decisions/0034-streaming-reveal-setting.md)). For the test reply (107 bursts over 6.5 s), the number of redraws is:
+- word by word: 107;
+- block by block: 11, plus 198 fade frames at 60 Hz;
+- smoothed: 415 at 60 Hz and 831 at 120 Hz.
 
 **Starting the agent early.** This was measured without calling a model:
 - Claude Code takes a median of 626 ms (550–683) from launch to answering the `initialize` handshake.
