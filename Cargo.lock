@@ -1749,6 +1749,7 @@ name = "dent-client-core"
 version = "0.0.0"
 dependencies = [
  "dent-protocol",
+ "serde_json",
 ]
 
 [[package]]
@@ -1769,8 +1770,26 @@ dependencies = [
 name = "dent-desktop"
 version = "0.0.0"
 dependencies = [
+ "block2 0.6.2",
+ "cairo-rs",
  "dent-client-core",
  "dent-protocol",
+ "futures",
+ "gpui-kit",
+ "gtk",
+ "image",
+ "libc",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "objc2-web-kit",
+ "pulldown-cmark",
+ "raw-window-handle",
+ "serde_json",
+ "webkit2gtk",
+ "webview2-com",
+ "windows 0.62.2",
+ "wry",
 ]
 
 [[package]]

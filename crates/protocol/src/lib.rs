@@ -207,9 +207,9 @@ impl Permission {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Ask => "Ask first",
-            Self::Edits => "Edit freely",
-            Self::Plan => "Plan only",
+            Self::Ask => "Supervised",
+            Self::Edits => "Auto-accept edits",
+            Self::Plan => "Plan",
             Self::Full => "Full access",
         }
     }

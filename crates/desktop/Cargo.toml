@@ -14,5 +14,33 @@ path = "src/main.rs"
 [dependencies]
 dent-protocol.workspace = true
 dent-client-core.workspace = true
+gpui-kit = "=0.7.1"
+# Live pages: the system web view as a child of the GPUI window (0037).
+wry = "=0.57.0"
+pulldown-cmark = { version = "=0.13.4", default-features = false }
+serde_json.workspace = true
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff"] }
+libc = "=0.2.190"
+futures = { version = "=0.3.34", default-features = false, features = ["std", "async-await"] }
+
+# Snapshots of the live page, drawn under menus while the web view hides.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "=0.6.2"
+objc2 = "=0.6.5"
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSImage", "NSApplication", "NSResponder"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSData", "NSError", "NSProcessInfo", "NSString"] }
+objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "WKWebView", "WKSnapshotConfiguration"] }
+
+# Linux and Windows are parked until after the Mac release (spike 08).
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "=0.18.2"
+webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
+cairo-rs = { version = "=0.18.5", features = ["png"] }
+raw-window-handle = "=0.6.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+webview2-com = "=0.39.1"
+windows = { version = "=0.62.2", features = ["Win32_System_Com", "Win32_UI_Shell"] }
+
 [lints]
 workspace = true

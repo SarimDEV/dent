@@ -431,6 +431,9 @@ impl Agent {
             if let Some(why) = self.guarded("Write", input, needs)? {
                 self.say(&format!("Understood, I won't write it. ({why})"), None)?;
             } else {
+                if let Some(dir) = std::path::Path::new(path).parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
                 let _ = std::fs::write(path, &body);
                 self.say(&format!("Wrote `{path}`."), None)?;
             }

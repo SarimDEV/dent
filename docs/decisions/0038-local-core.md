@@ -7,6 +7,7 @@ Status: accepted (2026-10-13) · Spec: [daemon.md](../daemon.md), [architecture.
 - **Clients on the daemon's own machine connect over a Unix socket** in the daemon's state directory (0700, socket 0600), speaking the same protocol, one JSON object per line. The WebSocket with Noise from [0033](0033-direct-websocket-hub-on-hold.md) carries the same lines between machines when Phase 4 adds them. A loopback TCP port would be open to every local process, including web pages; a socket only this user can open needs no pairing.
 - **The app starts the daemon** when it isn't running, and the daemon keeps going after the app quits. Installing it as a launchd service, so it also starts at boot, comes with the installer ([0022](0022-install-service-manager-cargo-dist.md)).
 - **SQLite through rusqlite 0.37.0 with the `bundled` feature,** so every machine runs the same SQLite with WAL and FTS5, whatever the system ships.
+- **The desktop app** reads the daemon's feed on a thread and hands it to the window through a `futures` channel (0.3.34). It keeps spike 08's `image` and `objc2` crates for page snapshots.
 - **A fake `claude`** (`crates/fake-claude`) speaks stream-json with the shapes recorded in [spike 01](../spikes/01-claude-code-stream-json.md). The daemon's tests and demos run against it, so nothing touches a real account.
 
 ## How the Claude Code driver behaves
