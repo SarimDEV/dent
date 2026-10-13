@@ -46,10 +46,13 @@ The viewer shows, as tabs, everything the open session made or changed ([0037](d
   - **Widths:** desktop, tablet (768) and phone (390), the narrow ones framed in the panel.
   - **Point:** click anything on the page, and the element (tag, text, selector) rides along with your next message as a chip you can remove.
   - **Errors:** page errors appear in a bar under the page with **Ask to fix**, which sends the error to the agent straight away.
+  - **Dev servers:** a running server shows "running" instead of versions. Links to other sites open in your browser.
+  - **Pop out:** a page can move to its own window and back. The panel says where it went; closing the window brings it back.
+  - **Covered pages:** when search or a menu has to cover the page, dent shows the page's last snapshot in its place.
   - Reload and open in your browser.
 - **Docs:** Markdown rendered as a page (see Markdown viewer), with copy and open in editor.
 - **Images:** screenshots and charts the agent made, fitted to the panel, with actual size.
-- **Changes:** the session's files with counts and the diff. Click a line number to comment; comments collect into one review that **Send to agent** delivers with file and line for each (see Review loop).
+- **Changes:** the session's files with counts and the diff, virtualized so a lockfile of thousands of lines scrolls freely. Click a line number to comment; comments collect into one review that **Send to agent** delivers with file and line for each (see Review loop).
 - **Terminal:** the session's terminal (see Terminal).
 - **Keys:** Cmd+1 is the first thing the session made, Cmd+2 changes, Cmd+3 the terminal.
 - The web view is a native layer, so nothing floating may overlap it: the preview hides while a menu is open, and toasts sit over the sidebar.
@@ -158,7 +161,9 @@ Motion is spring-based, short and always interruptible: input during an animatio
 | Open any cached session | Under 50 ms |
 | Cold start to usable window | Under 300 ms |
 | Animation length | 120 to 250 ms |
+| Redraws with nothing moving | Under 1 a second |
 
 - Panels slide and resize, messages settle in as they stream, status dots pulse gently while working.
 - Reduced-motion settings swap motion for fades.
+- The window redraws only when something on screen changes: a page event, a timer's second, a toast ending, the working squares. Long transcripts and diffs are virtualized lists that lay out only what's visible.
 - Frame time is measured in development builds, with a visible overlay (gpui-fps) and a CI check on scripted interactions. Scripted input goes through `Window::dispatch_event` with real wheel and key events; `ListState::scroll_by` is not a substitute on a bottom-aligned list ([spike 03](spikes/03-gpui-chat-and-diff.md)).

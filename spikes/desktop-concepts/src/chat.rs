@@ -18,7 +18,7 @@ use crate::ui::{button, floating, ghost, icon, icon_button, kbd, menu_row, probe
 
 impl Dent {
     pub fn main_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        match self.current().cloned() {
+        match self.current_rc() {
             Some(s) => self.chat(&s, window, cx),
             None => self.starter_page(cx),
         }
@@ -149,57 +149,45 @@ impl Dent {
             .child(actions)
     }
 
-    fn chat(&mut self, s: &Session, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn chat(&mut self, s: &Session, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.t;
-        let items: Vec<AnyElement> = s
-            .items
-            .iter()
-            .enumerate()
-            .map(|(ix, item)| self.item(s, ix, item, window, cx))
-            .collect();
-        let working = s.status == Status::Working;
-        let since = self.working_since.get(&s.id).copied();
-        let transcript = div()
-            .id("transcript")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.chat_scroll)
-            .child(
+        self.sync_transcript(s);
+        let count = self.transcript.item_count();
+        // Only the items on screen are drawn, however long the session.
+        let transcript = list(
+            self.transcript.clone(),
+            cx.processor(move |this, ix: usize, window, cx| {
+                let Some(s) = this.current_rc() else {
+                    return div().into_any_element();
+                };
+                let body = match s.items.get(ix) {
+                    Some(item) => this.item(&s, ix, item, window, cx),
+                    None => this.working_line(&s),
+                };
+                // The list sizes each row to its full width, so the column is
+                // centred inside it, in line with the composer.
                 div()
                     .w_full()
-                    .max_w(px(size::COLUMN + space::S8 * 2.))
-                    .mx_auto()
-                    .px(px(space::S8))
-                    .pt(px(space::S6))
-                    .pb(px(space::S8))
                     .flex()
-                    .flex_col()
-                    .gap(px(space::S4))
-                    .children(items)
-                    .when(working, |d| {
-                        d.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(space::S2))
-                                .ty(UI)
-                                .text_color(t.quiet)
-                                .child(status_square(Status::Working, &t))
-                                .child(div().text_color(t.ink).child("Working"))
-                                .child(div().text_color(t.faint).child("·"))
-                                .child(div().flex_1().min_w_0().truncate().child(s.detail.clone()))
-                                .when_some(since, |d, at| {
-                                    d.child(
-                                        div()
-                                            .ty(LABEL)
-                                            .text_color(t.faint)
-                                            .child(clock(at.elapsed().as_secs())),
-                                    )
-                                }),
-                        )
-                    }),
-            );
+                    .justify_center()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(size::COLUMN + space::S8 * 2.))
+                            .px(px(space::S8))
+                            .when(ix == 0, |d| d.pt(px(space::S6)))
+                            .pb(px(if ix + 1 == count {
+                                space::S8
+                            } else {
+                                space::S4
+                            }))
+                            .child(body),
+                    )
+                    .into_any_element()
+            }),
+        )
+        .flex_1()
+        .min_h_0();
         let footer: AnyElement = if s.closed {
             let id = s.id.clone();
             div()
@@ -258,6 +246,31 @@ impl Dent {
             .into_any_element()
     }
 
+    /// The last line while the agent works: what it's doing, and for how long.
+    fn working_line(&self, s: &Session) -> AnyElement {
+        let t = self.t;
+        let since = self.working_since.get(&s.id).copied();
+        div()
+            .flex()
+            .items_center()
+            .gap(px(space::S2))
+            .ty(UI)
+            .text_color(t.quiet)
+            .child(status_square(Status::Working, &t))
+            .child(div().text_color(t.ink).child("Working"))
+            .child(div().text_color(t.faint).child("·"))
+            .child(div().flex_1().min_w_0().truncate().child(s.detail.clone()))
+            .when_some(since, |d, at| {
+                d.child(
+                    div()
+                        .ty(LABEL)
+                        .text_color(t.faint)
+                        .child(clock(at.elapsed().as_secs())),
+                )
+            })
+            .into_any_element()
+    }
+
     fn item(
         &mut self,
         s: &Session,
@@ -302,7 +315,7 @@ impl Dent {
                     .get(&s.id)
                     .filter(|(i, _)| *i == ix)
                     .map(|(_, b)| b.clone());
-                let blocks = markdown::parse(src);
+                let blocks = self.markdown(src);
                 match (births, blocks.as_slice()) {
                     // A reply streaming in: each word fades in over 180 ms.
                     (Some(births), [markdown::Block::Para(inline)]) if !crate::reduce_motion() => {
@@ -320,7 +333,7 @@ impl Dent {
                             .child(inline.element(&t, theme::body(), t.ink, Some(&fade)))
                             .into_any_element()
                     }
-                    _ => markdown::render(&blocks, &t, false).into_any_element(),
+                    _ => markdown::render(blocks.as_slice(), &t, false).into_any_element(),
                 }
             }
             Item::Tools {
@@ -347,6 +360,7 @@ impl Dent {
                                     .sessions
                                     .iter_mut()
                                     .find(|x| x.id == sid)
+                                    .map(std::rc::Rc::make_mut)
                                     .and_then(|x| x.items.get_mut(ix))
                                 {
                                     *open = !*open;
@@ -592,7 +606,9 @@ impl Dent {
             self.panel_open && self.tab(s) == Tab::Art(art) && self.version(&a) == version;
         let old = version < latest;
         let file = a.path.rsplit('/').next().unwrap_or(a.path).to_string();
-        let thumb = (a.kind == Kind::Image).then(|| a.versions[version - 1].clone());
+        let thumb = (a.kind == Kind::Image)
+            .then(|| self.picture(art, version))
+            .flatten();
         if old {
             // Older versions fold to one line; the latest keeps the card.
             return div()
@@ -619,7 +635,11 @@ impl Dent {
                 .child(probe(&self.probes, format!("made-{art}-{version}")))
                 .into_any_element();
         }
-        let note = format!("{file} · v{version}");
+        let note = if a.kind == Kind::Server {
+            format!("{} · on {}, forwarded here", a.path, s.machine)
+        } else {
+            format!("{file} · v{version}")
+        };
         div()
             .id(SharedString::from(format!("made-{art}-{version}")))
             .relative()
@@ -650,11 +670,8 @@ impl Dent {
                     .justify_center()
                     .overflow_hidden()
                     .map(|d| match thumb {
-                        Some(bytes) => d.child(
-                            img(std::sync::Arc::new(Image::from_bytes(
-                                ImageFormat::Png,
-                                bytes.to_vec(),
-                            )))
+                        Some(picture) => d.child(
+                            img(picture)
                             .size_full()
                             .object_fit(ObjectFit::Cover),
                         ),
@@ -1125,7 +1142,7 @@ impl Dent {
                         menu_row(&self.probes, format!("m-{m}"), m, None, current == m, &t)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(id) = this.selected.clone()
-                                    && let Some(s) = this.sessions.iter_mut().find(|s| s.id == id)
+                                    && let Some(s) = this.sessions.iter_mut().find(|s| s.id == id).map(std::rc::Rc::make_mut)
                                 {
                                     s.agent = m.to_string();
                                 }
@@ -1156,7 +1173,7 @@ impl Dent {
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(id) = this.selected.clone()
-                                && let Some(s) = this.sessions.iter_mut().find(|s| s.id == id)
+                                && let Some(s) = this.sessions.iter_mut().find(|s| s.id == id).map(std::rc::Rc::make_mut)
                             {
                                 s.permission = p.to_string();
                             }

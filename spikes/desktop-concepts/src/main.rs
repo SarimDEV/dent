@@ -10,9 +10,11 @@ mod app;
 mod chat;
 mod data;
 mod demo;
+mod devserver;
 mod ds;
 mod markdown;
 mod palette;
+mod popout;
 mod sidebar;
 mod theme;
 mod ui;
@@ -38,10 +40,16 @@ use theme::Theme;
 
 pub static PROCESS_START: OnceLock<Instant> = OnceLock::new();
 static REDUCE_MOTION: AtomicBool = AtomicBool::new(false);
+/// Opened without taking focus: walkthroughs and measurements.
+pub static BACKGROUND: AtomicBool = AtomicBool::new(false);
 pub static WINDOW: OnceLock<(f32, f32, f32, f32)> = OnceLock::new();
 
 pub fn reduce_motion() -> bool {
     REDUCE_MOTION.load(Ordering::Relaxed)
+}
+
+pub fn set_reduce_motion(on: bool) {
+    REDUCE_MOTION.store(on, Ordering::Relaxed);
 }
 
 pub fn window_rect() -> (f32, f32, f32, f32) {
@@ -64,9 +72,9 @@ pub fn style_input(input: &Entity<TextareaState>, t: &Theme, cx: &mut App) {
 
 impl Render for Dent {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let dt = self.last_frame.elapsed();
         self.last_frame = Instant::now();
-        let _ = dt;
+        self.frames += 1;
+        ui::FRAME.store(self.frames, std::sync::atomic::Ordering::Relaxed);
         self.drain_page(window, cx);
         if self
             .toast
@@ -79,7 +87,12 @@ impl Render for Dent {
             let me = cx.entity();
             window.defer(cx, move |window, cx| demo::tick(me, window, cx));
         }
-        if self.animating() || self.toast.is_some() || self.demo.is_some() {
+        let toast_arriving = self
+            .toast
+            .as_ref()
+            .is_some_and(|t| t.at.elapsed() < Duration::from_millis(400));
+        let demo_running = self.demo.as_ref().is_some_and(|d| d.resting.is_none());
+        if self.animating() || toast_arriving || demo_running {
             window.request_animation_frame();
         }
         // The composer says what Enter will do in this session's state.
@@ -123,8 +136,7 @@ impl Render for Dent {
         let sidebar = (!self.sidebar_hidden).then(|| self.sidebar(cx));
         let main = self.main_column(window, cx);
         let panel = self
-            .current()
-            .cloned()
+            .current_rc()
             .filter(|s| self.panel_open && Self::has_viewer(s))
             .map(|s| self.panel(&s, window, cx));
         let toast =
@@ -363,6 +375,7 @@ fn load_fonts(cx: &mut App) {
 }
 
 struct Opts {
+    background: bool,
     dark: bool,
     pace: f32,
     demo: Option<String>,
@@ -373,6 +386,7 @@ struct Opts {
 
 fn opts() -> Opts {
     let mut o = Opts {
+        background: false,
         dark: false,
         pace: 1.,
         demo: None,
@@ -387,6 +401,8 @@ fn opts() -> Opts {
             "--reduce-motion" => REDUCE_MOTION.store(true, Ordering::Relaxed),
             "--pace" => o.pace = it.next().and_then(|v| v.parse().ok()).unwrap_or(1.),
             "--demo" => o.demo = it.next(),
+            // Open behind whatever you're using, without taking focus.
+            "--background" => o.background = true,
             "--shots" => o.shots = it.next().map(Into::into),
             "--record" => o.record = it.next().map(Into::into),
             "--size" => {
@@ -407,13 +423,36 @@ fn main() {
     PROCESS_START.get_or_init(Instant::now);
     let o = opts();
     let _ = WINDOW.set((40., 40., o.size.0, o.size.1));
-    gpui_kit::application()
-        .with_assets(gpui_kit::assets::AllAssets)
-        .run(move |cx| {
+
+    let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
+    // A background run starts as an accessory app on macOS: no Dock icon, and
+    // macOS never brings it forward, so it leaves whatever you're doing alone.
+    // Its windows draw as usual.
+    #[cfg(target_os = "macos")]
+    let app = if o.background || o.demo.is_some() {
+        app.with_windowing(WindowingRequest::Headless)
+    } else {
+        app
+    };
+    // A background run keeps real timing: macOS would otherwise nap a hidden
+    // app and slow its timers to a crawl.
+    #[cfg(target_os = "macos")]
+    if o.background || o.demo.is_some() {
+        use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+        let token = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+            NSActivityOptions::UserInitiatedAllowingIdleSystemSleep
+                | NSActivityOptions::LatencyCritical,
+            &NSString::from_str("dent walkthrough"),
+        );
+        std::mem::forget(token);
+    }
+    app.run(move |cx| {
             gpui_kit::init(cx);
             load_fonts(cx);
             app::bind_keys(cx);
             let (x, y, w, h) = window_rect();
+            let background = o.background || o.demo.is_some();
+            BACKGROUND.store(background, Ordering::Relaxed);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
                     origin: point(px(x), px(y)),
@@ -424,7 +463,8 @@ fn main() {
                     appears_transparent: true,
                     traffic_light_position: Some(point(px(16.), px(16.))),
                 }),
-                focus: true,
+                // Walkthroughs drive the window directly; they never need focus.
+                focus: !background,
                 ..Default::default()
             };
             let (dark, pace) = (o.dark, o.pace);
@@ -434,7 +474,23 @@ fn main() {
                 .map(|name| demo::Demo::new(&name, o.shots.clone(), o.record.is_some()));
             let length = demo.as_ref().map(|d| d.length());
             let record = o.record.clone();
-            let (_, view) = gpui_kit::open_window(options, cx, move |window, cx| {
+            #[cfg(target_os = "linux")]
+            if std::env::var_os("DENT_NO_GTK").is_none() {
+                // WebKitGTK needs GTK running beside GPUI's own event loop.
+                let _ = gtk::init();
+                cx.spawn(async move |cx| {
+                    loop {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(16))
+                            .await;
+                        while gtk::events_pending() {
+                            gtk::main_iteration_do(false);
+                        }
+                    }
+                })
+                .detach();
+            }
+            let (main_window, view) = gpui_kit::open_window(options, cx, move |window, cx| {
                 let view = cx.new(|cx| Dent::new(dark, pace, demo, window, cx));
                 let composer = view.read(cx).composer.clone();
                 composer.update(cx, |c, cx| c.focus(window, cx));
@@ -444,21 +500,34 @@ fn main() {
             if let (Some(path), Some(secs)) = (record, length) {
                 demo::record(path, secs);
             }
-            // The working squares step at 8 fps, and the timers tick, even when
-            // nothing else changes.
+            // Look in eight times a second, but only draw when something on
+            // screen changes: a working square's step, a timer's second, a
+            // page's message.
             let weak = view.downgrade();
             cx.spawn(async move |cx| {
                 loop {
                     cx.background_executor()
                         .timer(Duration::from_secs_f32(1. / ds::motion::PIXEL_FPS))
                         .await;
-                    if weak.update(cx, |_, cx| cx.notify()).is_err() {
+                    let Ok(due) = weak.update(cx, |this, _| this.tick_due()) else {
+                        break;
+                    };
+                    if due && weak.update(cx, |_, cx| cx.notify()).is_err() {
                         break;
                     }
                 }
             })
             .detach();
-            cx.on_window_closed(|cx, _| cx.quit()).detach();
-            cx.activate(true);
+            // Pages in their own windows close without quitting dent.
+            let main_id = main_window.window_id();
+            cx.on_window_closed(move |cx, id| {
+                if id == main_id {
+                    cx.quit();
+                }
+            })
+            .detach();
+            if !background {
+                cx.activate(true);
+            }
         });
 }

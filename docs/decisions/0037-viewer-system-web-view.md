@@ -18,6 +18,8 @@ Agents make web pages constantly, and a page only means something when it runs. 
 ## Consequences
 
 - The web view is a native layer above GPUI's drawing. GPUI can't draw over it, so menus, tooltips and toasts must not overlap the preview area: the preview hides while a menu is open, and floating UI is placed away from it (the close toast sits over the sidebar). This is the main cost of the choice.
-- Linux needs GTK for WebKitGTK, and wry's child web views there work on X11 only. Wayland support is a known gap to check before the Linux release.
+- Since GPUI can't draw over the page, dent draws the page's own snapshot in its place whenever something must cover it, so hiding it doesn't leave a blank panel.
+- Linux needs GTK for WebKitGTK. Child web views work on X11 (through an Xlib handle dent builds from GPUI's XCB one); on Wayland the page opens in its own window. Linux and Windows are deferred until after the Mac release.
+- wry activates the app whenever it creates a web view, so dent hands activation back when it runs in the background.
 - One web view is shared and reloaded per page and version, so memory stays flat however many pages a session makes. Live reload keeps the scroll position.
 - The `dent://` policy means pages that fetch from the network show a blocked request rather than silently working; dev-server previews (forwarded ports) load over `http://localhost` instead and are not offline.

@@ -1,7 +1,7 @@
 //! The viewer: everything a session made or changed, beside the chat. Pages
 //! run live, docs render, images show, changes take review comments.
 
-use std::sync::Arc;
+use std::rc::Rc;
 
 use gpui_kit::base::input::Textarea;
 use gpui_kit::prelude::*;
@@ -15,6 +15,14 @@ use crate::theme::{Status, status_square};
 use crate::ui::{button, ghost, icon, icon_button, kbd, probe};
 
 pub const MIN_WIDTH: f32 = 360.;
+
+/// A row of the diff list.
+#[derive(Clone, Copy)]
+pub enum Row {
+    Line(usize),
+    Note(usize),
+    Compose,
+}
 /// The chat never gets narrower than this; the viewer and then the sidebar give way.
 pub const CHAT_MIN: f32 = 440.;
 
@@ -28,11 +36,15 @@ impl Dent {
         let Some(s) = self.current() else {
             return false;
         };
+        // A page in its own window never hides for menus: nothing covers it.
+        let detached = self
+            .preview
+            .as_ref()
+            .is_some_and(|p| p.borrow().detached());
         self.panel_open
             && Self::has_viewer(s)
-            && matches!(self.tab(s), Tab::Art(a) if self.art(a).is_some_and(|a| a.kind == Kind::Html))
-            && self.menu.is_none()
-            && self.palette.is_none()
+            && matches!(self.tab(s), Tab::Art(a) if self.art(a).is_some_and(|a| a.kind.is_page()) && !self.popouts.contains_key(a))
+            && (detached || (self.menu.is_none() && self.palette.is_none()))
     }
 
     pub fn panel(
@@ -124,12 +136,12 @@ impl Dent {
             );
         let body = match tab {
             Tab::Art(id) => match self.art(id).map(|a| a.kind) {
-                Some(Kind::Html) => self.page(id, window, cx),
+                Some(Kind::Html | Kind::Server) => self.page(id, window, cx),
                 Some(Kind::Doc) => self.doc(id, cx),
                 Some(Kind::Image) => self.image(id, cx),
                 None => div().into_any_element(),
             },
-            Tab::Changes => self.changes(s, cx),
+            Tab::Changes => self.changes(s, window, cx),
             Tab::Terminal => self.terminal(s),
         };
         div()
@@ -204,10 +216,23 @@ impl Dent {
         let Some(a) = self.art(id).cloned() else {
             return div().into_any_element();
         };
-        let latest = a.versions.len();
+        let server = a.kind == Kind::Server;
+        if self.popouts.contains_key(id) {
+            return self.popped_out(id, &a, cx);
+        }
+        let latest = a.versions.len().max(1);
         let v = self.version(&a);
+        let detached = self
+            .preview
+            .as_ref()
+            .is_some_and(|p| p.borrow().detached());
         if let Some(p) = &self.preview {
-            p.borrow_mut().show(a.path, v, &a.versions[v - 1]);
+            let mut p = p.borrow_mut();
+            if server {
+                p.show_server(&crate::devserver::url());
+            } else {
+                p.show(a.path, v, &a.versions[v - 1]);
+            }
         }
         let errors = self.errors.get(&(id, v)).cloned().unwrap_or_default();
         let updated = self
@@ -263,9 +288,24 @@ impl Dent {
                 ))
                 .child(probe(&self.probes, label))
         };
+        let machine = self
+            .current()
+            .map(|s| s.machine.clone())
+            .unwrap_or_default();
         let toolbar = self
             .toolbar()
-            .child(step(
+            .when(server, |d| {
+                d.pl(px(space::S3)).child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S1H))
+                        .child(status_square(Status::Done, &t))
+                        .child(div().ty(LABEL).text_color(t.ink).child("running")),
+                )
+            })
+            .when(!server, |d| {
+                d.child(step(
                 "prev-version",
                 "chevron-left",
                 (v > 1).then(|| v - 1),
@@ -287,6 +327,7 @@ impl Dent {
                 "Later version",
                 cx,
             ))
+            })
             .child(div().w(px(1.)).h(px(16.)).mx(px(space::S1)).bg(t.hairline))
             .child(match self.toolbar_hint {
                 Some(h) => div()
@@ -302,7 +343,11 @@ impl Dent {
                     .truncate()
                     .ty(LABEL)
                     .text_color(t.quiet)
-                    .child(a.path),
+                    .child(if server {
+                        format!("{} · on {machine}", a.path)
+                    } else {
+                        a.path.to_string()
+                    }),
             })
             .when_some(updated, |d, secs| {
                 let k = if secs < 2. {
@@ -322,22 +367,26 @@ impl Dent {
                         .child(format!("updated to v{latest}")),
                 )
             })
-            .child(seg(Viewport::Fill, "monitor", "fill", "Full width", cx))
-            .child(seg(
-                Viewport::Tablet,
-                "tablet",
-                "tablet",
-                "Tablet width, 768",
-                cx,
-            ))
-            .child(seg(
-                Viewport::Phone,
-                "smartphone",
-                "phone",
-                "Phone width, 390",
-                cx,
-            ))
-            .child(div().w(px(1.)).h(px(16.)).mx(px(space::S1)).bg(t.hairline))
+            // Widths frame the page inside the viewer; a page in its own
+            // window is sized by its window.
+            .when(!detached, |d| {
+                d.child(seg(Viewport::Fill, "monitor", "fill", "Full width", cx))
+                    .child(seg(
+                        Viewport::Tablet,
+                        "tablet",
+                        "tablet",
+                        "Tablet width, 768",
+                        cx,
+                    ))
+                    .child(seg(
+                        Viewport::Phone,
+                        "smartphone",
+                        "phone",
+                        "Phone width, 390",
+                        cx,
+                    ))
+                    .child(div().w(px(1.)).h(px(16.)).mx(px(space::S1)).bg(t.hairline))
+            })
             .child(
                 div()
                     .id("pick")
@@ -376,63 +425,98 @@ impl Dent {
                         cx.notify();
                     })),
             )
+            .when(!detached, |d| {
+                d.child(
+                    icon_button("pop-out", "picture-in-picture-2", &t)
+                        .relative()
+                        .on_hover(Self::hint("Open in its own window", cx))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.pop_out(id, window, cx)
+                        }))
+                        .child(probe(&self.probes, "pop-out")),
+                )
+            })
             .child({
-                let (bytes, name) = (
-                    a.versions[v - 1].clone(),
-                    a.path.rsplit('/').next().unwrap_or(a.path).to_string(),
-                );
+                let file = (!server).then(|| {
+                    (
+                        a.versions[v - 1].clone(),
+                        a.path.rsplit('/').next().unwrap_or(a.path).to_string(),
+                    )
+                });
                 icon_button("external", "external-link", &t)
                     .on_hover(Self::hint("Open in your browser", cx))
-                    .on_click(move |_, _, cx| {
-                        let path = std::env::temp_dir().join(format!("dent-preview-v{v}-{name}"));
-                        if std::fs::write(&path, &bytes[..]).is_ok() {
-                            cx.open_url(&format!("file://{}", path.display()));
+                    .on_click(move |_, _, cx| match &file {
+                        Some((bytes, name)) => {
+                            let path =
+                                std::env::temp_dir().join(format!("dent-preview-v{v}-{name}"));
+                            if std::fs::write(&path, &bytes[..]).is_ok() {
+                                cx.open_url(&format!("file://{}", path.display()));
+                            }
                         }
+                        None => cx.open_url(&crate::devserver::url()),
                     })
             });
 
-        // The web view is a native layer over this area; GPUI draws its frame.
+        // The web view is a native layer over this area. GPUI draws the frame
+        // and, underneath, the page's last snapshot: when a menu hides the
+        // web view, the snapshot is what you see.
         let area_preview = self.preview.clone();
-        let width = viewport.width();
-        let area = div()
-            .flex_1()
-            .min_h_0()
-            .relative()
-            .bg(if width.is_some() { t.surface } else { t.panel })
-            .child(
-                canvas(
-                    move |bounds, _, _| {
-                        let inner = match width {
-                            Some(w) if bounds.size.width.as_f32() > w + space::S8 => Bounds {
-                                origin: point(
-                                    bounds.origin.x + (bounds.size.width - px(w)) / 2.,
-                                    bounds.origin.y + px(space::S4),
-                                ),
-                                size: size(px(w), bounds.size.height - px(space::S4 * 2.)),
-                            },
-                            _ => bounds,
-                        };
-                        if let Some(p) = &area_preview {
-                            p.borrow_mut().place(inner);
-                        }
-                        inner
-                    },
-                    move |_, inner, window, _| {
-                        if width.is_some() {
-                            // A hairline frame around a narrow viewport.
-                            window.paint_quad(outline(
-                                inner.dilate(px(1.)),
-                                t.hairline,
-                                BorderStyle::Solid,
-                            ));
-                        }
-                    },
+        let width = viewport.width().filter(|w| self.panel_w > w + space::S8);
+        let area = if detached {
+            self.own_window_note(cx)
+        } else {
+            div()
+                .flex_1()
+                .min_h_0()
+                .relative()
+                .flex()
+                .justify_center()
+                .bg(if width.is_some() { t.surface } else { t.panel })
+                .when(width.is_some(), |d| d.py(px(space::S4)))
+                .child(
+                    div()
+                        .h_full()
+                        .when_some(width, |d, w| d.w(px(w)))
+                        .when(width.is_none(), |d| d.w_full())
+                        .child(
+                            canvas(
+                                move |bounds, _, _| {
+                                    if let Some(p) = &area_preview {
+                                        p.borrow_mut().place(bounds);
+                                    }
+                                    (bounds, area_preview)
+                                },
+                                move |_, (inner, preview), window, _| {
+                                    if let Some(snap) =
+                                        preview.and_then(|p| p.borrow().snapshot(inner.size))
+                                    {
+                                        let _ = window.paint_image(
+                                            inner,
+                                            inner,
+                                            Corners::default(),
+                                            snap.image,
+                                            0,
+                                            false,
+                                        );
+                                    }
+                                    if width.is_some() {
+                                        // A hairline frame around a narrow viewport.
+                                        window.paint_quad(outline(
+                                            inner.dilate(px(1.)),
+                                            t.hairline,
+                                            BorderStyle::Solid,
+                                        ));
+                                    }
+                                },
+                            )
+                            .size_full(),
+                        ),
                 )
-                .size_full(),
-            )
-            .child(probe(&self.probes, "preview"));
+                .child(probe(&self.probes, "preview"))
+                .into_any_element()
+        };
 
-        let banner = (v < latest).then(|| {
+        let banner = (!server && v < latest).then(|| {
             div()
                 .h(px(36.))
                 .flex_none()
@@ -533,13 +617,104 @@ impl Dent {
             .into_any_element()
     }
 
+    /// The viewer while the page is in a window of its own.
+    fn popped_out(
+        &mut self,
+        id: &'static str,
+        a: &crate::data::Artifact,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.t;
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                self.toolbar().pl(px(space::S3)).child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .ty(LABEL)
+                        .text_color(t.quiet)
+                        .child(a.path),
+                ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(space::S3))
+                    .px(px(space::S6))
+                    .child(icon("picture-in-picture-2", 20., t.quiet))
+                    .child(
+                        div()
+                            .ty(UI)
+                            .text_color(t.ink)
+                            .child("This page is open in its own window."),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(space::S2))
+                            .child(ghost("show-popout", "Show window", &t).on_click(
+                                cx.listener(move |this, _, window, cx| {
+                                    this.pop_out(id, window, cx)
+                                }),
+                            ))
+                            .child(
+                                button("bring-back", "Bring it back", false, &t)
+                                    .relative()
+                                    .on_click(
+                                        cx.listener(move |this, _, _, cx| this.bring_back(id, cx)),
+                                    )
+                                    .child(probe(&self.probes, "bring-back")),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// On Wayland the page lives in its own window; the viewer says so.
+    fn own_window_note(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.t;
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(space::S3))
+            .px(px(space::S6))
+            .child(icon("app-window", 20., t.quiet))
+            .child(
+                div()
+                    .ty(UI)
+                    .text_color(t.ink)
+                    .child("The page opens in its own window here."),
+            )
+            .child(ghost("raise-page", "Show the page", &t).on_click(cx.listener(
+                |this, _, _, _| {
+                    if let Some(p) = &this.preview {
+                        p.borrow().raise();
+                    }
+                },
+            )))
+            .into_any_element()
+    }
+
     fn doc(&mut self, id: &'static str, cx: &mut Context<Self>) -> AnyElement {
         let t = self.t;
         let Some(a) = self.art(id).cloned() else {
             return div().into_any_element();
         };
         let src = String::from_utf8_lossy(&a.versions[a.versions.len() - 1]).to_string();
-        let blocks = markdown::parse(&src);
+        let blocks = self.markdown(&src);
         div()
             .flex_1()
             .min_h_0()
@@ -583,7 +758,7 @@ impl Dent {
                             .mx_auto()
                             .px(px(space::S8))
                             .py(px(space::S6))
-                            .child(markdown::render(&blocks, &t, true)),
+                            .child(markdown::render(blocks.as_slice(), &t, true)),
                     ),
             )
             .into_any_element()
@@ -652,11 +827,8 @@ impl Dent {
                     .flex()
                     .when(!actual, |d| d.items_center().justify_center())
                     .bg(t.surface)
-                    .child(
-                        img(Arc::new(Image::from_bytes(
-                            ImageFormat::Png,
-                            bytes.to_vec(),
-                        )))
+                    .children(self.picture(id, a.versions.len()).map(|picture| {
+                        img(picture)
                         .map(|i| {
                             if actual {
                                 // Screenshots are @2x: actual size is half the pixels.
@@ -668,13 +840,18 @@ impl Dent {
                         .object_fit(ObjectFit::Contain)
                         .rounded(px(radius::LG))
                         .border_1()
-                        .border_color(t.hairline),
-                    ),
+                        .border_color(t.hairline)
+                    })),
             )
             .into_any_element()
     }
 
-    fn changes(&mut self, s: &Session, cx: &mut Context<Self>) -> AnyElement {
+    fn changes(
+        &mut self,
+        s: &Session,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = self.t;
         let selected = self
             .diff_file
@@ -755,10 +932,12 @@ impl Dent {
                     )
                     .child(div().truncate().ty(LABEL).text_color(t.faint).child(dir))
             }));
-        let Some(file) = s.diff.get(selected).cloned() else {
+        let Some(shared) = self.current_rc() else {
             return div().into_any_element();
         };
-        let commenting = self.commenting.clone();
+        let Some(file) = s.diff.get(selected) else {
+            return div().into_any_element();
+        };
         let comments: Vec<(u32, String)> = self
             .review
             .iter()
@@ -771,141 +950,62 @@ impl Dent {
                 _ => None,
             })
             .collect();
-        let mut lines: Vec<AnyElement> = Vec::new();
+        // One row per line, plus a row for each comment and the open comment box.
+        let mut rows: Vec<Row> = Vec::with_capacity(file.lines.len());
         for (i, l) in file.lines.iter().enumerate() {
-            let n = l.new.or(l.old).unwrap_or(0);
-            let (bg, bar) = match l.kind {
-                Line::Added => (Some(t.added), Some(t.done.0)),
-                Line::Removed => (Some(t.removed), Some(t.quiet)),
-                Line::Hunk => (Some(t.selected()), None),
-                Line::Context => (None, None),
-            };
-            let path = file.path.clone();
-            let commentable = l.kind != Line::Hunk;
-            lines.push(
-                div()
-                    .id(SharedString::from(format!("line-{i}")))
-                    .group("line")
-                    .relative()
-                    .flex()
-                    .min_w_full()
-                    .h(px(size::LINE))
-                    .when_some(bg, |d, c| d.bg(c))
-                    .border_l_2()
-                    .border_color(bar.unwrap_or(transparent_black()))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("gutter-{i}")))
-                            .relative()
-                            .w(px(64.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_end()
-                            .gap(px(space::S1))
-                            .pr(px(space::S2))
-                            .ty(CODE)
-                            .text_color(t.faint)
-                            .when(commentable, |d| {
-                                d.cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.start_comment(path.clone(), n, window, cx)
-                                    }))
-                                    .child(
-                                        div()
-                                            .invisible()
-                                            .group_hover("line", |s| s.visible())
-                                            .child(icon("message-square-plus", 12., t.quiet)),
-                                    )
-                            })
-                            .child(match l.kind {
-                                Line::Hunk => String::new(),
-                                _ => n.to_string(),
-                            })
-                            .child(probe(&self.probes, format!("gutter-{i}"))),
-                    )
-                    .child(
-                        div()
-                            .w(px(14.))
-                            .flex_none()
-                            .ty(CODE)
-                            .text_color(t.faint)
-                            .child(match l.kind {
-                                Line::Added => "+",
-                                Line::Removed => "−",
-                                _ => "",
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .pr(px(space::S4))
-                            .whitespace_nowrap()
-                            .ty(CODE)
-                            .text_color(if l.kind == Line::Hunk { t.quiet } else { t.ink })
-                            .child(l.text.clone()),
-                    )
-                    .into_any_element(),
-            );
-            for (line, text) in comments
-                .iter()
-                .filter(|(line, _)| *line == n && commentable)
-            {
-                lines.push(comment_note(*line, text, &t).into_any_element());
+            rows.push(Row::Line(i));
+            if l.kind == Line::Hunk {
+                continue;
             }
-            if commenting
+            let n = l.new.or(l.old).unwrap_or(0);
+            for (k, _) in comments.iter().enumerate().filter(|(_, (line, _))| *line == n) {
+                rows.push(Row::Note(k));
+            }
+            if self
+                .commenting
                 .as_ref()
-                .is_some_and(|(f, line)| *f == file.path && *line == n && commentable)
+                .is_some_and(|(f, line)| *f == file.path && *line == n)
             {
-                lines.push(
-                    div()
-                        .mx(px(space::S3))
-                        .my(px(space::S2))
-                        .p(px(space::S3))
-                        .rounded(px(radius::LG))
-                        .bg(t.raised)
-                        .border_1()
-                        .border_color(t.hairline)
-                        .flex()
-                        .flex_col()
-                        .gap(px(space::S2))
-                        .child(
-                            div()
-                                .ty(UI)
-                                .text_color(t.ink)
-                                .child(Textarea::new(&self.comment_input)),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(space::S2))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .ty(LABEL)
-                                        .text_color(t.faint)
-                                        .child("comments collect into one review"),
-                                )
-                                .child(ghost("cancel-comment", "Cancel", &t).on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.commenting = None;
-                                        cx.notify();
-                                    },
-                                )))
-                                .child(
-                                    button("add-comment", "Add comment", true, &t)
-                                        .relative()
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.add_comment(window, cx)
-                                        }))
-                                        .child(probe(&self.probes, "add-comment")),
-                                ),
-                        )
-                        .into_any_element(),
-                );
+                rows.push(Row::Compose);
             }
         }
+        let hash = |v: &dyn Fn(&mut std::collections::hash_map::DefaultHasher)| {
+            use std::hash::Hasher;
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            v(&mut h);
+            h.finish()
+        };
+        use std::hash::Hash;
+        let file_key = hash(&|h| (&s.id, selected).hash(h));
+        let key = hash(&|h| (file_key, rows.len(), &self.commenting, comments.len()).hash(h));
+        if key != self.diff_key {
+            // A new file starts at the top; a comment opening or landing keeps your place.
+            let keep = (file_key == self.diff_file_key).then(|| self.diff_list.logical_scroll_top());
+            self.diff_key = key;
+            self.diff_file_key = file_key;
+            self.diff_list.reset(rows.len());
+            if let Some(top) = keep {
+                self.diff_list.scroll_to(top);
+            }
+        }
+        // Long lines scroll sideways: the list is as wide as the longest line.
+        let longest = file
+            .lines
+            .iter()
+            .map(|l| l.text.chars().count())
+            .max()
+            .unwrap_or(0) as f32;
+        let wide = 64. + 14. + longest * self.code_advance(window) + space::S4;
+        // Notes and the comment box fit the visible diff, not the longest line.
+        self.diff_view_w = self.panel_w - if compact { 0. } else { 200. } - space::S2;
+        let (rows, comments) = (Rc::new(rows), Rc::new(comments));
+        let diff = list(
+            self.diff_list.clone(),
+            cx.processor(move |this, ix: usize, _, cx| {
+                this.diff_row(&shared, selected, &rows, &comments, ix, cx)
+            }),
+        )
+        .size_full();
         let review = (!self.review.is_empty()).then(|| {
             let n = self.review.len();
             div()
@@ -1015,14 +1115,14 @@ impl Dent {
                                         div()
                                             .id("diff")
                                             .size_full()
-                                            .overflow_scroll()
-                                            .py(px(space::S1))
+                                            .overflow_x_scroll()
                                             .child(
                                                 div()
-                                                    .flex()
-                                                    .flex_col()
+                                                    .h_full()
                                                     .min_w_full()
-                                                    .children(lines),
+                                                    .w(px(wide))
+                                                    .py(px(space::S1))
+                                                    .child(diff),
                                             ),
                                     )
                                     // Long lines scroll sideways; the edge fades to say so.
@@ -1044,6 +1144,182 @@ impl Dent {
             )
             .children(review)
             .into_any_element()
+    }
+
+    /// The advance of one character of code, measured once.
+    fn code_advance(&mut self, window: &mut Window) -> f32 {
+        if self.code_em == 0. {
+            let font = font(crate::theme::mono());
+            let id = window.text_system().resolve_font(&font);
+            self.code_em = window
+                .text_system()
+                .em_advance(id, px(CODE.size))
+                .map(|p| p.as_f32())
+                .unwrap_or(7.2);
+        }
+        self.code_em
+    }
+
+    /// One row of the diff: a line, a comment on it, or the comment box.
+    fn diff_row(
+        &mut self,
+        s: &Session,
+        selected: usize,
+        rows: &[Row],
+        comments: &[(u32, String)],
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.t;
+        let Some(file) = s.diff.get(selected) else {
+            return div().into_any_element();
+        };
+        match rows.get(ix) {
+            Some(Row::Line(i)) => {
+                let i = *i;
+                let Some(l) = file.lines.get(i) else {
+                    return div().into_any_element();
+                };
+                let n = l.new.or(l.old).unwrap_or(0);
+                let (bg, bar) = match l.kind {
+                    Line::Added => (Some(t.added), Some(t.done.0)),
+                    Line::Removed => (Some(t.removed), Some(t.quiet)),
+                    Line::Hunk => (Some(t.selected()), None),
+                    Line::Context => (None, None),
+                };
+                let path = file.path.clone();
+                let commentable = l.kind != Line::Hunk;
+                div()
+                    .id(SharedString::from(format!("line-{i}")))
+                    .group("line")
+                    .relative()
+                    .flex()
+                    .w_full()
+                    .h(px(size::LINE))
+                    .when_some(bg, |d, c| d.bg(c))
+                    .border_l_2()
+                    .border_color(bar.unwrap_or(transparent_black()))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("gutter-{i}")))
+                            .relative()
+                            .w(px(64.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap(px(space::S1))
+                            .pr(px(space::S2))
+                            .ty(CODE)
+                            .text_color(t.faint)
+                            .when(commentable, |d| {
+                                d.cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.start_comment(path.clone(), n, window, cx)
+                                    }))
+                                    .child(
+                                        div()
+                                            .invisible()
+                                            .group_hover("line", |s| s.visible())
+                                            .child(icon("message-square-plus", 12., t.quiet)),
+                                    )
+                            })
+                            .child(match l.kind {
+                                Line::Hunk => String::new(),
+                                _ => n.to_string(),
+                            })
+                            .child(probe(&self.probes, format!("gutter-{i}"))),
+                    )
+                    .child(
+                        div()
+                            .w(px(14.))
+                            .flex_none()
+                            .ty(CODE)
+                            .text_color(t.faint)
+                            .child(match l.kind {
+                                Line::Added => "+",
+                                Line::Removed => "−",
+                                _ => "",
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .pr(px(space::S4))
+                            .whitespace_nowrap()
+                            .ty(CODE)
+                            .text_color(if l.kind == Line::Hunk { t.quiet } else { t.ink })
+                            .child(l.text.clone()),
+                    )
+                    .into_any_element()
+            }
+            Some(Row::Note(k)) => match comments.get(*k) {
+                // Notes stay inside the visible width, not the longest line's.
+                // The list sizes its rows; the note inside keeps to the visible width.
+                Some((line, text)) => div()
+                    .w_full()
+                    .flex()
+                    .child(
+                        div()
+                            .w(px(self.diff_view_w))
+                            .flex_none()
+                            .child(comment_note(*line, text, &t)),
+                    )
+                    .into_any_element(),
+                None => div().into_any_element(),
+            },
+            Some(Row::Compose) => div()
+                .w_full()
+                .flex()
+                .child(div().w(px(self.diff_view_w)).flex_none().child(
+                    div()
+                        .mx(px(space::S3))
+                        .my(px(space::S2))
+                        .p(px(space::S3))
+                        .rounded(px(radius::LG))
+                        .bg(t.raised)
+                        .border_1()
+                        .border_color(t.hairline)
+                        .flex()
+                        .flex_col()
+                        .gap(px(space::S2))
+                        .child(
+                            div()
+                                .ty(UI)
+                                .text_color(t.ink)
+                                .child(Textarea::new(&self.comment_input)),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(space::S2))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .ty(LABEL)
+                                        .text_color(t.faint)
+                                        .child("comments collect into one review"),
+                                )
+                                .child(ghost("cancel-comment", "Cancel", &t).on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.commenting = None;
+                                        cx.notify();
+                                    }),
+                                ))
+                                .child(
+                                    button("add-comment", "Add comment", true, &t)
+                                        .relative()
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.add_comment(window, cx)
+                                        }))
+                                        .child(probe(&self.probes, "add-comment")),
+                                ),
+                        ),
+                ))
+                .into_any_element(),
+            None => div().into_any_element(),
+        }
     }
 
     fn terminal(&mut self, s: &Session) -> AnyElement {

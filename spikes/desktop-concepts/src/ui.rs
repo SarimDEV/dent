@@ -113,6 +113,13 @@ pub fn section_label(text: &str, count: Option<usize>, t: &Theme) -> Div {
         })
 }
 
+thread_local! {
+    /// The frame each probe was last drawn in, so a check never clicks
+    /// where something used to be.
+    pub static PROBE_FRAME: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
+}
+pub static FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Records an element's bounds under a name, so the walkthrough can click it
 /// through normal hit-testing and checks can measure it.
 pub fn probe(
@@ -123,6 +130,8 @@ pub fn probe(
     let name = name.into();
     canvas(
         move |bounds, _, _| {
+            let frame = FRAME.load(std::sync::atomic::Ordering::Relaxed);
+            PROBE_FRAME.with(|f| f.borrow_mut().insert(name.clone(), frame));
             probes.borrow_mut().insert(name, bounds);
         },
         |_, _, _, _| {},

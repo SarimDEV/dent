@@ -16,10 +16,10 @@ pub const WIDTH: f32 = 288.;
 impl Dent {
     pub fn sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = self.t;
-        let needs: Vec<Session> = self.needs().into_iter().cloned().collect();
-        let done: Vec<Session> = self.done().into_iter().cloned().collect();
-        let working: Vec<Session> = self.working().into_iter().cloned().collect();
-        let closed: Vec<Session> = self.closed().into_iter().cloned().collect();
+        let needs = self.needs();
+        let done = self.done();
+        let working = self.working();
+        let closed = self.closed();
         let clear = needs.is_empty() && done.is_empty();
         let new_selected = self.selected.is_none();
 

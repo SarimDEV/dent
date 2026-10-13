@@ -12,14 +12,21 @@ pub enum Kind {
     Doc,
     /// A picture: a screenshot, a chart.
     Image,
+    /// A dev server the agent started, forwarded to this computer.
+    Server,
 }
 
 impl Kind {
+    /// Shown live in the web view.
+    pub fn is_page(self) -> bool {
+        matches!(self, Kind::Html | Kind::Server)
+    }
     pub fn icon(self) -> &'static str {
         match self {
             Kind::Html => "app-window",
             Kind::Doc => "file-text",
             Kind::Image => "image",
+            Kind::Server => "globe",
         }
     }
 }
@@ -158,6 +165,13 @@ pub fn artifacts() -> Vec<Artifact> {
                     .as_slice()
                     .into(),
             ],
+        },
+        Artifact {
+            id: "admin-dev",
+            kind: Kind::Server,
+            title: "Admin dashboard, running",
+            path: "localhost:5173",
+            versions: Vec::new(),
         },
         Artifact {
             id: "settings-shot",
@@ -477,10 +491,66 @@ pub fn sessions() -> Vec<Session> {
         "devbox",
         "Codex · GPT-5.5",
         Status::Working,
-        "Updating 7 crates, running tests",
+        "Updating 214 crates, running tests",
         "4m",
     );
+    // A long session: the transcript and the lockfile diff are big enough
+    // that only what's on screen can afford to be drawn.
+    let mut g = g;
+    g.items = vec![Item::User(
+        "Bump every dependency to its latest compatible version, one at a time, and run the tests after each.".into(),
+    )];
+    for (i, name) in CRATES.iter().cycle().take(214).enumerate() {
+        let to = format!("{}.{}.{}", 1 + i % 3, i % 17, i % 9);
+        g.items.push(Item::Tools {
+            summary: format!("Bumped {name} to {to}, tests pass"),
+            lines: vec![
+                format!("Ran cargo update -p {name}"),
+                "Ran cargo test · 412 passed".into(),
+            ],
+            open: false,
+        });
+        if i % 25 == 24 {
+            g.items.push(text(&format!(
+                "{} crates done. Nothing has needed a code change yet; `{name}` changed a default, which I checked against our config.",
+                i + 1
+            )));
+        }
+    }
+    g.diff = vec![lockfile_diff(), manifest_diff()];
     v.push(g);
+
+    let mut k = s(
+        "admin",
+        "Signups chart on the admin dashboard",
+        "marketing-site",
+        "devbox",
+        "Claude · Opus 5.5",
+        Status::Done,
+        "Dashboard running on port 5173",
+        "6m",
+    );
+    k.arts = vec!["admin-dev"];
+    k.items = vec![
+        Item::User("Add a signups-per-day chart to the admin dashboard, fed from the real API.".into()),
+        tools(
+            "Edited 2 files, started the dev server",
+            &[
+                "Edited src/routes/signups.tsx",
+                "Edited src/api/signups.ts",
+                "Ran pnpm dev · ready on port 5173",
+            ],
+        ),
+        text("The chart reads `/api/signups` and refreshes every two seconds. The dev server is running on devbox, and dent forwards its port, so the preview below is the real app."),
+        Item::Made { art: "admin-dev", version: 1 },
+    ];
+    k.terminal = vec![
+        (Tone::Command, "$ pnpm dev".into()),
+        (Tone::Quiet, "  VITE v6.3.1  ready in 412 ms".into()),
+        (Tone::Good, "  ➜  Local:   http://localhost:5173/".into()),
+        (Tone::Quiet, "  ➜  Network: use --host to expose".into()),
+    ];
+    v.push(k);
 
     let mut h = s(
         "readme",
@@ -507,6 +577,54 @@ pub fn sessions() -> Vec<Session> {
     i.closed = true;
     v.push(i);
     v
+}
+
+const CRATES: &[&str] = &[
+    "tokio", "serde", "axum", "tower", "hyper", "rustls", "sqlx", "tracing", "uuid", "chrono",
+    "reqwest", "clap", "anyhow", "thiserror", "bytes", "futures", "regex", "rand",
+];
+
+fn lockfile_diff() -> FileDiff {
+    let mut lines = Vec::new();
+    let (mut old, mut new) = (1u32, 1u32);
+    for (i, name) in CRATES.iter().cycle().take(214).enumerate() {
+        lines.push(DiffLine { old: None, new: None, kind: Line::Hunk, text: format!("@@ -{old},7 +{new},7 @@") });
+        for (kind, text) in [
+            (Line::Context, "[[package]]".to_string()),
+            (Line::Context, format!("name = \"{name}\"")),
+            (Line::Removed, format!("version = \"{}.{}.{}\"", 1 + i % 3, i % 17, i % 9)),
+            (Line::Added, format!("version = \"{}.{}.{}\"", 1 + i % 3, i % 17, i % 9 + 1)),
+            (Line::Context, "source = \"registry+https://github.com/rust-lang/crates.io-index\"".to_string()),
+            (Line::Removed, format!("checksum = \"{:064x}\"", (i as u128 + 7) * 0x9e3779b97f4a7c15)),
+            (Line::Added, format!("checksum = \"{:064x}\"", (i as u128 + 11) * 0x9e3779b97f4a7c15)),
+        ] {
+            let (o, n) = match kind {
+                Line::Removed => (Some(old), None),
+                Line::Added => (None, Some(new)),
+                _ => (Some(old), Some(new)),
+            };
+            if kind != Line::Added {
+                old += 1;
+            }
+            if kind != Line::Removed {
+                new += 1;
+            }
+            lines.push(DiffLine { old: o, new: n, kind, text });
+        }
+        old += 40;
+        new += 40;
+    }
+    FileDiff { path: "Cargo.lock".into(), added: 428, removed: 428, lines }
+}
+
+fn manifest_diff() -> FileDiff {
+    let mut lines = vec![DiffLine { old: None, new: None, kind: Line::Hunk, text: "@@ -12,18 +12,18 @@ [dependencies]".into() }];
+    for (i, name) in CRATES.iter().enumerate() {
+        let n = 12 + i as u32;
+        lines.push(DiffLine { old: Some(n), new: None, kind: Line::Removed, text: format!("{name} = \"{}.{}\"", 1 + i % 3, i % 17) });
+        lines.push(DiffLine { old: None, new: Some(n), kind: Line::Added, text: format!("{name} = \"{}.{}\"", 1 + i % 3, i % 17 + 1) });
+    }
+    FileDiff { path: "Cargo.toml".into(), added: CRATES.len(), removed: CRATES.len(), lines }
 }
 
 fn limit_diff() -> FileDiff {

@@ -29,6 +29,8 @@ pub enum Field {
 pub enum Act {
     Wait,
     Click(&'static str),
+    /// Click it if it's on screen; some controls exist only on some platforms.
+    ClickIfShown(&'static str),
     Key(&'static str),
     Type(Field, &'static str),
     /// Type into the focused field key by key, through normal input.
@@ -37,6 +39,9 @@ pub enum Act {
     Call(Call),
     /// Passes when the predicate holds within the timeout (seconds).
     Until(&'static str, Pred, f32),
+    /// Sit still for `secs` without asking for frames, then pass if the
+    /// window drew at most `max_fps` frames a second meanwhile.
+    Idle(&'static str, f32, f32),
     Shot(&'static str),
 }
 
@@ -49,6 +54,8 @@ pub struct Demo {
     results: Vec<(&'static str, bool)>,
     shots: Option<PathBuf>,
     hold: f32,
+    /// While idling: when it ends, and the frame count it started from.
+    pub resting: Option<(Instant, u64, f32, &'static str, f32)>,
 }
 
 use Act::*;
@@ -69,6 +76,7 @@ impl Demo {
             results: Vec::new(),
             shots,
             hold: if recording { 1.5 } else { 0.3 },
+            resting: None,
         }
     }
 
@@ -77,13 +85,40 @@ impl Demo {
         1.5 + self
             .steps
             .iter()
-            .map(|(w, a)| w + if matches!(a, Until(..)) { 2.5 } else { 0. })
+            .map(|(w, a)| {
+                w + match a {
+                    Until(..) => 2.5,
+                    Idle(_, secs, _) => *secs,
+                    _ => 0.,
+                }
+            })
             .sum::<f32>()
             + self.hold
     }
 }
 
 pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
+    // Finish an idle stretch: how many frames did the window draw?
+    let rested = me.update(cx, |this, _| {
+        let frames = this.frames;
+        let d = this.demo.as_mut()?;
+        let (until, start, secs, name, max) = d.resting?;
+        if Instant::now() < until {
+            return Some(None);
+        }
+        d.resting = None;
+        // The frame that ends the rest doesn't count.
+        let fps = (frames.saturating_sub(start + 1)) as f32 / secs;
+        Some(Some((name, fps, max)))
+    });
+    match rested {
+        Some(None) => return,
+        Some(Some((name, fps, max))) => {
+            eprintln!("      {name}: {fps:.1} frames a second");
+            note(&me, cx, name, fps <= max);
+        }
+        None => {}
+    }
     let step = me.update(cx, |this, _| {
         let d = this.demo.as_mut()?;
         if Instant::now() < d.due {
@@ -115,7 +150,8 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
     let mut advance = true;
     match act {
         Wait => {}
-        Click(name) => {
+        Click(name) | ClickIfShown(name) => {
+            let optional = matches!(act, ClickIfShown(_));
             if let Some(at) = center(&me, name, cx) {
                 // Arrive first, like a pointer would, so hover follows the click.
                 window.dispatch_event(
@@ -128,7 +164,7 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
                 );
                 mouse(window, cx, at, true);
                 mouse(window, cx, at, false);
-            } else {
+            } else if !optional {
                 note(
                     &me,
                     cx,
@@ -182,6 +218,18 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
             });
         }
         Call(f) => me.update(cx, |this, cx| f(this, window, cx)),
+        Idle(name, secs, max) => me.update(cx, |this, _| {
+            let frames = this.frames;
+            if let Some(d) = this.demo.as_mut() {
+                d.resting = Some((
+                    Instant::now() + Duration::from_secs_f32(secs),
+                    frames,
+                    secs,
+                    name,
+                    max,
+                ));
+            }
+        }),
         Until(name, pred, timeout) => {
             let ok = pred(me.read(cx), cx);
             let since = me.update(cx, |this, _| {
@@ -233,7 +281,15 @@ fn note(me: &Entity<Dent>, cx: &mut App, name: &'static str, ok: bool) {
 }
 
 fn center(me: &Entity<Dent>, name: &str, cx: &App) -> Option<Point<Pixels>> {
-    me.read(cx).probes.borrow().get(name).map(|b| b.center())
+    // Only what the latest frame drew.
+    let d = me.read(cx);
+    let fresh = crate::ui::PROBE_FRAME
+        .with(|f| f.borrow().get(name).copied())
+        .is_some_and(|at| at + 1 >= d.frames);
+    if !fresh {
+        return None;
+    }
+    d.probes.borrow().get(name).map(|b| b.center())
 }
 
 fn mouse(window: &mut Window, cx: &mut App, at: Point<Pixels>, down: bool) {
@@ -259,13 +315,13 @@ fn mouse(window: &mut Window, cx: &mut App, at: Point<Pixels>, down: bool) {
 // ---- Helpers for checks ----
 
 fn session<'a>(d: &'a Dent, id: &str) -> Option<&'a crate::data::Session> {
-    d.sessions.iter().find(|s| s.id == id)
+    d.sessions.iter().find(|s| s.id == id).map(|s| &**s)
 }
 fn status(d: &Dent, id: &str) -> Option<Status> {
     session(d, id).map(|s| s.status)
 }
 fn latest_new(d: &Dent) -> Option<&crate::data::Session> {
-    d.sessions.iter().find(|s| s.id.starts_with("new-"))
+    d.sessions.iter().find(|s| s.id.starts_with("new-")).map(|s| &**s)
 }
 
 // ---- Scenes ----
@@ -313,7 +369,7 @@ fn tour() -> Vec<(f32, Act)> {
                 |d, _| {
                     d.preview
                         .as_ref()
-                        .is_some_and(|p| p.borrow().showing.as_ref().is_some_and(|(_, v)| *v == 3))
+                        .is_some_and(|p| matches!(p.borrow().showing, Some(crate::web::Source::File { version: 3, .. })))
                 },
                 12.,
             ),
@@ -819,6 +875,230 @@ fn checks() -> Vec<(f32, Act)> {
                 1.,
             ),
         ),
+        // ---- A snapshot stands in for the page under menus ----
+        (
+            0.3,
+            Until(
+                "the page leaves a snapshot to stand in for it",
+                |d, _| d.preview.as_ref().is_some_and(|p| { let p = p.borrow(); p.detached() || p.has_snapshot() }),
+                3.,
+            ),
+        ),
+        (0.2, Key("cmd-k")),
+        (
+            0.3,
+            Until(
+                "search hides the live page…",
+                |d, _| {
+                    // In its own window (Wayland) nothing covers the page, so it stays.
+                    d.preview.as_ref().is_some_and(|p| p.borrow().detached())
+                        || (!d.preview_visible()
+                            && d.preview.as_ref().is_some_and(|p| !p.borrow().is_visible()))
+                },
+                1.,
+            ),
+        ),
+        (
+            0.0,
+            Until(
+                "…and its snapshot is drawn in its place",
+                |d, _| d.preview.as_ref().is_some_and(|p| { let p = p.borrow(); p.detached() || p.has_snapshot() }),
+                1.,
+            ),
+        ),
+        (0.2, Shot("h-search-over-page")),
+        (0.3, Key("escape")),
+        // ---- A page in its own window ----
+        (0.3, ClickIfShown("pop-out")),
+        (
+            0.4,
+            Until(
+                "the page opens in its own window",
+                |d, _| {
+                    d.preview.as_ref().is_some_and(|p| p.borrow().detached())
+                        || (d.popouts.contains_key("pricing") && !d.preview_visible())
+                },
+                2.,
+            ),
+        ),
+        (1.2, Shot("i-popout")),
+        (0.2, ClickIfShown("bring-back")),
+        (
+            0.4,
+            Until(
+                "Bring it back closes that window and the page returns",
+                |d, _| d.popouts.is_empty() && d.preview_visible(),
+                2.,
+            ),
+        ),
+        // ---- A dev server, forwarded ----
+        (
+            0.2,
+            Call(|d, w, cx| d.select(Some("admin".into()), w, cx)),
+        ),
+        (
+            1.8,
+            Page(
+                "window.ipc.postMessage(JSON.stringify({t:'probe',msg:document.getElementById('today').textContent}))",
+            ),
+        ),
+        (
+            0.0,
+            Until(
+                "the dev server's page loads its live data",
+                |d, _| {
+                    d.page_probe
+                        .as_deref()
+                        .is_some_and(|t| t.parse::<u32>().is_ok())
+                },
+                3.,
+            ),
+        ),
+        (0.4, Shot("j-dev-server")),
+        (
+            0.2,
+            Page("document.querySelector('nav a[href^=\"https\"]').click()"),
+        ),
+        (
+            0.0,
+            Until(
+                "a link off the page opens in the browser, not the preview",
+                |d, _| {
+                    d.external.iter().any(|u| u.contains("quillmate.example"))
+                        && d.preview.as_ref().is_some_and(|p| {
+                            matches!(p.borrow().showing, Some(crate::web::Source::Server(_)))
+                        })
+                },
+                2.,
+            ),
+        ),
+        (0.2, Click("pick")),
+        (
+            0.3,
+            Page("__dentShow('#today'); document.getElementById('today').click()"),
+        ),
+        (
+            0.0,
+            Until(
+                "Point works on a running app",
+                |d, _| {
+                    d.attachments.iter().any(
+                        |a| matches!(a, Attachment::Element { file, .. } if file == "localhost:5173"),
+                    )
+                },
+                2.,
+            ),
+        ),
+        (
+            0.2,
+            Call(|d, _, cx| {
+                d.attachments.clear();
+                cx.notify();
+            }),
+        ),
+        // ---- Long sessions draw only what's on screen ----
+        (
+            0.2,
+            Call(|d, w, cx| d.select(Some("deps".into()), w, cx)),
+        ),
+        (
+            0.6,
+            Until(
+                "a 224-item session opens at its newest message",
+                |d, _| d.transcript.item_count() > 220 && d.transcript.is_following_tail(),
+                2.,
+            ),
+        ),
+        (0.2, Click("tab-changes")),
+        (
+            0.3,
+            Call(|d, _, cx| {
+                d.diff_list.scroll_to(ListOffset {
+                    item_ix: 1198,
+                    offset_in_item: px(0.),
+                });
+                cx.notify();
+            }),
+        ),
+        (
+            0.3,
+            Until(
+                "the diff scrolls deep into the lockfile",
+                |d, _| d.diff_list.logical_scroll_top().item_ix > 1000,
+                1.,
+            ),
+        ),
+        (0.3, Click("gutter-1203")),
+        (
+            0.3,
+            Until(
+                "a line deep in a 1,712-line diff takes a comment, in place",
+                |d, _| {
+                    d.commenting
+                        .as_ref()
+                        .is_some_and(|(f, line)| f == "Cargo.lock" && *line > 5000)
+                        && d.diff_list.logical_scroll_top().item_ix > 1000
+                },
+                2.,
+            ),
+        ),
+        (0.3, Shot("k-long-diff")),
+        (0.2, Key("escape")),
+        // ---- Frames: drawn only when something on screen moves ----
+        (
+            0.2,
+            Call(|d, w, cx| d.select(Some("ledger".into()), w, cx)),
+        ),
+        // The inbox has focus, so no text caret blinks while measuring.
+        (0.3, Key("escape")),
+        (
+            0.6,
+            Idle(
+                "with agents working, the window draws only the squares' 8 steps a second",
+                3.,
+                9.5,
+            ),
+        ),
+        (
+            0.1,
+            Call(|_, _, cx| {
+                crate::set_reduce_motion(true);
+                cx.notify();
+            }),
+        ),
+        (
+            0.3,
+            Idle(
+                "with Reduce Motion, only the timers redraw, once a second",
+                3.,
+                1.5,
+            ),
+        ),
+        (0.2, Shot("l-reduce-motion")),
+        (
+            0.1,
+            Call(|_, _, cx| {
+                crate::set_reduce_motion(false);
+                cx.notify();
+            }),
+        ),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                for s in d.sessions.iter_mut() {
+                    let s = std::rc::Rc::make_mut(s);
+                    if s.status == Status::Working {
+                        s.status = Status::Done;
+                    }
+                }
+                d.stop_all_tasks();
+                cx.notify();
+            }),
+        ),
+        (
+            0.3,
+            Idle("with nothing moving, the window draws nothing", 3., 0.4),
+        ),
     ]
 }
 
@@ -845,6 +1125,13 @@ fn stills() -> Vec<(f32, Act)> {
         (0.2, Call(|d, w, cx| d.select(Some("ledger".into()), w, cx))),
         (0.3, Key("escape")),
         (0.6, Shot("g-inbox-keys")),
+        (0.3, Click("row-pick")),
+        (0.8, Shot("m-nothing-to-view")),
+        (0.3, Click("row-flaky")),
+        (0.8, Shot("n-flaky")),
+        (0.3, Click("row-ledger")),
+        (0.3, Key("cmd-\\")),
+        (0.8, Shot("o-viewer-hidden")),
     ]
 }
 
@@ -874,6 +1161,29 @@ pub fn record(path: PathBuf, secs: f32) {
 /// The window only, never what's around it: by window number when the
 /// `WINID` helper (tools/winid.swift) is given, else the window's rectangle.
 pub fn still(path: PathBuf) {
+    // On Linux: dent's own window, found by process, never the whole screen.
+    #[cfg(target_os = "linux")]
+    {
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            let id = std::process::Command::new("xdotool")
+                .args(["search", "--onlyvisible", "--pid", &std::process::id().to_string()])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .and_then(|s| s.lines().last().map(str::to_string));
+            let Some(id) = id else {
+                eprintln!("still: no window to capture for {}", path.display());
+                return;
+            };
+            let _ = std::process::Command::new("import")
+                .args(["-window", &id])
+                .arg(&path)
+                .status();
+        });
+        return;
+    }
+    #[allow(unreachable_code)]
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(40));
         let id = std::env::var("WINID").ok().and_then(|tool| {
@@ -883,14 +1193,14 @@ pub fn still(path: PathBuf) {
                 .ok()?;
             Some(String::from_utf8(out.stdout).ok()?.trim().to_string()).filter(|s| !s.is_empty())
         });
-        let mut cmd = std::process::Command::new("screencapture");
-        match id {
-            Some(id) => cmd.args(["-x", "-o", &format!("-l{id}")]),
-            None => {
-                let (x, y, w, h) = crate::window_rect();
-                cmd.args(["-x", "-R", &format!("{x},{y},{w},{h}")])
-            }
+        // Only ever the window itself: without its number, no still.
+        let Some(id) = id else {
+            eprintln!("still: set WINID to capture {}", path.display());
+            return;
         };
-        let _ = cmd.arg(&path).status();
+        let _ = std::process::Command::new("screencapture")
+            .args(["-x", "-o", &format!("-l{id}")])
+            .arg(&path)
+            .status();
     });
 }

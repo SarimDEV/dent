@@ -4,6 +4,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::base::input::{InputEvent, TextareaState};
@@ -11,8 +12,9 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use crate::data::{self, Artifact, Item, Session};
+use crate::markdown::Block;
 use crate::theme::{Status, Theme};
-use crate::web::{PageEvent, Preview};
+use crate::web::{PageEvent, Preview, Source};
 
 actions!(
     dent,
@@ -182,7 +184,8 @@ pub enum Step {
 
 pub struct Dent {
     pub t: Theme,
-    pub sessions: Vec<Session>,
+    /// Shared so a redraw can hold a session without copying its history.
+    pub sessions: Vec<Rc<Session>>,
     pub arts: Vec<Artifact>,
     /// The open session; None shows the new-session page.
     pub selected: Option<String>,
@@ -228,7 +231,33 @@ pub struct Dent {
     pub diff_file: HashMap<String, usize>,
     pub commenting: Option<(String, u32)>,
     pub review: Vec<Attachment>,
-    pub chat_scroll: ScrollHandle,
+    /// The conversation draws only the items on screen.
+    pub transcript: ListState,
+    /// What the list was last measured for: the session, and a signature per item.
+    pub transcript_sigs: (Option<String>, Vec<u64>),
+    /// The diff draws only the lines on screen.
+    pub diff_list: ListState,
+    pub diff_key: u64,
+    pub diff_file_key: u64,
+    /// The visible width of the diff, for notes and the comment box.
+    pub diff_view_w: f32,
+    /// Parsed Markdown by source, so a redraw never parses again.
+    pub md: HashMap<u64, Rc<Vec<Block>>>,
+    /// Decoded pictures by artifact version, so a redraw never decodes or hashes again.
+    pub pictures: HashMap<(&'static str, usize), Arc<Image>>,
+    /// Pages open in their own windows, by artifact.
+    pub popouts: HashMap<&'static str, (AnyWindowHandle, Entity<crate::popout::PopOut>)>,
+    /// Links pages asked to open in the browser (the walkthrough records them
+    /// instead of opening them).
+    pub external: Vec<String>,
+    /// Frames drawn, for the checks.
+    pub frames: u64,
+    /// What a check's script read off the page.
+    pub page_probe: Option<String>,
+    /// The width of one character of code, measured on first use.
+    pub code_em: f32,
+    /// The second the timers last showed.
+    pub last_second: u64,
     pub probes: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
     pub hovered_row: Option<String>,
     pub placeholder: &'static str,
@@ -340,9 +369,22 @@ impl Dent {
             },
         )
         .detach();
+        // A background run never keeps the front: whatever activates dent's
+        // window, activation goes straight back to the app you're using.
+        #[cfg(target_os = "macos")]
+        if crate::BACKGROUND.load(std::sync::atomic::Ordering::Relaxed) {
+            cx.observe_window_activation(window, |_, window, _| {
+                if window.is_window_active()
+                    && let Some(mtm) = objc2::MainThreadMarker::new()
+                {
+                    objc2_app_kit::NSApplication::sharedApplication(mtm).deactivate();
+                }
+            })
+            .detach();
+        }
         let mut this = Self {
             t,
-            sessions: data::sessions(),
+            sessions: data::sessions().into_iter().map(Rc::new).collect(),
             arts: data::artifacts(),
             selected: Some("pricing".into()),
             focus: cx.focus_handle(),
@@ -389,7 +431,20 @@ impl Dent {
             diff_file: HashMap::new(),
             commenting: None,
             review: Vec::new(),
-            chat_scroll: ScrollHandle::new(),
+            transcript: ListState::new(0, ListAlignment::Top, px(600.)),
+            transcript_sigs: (None, Vec::new()),
+            diff_list: ListState::new(0, ListAlignment::Top, px(400.)),
+            diff_key: 0,
+            diff_file_key: 0,
+            diff_view_w: 400.,
+            md: HashMap::new(),
+            pictures: HashMap::new(),
+            popouts: HashMap::new(),
+            external: Vec::new(),
+            frames: 0,
+            page_probe: None,
+            code_em: 0.,
+            last_second: 0,
             probes: Rc::default(),
             hovered_row: None,
             placeholder: "",
@@ -409,43 +464,58 @@ impl Dent {
                 );
             }
         }
-        this.preview = Preview::new(window).map(|p| Rc::new(RefCell::new(p)));
+        if std::env::var_os("DENT_NO_PREVIEW").is_none() {
+            this.preview = Preview::new(window).map(|p| Rc::new(RefCell::new(p)));
+        }
         this
     }
 
     // ---- Looking things up ----
 
     pub fn session(&self, id: &str) -> Option<&Session> {
-        self.sessions.iter().find(|s| s.id == id)
+        self.sessions.iter().find(|s| s.id == id).map(|s| &**s)
     }
     fn session_mut(&mut self, id: &str) -> Option<&mut Session> {
-        self.sessions.iter_mut().find(|s| s.id == id)
+        self.sessions
+            .iter_mut()
+            .find(|s| s.id == id)
+            .map(Rc::make_mut)
     }
     pub fn current(&self) -> Option<&Session> {
         self.selected.as_deref().and_then(|id| self.session(id))
+    }
+    /// The open session, cheap to hold across a redraw.
+    pub fn current_rc(&self) -> Option<Rc<Session>> {
+        let id = self.selected.as_deref()?;
+        self.sessions.iter().find(|s| s.id == id).cloned()
     }
     pub fn art(&self, id: &str) -> Option<&Artifact> {
         self.arts.iter().find(|a| a.id == id)
     }
 
-    fn open(&self) -> impl Iterator<Item = &Session> {
+    fn open(&self) -> impl Iterator<Item = &Rc<Session>> {
         self.sessions.iter().filter(|s| !s.closed)
     }
-    pub fn needs(&self) -> Vec<&Session> {
-        self.open().filter(|s| s.status == Status::Needs).collect()
+    pub fn needs(&self) -> Vec<Rc<Session>> {
+        self.open()
+            .filter(|s| s.status == Status::Needs)
+            .cloned()
+            .collect()
     }
-    pub fn done(&self) -> Vec<&Session> {
+    pub fn done(&self) -> Vec<Rc<Session>> {
         self.open()
             .filter(|s| matches!(s.status, Status::Done | Status::Idle))
+            .cloned()
             .collect()
     }
-    pub fn working(&self) -> Vec<&Session> {
+    pub fn working(&self) -> Vec<Rc<Session>> {
         self.open()
             .filter(|s| matches!(s.status, Status::Working | Status::Waiting))
+            .cloned()
             .collect()
     }
-    pub fn closed(&self) -> Vec<&Session> {
-        self.sessions.iter().filter(|s| s.closed).collect()
+    pub fn closed(&self) -> Vec<Rc<Session>> {
+        self.sessions.iter().filter(|s| s.closed).cloned().collect()
     }
     /// Inbox order: what needs you, then what's done.
     fn to_clear(&self) -> Vec<String> {
@@ -499,7 +569,8 @@ impl Dent {
         self.picking = false;
         self.attachments.clear();
         self.commenting = None;
-        self.chat_scroll.scroll_to_bottom();
+        self.transcript.set_follow_mode(FollowMode::Tail);
+        self.transcript.scroll_to_end();
         match &self.selected {
             Some(_) => self.composer.update(cx, |c, cx| c.focus(window, cx)),
             None => self.starter.update(cx, |c, cx| c.focus(window, cx)),
@@ -598,7 +669,8 @@ impl Dent {
         }
         let script = self.reply_to(&id, &text, &atts);
         self.run(&id, script, cx);
-        self.chat_scroll.scroll_to_bottom();
+        self.transcript.set_follow_mode(FollowMode::Tail);
+        self.transcript.scroll_to_end();
     }
 
     /// What the fake agent does with a message.
@@ -668,7 +740,7 @@ impl Dent {
             diff: Vec::new(),
             terminal: Vec::new(),
         };
-        self.sessions.insert(0, s);
+        self.sessions.insert(0, Rc::new(s));
         self.arrived_at.insert(id.clone(), Instant::now());
         self.starter.update(cx, |c, cx| c.set_value("", window, cx));
         self.defaults.project = None;
@@ -1024,10 +1096,13 @@ impl Dent {
     /// Page events arrive from the web view; turn them into state.
     pub fn drain_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(p) = &self.preview else { return };
-        let (events, showing) = {
+        let (events, showing, retired) = {
             let p = p.borrow();
-            (p.drain(), p.showing.clone())
+            (p.drain(), p.showing.clone(), p.retired())
         };
+        for image in retired {
+            let _ = window.drop_image(image);
+        }
         if events.is_empty() {
             return;
         }
@@ -1035,26 +1110,50 @@ impl Dent {
             Tab::Art(a) => Some(a),
             _ => None,
         });
+        if let Some(a) = art {
+            self.page_events(a, showing, events, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// What a page said, from the viewer or a page in its own window.
+    pub fn page_events(
+        &mut self,
+        art: &'static str,
+        showing: Option<Source>,
+        events: Vec<PageEvent>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let v = match &showing {
+            Some(Source::File { version, .. }) => *version,
+            _ => 1,
+        };
         for ev in events {
             match ev {
                 PageEvent::Loaded => {}
                 PageEvent::Error(msg) => {
-                    if let (Some(a), Some((_, v))) = (art, &showing) {
-                        let list = self.errors.entry((a, *v)).or_default();
-                        if !list.contains(&msg) {
-                            list.push(msg);
-                        }
-                        // A broken latest page needs you, like any other error.
-                        let latest = self.art(a).map(|x| x.versions.len()) == Some(*v);
-                        if latest
-                            && let Some(s) = self.sessions.iter_mut().find(|s| {
-                                s.arts.contains(&a)
+                    let list = self.errors.entry((art, v)).or_default();
+                    if !list.contains(&msg) {
+                        list.push(msg);
+                    }
+                    // A broken latest page needs you, like any other error.
+                    let latest = self
+                        .art(art)
+                        .map(|x| x.versions.len().max(1))
+                        == Some(v);
+                    if latest
+                        && let Some(s) = self
+                            .sessions
+                            .iter_mut()
+                            .find(|s| {
+                                s.arts.contains(&art)
                                     && matches!(s.status, Status::Done | Status::Idle)
                             })
-                        {
-                            s.status = Status::Needs;
-                            s.detail = "The page has an error".into();
-                        }
+                            .map(Rc::make_mut)
+                    {
+                        s.status = Status::Needs;
+                        s.detail = "The page has an error".into();
                     }
                 }
                 PageEvent::Pick {
@@ -1063,8 +1162,8 @@ impl Dent {
                     selector,
                 } => {
                     self.picking = false;
-                    let file = art
-                        .and_then(|a| self.art(a))
+                    let file = self
+                        .art(art)
                         .map(|a| a.path.to_string())
                         .unwrap_or_default();
                     self.attachments
@@ -1075,9 +1174,145 @@ impl Dent {
                         text,
                         selector,
                     });
-                    self.composer.update(cx, |c, cx| c.focus(window, cx));
+                    // A pick from a page in its own window lands in the main window's composer.
+                    if self.popouts.contains_key(art) {
+                        cx.notify();
+                    } else {
+                        self.composer.update(cx, |c, cx| c.focus(window, cx));
+                    }
+                }
+                PageEvent::PickCancel => self.picking = false,
+                PageEvent::Probe(text) => self.page_probe = Some(text),
+                PageEvent::External(url) => {
+                    if self.demo.is_some() {
+                        self.external.push(url);
+                    } else {
+                        cx.open_url(&url);
+                    }
                 }
             }
+        }
+        cx.notify();
+    }
+
+    /// Parsed Markdown for `src`, parsed once.
+    pub fn markdown(&mut self, src: &str) -> Rc<Vec<Block>> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        src.hash(&mut h);
+        let key = h.finish();
+        if self.md.len() > 512 {
+            self.md.clear();
+        }
+        self.md
+            .entry(key)
+            .or_insert_with(|| Rc::new(crate::markdown::parse(src)))
+            .clone()
+    }
+
+    /// The decoded picture for an artifact version, decoded once.
+    pub fn picture(&mut self, art: &'static str, v: usize) -> Option<Arc<Image>> {
+        if let Some(p) = self.pictures.get(&(art, v)) {
+            return Some(p.clone());
+        }
+        let bytes = self.art(art)?.versions.get(v.checked_sub(1)?)?.clone();
+        let p = Arc::new(Image::from_bytes(ImageFormat::Png, bytes.to_vec()));
+        self.pictures.insert((art, v), p.clone());
+        Some(p)
+    }
+
+    /// Keep the conversation list's measurements in step with its items:
+    /// a new session starts at the end; changed items are measured again.
+    pub fn sync_transcript(&mut self, s: &Session) {
+        let sigs: Vec<u64> = s
+            .items
+            .iter()
+            .map(|i| self.item_sig(i))
+            .chain((s.status == Status::Working).then_some(u64::MAX))
+            .collect();
+        let (id, old) = &self.transcript_sigs;
+        if id.as_deref() != Some(s.id.as_str()) {
+            self.transcript.reset(sigs.len());
+            self.transcript.set_follow_mode(FollowMode::Tail);
+            self.transcript.scroll_to_end();
+        } else if *old != sigs {
+            let first = old
+                .iter()
+                .zip(&sigs)
+                .position(|(a, b)| a != b)
+                .unwrap_or(old.len().min(sigs.len()));
+            self.transcript.splice(first..old.len(), sigs.len() - first);
+        }
+        self.transcript_sigs = (Some(s.id.clone()), sigs);
+    }
+
+    /// Anything about an item that changes its height.
+    fn item_sig(&self, item: &Item) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::mem::discriminant(item).hash(&mut h);
+        match item {
+            Item::User(t) | Item::Text(t) | Item::Queued(t) => t.hash(&mut h),
+            Item::Tools { lines, open, summary } => (lines.len(), open, summary).hash(&mut h),
+            Item::Made { art, version } => {
+                // Older versions fold to one line.
+                let latest = self.art(art).map(|a| a.versions.len()).unwrap_or(0);
+                (art, version, *version < latest).hash(&mut h);
+            }
+            Item::Approval { command, why } => (command, why).hash(&mut h),
+            Item::Question { text, options } => (text, options).hash(&mut h),
+            Item::Changed { files, .. } => files.hash(&mut h),
+            Item::Pr { number, checks, .. } => (number, checks).hash(&mut h),
+            Item::Note { text, .. } => text.hash(&mut h),
+        }
+        h.finish()
+    }
+
+    /// Open a page in a window of its own, or bring that window forward.
+    pub fn pop_out(&mut self, art: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((h, _)) = self.popouts.get(art) {
+            if !crate::BACKGROUND.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = h.update(cx, |_, w, _| w.activate_window());
+            }
+            return;
+        }
+        self.picking = false;
+        let me = cx.entity();
+        let at = window.bounds();
+        let opts = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds {
+                origin: point(at.origin.x + px(120.), at.origin.y + px(60.)),
+                size: size(px(900.), px(760.)),
+            })),
+            titlebar: Some(TitlebarOptions {
+                title: None,
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(16.), px(16.))),
+            }),
+            window_min_size: Some(size(px(420.), px(360.))),
+            focus: !crate::BACKGROUND.load(std::sync::atomic::Ordering::Relaxed),
+            ..Default::default()
+        };
+        let t = self.t;
+        // The new window draws straight away and reads this state, so open it
+        // once this update is over.
+        cx.defer(move |cx| {
+            let dent = me.clone();
+            if let Ok((h, view)) = gpui_kit::open_window(opts, cx, move |window, cx| {
+                cx.new(|cx| crate::popout::PopOut::new(dent, art, t, window, cx))
+            }) {
+                me.update(cx, |d, cx| {
+                    d.popouts.insert(art, (h, view));
+                    cx.notify();
+                });
+            }
+        });
+    }
+
+    /// Close a page's own window; it goes back to the viewer.
+    pub fn bring_back(&mut self, art: &'static str, cx: &mut Context<Self>) {
+        if let Some((h, view)) = self.popouts.remove(art) {
+            crate::popout::close(h, view, cx);
         }
         cx.notify();
     }
@@ -1260,14 +1495,65 @@ impl Dent {
 
     /// Keep the newest line in view while following the conversation.
     fn follow(&mut self) {
-        self.chat_scroll.scroll_to_bottom();
+        self.transcript.set_follow_mode(FollowMode::Tail);
+        self.transcript.scroll_to_end();
+    }
+
+    /// For the checks: no agent keeps running.
+    pub fn stop_all_tasks(&mut self) {
+        self.tasks.clear();
+        self.working_since.clear();
+    }
+
+    /// Whether the next tick needs a frame. Nothing on screen moving means
+    /// nothing is drawn.
+    pub fn tick_due(&mut self) -> bool {
+        let page = self.preview.as_ref().is_some_and(|p| {
+            let p = p.borrow();
+            let owed = p.tick();
+            p.pending() || owed
+        });
+        let toast_expired = self
+            .toast
+            .as_ref()
+            .is_some_and(|t| t.at.elapsed() > Duration::from_secs(8));
+        let copied = self
+            .copied_at
+            .is_some_and(|at| (1.5..1.7).contains(&at.elapsed().as_secs_f32()));
+        let working_shown = self.sessions.iter().any(|s| {
+            !s.closed
+                && s.status == Status::Working
+                && (!self.sidebar_hidden || self.selected.as_deref() == Some(s.id.as_str()))
+        });
+        // Squares step at 8 fps; with Reduce Motion they hold still and only
+        // the timers move, once a second.
+        let second = crate::PROCESS_START
+            .get()
+            .map(|p| p.elapsed().as_secs())
+            .unwrap_or(0);
+        let new_second = second != self.last_second;
+        self.last_second = second;
+        let squares = working_shown && !crate::reduce_motion();
+        // The walkthrough wakes when an idle stretch it's measuring ends.
+        let rest_over = self
+            .demo
+            .as_ref()
+            .and_then(|d| d.resting)
+            .is_some_and(|(until, ..)| Instant::now() >= until);
+        page || toast_expired || copied || squares || (working_shown && new_second) || rest_over
     }
 
     pub fn animating(&self) -> bool {
         let fresh = |m: &HashMap<String, Instant>| {
             m.values().any(|t| t.elapsed() < Duration::from_millis(700))
         };
-        !self.tasks.is_empty()
+        // Words fade in for a moment after they arrive; the agent's own updates
+        // redraw when they happen, so a running agent alone needs no frames.
+        let streaming = self.births.values().any(|(_, b)| {
+            b.last()
+                .is_some_and(|(_, at)| at.elapsed() < Duration::from_millis(crate::ds::motion::BASE as u64 + 40))
+        });
+        streaming
             || fresh(&self.finished_at)
             || fresh(&self.arrived_at)
             || self
