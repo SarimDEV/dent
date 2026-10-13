@@ -12,7 +12,7 @@ node shoot.mjs OUT --looks paper [--appearance dark] [--text-size accessibility-
 With no `-screen` argument the app is interactive. The UI tests drive every flow and check the edges (a double tap on Send, Stop mid-reply, sending while a reply streams, the keyboard over the composer):
 
 ```sh
-xcodebuild build-for-testing … && SHOTS=/tmp/flows xcodebuild test-without-building -project Concepts.xcodeproj \
+xcodebuild build-for-testing … && TEST_RUNNER_SHOTS=/tmp/flows xcodebuild test-without-building -project Concepts.xcodeproj \
   -scheme Concepts -destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath build/dd -only-testing:ConceptsUITests/FlowTests
 ```
 
