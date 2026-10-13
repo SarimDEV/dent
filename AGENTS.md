@@ -29,13 +29,14 @@ All under `crates/`. Package names are prefixed `dent-`.
 
 | Crate | Job | May depend on |
 | --- | --- | --- |
-| `protocol` | Wire messages, event types, versioning | serde only |
+| `protocol` | Wire messages, event types, versioning | serde, serde_json |
 | `client-core` | Connections, sync, cache, search, Markdown → block tree. **No I/O and no runtime:** the host feeds it bytes and the time and does the I/O it asks for ([spike 07](docs/spikes/07-client-core.md)), so it binds to iOS (UniFFI) and wasm | `protocol` |
 | `daemon` | Drivers, event log, git, files, checkpoints, providers | `protocol` |
 | `session-holder` | Owns agent processes and PTYs. Tiny, rarely changed | std + minimal |
 | `desktop` | GPUI app. The only crate allowed to use GPUI | `client-core`, `protocol` |
 | `web` | wasm-bindgen facade over `client-core` | `client-core` |
 | `cli` | `dent` binary: scripts, agents, `dent daemon install`, `dent doctor` | `client-core`, `protocol` |
+| `fake-claude` | Stands in for `claude -p` in tests and demos | serde_json |
 | `hub` | Hosted/self-hosted hub. **AGPL-3.0**; everything else is MIT | `protocol` |
 
 `spikes/` holds throwaway Phase 1 experiments (each its own crate, named `spike-*`, with a findings note in `docs/spikes/`). Spikes may use any dependency without a decision record and are excluded from the default build; production crates never depend on them. `push/` is dent-push, a TypeScript Cloudflare Worker (`npm test` runs it locally). `ios/` (Xcode) and `relay/` (deployment files) come later.

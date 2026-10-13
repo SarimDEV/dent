@@ -1,0 +1,18 @@
+[package]
+name = "dent-fake-claude"
+description = "Stands in for `claude -p` stream-json in tests and demos, so nothing touches a real account."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "dent-fake-claude"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

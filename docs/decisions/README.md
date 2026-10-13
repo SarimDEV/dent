@@ -39,3 +39,4 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0035. dent-push: notifications as their own small service on Cloudflare Workers](0035-dent-push.md)
 - [0036. Sessions are an inbox; a new session starts by typing](0036-sessions-as-an-inbox.md)
 - [0037. The viewer: everything a session made, beside the chat; pages run in the system web view](0037-viewer-system-web-view.md)
+- [0038. The local core: a Unix socket for clients on the same machine, SQLite through rusqlite](0038-local-core.md)

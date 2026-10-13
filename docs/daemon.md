@@ -15,7 +15,9 @@ Each agent sits behind one `AgentDriver` trait: start a session, send a user mes
 - Generate Codex's protocol types from its schema dump rather than hand-writing them (`scripts/gen-codex-types.py`; see [spike 02](spikes/02-codex-app-server.md)).
 - Model availability depends on the account: a ChatGPT sign-in rejects some models (for example the user's configured default), so the model picker comes from `model/list`, and a rejected model is shown as such rather than as a generic turn failure.
 - Use the agents' own credentials and login flows. The daemon never reads or reuses their tokens.
-- Agents keep their own transcripts. On restart the daemon resumes the agent's session by id (`--resume` for Claude Code, thread resume for Codex) and reconciles against its own event log.
+- Agents keep their own transcripts. On restart the daemon resumes the agent's session by id (`--resume` for Claude Code, thread resume for Codex) and reconciles against its own event log. dent names Claude Code's session up front with `--session-id`.
+- Messages sent while the agent works wait in the daemon until the turn ends and can be taken back; **Send now** steers one into the running turn. Stop interrupts, then stops the process after 2 seconds if the turn hasn't ended ([0038](decisions/0038-local-core.md)).
+- Clients on the same machine connect over a Unix socket only the user can open; other machines use the WebSocket from [0033](decisions/0033-direct-websocket-hub-on-hold.md).
 - The third driver is the Agent Client Protocol (ACP), which now has session resume, usage updates and a 1.0 Rust SDK ([updates](https://agentclientprotocol.com/updates)). One ACP driver brings in every agent that speaks it.
 
 ## Usage limits
@@ -50,7 +52,7 @@ Every session is an append-only log of typed events in SQLite: user message, ass
 
 1. **Agent processes** keep running while clients disconnect. The session holder holds their stdio, so they survive daemon upgrades and crashes too.
    - Output goes to disk first, and each event records the byte it ended at, so a restarted daemon picks up exactly where it left off ([spike 06](spikes/06-session-holder.md)).
-   - The daemon stops an agent's process after 30 s with no reply under way, and resumes its session from the transcript on the next prompt.
+   - The daemon stops an agent's process after 5 minutes with nothing running, and resumes its session from the transcript on the next prompt ([0038](decisions/0038-local-core.md)).
 2. **Daemon restarts** (upgrade or crash) carry on with agents still running in the holder. After a reboot, or if the holder itself dies, each session resumes from the agent's own transcript and the event log; in-flight turns are marked interrupted and can be continued with one click.
 3. **UI state** (open sessions, panes, scroll position, markdown tabs, drafts) is shared state, synced like projects (see Sync).
 
