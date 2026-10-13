@@ -1,0 +1,17 @@
+[package]
+name = "spike-desktop-concepts"
+description = "Desktop concepts: the session inbox, starting by typing, and the viewer panel (live previews, docs, diffs, images) in GPUI with fake agents."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui-kit = "=0.7.1"
+# Live HTML previews: the system web view as a child of the GPUI window.
+wry = "=0.57.0"
+pulldown-cmark = { version = "=0.13.4", default-features = false }
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -35,6 +35,7 @@ A 4 px grid, with 2 px allowed only inside a component for optical fixes.
 | --- | --- | --- |
 | `size.header` | 44 | Every panel header (sidebar, chat, diff, docs), so all column tops align |
 | `size.row` | 28 | Sidebar and list rows |
+| `size.toolbar` | 40 | Viewer toolbars under a panel header |
 | `size.line` | 20 | Code, diff and tool lines (equals the code line height) |
 | `size.control` | 28 | Buttons and inputs |
 | `size.control.sm` | 22 | Pills, inline buttons |
@@ -86,7 +87,7 @@ Three layers. Components never use a hex value.
 | --- | --- | --- | --- |
 | `state.hover` | ink 5% | ink 6% | Row and ghost button hover |
 | `state.press` | ink 9% | ink 10% | Pressed |
-| `state.selected` | ink 7% | ink 8% | Selected row |
+| `state.selected` | ink 10% | ink 12% | Selected row (twice hover, so a hovered row never reads as a second selection) |
 | `signal.wash` | signal 7% | signal 12% | Approval card fill, signal tints |
 | `signal.edge` | signal 45% | signal 50% | Approval card edge |
 | `focus` | ink, 2 px, 2 px offset | same | Keyboard focus only, appears instantly |
@@ -151,7 +152,7 @@ Each motion has one name and one job.
 | **Tick** | Changed digits roll in their own column, up or down with the value, `dur.slow`, rightmost first with `stagger` | Usage, event and blocked counts |
 | **Progress** | A hairline fill under a running tool line moves linearly towards 90% of its expected time and holds; a timer counts up | Running tools |
 | **Compact** | The serif title eases from 28 to 20 on `spring.snappy`; the live pill arrives with a 4 px slide | Reading history |
-| **Drift** | The working square's dither ripples outward, stepped at `steps.pixel` | Working status |
+| **Drift** | The working square's checker shifts one cell, stepped at `steps.pixel` | Working status |
 | **Press** | See States | Buttons, rows |
 
 ### Never animated

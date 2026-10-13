@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quillmate pricing</title>
+<style>
+  :root { --ink:#1d2433; --soft:#5b6478; --line:#e3e6ee; --bg:#fbfbfd; --brand:#3b5bdb; --brand-ink:#fff; --tint:#eef2ff; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: var(--bg); }
+  header { display:flex; align-items:center; justify-content:space-between; padding: 20px 40px; border-bottom: 1px solid var(--line); background: #fff; }
+  .logo { font-weight: 700; letter-spacing: -.01em; display:flex; gap:10px; align-items:center; }
+  .logo i { width: 22px; height: 22px; border-radius: 6px; background: var(--brand); display:inline-block; }
+  nav a { color: var(--soft); text-decoration: none; margin-left: 24px; font-size: 15px; }
+  main { max-width: 1040px; margin: 0 auto; padding: 56px 32px 72px; }
+  h1 { font-size: 40px; line-height: 1.15; letter-spacing: -.02em; margin: 0 0 12px; text-align: center; }
+  .lede { color: var(--soft); text-align: center; margin: 0 auto 32px; max-width: 520px; font-size: 18px; }
+  
+  .plans { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 20px; }
+  .plan { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 28px; display: flex; flex-direction: column; gap: 16px; }
+  .plan h2 { margin: 0; font-size: 18px; }
+  .price { font-size: 40px; font-weight: 700; letter-spacing: -.02em; }
+  .price small { font-size: 15px; font-weight: 400; color: var(--soft); letter-spacing: 0; }
+  .plan ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; color: var(--soft); font-size: 15px; }
+  .plan li::before { content: "✓"; color: var(--brand); margin-right: 8px; font-weight: 700; }
+  .plan button { margin-top: auto; height: 44px; border-radius: 10px; border: 1px solid var(--line); background: #fff; color: var(--ink); font: inherit; font-weight: 600; cursor: pointer; }
+  
+  
+  footer { text-align:center; color: var(--soft); font-size: 14px; margin-top: 40px; }
+  @media (max-width: 560px) { header { padding: 16px 20px; } nav { display:none; } main { padding: 36px 20px 48px; } h1 { font-size: 30px; } }
+</style>
+</head>
+<body>
+<header><div class="logo"><i></i>Quillmate</div><nav><a href="#">Product</a><a href="#">Customers</a><a href="#">Pricing</a><a href="#">Sign in</a></nav></header>
+<main>
+  <h1>Simple pricing for every team</h1>
+  <p class="lede">Start free. Upgrade when your team needs shared drafts, review and SSO.</p>
+  
+  <section class="plans">
+    <article class="plan"><h2>Starter</h2><div class="price" data-m="0" data-y="0">$0<small> / month</small></div><ul><li>3 projects</li><li>Basic templates</li><li>Community support</li></ul><button>Get started</button></article>
+    <article class="plan "><h2>Pro</h2><div class="price" data-m="12" data-y="10">$12<small> / month</small></div><ul><li>Unlimited projects</li><li>Shared drafts and review</li><li>Version history</li></ul><button class="cta">Start free trial</button></article>
+    <article class="plan"><h2>Team</h2><div class="price" data-m="29" data-y="24">$29<small> / month</small></div><ul><li>Everything in Pro</li><li>SSO and audit log</li><li>Priority support</li></ul><button>Contact sales</button></article>
+  </section>
+  <footer>Prices in USD. Cancel any time.</footer>
+</main>
+
+</body>
+</html>

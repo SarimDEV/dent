@@ -32,7 +32,7 @@ dent uses the Field Notes direction: warm paper in light mode, warm carbon in da
 | Done | #3FBF4F | #5FD86B | Finished, CI passed |
 | Waiting | #E8A317 | #F0B43A | Paused, near a usage limit |
 | Diff added | #E2F2DE | #1A2E1C | Added lines |
-| Diff removed | #F6E0EC | #35192A | Removed lines |
+| Diff removed | #F3E2DA | #33211B | Removed lines: a warm clay tint, kept well away from the Needs-you magenta |
 
 - Status squares dither the signal colour with a paler partner in light mode and a deeper one in dark mode.
 - Signal colours are fills, never text on Paper, where they fail contrast.
@@ -55,7 +55,7 @@ The default pairing is called Book: agent replies read like a page, and the inte
 ## Texture and motion
 
 - Grain is a pre-rendered noise texture: multiplied at low opacity on Paper, screened at lower opacity on Carbon.
-- Approval cards resolve in with a short dither dissolve, the theme switch is a 200 ms colour tween, and a working session's square ripples slowly; reduced-motion settings make all of it instant. The full motion vocabulary and its rules are in [design-system.md](design-system.md).
+- Approval cards resolve in with a short dither dissolve, the theme switch is a 200 ms colour tween, and a working session's square drifts, stepped like pixel animation; reduced-motion settings make all of it instant. The full motion vocabulary and its rules are in [design-system.md](design-system.md).
 - Nothing blurs live behind scrolling content, and every effect is held to the frame budgets in Reliability requirements.
 
 ## Fixes before building

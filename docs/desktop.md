@@ -4,10 +4,11 @@ The desktop app is a GPUI client for macOS, Linux and Windows, built around a ch
 
 ## Layout
 
-- **Sidebar:** one list of sessions across every machine, sorted as an inbox (decision [0036](decisions/0036-sessions-as-an-inbox.md)): Needs you, then Done, then Working, lighter, at the bottom. Each row shows its status, project and machine. Closing a session archives it, with an Undo, and the Closed list reopens anything; inbox zero is when everything is working or closed. Machines and their connection state sit at the bottom.
-- **Main:** the selected session's chat.
-- **Side panel:** docs, diff or terminal, toggled and resized by keyboard; can pop out into its own window.
-- **Status bar:** usage limits, machine connectivity, blocked-session count.
+- **Sidebar:** one list of sessions across every machine, sorted as an inbox (decision [0036](decisions/0036-sessions-as-an-inbox.md)): Needs you, then Done, then Working, lighter and with a running timer, at the bottom. Each row shows its status, title, project and what it is doing in plain words. Hovering a done row shows Close; Cmd+W closes the open session and opens the next one to clear. Closing archives, with an Undo over the sidebar for 8 seconds (Cmd+Z), and a Closed section at the end reopens anything; inbox zero is when everything is working or closed. The top of the sidebar holds the traffic lights, search and New session.
+- **Main:** the selected session's chat, or the new-session page.
+- **Viewer:** everything the session made or changed, beside the chat (below). Toggled with Cmd+\\ and resized from its edge; can pop out into its own window.
+- **Status bar:** usage limits, machines online, and how many sessions need you (Cmd+J jumps to the next).
+- **Narrow windows:** the chat keeps at least 440 pt. The viewer shrinks first, down to 360 pt; below that the sidebar folds away behind a button in the chat header, and the status bar still shows what needs you.
 
 ## Chat
 
@@ -35,6 +36,23 @@ Cmd/Ctrl+N opens an empty chat with the cursor in the composer: you start by typ
 - **Project:** filled in from what you type, updating as you go; "New project" or "No project" when nothing fits.
 - **Machine:** the least busy online machine with the project's repo.
 - **Model, permissions, worktree:** whatever you used last.
+
+## Viewer
+
+The viewer shows, as tabs, everything the open session made or changed ([0037](decisions/0037-viewer-system-web-view.md)). Every viewable file an agent writes becomes a card in the chat that opens it here. Writing the same file again adds a version; nothing is replaced. A card for an older version says what replaced it.
+
+- **Pages** (HTML files, and forwarded dev servers) run live in the system web view, offline and isolated through a `dent://` scheme.
+  - **Versions:** a stepper (v3 of 4). An older version shows a "Back to v4" bar. A new version shows straight away when you're following the latest, with a brief "updated to v4" and the scroll position kept.
+  - **Widths:** desktop, tablet (768) and phone (390), the narrow ones framed in the panel.
+  - **Point:** click anything on the page, and the element (tag, text, selector) rides along with your next message as a chip you can remove.
+  - **Errors:** page errors appear in a bar under the page with **Ask to fix**, which sends the error to the agent straight away.
+  - Reload and open in your browser.
+- **Docs:** Markdown rendered as a page (see Markdown viewer), with copy and open in editor.
+- **Images:** screenshots and charts the agent made, fitted to the panel, with actual size.
+- **Changes:** the session's files with counts and the diff. Click a line number to comment; comments collect into one review that **Send to agent** delivers with file and line for each (see Review loop).
+- **Terminal:** the session's terminal (see Terminal).
+- **Keys:** Cmd+1 is the first thing the session made, Cmd+2 changes, Cmd+3 the terminal.
+- The web view is a native layer, so nothing floating may overlap it: the preview hides while a menu is open, and toasts sit over the sidebar.
 
 ## Quick capture
 
@@ -92,7 +110,7 @@ The goal is VS Code's Source Control flow, at native speed.
 Agents on remote machines start dev servers you cannot otherwise reach.
 
 - The daemon detects ports that agent processes open and forwards them to your machine automatically.
-- Each forwarded port appears on its session with an open-in-browser button.
+- Each forwarded port appears on its session and opens in the viewer as a live page, or in your own browser.
 - The phone can open a preview too, relayed through the hub.
 
 ## Browser panel
@@ -123,7 +141,10 @@ Every action has a command, and every command can be bound in a keymap file. The
 | Next blocked session | Cmd/Ctrl+J |
 | New session | Cmd/Ctrl+N |
 | Close session | Cmd/Ctrl+W |
-| Toggle docs / diff / terminal | Cmd/Ctrl+1 / 2 / 3, Ctrl+\` |
+| Viewer: first artifact / changes / terminal | Cmd/Ctrl+1 / 2 / 3 |
+| Toggle the viewer | Cmd/Ctrl+\\ |
+| Stop the agent | Cmd/Ctrl+. |
+| Undo close | Cmd/Ctrl+Z |
 | Stage / unstage file in diff list | S / U |
 | Search everything | Cmd/Ctrl+Shift+F |
 
