@@ -245,7 +245,7 @@ pub fn render(blocks: &[Block], t: &Theme, doc: bool) -> Div {
                         (true, _) => (READING, reading),
                         // In chat, headings are the interface face, so they
                         // read as structure rather than another paragraph.
-                        (false, _) => (UI, theme::sans()),
+                        (false, _) => (READING, theme::sans()),
                     };
                     div()
                         .when(*level > 1 || !doc, |d| d.pt(px(space::S3)))

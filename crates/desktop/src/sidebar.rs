@@ -174,7 +174,6 @@ impl Dent {
         let selected = self.selected.as_deref() == Some(s.id.as_str());
         let hovered = self.hovered_row.as_deref() == Some(s.id.as_str());
         let closable = Self::can_close(s);
-        let stopped = s.stopped;
         // A row that just finished pops its square once; a row that just
         // arrived rises into place.
         let pop = self
@@ -240,12 +239,6 @@ impl Dent {
                 }))
                 .tooltip(tip("Reopen", None, t))
                 .child(icon("archive-restore", 13., t.quiet))
-                .into_any_element()
-        } else if stopped && !s.closed {
-            div()
-                .ty(LABEL)
-                .text_color(t.quiet)
-                .child("stopped")
                 .into_any_element()
         } else {
             let age = match self.working_since.get(&s.id) {

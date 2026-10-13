@@ -184,6 +184,7 @@ impl Render for Dent {
             .panel_width
             .min(w - side - viewer::CHAT_MIN)
             .max(viewer::MIN_WIDTH);
+        self.chat_w = w - side - if wants_panel { self.panel_w } else { 0. };
         let sidebar = (!self.sidebar_hidden).then(|| self.sidebar(cx));
         let main = self.main_column(window, cx);
         let panel = self
@@ -263,8 +264,11 @@ impl Render for Dent {
                 cx.listener(|this, _: &NewSession, window, cx| this.select(None, window, cx)),
             )
             .on_action(cx.listener(|this, _: &CloseSession, window, cx| {
+                // After closing you're in the inbox, like mail: arrows move,
+                // Enter opens, and ⌘Z undoes without a text field taking it.
                 if let Some(id) = this.selected.clone() {
                     this.close(&id, window, cx);
+                    window.focus(&this.inbox_focus, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &UndoClose, window, cx| {

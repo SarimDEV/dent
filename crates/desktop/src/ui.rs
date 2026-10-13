@@ -88,13 +88,34 @@ pub fn ghost(
         .child(label.into())
 }
 
-/// A keyboard hint: ⌘Z.
+/// A key, boxed like a keycap: ⌘Z, 1.
 pub fn kbd(keys: &str, t: &Theme) -> Div {
     div()
         .flex_none()
+        .min_w(px(18.))
+        .h(px(18.))
+        .px(px(4.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(radius::SM))
+        .border_1()
+        .border_color(t.hairline)
+        .ty(LABEL)
+        .text_color(t.quiet)
+        .child(keys.to_string())
+}
+
+/// A quiet one-line hint that gives way before anything else does.
+pub fn hint(text: &str, t: &Theme) -> Div {
+    div()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
         .ty(LABEL)
         .text_color(t.faint)
-        .child(keys.to_string())
+        .child(text.to_string())
 }
 
 /// Uppercase section label, with an optional count.

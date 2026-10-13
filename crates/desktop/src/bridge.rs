@@ -166,8 +166,19 @@ pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
                         }
                         c
                     })
+                    // While the card asks, the card says what it is.
+                    .filter(|c| !c.name.starts_with("waiting:"))
                     .collect();
                 if calls.is_empty() {
+                    continue;
+                }
+                // Writes that became a card need no line of their own.
+                let carded = calls.iter().all(|c| {
+                    matches!(c.name.as_str(), "Write" | "Edit" | "MultiEdit")
+                        && matches!(c.result, Some((false, _)))
+                        && c.path().is_some_and(|p| Kind::of(&p).is_some())
+                });
+                if carded {
                     continue;
                 }
                 let calls = &calls;

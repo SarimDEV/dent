@@ -236,6 +236,8 @@ pub struct Dent {
     pub panel_width: f32,
     /// This frame's widths: the viewer gives way before the chat does.
     pub panel_w: f32,
+    /// This frame's chat column width.
+    pub chat_w: f32,
     pub sidebar_hidden: bool,
     /// The person opened the sidebar over a narrow window.
     pub sidebar_forced: bool,
@@ -457,6 +459,7 @@ impl Dent {
             panel_open: true,
             panel_width: 600.,
             panel_w: 600.,
+            chat_w: 800.,
             sidebar_hidden: false,
             sidebar_forced: false,
             dragging: false,
@@ -680,6 +683,9 @@ impl Dent {
 
     /// What the daemon said since the last look.
     pub fn on_live(&mut self, batch: Vec<Incoming>, cx: &mut Context<Self>) {
+        if self.walk.as_ref().is_some_and(|w| w.resting.is_some()) {
+            eprintln!("      daemon messages while idle: {}", batch.len());
+        }
         let mut changed: Vec<String> = Vec::new();
         for m in batch {
             match m {
@@ -956,8 +962,17 @@ impl Dent {
             .update(cx, |c, cx| c.set_value("", window, cx));
         self.drafts.remove(&id);
         self.just_sent = Some(Instant::now());
-        // Typing while it asks a question answers it.
+        // Typing while it asks a question answers it; while it asks to run
+        // something, the text is the reason for denying; on a plan, it's
+        // what to change.
         if atts.is_empty() && self.answer_with_text(&id, &text, cx) {
+            return;
+        }
+        if atts.is_empty()
+            && let Some(Item::Approval { id: ask, .. } | Item::Plan { id: ask, .. }) =
+                self.open_ask(&id)
+        {
+            self.reply_to_ask(&id, ask, Answer::Deny { message: text }, cx);
             return;
         }
         self.live.send(Request::Send {

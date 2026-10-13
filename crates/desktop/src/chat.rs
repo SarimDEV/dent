@@ -15,7 +15,7 @@ use crate::ds::{
 };
 use crate::markdown;
 use crate::theme::{self, Status, status_square};
-use crate::ui::{button, floating, ghost, icon, icon_button, kbd, menu_row, probe, tip};
+use crate::ui::{button, floating, ghost, hint, icon, icon_button, kbd, menu_row, probe, tip};
 
 impl Dent {
     pub fn main_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -259,7 +259,10 @@ impl Dent {
             .text_color(t.quiet)
             .child(status_square(Status::Working, &t))
             .child(div().text_color(t.ink).child(match since {
-                Some(at) => format!("Working for {}", duration(at.elapsed().as_secs())),
+                Some(at) if at.elapsed().as_secs() >= 1 => {
+                    format!("Working for {}", duration(at.elapsed().as_secs()))
+                }
+                Some(_) => "Working".into(),
                 None => "Working".into(),
             }))
             .child(div().text_color(t.faint).child("·"))
@@ -523,7 +526,11 @@ impl Dent {
                                     .gap(px(space::S2))
                                     .child(status_square(Status::Needs, &t))
                                     .child(
-                                        div().ty(READING).text_color(t.ink).child(q.text.clone()),
+                                        div()
+                                            .ty(UI)
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(t.ink)
+                                            .child(q.text.clone()),
                                     ),
                             )
                             .child(div().flex().flex_col().gap(px(space::S1)).children(
@@ -911,40 +918,49 @@ impl Dent {
                                 cx,
                             ))
                             .child(div().flex_1())
-                            .when_some(s.context, |d, (used, max)| {
-                                let max = max.unwrap_or(200_000).max(1);
-                                let pct = used as f32 / max as f32 * 100.;
-                                d.child(
-                                    div()
-                                        .ty(LABEL)
-                                        .text_color(if pct > 90. { t.needs.0 } else { t.faint })
-                                        .child(if pct < 10. {
-                                            format!("context {pct:.1}%")
-                                        } else {
-                                            format!("context {pct:.0}%")
-                                        }),
-                                )
-                            })
-                            // The hint gives way before the buttons do.
-                            .child(div().min_w_0().overflow_hidden().child(kbd(
-                                if s.status == Status::Needs {
-                                    match s.items.iter().rev().find_map(|i| match i {
-                                        Item::Question { .. } => Some("↩ answer"),
-                                        Item::Approval { .. } | Item::Plan { .. } => {
-                                            Some("↩ queue · Deny sends what’s typed")
-                                        }
-                                        _ => None,
-                                    }) {
-                                        Some(h) => h,
-                                        None => "↩ send",
-                                    }
-                                } else if working {
-                                    "↩ queue · ⌘↩ steer"
-                                } else {
-                                    "↩ send"
+                            .when_some(
+                                s.context.filter(|_| self.chat_w >= 680.),
+                                |d, (used, max)| {
+                                    let max = max.unwrap_or(200_000).max(1);
+                                    let pct = used as f32 / max as f32 * 100.;
+                                    d.child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .flex_shrink(2.)
+                                            .ty(LABEL)
+                                            .text_color(if pct > 90. { t.needs.0 } else { t.faint })
+                                            .child(if pct < 10. {
+                                                format!("context {pct:.1}% · ")
+                                            } else {
+                                                format!("context {pct:.0}% · ")
+                                            }),
+                                    )
                                 },
-                                &t,
-                            )))
+                            )
+                            // The hint gives way before the buttons do.
+                            .when(self.chat_w >= 560., |d| {
+                                d.child(hint(
+                                    if s.status == Status::Needs {
+                                        match s.items.iter().rev().find_map(|i| match i {
+                                            Item::Question { .. } => Some("↩ answer"),
+                                            Item::Approval { .. } | Item::Plan { .. } => {
+                                                Some("↩ queue · Deny sends what’s typed")
+                                            }
+                                            _ => None,
+                                        }) {
+                                            Some(h) => h,
+                                            None => "↩ send",
+                                        }
+                                    } else if working {
+                                        "↩ queue · ⌘↩ steer"
+                                    } else {
+                                        "↩ send"
+                                    },
+                                    &t,
+                                ))
+                            })
                             .child(action),
                     )
                     .child(probe(&self.probes, "composer")),
