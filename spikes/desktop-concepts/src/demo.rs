@@ -837,6 +837,14 @@ fn stills() -> Vec<(f32, Act)> {
         (0.3, Key("cmd-n")),
         (0.3, Keys("Fix the pricing page footer on small screens")),
         (0.9, Shot("e-new")),
+        (0.3, Key("escape")),
+        (0.2, Key("cmd-k")),
+        (0.3, Keys("pricing")),
+        (0.6, Shot("f-search")),
+        (0.2, Key("escape")),
+        (0.2, Call(|d, w, cx| d.select(Some("ledger".into()), w, cx))),
+        (0.3, Key("escape")),
+        (0.6, Shot("g-inbox-keys")),
     ]
 }
 

@@ -93,6 +93,8 @@ impl Dent {
             .bg(t.ink.opacity(if t.dark { 0.3 } else { 0.08 }))
             .flex()
             .justify_center()
+            // Sized by its results, not stretched to the window.
+            .items_start()
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
@@ -146,8 +148,7 @@ impl Dent {
                     .child(
                         div()
                             .id("results")
-                            .flex_1()
-                            .min_h_0()
+                            .max_h(px(400.))
                             .overflow_y_scroll()
                             .py(px(space::S1))
                             .children(rows)
