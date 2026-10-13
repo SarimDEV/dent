@@ -363,7 +363,7 @@ impl Dent {
             })
             // Widths frame the page inside the viewer; a page in its own
             // window is sized by its window.
-            .when(!detached, |d| {
+            .when(!detached && self.panel_w >= 460., |d| {
                 d.child(seg(Viewport::Fill, "monitor", "fill", "Full width", cx))
                     .child(seg(
                         Viewport::Tablet,

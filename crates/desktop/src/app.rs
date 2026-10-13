@@ -1004,10 +1004,10 @@ impl Dent {
         if !matches!(s.status, Status::Working | Status::Needs) {
             return;
         }
+        // The header offers Resume once it has stopped.
         self.live.send(Request::Interrupt {
             session: id.to_string(),
         });
-        self.toast(ToastAction::Resume(id.to_string()), "Stopped".into());
         cx.notify();
     }
 

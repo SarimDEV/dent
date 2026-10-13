@@ -36,7 +36,7 @@ pub fn model_name(models: &[Model], id: Option<&str>) -> String {
     models
         .iter()
         .find(|m| m.id == id)
-        .map(|m| m.name.clone())
+        .map(|m| m.name.trim_end_matches(" (recommended)").to_string())
         .unwrap_or_else(|| id.to_string())
 }
 
@@ -93,6 +93,19 @@ fn relative(cwd: &Path, path: &str) -> String {
 
 pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
     let cwd = Path::new(&v.cwd);
+    let open_asks: Vec<(String, String)> = v
+        .entries
+        .iter()
+        .filter_map(|e| match e {
+            Entry::Ask {
+                tool,
+                input,
+                answer: None,
+                ..
+            } => Some((tool.clone(), input.clone())),
+            _ => None,
+        })
+        .collect();
     let mut items: Vec<Item> = Vec::with_capacity(v.entries.len() + 2);
     let mut queued: Vec<Item> = Vec::new();
     let mut arts: Vec<&'static str> = Vec::new();
@@ -117,7 +130,10 @@ pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
             Entry::Text { text } => items.push(Item::Text(text.clone())),
             Entry::Thinking { .. } => {}
             Entry::Tools { calls } => {
-                for c in calls.iter().filter(|c| c.name == "Bash") {
+                for c in calls
+                    .iter()
+                    .filter(|c| c.name == "Bash" && c.result.is_some())
+                {
                     let cmd = c.input()["command"]
                         .as_str()
                         .unwrap_or_default()
@@ -130,10 +146,26 @@ pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
                         }
                     }
                 }
+                // The plan belongs with the composer, and questions and plans
+                // have their own cards.
                 let calls: Vec<Call> = calls
                     .iter()
-                    .filter(|c| c.name != "TodoWrite")
-                    .cloned()
+                    .filter(|c| {
+                        !matches!(
+                            c.name.as_str(),
+                            "TodoWrite" | "AskUserQuestion" | "ExitPlanMode"
+                        )
+                    })
+                    .map(|c| {
+                        let mut c = c.clone();
+                        if c.result.is_none()
+                            && open_asks.contains(&(c.name.clone(), c.input.clone()))
+                        {
+                            // Not running yet: it's waiting for you.
+                            c.name = format!("waiting:{}", c.name);
+                        }
+                        c
+                    })
                     .collect();
                 if calls.is_empty() {
                     continue;
@@ -157,10 +189,17 @@ pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
                 answer,
             } => {
                 let input: Value = serde_json::from_str(input).unwrap_or(Value::Null);
-                items.push(match answer {
-                    None => ask(id, tool, &input, description.as_deref(), cwd),
-                    Some(a) => answered(tool, &input, a, cwd),
-                });
+                match answer {
+                    None => items.push(ask(id, tool, &input, description.as_deref(), cwd)),
+                    // The answer reads before what it let happen.
+                    Some(a) => {
+                        let note = answered(tool, &input, a, cwd);
+                        match items.last() {
+                            Some(Item::Tools { .. }) => items.insert(items.len() - 1, note),
+                            _ => items.push(note),
+                        }
+                    }
+                }
             }
             Entry::Made { path, version } => {
                 let art = art_id(&v.id, path);
@@ -297,6 +336,15 @@ fn first_line(s: &str) -> String {
 
 /// One line per call; a subagent's calls sit under the call that started it.
 fn line(c: &Call, cwd: &Path) -> String {
+    if let Some(name) = c.name.strip_prefix("waiting:") {
+        let real = Call {
+            name: name.to_string(),
+            ..c.clone()
+        };
+        let what = line(&real, cwd);
+        let rest = what.split_once(' ').map(|x| x.1).unwrap_or(&what);
+        return format!("Waiting for you: {rest}");
+    }
     let mut l = c.line();
     if let Some(p) = c.path() {
         let rel = relative(cwd, &p);
@@ -323,7 +371,7 @@ fn summary(calls: &[Call], cwd: &Path) -> String {
     let mut kinds: Vec<(u8, &str, usize)> = Vec::new();
     let mut changed: Vec<String> = Vec::new();
     for c in &top {
-        let kind = match c.name.as_str() {
+        let kind = match c.name.trim_start_matches("waiting:") {
             "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => {
                 let p = c.path().unwrap_or_default();
                 if changed.contains(&p) {

@@ -242,10 +242,13 @@ pub fn render(blocks: &[Block], t: &Theme, doc: bool) -> Div {
                     let (ty, family) = match (doc, level) {
                         (true, 1) => (DISPLAY, theme::serif()),
                         (true, 2) => (DISPLAY_COMPACT, theme::serif()),
-                        _ => (READING, reading),
+                        (true, _) => (READING, reading),
+                        // In chat, headings are the interface face, so they
+                        // read as structure rather than another paragraph.
+                        (false, _) => (UI, theme::sans()),
                     };
                     div()
-                        .when(doc && *level > 1, |d| d.pt(px(space::S3)))
+                        .when(*level > 1 || !doc, |d| d.pt(px(space::S3)))
                         .ty(ty)
                         .text_color(t.ink)
                         .when(!doc || *level > 2, |d| d.font_weight(FontWeight::MEDIUM))

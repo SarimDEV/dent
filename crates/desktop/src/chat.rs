@@ -15,7 +15,7 @@ use crate::ds::{
 };
 use crate::markdown;
 use crate::theme::{self, Status, status_square};
-use crate::ui::{button, floating, icon, icon_button, kbd, menu_row, probe, tip};
+use crate::ui::{button, floating, ghost, icon, icon_button, kbd, menu_row, probe, tip};
 
 impl Dent {
     pub fn main_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -441,13 +441,6 @@ impl Dent {
                                     )
                                     .child(probe(&self.probes, "allow-session")),
                             )
-                            .child(div().flex_1())
-                            .child(
-                                div()
-                                    .ty(LABEL)
-                                    .text_color(t.faint)
-                                    .child("A reply in the box goes with Deny"),
-                            )
                             .child(
                                 button("deny", "Deny", false, &t)
                                     .relative()
@@ -456,6 +449,12 @@ impl Dent {
                                     }))
                                     .child(probe(&self.probes, "deny")),
                             ),
+                    )
+                    .child(
+                        div()
+                            .ty(LABEL)
+                            .text_color(t.quiet)
+                            .child("Typed text is sent as the reason"),
                     )
                     .into_any_element()
             }
@@ -490,13 +489,6 @@ impl Dent {
                                     )
                                     .child(probe(&self.probes, "plan-go")),
                             )
-                            .child(div().flex_1())
-                            .child(
-                                div()
-                                    .ty(LABEL)
-                                    .text_color(t.faint)
-                                    .child("Say what to change in the box"),
-                            )
                             .child(
                                 button("plan-keep", "Keep planning", false, &t)
                                     .relative()
@@ -505,6 +497,12 @@ impl Dent {
                                     }))
                                     .child(probe(&self.probes, "plan-keep")),
                             ),
+                    )
+                    .child(
+                        div()
+                            .ty(LABEL)
+                            .text_color(t.quiet)
+                            .child("Typed text is sent as what to change"),
                     )
                     .into_any_element()
             }
@@ -552,13 +550,14 @@ impl Dent {
                                             this.answer(&sid, qi, o2.clone(), cx)
                                         }))
                                         .flex()
-                                        .items_baseline()
+                                        .items_start()
                                         .gap(px(space::S2))
                                         .child(
                                             div()
-                                                .ty(LABEL)
-                                                .text_color(t.faint)
-                                                .child(format!("{}", i + 1)),
+                                                .h(px(20.))
+                                                .flex()
+                                                .items_center()
+                                                .child(kbd(&format!("{}", i + 1), &t)),
                                         )
                                         .child(
                                             div()
@@ -636,32 +635,22 @@ impl Dent {
                                 div()
                                     .ty(LABEL)
                                     .text_color(t.faint)
-                                    .child("queued · sends when this reply finishes"),
+                                    .child("Queued · sends when this reply finishes"),
                             )
                             .child(
-                                div()
-                                    .id(SharedString::from(format!("unqueue-{ix}")))
-                                    .ty(LABEL)
-                                    .text_color(t.quiet)
-                                    .cursor_pointer()
-                                    .hover(|d| d.text_color(t.ink))
+                                ghost(SharedString::from(format!("unqueue-{ix}")), "Edit", &t)
+                                    .relative()
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.unqueue(&sid, &msg, &back, window, cx)
                                     }))
-                                    .child("Edit"),
+                                    .child(probe(&self.probes, format!("unqueue-{ix}"))),
                             )
                             .child(
-                                div()
-                                    .id(SharedString::from(format!("steer-{ix}")))
+                                ghost(SharedString::from(format!("steer-{ix}")), "Send now", &t)
                                     .relative()
-                                    .ty(LABEL)
-                                    .text_color(t.quiet)
-                                    .cursor_pointer()
-                                    .hover(|d| d.text_color(t.ink))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.steer_queued(&sid2, &msg2, &now, cx)
                                     }))
-                                    .child("Send now")
                                     .child(probe(&self.probes, format!("steer-{ix}"))),
                             ),
                     )
@@ -800,6 +789,7 @@ impl Dent {
             div()
                 .id("send")
                 .relative()
+                .flex_none()
                 .size(px(size::CONTROL))
                 .rounded(px(radius::MD))
                 .flex()
@@ -817,6 +807,7 @@ impl Dent {
             div()
                 .id("send")
                 .relative()
+                .flex_none()
                 .size(px(size::CONTROL))
                 .rounded(px(radius::MD))
                 .flex()
@@ -934,14 +925,26 @@ impl Dent {
                                         }),
                                 )
                             })
-                            .child(kbd(
-                                if working {
+                            // The hint gives way before the buttons do.
+                            .child(div().min_w_0().overflow_hidden().child(kbd(
+                                if s.status == Status::Needs {
+                                    match s.items.iter().rev().find_map(|i| match i {
+                                        Item::Question { .. } => Some("↩ answer"),
+                                        Item::Approval { .. } | Item::Plan { .. } => {
+                                            Some("↩ queue · Deny sends what’s typed")
+                                        }
+                                        _ => None,
+                                    }) {
+                                        Some(h) => h,
+                                        None => "↩ send",
+                                    }
+                                } else if working {
                                     "↩ queue · ⌘↩ steer"
                                 } else {
                                     "↩ send"
                                 },
                                 &t,
-                            ))
+                            )))
                             .child(action),
                     )
                     .child(probe(&self.probes, "composer")),

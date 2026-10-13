@@ -249,7 +249,9 @@ impl Dent {
                 .into_any_element()
         } else {
             let age = match self.working_since.get(&s.id) {
-                Some(since) if s.status == Status::Working => clock(since.elapsed().as_secs()),
+                Some(since) if s.status == Status::Working => {
+                    crate::chat::duration(since.elapsed().as_secs())
+                }
                 _ => crate::data::ago(s.updated),
             };
             div()
@@ -393,14 +395,13 @@ impl Dent {
                             cx.listener(|this, _, window, cx| this.next_needs_you(window, cx)),
                         )
                         .child(status_square_at(Status::Needs, &t, 1.))
-                        .child(format!("{needs} need you"))
+                        .child(if needs == 1 {
+                            "1 needs you".to_string()
+                        } else {
+                            format!("{needs} need you")
+                        })
                         .child(kbd("⌘J", &t)),
                 )
             })
     }
-}
-
-/// Elapsed time as m:ss, in a fixed-width face so it never jitters.
-pub fn clock(secs: u64) -> String {
-    format!("{}:{:02}", secs / 60, secs % 60)
 }

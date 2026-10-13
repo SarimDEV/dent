@@ -92,6 +92,13 @@ pub fn style_input(input: &Entity<TextareaState>, t: &Theme, cx: &mut App) {
 impl Render for Dent {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.last_frame = Instant::now();
+        if self.walk.as_ref().is_some_and(|w| w.resting.is_some()) {
+            eprintln!(
+                "      idle frame: active={} inbox={}",
+                window.is_window_active(),
+                self.inbox_focus.is_focused(window)
+            );
+        }
         self.frames += 1;
         ui::FRAME.store(self.frames, std::sync::atomic::Ordering::Relaxed);
         self.drain_page(window, cx);
@@ -133,10 +140,8 @@ impl Render for Dent {
         let open = self.current().and_then(|s| {
             s.items.iter().rev().find_map(|i| match i {
                 data::Item::Question { .. } => Some("Type your own answer, or pick one above"),
-                data::Item::Plan { .. } => {
-                    Some("Say what to change, then Keep planning; or Start building")
-                }
-                data::Item::Approval { .. } => Some("A reason here goes with Deny"),
+                data::Item::Plan { .. } => Some("What to change in the plan (optional)"),
+                data::Item::Approval { .. } => Some("Reason for denying (optional)"),
                 _ => None,
             })
         });
@@ -419,19 +424,25 @@ impl Render for Dent {
     }
 }
 
+/// The Book pairing, compiled in so the app needs nothing beside it (0032).
 fn load_fonts(cx: &mut App) {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/fonts");
-    let mut fonts = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.extension().is_some_and(|x| x == "ttf")
-                && let Ok(bytes) = std::fs::read(&p)
-            {
-                fonts.push(std::borrow::Cow::Owned(bytes));
-            }
-        }
-    }
+    let fonts: Vec<std::borrow::Cow<'static, [u8]>> = [
+        &include_bytes!("../../../assets/fonts/CommitMono-400-Italic.ttf")[..],
+        &include_bytes!("../../../assets/fonts/CommitMono-400-Regular.ttf")[..],
+        &include_bytes!("../../../assets/fonts/CommitMono-700-Regular.ttf")[..],
+        &include_bytes!("../../../assets/fonts/IBMPlexSans-Medium.ttf")[..],
+        &include_bytes!("../../../assets/fonts/IBMPlexSans-Regular.ttf")[..],
+        &include_bytes!("../../../assets/fonts/IBMPlexSans-SemiBold.ttf")[..],
+        &include_bytes!("../../../assets/fonts/InstrumentSerif-Italic.ttf")[..],
+        &include_bytes!("../../../assets/fonts/InstrumentSerif-Regular.ttf")[..],
+        &include_bytes!("../../../assets/fonts/Literata-Italic.ttf")[..],
+        &include_bytes!("../../../assets/fonts/Literata-Medium.ttf")[..],
+        &include_bytes!("../../../assets/fonts/Literata-MediumItalic.ttf")[..],
+        &include_bytes!("../../../assets/fonts/Literata-Regular.ttf")[..],
+    ]
+    .into_iter()
+    .map(std::borrow::Cow::Borrowed)
+    .collect();
     if let Err(e) = cx.text_system().add_fonts(fonts) {
         eprintln!("fonts: {e}");
     }

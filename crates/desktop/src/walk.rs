@@ -572,6 +572,22 @@ fn checks() -> Vec<(f32, Act)> {
         ),
         (0.2, Key("cmd-z")),
         (
+            0.5,
+            Call(|d, w, cx| {
+                eprintln!(
+                    "      after ⌘Z: toast={:?} closed={:?} inbox_focused={} composer_focused={}",
+                    d.toast.as_ref().map(|t| t.action.clone()),
+                    d.sessions
+                        .iter()
+                        .filter(|s| s.closed)
+                        .map(|s| s.title.clone())
+                        .collect::<Vec<_>>(),
+                    d.inbox_focus.is_focused(w),
+                    d.composer.read(cx).focus_handle(cx).is_focused(w),
+                )
+            }),
+        ),
+        (
             0.1,
             Until(
                 "⌘Z brings it back",
