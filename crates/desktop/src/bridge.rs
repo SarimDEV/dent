@@ -8,7 +8,7 @@ use dent_client_core::{Call, Entry, Note, SessionView};
 use dent_protocol::{Answer, Model, Status as Wire};
 use serde_json::Value;
 
-use crate::data::{Artifact, FileDiff, Item, Kind, Question, Session, Tone, intern};
+use crate::data::{Artifact, FileDiff, Item, Kind, Question, Session, Tone, ToolLine, intern};
 use crate::theme::Status;
 
 /// Everything outside the timeline a session row needs.
@@ -243,30 +243,7 @@ pub fn session(
                 }
                 items.push(Item::Tools {
                     summary: summary(&calls, cwd),
-                    lines: calls
-                        .iter()
-                        .map(|c| {
-                            let l = line(c, cwd);
-                            if !matches!(c.name.as_str(), "Task" | "Agent") {
-                                return l;
-                            }
-                            // A subagent says how far it got.
-                            let steps = calls
-                                .iter()
-                                .filter(|x| x.parent.as_deref() == Some(c.id.as_str()))
-                                .count();
-                            let state = match &c.result {
-                                None => "working",
-                                Some((true, _)) => "failed",
-                                Some((false, _)) => "done",
-                            };
-                            match steps {
-                                0 => format!("{l} · {state}"),
-                                1 => format!("{l} · {state} · 1 step"),
-                                n => format!("{l} · {state} · {n} steps"),
-                            }
-                        })
-                        .collect(),
+                    lines: tree(&calls, cwd),
                 });
             }
             Entry::Ask {
@@ -550,7 +527,73 @@ fn first_line(s: &str) -> String {
     out
 }
 
-/// One line per call; a subagent's calls sit under the call that started it.
+/// The group's calls as a tree: each call, then what any subagent it
+/// started did, a level deeper.
+fn tree(calls: &[Call], cwd: &Path) -> Vec<ToolLine> {
+    let mut out = Vec::new();
+    branch(calls, None, 0, cwd, &mut out);
+    out
+}
+
+fn branch(calls: &[Call], parent: Option<&str>, depth: usize, cwd: &Path, out: &mut Vec<ToolLine>) {
+    // A call whose parent isn't in this group roots here.
+    let here = |c: &&Call| match parent {
+        None => c
+            .parent
+            .as_deref()
+            .is_none_or(|p| !calls.iter().any(|x| x.id == p)),
+        Some(p) => c.parent.as_deref() == Some(p),
+    };
+    for c in calls.iter().filter(here) {
+        let agent = matches!(c.name.as_str(), "Task" | "Agent");
+        let mut text = line(c, cwd);
+        if agent {
+            // A subagent says how far it got.
+            let steps = calls
+                .iter()
+                .filter(|x| x.parent.as_deref() == Some(c.id.as_str()))
+                .count();
+            let state = match &c.result {
+                None => "working",
+                Some((true, _)) => "failed",
+                Some((false, _)) => "done",
+            };
+            text = match steps {
+                0 => format!("{text} · {state}"),
+                1 => format!("{text} · {state} · 1 step"),
+                n => format!("{text} · {state} · {n} steps"),
+            };
+        }
+        out.push(ToolLine {
+            text,
+            depth,
+            report: None,
+            id: c.id.clone(),
+        });
+        if !agent || depth > 8 {
+            continue;
+        }
+        branch(calls, Some(&c.id), depth + 1, cwd, out);
+        match (&c.result, &c.said) {
+            // While it works, what it last said.
+            (None, Some(said)) => out.push(ToolLine {
+                text: format!("“{}”", first_line(said)),
+                depth: depth + 1,
+                report: None,
+                id: c.id.clone(),
+            }),
+            (Some((false, report)), _) if !report.trim().is_empty() => out.push(ToolLine {
+                text: String::new(),
+                depth: depth + 1,
+                report: Some(report.trim().to_string()),
+                id: c.id.clone(),
+            }),
+            _ => {}
+        }
+    }
+}
+
+/// One line per call.
 fn line(c: &Call, cwd: &Path) -> String {
     if let Some(name) = c.name.strip_prefix("waiting:") {
         let real = Call {
@@ -572,8 +615,7 @@ fn line(c: &Call, cwd: &Path) -> String {
         Some((true, out)) => format!(": {}", first_line(out)),
         _ => String::new(),
     };
-    let indent = if c.parent.is_some() { "  " } else { "" };
-    format!("{indent}{l}{mark}")
+    format!("{l}{mark}")
 }
 
 /// A group's folded line, like "Read 3 files, changed 2 files, and ran a

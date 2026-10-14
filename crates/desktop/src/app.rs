@@ -2150,10 +2150,15 @@ impl Dent {
             }
             Item::Text(t) | Item::Queued { text: t, .. } => fp(t, &mut h),
             Item::Tools { lines, summary } => {
-                (lines.len(), summary).hash(&mut h);
+                (lines, summary).hash(&mut h);
                 self.open_tools
                     .contains(&(sid.to_string(), ix))
                     .hash(&mut h);
+                for l in lines.iter().filter(|l| l.report.is_some()) {
+                    self.expanded
+                        .contains(&format!("report-{}", l.id))
+                        .hash(&mut h);
+                }
             }
             Item::Made { art, version } => {
                 // Older versions fold to one line.

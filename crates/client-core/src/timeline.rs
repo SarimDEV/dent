@@ -111,6 +111,8 @@ pub struct Call {
     pub input: String,
     pub parent: Option<String>,
     pub result: Option<(bool, String)>,
+    /// For a subagent: the last thing it said while working.
+    pub said: Option<String>,
 }
 
 impl Call {
@@ -361,6 +363,17 @@ impl SessionView {
                         (Block::Thinking { text }, None) if !text.trim().is_empty() => {
                             self.push(Entry::Thinking { text: text.clone() })
                         }
+                        // A subagent's words belong to the call that started it.
+                        (Block::Text { text }, Some(p)) if !text.trim().is_empty() => {
+                            if let Some(&(ix, at)) = self.calls.get(p) {
+                                if let Some(Entry::Tools { calls }) = self.entries.get_mut(ix)
+                                    && let Some(c) = calls.get_mut(at)
+                                {
+                                    c.said = Some(text.clone());
+                                }
+                                self.touch(ix);
+                            }
+                        }
                         (Block::Tool { id, name, input }, _) => {
                             self.call(Call {
                                 id: id.clone(),
@@ -368,6 +381,7 @@ impl SessionView {
                                 input: input.clone(),
                                 parent: parent.clone(),
                                 result: None,
+                                said: None,
                             });
                         }
                         _ => {}

@@ -1012,9 +1012,26 @@ fn checks() -> Vec<(f32, Act)> {
         0.1,
         Until("a subagent shows how far it got", |d, _| {
             status_is(d, Status::Done)
-                && has(d, |i| matches!(i, Item::Tools { lines, .. } if lines.iter().any(|l| l.contains("Subagent:") && l.contains("done · 2 steps"))))
+                && has(d, |i| matches!(i, Item::Tools { lines, .. } if lines.iter().any(|l| l.text.contains("Subagent:") && l.text.contains("done · 3 steps"))))
         }, 10.),
-    )]);
+    ), (
+        0.1,
+        Until("a subagent's own subagent sits a level deeper, with its report", |d, _| {
+            has(d, |i| matches!(i, Item::Tools { lines, .. }
+                if lines.iter().any(|l| l.depth == 1 && l.text.contains("Time the db tests"))
+                && lines.iter().any(|l| l.depth == 2 && l.text.contains("cargo test db"))
+                && lines.iter().any(|l| l.depth == 1 && l.report.as_deref().is_some_and(|r| r.contains("Slow tests")))))
+        }, 3.),
+    ), (
+        0.1,
+        Call(|d, _, cx| {
+            let Some(s) = d.current_rc() else { return };
+            if let Some(ix) = s.items.iter().position(|i| matches!(i, Item::Tools { lines, .. } if lines.iter().any(|l| l.report.is_some()))) {
+                d.open_tools.insert((s.id.clone(), ix));
+                cx.notify();
+            }
+        }),
+    ), (0.8, Shot("subagent"))]);
     v.extend(new_session("make a plan please"));
     v.extend([
         (

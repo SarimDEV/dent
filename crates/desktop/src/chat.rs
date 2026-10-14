@@ -572,19 +572,30 @@ impl Dent {
                     )
                     .when(open, |d| {
                         let n = lines.len();
-                        d.children(lines.iter().enumerate().map(move |(i, l)| {
-                            div()
-                                .flex()
-                                .gap(px(space::S2))
-                                .ty(CODE)
-                                .text_color(t.quiet)
-                                .child(div().text_color(t.faint).child(if i + 1 == n {
-                                    "└"
-                                } else {
-                                    "├"
-                                }))
-                                .child(l.clone())
-                        }))
+                        let rows: Vec<AnyElement> = lines
+                            .iter()
+                            .enumerate()
+                            .map(|(i, l)| {
+                                let branch = if i + 1 == n { "└" } else { "├" };
+                                let row = div()
+                                    .flex()
+                                    .gap(px(space::S2))
+                                    .ty(CODE)
+                                    .text_color(t.quiet)
+                                    .child(div().text_color(t.faint).child(branch))
+                                    // A subagent's work steps in under it.
+                                    .child(div().w(px(l.depth as f32 * space::S4)).flex_none());
+                                match &l.report {
+                                    None => row
+                                        .child(div().min_w_0().child(l.text.clone()))
+                                        .into_any_element(),
+                                    Some(report) => row
+                                        .child(self.report(ix, &l.id, report, cx))
+                                        .into_any_element(),
+                                }
+                            })
+                            .collect();
+                        d.children(rows)
                     })
                     .into_any_element()
             }
@@ -1953,6 +1964,65 @@ fn needs_title(text: &str, t: &theme::Theme) -> Div {
 }
 
 /// What rode along with a message, shown above its text.
+impl Dent {
+    /// A finished subagent's report under its steps: rendered, and folded
+    /// to its first lines until opened.
+    fn report(
+        &mut self,
+        ix: usize,
+        call: &str,
+        report: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.t;
+        let key = format!("report-{call}");
+        let open = self.expanded.contains(&key);
+        // Folded, it shows its first two blocks whole, never half a table.
+        let all = self.markdown(report);
+        let blocks: &[markdown::Block] = &all;
+        let long = blocks.len() > 2;
+        let blocks = if long && !open {
+            &blocks[..2]
+        } else {
+            &blocks[..]
+        };
+        div()
+            .flex_1()
+            .min_w_0()
+            .my(px(space::S1))
+            .pl(px(space::S3))
+            .border_l_2()
+            .border_color(t.hairline)
+            .flex()
+            .flex_col()
+            .gap(px(space::S1))
+            .child(div().ty(LABEL).text_color(t.quiet).child("REPORT"))
+            .child(markdown::render(blocks, &t, false))
+            .when(long, |d| {
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("report-{ix}-{call}")))
+                        .ty(UI)
+                        .text_color(t.quiet)
+                        .cursor_pointer()
+                        .hover(|d| d.text_color(t.ink))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !this.expanded.remove(&key) {
+                                this.expanded.insert(key.clone());
+                            }
+                            cx.notify();
+                        }))
+                        .child(if open {
+                            "Show less"
+                        } else {
+                            "Show full report"
+                        }),
+                )
+            })
+            .into_any_element()
+    }
+}
+
 /// Where an attached picture is on disk, if it's a picture that's still there.
 fn picture_path(shown: &str, cwd: &str) -> Option<std::path::PathBuf> {
     let ext = shown.rsplit('.').next()?.to_ascii_lowercase();

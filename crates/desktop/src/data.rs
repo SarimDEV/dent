@@ -95,7 +95,7 @@ pub enum Item {
     /// Tool calls folded to one line, expandable.
     Tools {
         summary: String,
-        lines: Vec<String>,
+        lines: Vec<ToolLine>,
     },
     /// The agent wrote a viewable file: a card that opens it.
     Made {
@@ -131,6 +131,18 @@ pub enum Item {
     Changed {
         paths: Vec<String>,
     },
+}
+
+/// One line of an opened tool group. Subagents' work sits under the call
+/// that started it, a level deeper each time.
+#[derive(Clone, Debug, PartialEq, Hash)]
+pub struct ToolLine {
+    pub text: String,
+    pub depth: usize,
+    /// A finished subagent's report, in Markdown, shown under its steps.
+    pub report: Option<String>,
+    /// The call it belongs to.
+    pub id: String,
 }
 
 #[derive(Clone)]

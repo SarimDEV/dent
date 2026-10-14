@@ -597,8 +597,28 @@ impl Agent {
                 self.pause(200)?;
                 self.result(&id, "fn main() {}", false, Some(&task));
             }
+            self.say("Timing the database tests next.", Some(&task))?;
+            // A subagent can start its own.
+            let inner = self.tool(
+                "Task",
+                json!({"description": "Time the db tests", "prompt": "Run them with timing"}),
+                Some(&task),
+            );
+            let run = self.tool(
+                "Bash",
+                json!({"command": "cargo test db -- --report-time"}),
+                Some(&inner),
+            );
+            self.pause(200)?;
+            self.result(&run, "test db::migrate ... ok <4.1s>", false, Some(&inner));
+            self.result(&inner, "`db::migrate` takes 4.1 s.", false, Some(&task));
             self.say("The db tests are the slow ones.", Some(&task))?;
-            self.result(&task, "The db tests are the slow ones.", false, None);
+            self.result(
+                &task,
+                "## Slow tests\n\nThe db tests are the slow ones.\n\n| Test | Time |\n| --- | --- |\n| `db::migrate` | 4.1 s |\n| `db::seed` | 1.2 s |\n| `api::health` | 0.1 s |\n\n- Migrations rebuild the schema each run.\n- Seeding writes 10,000 rows.\n- Sharing one database across tests would save about 5 s.\n- The api tests are already fast.",
+                false,
+                None,
+            );
             self.say(
                 "The subagent found that the database tests are the slow ones.",
                 None,
