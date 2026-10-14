@@ -152,12 +152,8 @@ impl Dent {
         for (n, p) in search(&projects, q).into_iter().enumerate() {
             let path = p.path.clone();
             let on = d.project.as_deref() == Some(p.path.as_str());
-            let note = if on && !d.project_picked {
-                "Guessed from what you typed".to_string()
-            } else {
-                // One line: a long path keeps its start and end.
-                crate::viewer::middle_ellipsis(&tilde(&p.path), 38)
-            };
+            // One line: a long path keeps its start and end.
+            let note = crate::viewer::middle_ellipsis(&tilde(&p.path), 38);
             let gone = p.path.clone();
             v.push(
                 Entry::row(
@@ -183,7 +179,6 @@ impl Dent {
                 d.project.is_none(),
                 act(Box::new(|this, _, _| {
                     this.defaults.project = None;
-                    this.defaults.project_picked = true;
                 })),
             ));
         }
@@ -391,7 +386,6 @@ impl Dent {
             Waiting::Projects,
         );
         self.defaults.project = Some(path.to_string());
-        self.defaults.project_picked = true;
     }
 
     /// Take a project off the list, or put it back (Undo).

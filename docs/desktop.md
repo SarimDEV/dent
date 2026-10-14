@@ -38,7 +38,7 @@ The desktop app is a GPUI client for macOS, Linux and Windows, built around a ch
 
 Cmd/Ctrl+N opens an empty chat with the cursor in the composer: you start by typing. Under the composer are the session's settings, already chosen, each a click (or a key) to change:
 
-- **Project:** filled in from what you type, updating as you go, until you pick one. Its chip opens a picker you type into ([0044](decisions/0044-project-picker.md)): words search the projects (name, then a folder on the path), newest first, ⌘1–⌘9 for the first nine; a path starting with `/` or `~` goes to a folder, Tab steps into the lit subfolder and "Make …" creates one that isn't there; a name that matches nothing offers New project, a Git repository with a first commit in `~/dent/projects`; a pasted Git URL offers Clone into the same place. "Choose a folder…" opens the Mac's folder picker and "No project" uses `~/dent/scratch`. ⌘⌫ or the lit row's × takes a project off the list (its folder stays), with Undo. Esc steps back out of naming or cloning, then closes.
+- **Project:** never guessed from what you type ([0045](decisions/0045-no-project-guessing.md)): the folder of the session you came from, otherwise the last project you started or picked. Its chip opens a picker you type into ([0044](decisions/0044-project-picker.md)): words search the projects (name, then a folder on the path), newest first, ⌘1–⌘9 for the first nine; a path starting with `/` or `~` goes to a folder, Tab steps into the lit subfolder and "Make …" creates one that isn't there; a name that matches nothing offers New project, a Git repository with a first commit in `~/dent/projects`; a pasted Git URL offers Clone into the same place. "Choose a folder…" opens the Mac's folder picker and "No project" uses `~/dent/scratch`. ⌘⌫ or the lit row's × takes a project off the list (its folder stays), with Undo. Esc steps back out of naming or cloning, then closes.
 - **Machine:** the least busy online machine with the project's repo.
 - **Model, permissions, worktree:** whatever you used last.
 
@@ -64,18 +64,16 @@ The viewer shows, as tabs, everything the open session made or changed ([0037](d
 
 ## Quick capture
 
-Press a global shortcut from anywhere, type an idea, press Enter, and an agent starts on it in the right project. You never have to switch to the app.
+Press a global shortcut from anywhere, type an idea, press Enter, and an agent starts on it. You never have to switch to the app.
 
 1. A system-wide shortcut (default Cmd/Ctrl+Shift+Space) opens a small floating prompt over whatever you are doing. It works while the app is closed, because a lightweight menu-bar or tray process stays running.
-2. While you type, the decision model picks where the idea belongs: an existing project and repo, or a new project. The pick shows under the prompt as "AuthZ refactor · auth-service" or "New project", updating as you type.
-3. Enter starts the session there on your default machine. Tab cycles through the next most likely projects first; one more key picks another machine.
+2. The project shows under the prompt before you type: the last one you used ([0045](decisions/0045-no-project-guessing.md)). Tab opens the project picker; typing never changes it.
+3. Enter starts the session there on your default machine; one more key picks another machine.
 4. A small toast confirms where it started, and the session is in the sidebar and on your phone straight away.
 
-- **New projects** get a name suggested from the prompt and a scratch folder, or the repo the idea clearly refers to.
-- **Low confidence** never guesses silently: when no project is clearly ahead, the prompt shows the top choices and waits for one key.
+- **New projects** come from the picker: a name makes one, a Git URL clones one.
 - **Change your mind:** "Move to project" works on any session, keeping its history.
 - **Context comes along:** the shortcut can attach the current browser URL or selected text, if you allow it.
-- **What the model sees:** project names, their repos and recent session titles, plus your prompt. Without a decision model configured, captures start with no project.
 - **Platform note:** global shortcuts work directly on macOS and Windows; on Linux under Wayland they go through the desktop's global-shortcuts permission prompt.
 
 ## Markdown viewer

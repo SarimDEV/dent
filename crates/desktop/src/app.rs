@@ -346,10 +346,9 @@ impl Attachment {
 /// Settings for a new session: chosen for you, each one click to change.
 #[derive(Clone)]
 pub struct Defaults {
-    /// A folder; `None` starts in a scratch folder.
+    /// A folder; `None` starts in a scratch folder. Never guessed: the
+    /// session you came from, else the last one you started or picked.
     pub project: Option<String>,
-    /// Once you pick a project, typing stops changing it.
-    pub project_picked: bool,
     pub model: Option<String>,
     pub permission: Permission,
     /// The agent's effort level; `None` is its default.
@@ -680,7 +679,7 @@ impl Dent {
         let starter = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(3, 14)
-                .placeholder("Describe a task. dent picks the project as you type.")
+                .placeholder("Describe a task")
                 .submit_on_enter(true)
         });
         let comment_input = cx.new(|cx| {
@@ -784,27 +783,9 @@ impl Dent {
         cx.subscribe_in(
             &starter,
             window,
-            |this, s, ev: &InputEvent, window, cx| match ev {
+            |this, _, ev: &InputEvent, window, cx| match ev {
                 InputEvent::PressEnter { shift: false, .. } => this.start(window, cx),
-                InputEvent::Change => {
-                    this.prompt_changed(cx);
-                    // The project follows what you type, a beat behind, until you pick one.
-                    let text = s.read(cx).value().to_string();
-                    cx.spawn_in(window, async move |this, cx| {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(300))
-                            .await;
-                        let _ = this.update(cx, |this, cx| {
-                            if !this.defaults.project_picked
-                                && this.starter.read(cx).value() == text.as_str()
-                            {
-                                this.defaults.project = this.guess_project(&text);
-                                cx.notify();
-                            }
-                        });
-                    })
-                    .detach();
-                }
+                InputEvent::Change => this.prompt_changed(cx),
                 _ => {}
             },
         )
@@ -947,7 +928,6 @@ impl Dent {
             drafts: HashMap::new(),
             defaults: Defaults {
                 project: prefs.project.clone(),
-                project_picked: prefs.project.is_some(),
                 model: prefs.model.clone(),
                 permission: prefs.permission,
                 effort: prefs.effort.clone(),
@@ -1403,6 +1383,12 @@ impl Dent {
             cx.notify();
             return;
         }
+        // A new session from inside one starts in its folder.
+        if id.is_none()
+            && let Some(s) = self.current_rc()
+        {
+            self.defaults.project = self.project_for(&s.cwd);
+        }
         // Each session keeps its own draft.
         let text = self.composer.read(cx).value().to_string();
         if let Some(old) = &self.selected {
@@ -1777,7 +1763,6 @@ impl Dent {
             ) => {
                 self.project_busy = None;
                 self.defaults.project = Some(path);
-                self.defaults.project_picked = true;
                 self.menu = None;
                 self.waiting
                     .insert(self.live.send(Request::Projects), Waiting::Projects);
@@ -2393,11 +2378,8 @@ impl Dent {
                 }
             }
             "clear" => {
-                // A fresh start in the same folder; this session stays.
-                if let Some(s) = session {
-                    self.defaults.project = Some(s.cwd.clone());
-                    self.defaults.project_picked = true;
-                }
+                // A fresh start in the same folder (as any new session from
+                // here is); this session stays.
                 self.select(None, window, cx);
             }
             _ => {}
@@ -2617,11 +2599,7 @@ impl Dent {
     /// Remember the current defaults and layout for next time, when they change.
     pub fn save_prefs(&mut self) {
         let p = crate::prefs::Prefs {
-            project: self
-                .defaults
-                .project
-                .clone()
-                .filter(|_| self.defaults.project_picked),
+            project: self.defaults.project.clone(),
             model: self.defaults.model.clone(),
             permission: self.defaults.permission,
             effort: self.defaults.effort.clone(),
@@ -2658,20 +2636,10 @@ impl Dent {
         }
     }
 
-    /// The project a task most likely belongs to: one named in it, else the
-    /// last one used.
-    pub fn guess_project(&self, text: &str) -> Option<String> {
-        let words: Vec<String> = text
-            .to_lowercase()
-            .split(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
-            .filter(|w| w.len() > 2)
-            .map(str::to_owned)
-            .collect();
-        self.projects
-            .iter()
-            .find(|p| words.iter().any(|w| *w == p.name.to_lowercase()))
-            .or_else(|| self.projects.first())
-            .map(|p| p.path.clone())
+    /// A session's folder as a new session's project: the scratch folder is
+    /// "No project".
+    pub fn project_for(&self, cwd: &str) -> Option<String> {
+        (std::path::Path::new(cwd) != crate::scratch_dir()).then(|| cwd.to_string())
     }
 
     /// Models to offer: the agent's own list, from the daemon.
@@ -2786,7 +2754,6 @@ impl Dent {
         self.creating = true;
         self.creating_at = Instant::now();
         self.starter.update(cx, |c, cx| put(c, "", window, cx));
-        self.defaults.project_picked = false;
         cx.notify();
     }
 
@@ -3979,9 +3946,6 @@ impl Dent {
                 put(s, query.clone(), window, cx);
                 s.focus(window, cx);
             });
-            if !self.defaults.project_picked {
-                self.defaults.project = self.guess_project(&query);
-            }
         } else {
             self.close_palette(window, cx);
         }

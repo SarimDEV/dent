@@ -645,7 +645,6 @@ fn streaming(d: &Dent) -> bool {
 /// The scratch project the walk script made.
 fn use_project(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
     d.defaults.project = std::env::var("DENT_WALK_PROJECT").ok();
-    d.defaults.project_picked = true;
     cx.notify();
 }
 

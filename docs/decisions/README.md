@@ -46,3 +46,4 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0042. Your terminal: your own shell, drawn by dent with alacritty_terminal](0042-terminal-alacritty.md)
 - [0043. Prompt completion: `/` opens the message, `@` anywhere, dent keeps its own state](0043-prompt-completion.md)
 - [0044. Project picker: one field that searches, goes to a path, makes and clones](0044-project-picker.md)
+- [0045. A new session's project is never guessed from what you type](0045-no-project-guessing.md)

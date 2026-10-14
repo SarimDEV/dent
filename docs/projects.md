@@ -19,10 +19,10 @@ A project is a piece of work you are doing, like "AuthZ refactor" or a random id
 
 A new idea should cost one keystroke, not a setup screen.
 
-- Cmd/Ctrl+N opens a new session: you start typing, and the project fills in from what you type (decision [0036](decisions/0036-sessions-as-an-inbox.md)). It runs on the least busy machine, with the model, permissions and worktree you used last.
+- Cmd/Ctrl+N opens a new session: you start typing, in the project you were in, or the last one you used; typing never changes it (decision [0045](decisions/0045-no-project-guessing.md)). It runs on the least busy machine, with the model, permissions and worktree you used last.
 - If the idea has no repo yet, the session gets a fresh scratch folder with `git init`, and the agent can create a remote later.
 - Promoting a scratch folder to a repo or adding existing repos happens whenever you want, without moving the session.
-- The project guess is shown under the composer before you send, and can be changed there, or later with "Move to project". When it looks like a fresh idea, it offers a new project.
+- The project is shown under the composer before you send, and can be changed there (the picker can also make or clone one), or later with "Move to project".
 
 ## Worktrees
 
