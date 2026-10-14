@@ -266,6 +266,15 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
                     .await?;
             Reply::Files { paths }
         }
+        Request::FilesIn { dir } => {
+            let dir = std::path::PathBuf::from(dir);
+            if !dir.is_absolute() || !dir.is_dir() {
+                bail!("{} is not a folder", dir.display());
+            }
+            let paths =
+                tokio::task::spawn_blocking(move || crate::git::files(&dir, 20_000)).await?;
+            Reply::Files { paths }
+        }
         Request::ReadFile { session, path } => {
             let cwd = cwd_of(d, &session)?;
             let bytes =

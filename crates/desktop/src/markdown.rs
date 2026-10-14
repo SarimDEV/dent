@@ -59,6 +59,9 @@ pub struct Face {
     pub size: f32,
     pub ink: Hsla,
     pub bg: Hsla,
+    /// The text's own weight. Runs carry their fonts, so a weight set on
+    /// the element around them never reaches them; it goes here.
+    pub weight: FontWeight,
 }
 
 impl Face {
@@ -68,7 +71,12 @@ impl Face {
             size: ty.size,
             ink,
             bg,
+            weight: FontWeight::NORMAL,
         }
+    }
+
+    pub fn weighted(self, weight: FontWeight) -> Self {
+        Self { weight, ..self }
     }
 }
 
@@ -253,8 +261,14 @@ impl Inline {
         for (len, st) in &self.runs {
             insert(at, &mut text, &mut runs, at);
             let mut f = font(if st.code { theme::mono() } else { face.family });
+            f.weight = face.weight;
             if st.strong {
-                f.weight = FontWeight::MEDIUM;
+                // A step heavier than the text around it.
+                f.weight = if face.weight.0 >= FontWeight::MEDIUM.0 {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::MEDIUM
+                };
             }
             if st.emph {
                 f.style = FontStyle::Italic;
@@ -1123,12 +1137,16 @@ fn render_in(
                     // read as structure rather than another paragraph.
                     (false, _) => (READING, theme::sans()),
                 };
-                let f = face(ty, family, t.ink);
+                let weight = if !doc || *level > 2 {
+                    FontWeight::MEDIUM
+                } else {
+                    FontWeight::NORMAL
+                };
+                let f = face(ty, family, t.ink).weighted(weight);
                 div()
                     .when(*level > 1 || !doc, |d| d.pt(px(space::S3)))
                     .ty(ty)
                     .text_color(t.ink)
-                    .when(!doc || *level > 2, |d| d.font_weight(FontWeight::MEDIUM))
                     .child(i.element(&key, t, f, None, &r.md, r.window))
                     .into_any_element()
             }
@@ -1859,7 +1877,11 @@ fn row(
 ) -> Div {
     let pad = 2. * CELL_X;
     let ink = if head { t.quiet } else { t.ink };
-    let face = Face::of(UI, theme::sans(), ink, t.surface);
+    let face = Face::of(UI, theme::sans(), ink, t.surface).weighted(if head {
+        FontWeight::MEDIUM
+    } else {
+        FontWeight::NORMAL
+    });
     let empty = Inline::default();
     let mut out = Vec::with_capacity(data.widths.len());
     for c in 0..data.widths.len() {
@@ -1895,7 +1917,7 @@ fn row(
         .ty(UI)
         .text_color(ink)
         .when(gutter, |d| d.pr(px(GUTTER)))
-        .when(head, |d| d.bg(t.raised).font_weight(FontWeight::MEDIUM))
+        .when(head, |d| d.bg(t.raised))
         .when(rule, |d| d.border_b_1().border_color(t.hairline))
         .children(out)
 }

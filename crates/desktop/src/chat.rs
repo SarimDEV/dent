@@ -12,6 +12,7 @@ use crate::ui::RevealOnHover;
 
 use crate::anim;
 use crate::app::{Dent, Menu, Tab};
+use crate::complete;
 use dent_protocol::Permission;
 
 use crate::data::{Item, Kind, Session};
@@ -1881,12 +1882,7 @@ impl Dent {
                     .when(!chips.is_empty(), |d| {
                         d.child(div().flex().flex_wrap().gap(px(space::S1H)).children(chips))
                     })
-                    .child(
-                        div()
-                            .ty(READING)
-                            .text_color(t.ink)
-                            .child(Textarea::new(&self.composer)),
-                    )
+                    .child(self.prompt_field(&self.composer.clone(), cx))
                     .child(
                         div()
                             .flex()
@@ -1930,7 +1926,7 @@ impl Dent {
                             .child(action),
                     )
                     .child(probe(&self.probes, "composer"))
-                    .children(self.slash_menu(cx)),
+                    .children(self.slash_menu(false, cx)),
             )
     }
 
@@ -2044,98 +2040,199 @@ impl Dent {
         )
     }
 
-    /// Commands matching a `/word` in the composer, above it.
-    fn slash_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// Where a prompt is typed. A click can move the caret into or out of
+    /// a word to complete, so the menu looks again after one.
+    fn prompt_field(
+        &self,
+        field: &Entity<gpui_kit::base::input::TextareaState>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        div()
+            .ty(READING)
+            .text_color(self.t.ink)
+            .capture_any_mouse_up(cx.listener(|_, _, _, cx| cx.notify()))
+            .child(Textarea::new(field))
+    }
+
+    /// The prompt's menu: commands after a `/` that opens it, files and
+    /// folders after an `@`. Opens above the composer, below a new
+    /// session's field, which sits near the top.
+    fn slash_menu(&mut self, below: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = self.t;
-        let (mention, hits) = self.completions(cx);
-        if hits.is_empty() {
-            return None;
+        let c = self.completion(cx)?;
+        let mention = c.token.kind == complete::Kind::Mention;
+        let n = c.items.len();
+        let at = self.slash_ix.min(n.saturating_sub(1));
+        // The highlighted row stays in view as the arrows move it.
+        if self.slash_shown != Some(at) {
+            self.slash_shown = Some(at);
+            self.slash_scroll.scroll_to_item(at);
         }
-        let at = self.slash_ix.min(hits.len() - 1);
-        let rows: Vec<AnyElement> = hits
+        let rows: Vec<AnyElement> = c
+            .items
             .into_iter()
             .enumerate()
-            .map(|(i, c)| {
-                let name = c.name.clone();
-                div()
+            .map(|(i, item)| {
+                let name = item.name.clone();
+                let on = i == at;
+                let row = div()
                     .id(SharedString::from(format!("slash-{i}")))
                     .relative()
+                    .flex_none()
                     .px(px(space::S3))
-                    .py(px(space::S1H))
+                    .h(px(size::ROW))
                     .flex()
-                    .items_baseline()
+                    .items_center()
                     .gap(px(space::S2))
                     .rounded(px(radius::SM))
                     .cursor_pointer()
-                    .when(i == at, |d| d.bg(t.selected()))
-                    .hover(|d| d.bg(t.hover()))
-                    .on_press(cx.listener(move |this, _, window, cx| {
-                        if mention {
-                            this.complete_mention(&name, window, cx);
-                        } else {
-                            this.complete_slash(&name, window, cx);
+                    .when(on, |d| d.bg(t.selected()))
+                    // The pointer lights what it's over, as the arrows do.
+                    .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                        if this.slash_ix != i {
+                            this.slash_ix = i;
+                            cx.notify();
                         }
-                        this.composer.update(cx, |c, cx| c.focus(window, cx));
                     }))
-                    .child(
-                        div()
-                            .flex_none()
-                            .ty(CODE)
-                            .text_color(t.ink)
-                            .child(if mention {
-                                c.name.clone()
-                            } else {
-                                format!("/{}", c.name)
-                            }),
-                    )
-                    .when(!c.hint.is_empty(), |d| {
-                        d.child(
+                    .on_press(cx.listener(move |this, _, window, cx| {
+                        this.pick_completion(&name, window, cx);
+                    }));
+                let row = if mention {
+                    // The name first; where it is, quieter, after.
+                    let folder = item.name.ends_with('/');
+                    let base = complete::base(&item.name);
+                    let parent = item.name.trim_end_matches('/');
+                    let parent = &parent[..parent.len() - base.len()];
+                    row.child(icon(if folder { "folder" } else { "file" }, 13., t.quiet))
+                        .child(
                             div()
                                 .flex_none()
-                                .ty(CODE)
-                                .text_color(t.faint)
-                                .child(c.hint.trim_matches(['<', '>', '[', ']']).to_string()),
+                                .max_w(relative(0.6))
+                                .truncate()
+                                .ty(UI)
+                                .text_color(t.ink)
+                                .child(if folder {
+                                    format!("{base}/")
+                                } else {
+                                    base.to_string()
+                                }),
                         )
-                    })
-                    .child(
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .ty(UI)
+                                .text_color(t.quiet)
+                                .child(parent.trim_end_matches('/').to_string()),
+                        )
+                } else {
+                    // What it does, or failing that what it takes.
+                    let about = if item.description.is_empty() {
+                        item.hint.clone()
+                    } else {
+                        item.description.clone()
+                    };
+                    // The code face and the UI face share a baseline, not a
+                    // centre line.
+                    row.child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .ty(UI)
-                            .text_color(t.quiet)
-                            .child(c.description.clone()),
+                            .flex()
+                            .items_baseline()
+                            .gap(px(space::S2))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .max_w(relative(0.45))
+                                    .truncate()
+                                    .ty(CODE)
+                                    .text_color(t.ink)
+                                    .child(format!("/{}", item.name)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .ty(UI)
+                                    .text_color(t.quiet)
+                                    .child(about),
+                            ),
                     )
-                    .child(probe(&self.probes, format!("slash-{i}")))
+                };
+                row.child(probe(&self.probes, format!("slash-{i}")))
                     .into_any_element()
             })
             .collect();
-        Some(
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .bottom(relative(1.))
-                .pb(px(space::S1))
-                .child(
-                    floating(&t)
-                        .id("slash-menu")
-                        .p(px(space::S1))
-                        .flex()
-                        .flex_col()
-                        .occlude()
-                        .children(rows)
-                        .child(
-                            div()
-                                .px(px(space::S3))
-                                .pt(px(space::S1))
-                                .ty(LABEL)
-                                .text_color(t.faint)
-                                .child("↑↓ choose · Tab complete"),
-                        ),
-                )
-                .into_any_element(),
-        )
+        let sign = if mention { "@" } else { "/" };
+        let note = match (n, c.loading, mention) {
+            (0, true, true) => Some("Looking for files…".to_string()),
+            (0, _, true) => Some(format!("No file or folder matches {sign}{}", c.token.query)),
+            (0, _, false) => Some(format!("No command matches {sign}{}", c.token.query)),
+            _ => None,
+        };
+        let footer = if n == 0 {
+            "Esc to close"
+        } else if c.loading {
+            // dent's own commands are here; the agent's are on their way.
+            "Looking up Claude's commands…"
+        } else {
+            "↑↓ choose · ↩ or Tab to pick · Esc to close"
+        };
+        // Painted after everything, so what follows the field (the chips,
+        // the list below) never draws over it; outside the field's 1px
+        // border, so their edges line up exactly.
+        let menu = div()
+            .absolute()
+            .left(px(-1.))
+            .right(px(-1.))
+            .when(below, |d| d.top(relative(1.)).pt(px(space::S1)))
+            .when(!below, |d| d.bottom(relative(1.)).pb(px(space::S1)))
+            .child(
+                floating(&t)
+                    .id("slash-menu")
+                    .p(px(space::S1))
+                    .flex()
+                    .flex_col()
+                    .occlude()
+                    // Clicks land on the menu, not on what's behind it,
+                    // and the prompt keeps its caret.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .id("slash-rows")
+                            .flex()
+                            .flex_col()
+                            .max_h(px(size::ROW * 8.))
+                            .overflow_y_scroll()
+                            .track_scroll(&self.slash_scroll)
+                            .children(rows),
+                    )
+                    .children(note.map(|note| {
+                        div()
+                            .px(px(space::S3))
+                            .h(px(size::ROW))
+                            .flex()
+                            .items_center()
+                            .ty(UI)
+                            .text_color(t.quiet)
+                            .child(note)
+                    }))
+                    .child(
+                        div()
+                            .mt(px(space::S1))
+                            .px(px(space::S3))
+                            .py(px(space::S2))
+                            .border_t_1()
+                            .border_color(t.hairline)
+                            .ty(LABEL)
+                            .text_color(t.quiet)
+                            .child(footer),
+                    ),
+            );
+        Some(deferred(menu).with_priority(1).into_any_element())
     }
 
     fn starter_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -2251,14 +2348,10 @@ impl Dent {
                             .flex()
                             .flex_col()
                             .gap(px(space::S2))
-                            .child(
-                                div()
-                                    .ty(READING)
-                                    .text_color(t.ink)
-                                    .child(Textarea::new(&self.starter)),
-                            )
+                            .child(self.prompt_field(&self.starter.clone(), cx))
                             .child(div().flex().justify_end().child(start))
-                            .child(probe(&self.probes, "starter")),
+                            .child(probe(&self.probes, "starter"))
+                            .children(self.slash_menu(true, cx)),
                     )
                     .child(chips)
                     .children(self.terminal_sessions(cx)),
@@ -2416,16 +2509,12 @@ impl Dent {
                     .hover(|d| d.bg(t.hover()))
                     .active(|d| d.bg(t.press()))
                     .on_press(cx.listener(move |this, _, _, cx| {
-                        this.menu = if this.menu == Some(which) {
-                            None
+                        if this.menu == Some(which) {
+                            this.menu = None;
+                            cx.notify();
                         } else {
-                            // Each menu opens at its top, the current choice lit
-                            // for the keyboard.
-                            this.menu_scroll = ScrollHandle::new();
-                            this.menu_ix = this.menu_entries(which, cx).iter().position(|e| e.on);
-                            Some(which)
-                        };
-                        cx.notify();
+                            this.open_menu(which, cx);
+                        }
                     }))
                     .child(icon(
                         icon_name,

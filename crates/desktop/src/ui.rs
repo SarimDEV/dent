@@ -277,7 +277,7 @@ pub fn probe(
 /// A floating surface (elevation 1): menus, toasts.
 pub fn floating(t: &Theme) -> Div {
     div()
-        .bg(t.raised)
+        .bg(t.popover())
         .border_1()
         .border_color(t.hairline)
         .rounded(px(radius::XL))

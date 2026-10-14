@@ -9,6 +9,7 @@ mod app;
 mod assets;
 mod bridge;
 mod chat;
+mod complete;
 mod context;
 mod data;
 mod diagram;
@@ -437,7 +438,10 @@ impl Render for Dent {
                 if this.context.take().is_some() {
                 } else if this.palette.is_some() {
                     this.close_palette(window, cx);
-                } else if this.menu.take().is_some() || select::clear(window) {
+                } else if this.menu.take().is_some()
+                    || this.dismiss_completion(cx)
+                    || select::clear(window)
+                {
                 } else if this.picking {
                     this.toggle_pick(cx);
                 } else if this.renaming.is_some() || this.commenting.is_some() {
@@ -446,10 +450,13 @@ impl Render for Dent {
                     this.renaming = None;
                     this.commenting = None;
                     this.composer.update(cx, |c, cx| c.focus(window, cx));
-                } else if this.field_focused(window, cx) == Some(app::Field::Composer)
-                    && !this.composer.read(cx).value().trim().is_empty()
+                } else if this
+                    .field_focused(window, cx)
+                    .is_some_and(|f| matches!(f, app::Field::Composer | app::Field::Starter))
+                    && !this.prompt().read(cx).value().trim().is_empty()
                 {
-                    // A draft keeps the keyboard: Esc doesn't throw you out of it.
+                    // A draft keeps the keyboard: Esc doesn't throw you out of
+                    // it, in a session or a new one.
                 } else {
                     this.focus_inbox(window, cx);
                 }

@@ -14,6 +14,10 @@ use crate::paths::Paths;
 use crate::session::{self, Cmd, Op};
 use crate::store::{Source, Store};
 
+/// The key for the commands every session starts with, read by the usage
+/// probe before any session has.
+const EVERY: &str = "";
+
 /// Something every subscribed client should hear about now.
 #[derive(Debug, Clone)]
 pub enum Live {
@@ -170,11 +174,13 @@ impl Daemon {
         }
     }
 
-    /// A session's commands, or any session's when it hasn't started yet.
+    /// A session's commands; before it has started, the ones every session
+    /// starts with (from the usage probe), or another session's.
     pub fn commands(&self, session: Option<&str>) -> Vec<dent_protocol::Command> {
         let all = lock(&self.commands);
         session
             .and_then(|s| all.get(s))
+            .or_else(|| all.get(EVERY))
             .or_else(|| all.values().next())
             .cloned()
             .unwrap_or_default()
@@ -195,8 +201,11 @@ impl Daemon {
         })
         .await
         .ok();
-        let (windows, models) = read.map(|p| (p.windows, p.models)).unwrap_or_default();
+        let (windows, models, commands) = read
+            .map(|p| (p.windows, p.models, p.commands))
+            .unwrap_or_default();
         me.set_models(models);
+        me.set_commands(EVERY, commands);
         let reading = (windows.unwrap_or_default(), now_ms());
         *cached = Some(reading.clone());
         reading

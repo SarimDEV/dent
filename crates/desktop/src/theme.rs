@@ -133,6 +133,16 @@ impl Theme {
     pub fn press(&self) -> Hsla {
         self.ink.opacity(self.a(0.09, 0.10))
     }
+    /// Menus and popovers: in Carbon a step lighter than the field they
+    /// open from, as the Mac lifts a menu, so one never reads as a second
+    /// box; on Paper the shadow does that.
+    pub fn popover(&self) -> Hsla {
+        if self.dark {
+            mix(self.raised, self.ink, 0.05)
+        } else {
+            self.raised
+        }
+    }
     pub fn selected(&self) -> Hsla {
         self.ink.opacity(self.a(0.10, 0.12))
     }

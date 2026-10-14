@@ -424,6 +424,46 @@ fn a_reply_streams_is_kept_and_catches_up_from_any_point() {
 }
 
 #[test]
+fn a_command_the_agent_runs_itself_shows_its_answer_once() {
+    let w = World::new(&[]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "/context");
+    c.wait(&s, "the command to end", is_done);
+    assert!(c.text(&s).contains("Context Usage"), "{}", c.text(&s));
+    // An ordinary reply isn't repeated from its result.
+    let replies = |c: &Client| c.count(&s, |b| matches!(b, Body::Assistant { parent: None, .. }));
+    let before = replies(&c);
+    c.say(&s, "m2", "hello there", false);
+    c.wait_turns(&s, 2);
+    assert!(replies(&c) > before);
+    assert_eq!(
+        c.text(&s).matches("hello there").count(),
+        1,
+        "{}",
+        c.text(&s)
+    );
+}
+
+#[test]
+fn a_new_sessions_folder_lists_its_files() {
+    let w = World::new(&[]);
+    let mut c = w.client();
+    match c.call(Request::FilesIn { dir: w.cwd() }).unwrap() {
+        Out::Reply {
+            reply: dent_protocol::Reply::Files { paths },
+        } => assert!(paths.iter().any(|p| p == "README.md"), "{paths:?}"),
+        o => panic!("{o:?}"),
+    }
+    assert!(
+        c.call(Request::FilesIn {
+            dir: "relative".into()
+        })
+        .is_err()
+    );
+}
+
+#[test]
 fn approvals_allow_deny_and_questions() {
     let w = World::new(&[]);
     let mut c = w.client();

@@ -146,6 +146,9 @@ struct Session {
     /// A message was steered into the running turn; the abort the agent
     /// reports for it isn't the turn ending.
     steered: bool,
+    /// The agent replied in this turn. A slash command the agent runs
+    /// itself (`/context`, `/usage`) replies only in the turn's result.
+    said: bool,
     background: Vec<Task>,
     asked: HashMap<String, Pending>,
     /// Client message ids already logged, so a resend never runs twice.
@@ -188,6 +191,7 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
         resume_at: None,
         held: VecDeque::new(),
         steered: false,
+        said: false,
         background: Vec::new(),
         asked: HashMap::new(),
         seen: HashSet::new(),
@@ -270,8 +274,10 @@ impl Session {
                 Body::Answered { id, .. } => {
                     self.asked.remove(&id);
                 }
+                Body::Assistant { parent: None, .. } => self.said = true,
                 Body::TurnStarted => {
                     self.in_turn = true;
+                    self.said = false;
                     self.agent_started = true;
                     rewound_to = None;
                     forked_at = None;
@@ -603,6 +609,7 @@ impl Session {
         ))
         .await?;
         self.in_turn = true;
+        self.said = false;
         self.idle_at = None;
         Ok(())
     }
@@ -995,6 +1002,9 @@ impl Session {
                     self.context = Some(c);
                 }
                 let blocks = claude::blocks(blocks);
+                if parent.is_none() {
+                    self.said = true;
+                }
                 if !blocks.is_empty() {
                     self.log_from(
                         Body::Assistant {
@@ -1148,11 +1158,24 @@ impl Session {
                     Outcome::Interrupted { reason: None }
                 } else if is_error {
                     Outcome::Error {
-                        message: text.unwrap_or_else(|| "The turn failed".into()),
+                        message: text.clone().unwrap_or_else(|| "The turn failed".into()),
                     }
                 } else {
                     Outcome::Done
                 };
+                if matches!(outcome, Outcome::Done)
+                    && !self.said
+                    && let Some(text) = text
+                {
+                    self.log_from(
+                        Body::Assistant {
+                            parent: None,
+                            blocks: vec![dent_protocol::Block::Text { text }],
+                            uuid: None,
+                        },
+                        end,
+                    );
+                }
                 if let Some(used) = self.context {
                     self.log_from(
                         Body::Context {

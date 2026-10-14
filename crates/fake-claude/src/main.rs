@@ -188,6 +188,9 @@ impl Agent {
                     "initialize" => json!({
                         "commands": [
                             {"name": "compact", "description": "Clear history but keep a summary in context", "argumentHint": "<instructions>"},
+                            {"name": "context", "description": "Show current context usage", "argumentHint": ""},
+                            {"name": "model", "description": "Set the AI model for Claude Code", "argumentHint": "<model>"},
+                            {"name": "color", "description": "Set the prompt bar color for this session", "argumentHint": ""},
                             {"name": "review", "description": "Review a pull request", "argumentHint": ""},
                             {"name": "deep-research", "description": "Research a question across many sources", "argumentHint": "<question>"},
                         ],
@@ -473,6 +476,11 @@ impl Agent {
         let lower = text.to_lowercase();
         let ask = self.mode == "default";
         self.pause(250)?;
+        // A command the agent runs itself answers only in its result.
+        if lower.starts_with("/context") {
+            self.end("## Context Usage\n\n**Tokens:** 3k / 1m (0%)", false);
+            return Ok(());
+        }
         if lower.contains("crash") {
             self.say("Starting on that now, ", None)?;
             std::process::exit(3);

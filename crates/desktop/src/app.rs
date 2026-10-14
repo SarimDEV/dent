@@ -16,6 +16,7 @@ use dent_protocol::{
     Answer, Command, Model, Out, Permission, Project, RecentSession, Reply, Request,
 };
 
+use crate::complete;
 use crate::data::{Artifact, FileDiff, Item, Session};
 use crate::live::{Incoming, Live};
 use crate::markdown::Block;
@@ -371,6 +372,17 @@ fn reachable(url: &str) -> String {
 /// A session's search text, with the size it was made at.
 type SearchText = ((usize, u64), Rc<str>);
 
+/// Where `commands` keeps the slash commands every session starts with.
+const EVERY: &str = "";
+
+/// What the prompt's menu offers for the word at its caret.
+pub struct Completion {
+    pub token: complete::Token,
+    pub items: Vec<Command>,
+    /// The list isn't here yet (the agent's commands, a folder's files).
+    pub loading: bool,
+}
+
 /// What a request's reply is for.
 enum Waiting {
     Models,
@@ -453,7 +465,8 @@ pub struct Dent {
     pub usage: Option<(Vec<dent_protocol::Window>, u64)>,
     /// Each session's files, for @ mentions.
     pub files: HashMap<String, Rc<Vec<String>>>,
-    /// Slash commands the agent offers, by session.
+    /// Slash commands the agent offers, by session; under `EVERY`, the ones
+    /// a session starts with.
     pub commands: HashMap<String, Vec<Command>>,
     /// What was last written to the prefs file.
     saved_prefs: Option<crate::prefs::Prefs>,
@@ -507,8 +520,12 @@ pub struct Dent {
     pub revealed_tab: Option<(Tab, usize, u32)>,
     pub reveal_pending: bool,
     pub reveal_tries: u8,
-    /// Esc put the slash or @ menu away; typing brings it back.
-    pub slash_dismissed: bool,
+    /// The word whose menu Esc put away; it stays away until the caret
+    /// leaves that word.
+    pub slash_dismissed: Option<(complete::Kind, usize)>,
+    /// The prompt menu's scroll, kept on its highlighted row.
+    pub slash_scroll: ScrollHandle,
+    pub slash_shown: Option<usize>,
     pub palette_scroll: ScrollHandle,
     /// Where you were reading each session, and whether you were at the end.
     pub read_at: HashMap<String, (ListOffset, bool)>,
@@ -699,11 +716,7 @@ impl Dent {
             window,
             |this, _, ev: &InputEvent, window, cx| match ev {
                 InputEvent::PressEnter { shift: false, .. } => this.send(window, cx),
-                InputEvent::Change => {
-                    this.slash_ix = 0;
-                    this.slash_dismissed = false;
-                    cx.notify()
-                }
+                InputEvent::Change => this.prompt_changed(cx),
                 _ => {}
             },
         )
@@ -714,7 +727,7 @@ impl Dent {
             |this, s, ev: &InputEvent, window, cx| match ev {
                 InputEvent::PressEnter { shift: false, .. } => this.start(window, cx),
                 InputEvent::Change => {
-                    cx.notify();
+                    this.prompt_changed(cx);
                     // The project follows what you type, a beat behind, until you pick one.
                     let text = s.read(cx).value().to_string();
                     cx.spawn_in(window, async move |this, cx| {
@@ -901,7 +914,9 @@ impl Dent {
             revealed_tab: None,
             reveal_pending: false,
             reveal_tries: 0,
-            slash_dismissed: false,
+            slash_dismissed: None,
+            slash_scroll: ScrollHandle::new(),
+            slash_shown: None,
             palette_scroll: ScrollHandle::new(),
             read_at: HashMap::new(),
             md_docs: HashMap::new(),
@@ -1548,6 +1563,7 @@ impl Dent {
                         .insert(self.live.send(Request::Projects), Waiting::Projects);
                     self.fetch_usage();
                     self.fetch_recent();
+                    self.fetch_commands(EVERY);
                 }
                 Incoming::Down(why) => {
                     if self.connection.is_ok() {
@@ -1647,7 +1663,8 @@ impl Dent {
                     reply: Reply::Files { paths },
                 },
             ) => {
-                self.files.insert(id, Rc::new(paths));
+                self.files
+                    .insert(id, Rc::new(complete::with_folders(paths)));
             }
             (
                 Waiting::Usage,
@@ -1657,6 +1674,11 @@ impl Dent {
             ) => {
                 if !windows.is_empty() {
                     self.usage = Some((windows, at));
+                }
+                // The usage reading also learns the commands every session
+                // starts with.
+                if !self.commands.contains_key(EVERY) {
+                    self.fetch_commands(EVERY);
                 }
             }
             (
@@ -1726,6 +1748,8 @@ impl Dent {
         let plain = !k.modifiers.modified();
         let field = self.field_focused(window, cx);
         let in_composer = field == Some(Field::Composer);
+        // The field a prompt is typed in, whichever page it's on.
+        let in_prompt = field.is_some_and(|f| self.field_entity(f) == self.prompt());
         // The ⌘K palette: arrows move through the results, and Tab stays put
         // rather than leaving for the composer behind it.
         if self.palette.is_some() && plain && matches!(k.key.as_str(), "up" | "down" | "tab") {
@@ -1837,17 +1861,6 @@ impl Dent {
             self.step_selection(if k.key == "up" { -1 } else { 1 }, false, window, cx);
             return true;
         }
-        // Esc puts away the slash or @ menu before anything else.
-        if plain
-            && k.key == "escape"
-            && in_composer
-            && !self.slash_dismissed
-            && !self.completions(cx).1.is_empty()
-        {
-            self.slash_dismissed = true;
-            cx.notify();
-            return true;
-        }
         // A question's options answer to their number keys while the
         // composer is empty.
         if plain
@@ -1869,27 +1882,47 @@ impl Dent {
                 return true;
             }
         }
-        // The slash menu: arrows move, Tab or Return completes.
-        if plain && matches!(k.key.as_str(), "up" | "down" | "tab" | "enter") && in_composer {
-            let (mention, hits) = self.completions(cx);
-            let typed = self.composer.read(cx).value().to_string();
-            let exact = !mention && hits.iter().any(|c| typed == format!("/{}", c.name));
-            if !hits.is_empty() && !(k.key == "enter" && exact) {
+        // The prompt's menu: arrows move round it, Tab or Return picks.
+        // Return sends instead when the command is typed in full, or when
+        // the lit row was only found by its description: Return never
+        // swaps what you typed for a different name unless you chose it.
+        if plain
+            && matches!(k.key.as_str(), "up" | "down" | "tab" | "enter")
+            && in_prompt
+            && let Some(c) = self.completion(cx)
+            && !c.items.is_empty()
+        {
+            let n = c.items.len();
+            let at = self.slash_ix.min(n - 1);
+            let typed = &self.prompt().read(cx).value()[c.token.start..c.token.end];
+            let slash = c.token.kind == complete::Kind::Slash;
+            let whole = slash && c.items.iter().any(|i| typed == format!("/{}", i.name));
+            let named = c.items[at]
+                .name
+                .to_lowercase()
+                .contains(&c.token.query.to_lowercase());
+            let chosen = self.slash_ix > 0;
+            if !(k.key == "enter" && (whole || slash && !named && !chosen)) {
                 match k.key.as_str() {
-                    "up" => self.slash_ix = self.slash_ix.saturating_sub(1),
-                    "down" => self.slash_ix = (self.slash_ix + 1).min(hits.len() - 1),
+                    "up" => self.slash_ix = (at + n - 1) % n,
+                    "down" => self.slash_ix = (at + 1) % n,
                     _ => {
-                        let pick = hits[self.slash_ix.min(hits.len() - 1)].name.clone();
-                        if mention {
-                            self.complete_mention(&pick, window, cx);
-                        } else {
-                            self.complete_slash(&pick, window, cx);
-                        }
+                        let pick = c.items[at].name.clone();
+                        self.pick_completion(&pick, window, cx);
                     }
                 }
                 cx.notify();
                 return true;
             }
+        }
+        // Moving the caret can move it into or out of a word to complete.
+        if in_prompt
+            && matches!(
+                k.key.as_str(),
+                "left" | "right" | "home" | "end" | "up" | "down" | "backspace" | "delete"
+            )
+        {
+            cx.notify();
         }
         // Alt+Up and Alt+Down move between your own messages, while the
         // composer has nothing to edit.
@@ -2059,116 +2092,209 @@ impl Dent {
         }
     }
 
-    /// Ask for a session's slash commands, once it has some.
+    /// Ask for a session's slash commands, once it has some; for `EVERY`,
+    /// the ones a session starts with.
     pub fn fetch_commands(&mut self, id: &str) {
         let n = self.live.send(Request::Commands {
-            session: Some(id.to_string()),
+            session: (id != EVERY).then(|| id.to_string()),
         });
         self.waiting.insert(n, Waiting::Commands(id.to_string()));
     }
 
-    /// Commands matching what's typed, while the composer holds only `/word`.
-    pub fn slash_matches(&self, cx: &App) -> Vec<Command> {
-        let text = self.composer.read(cx).value().to_string();
-        let Some(word) = text.strip_prefix('/') else {
-            return Vec::new();
-        };
-        if word.contains(char::is_whitespace) {
-            return Vec::new();
+    /// The field a prompt is typed in: the open session's composer, or the
+    /// new session's.
+    pub fn prompt(&self) -> &Entity<TextareaState> {
+        if self.current_rc().is_some() {
+            &self.composer
+        } else {
+            &self.starter
         }
-        let Some(list) = self.selected.as_ref().and_then(|s| self.commands.get(s)) else {
-            return Vec::new();
-        };
-        let word = word.to_lowercase();
-        let mut hits: Vec<(usize, &Command)> = list
-            .iter()
-            .filter_map(|c| {
-                let name = c.name.to_lowercase();
-                if name.starts_with(&word) {
-                    Some((0, c))
-                } else if name.contains(&word) {
-                    Some((1, c))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        hits.sort_by_key(|(rank, c)| (*rank, c.name.len()));
-        hits.into_iter().take(8).map(|(_, c)| c.clone()).collect()
     }
 
-    /// What the composer could complete: an `@file` being typed at its end,
-    /// or a lone `/command`. True for mentions.
-    pub fn completions(&self, cx: &App) -> (bool, Vec<Command>) {
-        if self.slash_dismissed {
-            return (false, Vec::new());
-        }
-        let slash = self.slash_matches(cx);
-        if !slash.is_empty() {
-            return (false, slash);
-        }
-        let text = self.composer.read(cx).value().to_string();
-        let tail = text.rsplit(char::is_whitespace).next().unwrap_or_default();
-        let Some(q) = tail.strip_prefix('@') else {
-            return (true, Vec::new());
-        };
-        let Some(files) = self.selected.as_ref().and_then(|s| self.files.get(s)) else {
-            return (true, Vec::new());
-        };
-        let q = q.to_lowercase();
-        // Name starts with it, then name contains it, then the path, then
-        // the letters in order anywhere.
-        let mut hits: Vec<(u8, usize, &String)> = files
-            .iter()
-            .filter_map(|p| {
-                let lower = p.to_lowercase();
-                let name = lower.rsplit('/').next().unwrap_or(&lower);
-                let rank = if q.is_empty() {
-                    3
-                } else if name.starts_with(&q) {
-                    0
-                } else if name.contains(&q) {
-                    1
-                } else if lower.contains(&q) {
-                    2
-                } else {
-                    let mut it = lower.chars();
-                    if !q.chars().all(|c| it.any(|x| x == c)) {
-                        return None;
-                    }
-                    3
-                };
-                Some((rank, p.len(), p))
-            })
-            .collect();
-        hits.sort();
-        let list = hits
-            .into_iter()
-            .take(8)
-            .map(|(_, _, p)| Command {
-                name: p.clone(),
-                description: String::new(),
-                hint: String::new(),
-            })
-            .collect();
-        (true, list)
+    /// Where a new session's files are kept, by its folder.
+    fn folder_key(&self) -> String {
+        let dir = self
+            .defaults
+            .project
+            .clone()
+            .unwrap_or_else(|| crate::scratch_dir().display().to_string());
+        format!("dir:{dir}")
     }
 
-    /// Put an @-mentioned file in place of what was typed after the @.
-    pub fn complete_mention(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.composer.read(cx).value().to_string();
-        let cut = text.rfind('@').unwrap_or(text.len());
-        let value = format!("{}@{path} ", &text[..cut]);
-        self.composer.update(cx, |c, cx| put(c, value, window, cx));
+    /// The files an `@` offers: the session's, or the new session's folder's.
+    fn mention_files(&self) -> Option<&Rc<Vec<String>>> {
+        match self.current_rc() {
+            Some(s) => self.files.get(&s.id),
+            None => self.files.get(&self.folder_key()),
+        }
+    }
+
+    /// What the prompt could complete at its caret: commands for a `/`
+    /// opening it, files and folders for an `@` anywhere. `None` while
+    /// nothing is being typed, or Esc put this one away.
+    pub fn completion(&self, cx: &App) -> Option<Completion> {
+        let field = self.prompt().read(cx);
+        let token = complete::token(&field.value(), field.cursor())?;
+        if self.slash_dismissed == Some((token.kind, token.start)) {
+            return None;
+        }
+        let (items, loading) = match token.kind {
+            complete::Kind::Slash => {
+                // The agent's own list for this session, or the one every
+                // session starts with; dent's commands are there either way.
+                let agent = self
+                    .selected
+                    .as_ref()
+                    .and_then(|s| self.commands.get(s))
+                    .or_else(|| self.commands.get(EVERY));
+                let all = complete::offered(
+                    agent.map(Vec::as_slice).unwrap_or_default(),
+                    self.current_rc().is_some(),
+                );
+                (complete::commands(&all, &token.query), agent.is_none())
+            }
+            complete::Kind::Mention => match self.mention_files() {
+                Some(files) => (complete::files(files, &token.query), false),
+                None => (Vec::new(), true),
+            },
+        };
+        Some(Completion {
+            token,
+            items,
+            loading,
+        })
+    }
+
+    /// Esc on the prompt's menu: it stays away until the caret leaves its
+    /// word. True if there was one to put away. Esc is handled in one place,
+    /// the Escape action, because macOS hands a field's Esc back as a
+    /// command after any interceptor has seen it.
+    pub fn dismiss_completion(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(c) = self.completion(cx) else {
+            return false;
+        };
+        self.slash_dismissed = Some((c.token.kind, c.token.start));
+        cx.notify();
+        true
+    }
+
+    /// After the prompt changes: the highlight goes back to the top, a
+    /// put-away menu comes back once its word is gone or erased to its sign,
+    /// and a new session's
+    /// files are asked for when an `@` needs them.
+    pub fn prompt_changed(&mut self, cx: &mut Context<Self>) {
         self.slash_ix = 0;
+        let field = self.prompt().read(cx);
+        let token = complete::token(&field.value(), field.cursor());
+        // Erased back to its bare `/` or `@`, the word starts over.
+        if token.as_ref().map(|t| (t.kind, t.start)) != self.slash_dismissed
+            || token.as_ref().is_some_and(|t| t.query.is_empty())
+        {
+            self.slash_dismissed = None;
+        }
+        if token.is_some_and(|t| t.kind == complete::Kind::Mention) && self.current_rc().is_none() {
+            let key = self.folder_key();
+            let asked = self
+                .waiting
+                .values()
+                .any(|w| matches!(w, Waiting::Files(f) if *f == key));
+            if !self.files.contains_key(&key) && !asked {
+                let dir = key.trim_start_matches("dir:").to_string();
+                let n = self.live.send(Request::FilesIn { dir });
+                self.waiting.insert(n, Waiting::Files(key));
+            }
+        }
         cx.notify();
     }
 
-    /// Put the chosen command in the composer, ready for its arguments.
-    pub fn complete_slash(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.composer
-            .update(cx, |c, cx| put(c, format!("/{name} "), window, cx));
+    /// Use the chosen completion: a file or command takes the word's place;
+    /// a folder too, leaving the menu open inside it; dent's own commands
+    /// do their thing.
+    pub fn pick_completion(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(c) = self.completion(cx) else {
+            return;
+        };
+        let field = self.prompt().clone();
+        let text = field.read(cx).value().to_string();
+        let own =
+            c.token.kind == complete::Kind::Slash && complete::OWN.iter().any(|(n, ..)| *n == name);
+        let (with, finished) = match c.token.kind {
+            _ if own => (String::new(), false),
+            complete::Kind::Slash => (format!("/{name}"), true),
+            complete::Kind::Mention => (complete::mention(name), !name.ends_with('/')),
+        };
+        let (value, caret) = complete::apply(&text, &c.token, &with, finished);
+        field.update(cx, |f, cx| {
+            f.set_value(value.trim_start().to_string(), window, cx);
+            let caret = caret.saturating_sub(value.len() - value.trim_start().len());
+            f.set_selected_range(caret..caret, cx);
+            f.focus(window, cx);
+        });
         self.slash_ix = 0;
+        if own {
+            self.run_own(name, "", window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Do one of dent's own commands, with what was typed after it.
+    pub fn run_own(&mut self, name: &str, arg: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let session = self.current_rc();
+        let which = |open, new| if session.is_some() { open } else { new };
+        match name {
+            "model" => self.open_menu(which(Menu::SessionModel, Menu::Model), cx),
+            "effort" => self.open_menu(which(Menu::SessionEffort, Menu::Effort), cx),
+            "rename" => {
+                if let Some(s) = session {
+                    if arg.is_empty() {
+                        self.start_rename(&s.id, &s.title, window, cx);
+                    } else if s.title != arg {
+                        self.live.send(Request::Rename {
+                            session: s.id.clone(),
+                            title: arg.to_string(),
+                        });
+                    }
+                }
+            }
+            "clear" => {
+                // A fresh start in the same folder; this session stays.
+                if let Some(s) = session {
+                    self.defaults.project = Some(s.cwd.clone());
+                    self.defaults.project_picked = true;
+                }
+                self.select(None, window, cx);
+            }
+            _ => {}
+        }
+    }
+
+    /// A sent message that is one of dent's own commands, done here rather
+    /// than sent to the agent. True if it was one.
+    pub fn sent_own(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(rest) = text.strip_prefix('/') else {
+            return false;
+        };
+        let (name, arg) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        let in_session = self.current_rc().is_some();
+        if !complete::OWN
+            .iter()
+            .any(|(n, _, needs)| *n == name && (in_session || !needs))
+        {
+            return false;
+        }
+        let name = name.to_string();
+        self.prompt()
+            .clone()
+            .update(cx, |f, cx| put(f, "", window, cx));
+        self.run_own(&name, arg.trim(), window, cx);
+        true
+    }
+
+    /// Open a chip's menu, at its top with the current choice lit.
+    pub fn open_menu(&mut self, which: Menu, cx: &mut Context<Self>) {
+        self.menu_scroll = ScrollHandle::new();
+        self.menu_ix = self.menu_entries(which, cx).iter().position(|e| e.on);
+        self.menu = Some(which);
         cx.notify();
     }
 
@@ -2410,6 +2536,10 @@ impl Dent {
         if text.is_empty() && self.attachments.is_empty() {
             return;
         }
+        // `/model` and the like are dent's to do, not the agent's.
+        if self.attachments.is_empty() && self.sent_own(&text, window, cx) {
+            return;
+        }
         let mut atts = std::mem::take(&mut self.attachments);
         // Files travel as attachments; the rest are lines in the message.
         let files: Vec<String> = atts
@@ -2459,6 +2589,9 @@ impl Dent {
     pub fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.starter.read(cx).value().trim().to_string();
         if text.is_empty() || self.creating() {
+            return;
+        }
+        if self.attachments.is_empty() && self.sent_own(&text, window, cx) {
             return;
         }
         let d = self.defaults.clone();

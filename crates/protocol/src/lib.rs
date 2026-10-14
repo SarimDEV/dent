@@ -504,6 +504,11 @@ pub enum Request {
     Files {
         session: SessionId,
     },
+    /// The same for a folder no session has yet: a new session's project,
+    /// for @ mentions before it starts.
+    FilesIn {
+        dir: String,
+    },
     /// A file in the session's directory, for the viewer.
     ReadFile {
         session: SessionId,

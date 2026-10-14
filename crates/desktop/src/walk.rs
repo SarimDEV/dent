@@ -272,7 +272,8 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
                     Field::Aside => this.aside_input.clone(),
                 };
                 input.update(cx, |i, cx| {
-                    i.set_value(text, window, cx);
+                    // As typed: the caret ends up after the text.
+                    crate::app::put(i, text, window, cx);
                     i.focus(window, cx);
                 });
                 cx.notify();
@@ -895,7 +896,10 @@ fn checks() -> Vec<(f32, Act)> {
             0.1,
             Until(
                 "typing / offers the agent's commands",
-                |d, cx| d.slash_matches(cx).iter().any(|c| c.name == "compact"),
+                |d, cx| {
+                    d.completion(cx)
+                        .is_some_and(|c| c.items.iter().any(|c| c.name == "compact"))
+                },
                 5.,
             ),
         ),
@@ -915,7 +919,10 @@ fn checks() -> Vec<(f32, Act)> {
             0.1,
             Until(
                 "typing @ offers the project's files",
-                |d, cx| d.completions(cx).1.iter().any(|c| c.name == "README.md"),
+                |d, cx| {
+                    d.completion(cx)
+                        .is_some_and(|c| c.items.iter().any(|c| c.name == "README.md"))
+                },
                 5.,
             ),
         ),

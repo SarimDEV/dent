@@ -21,6 +21,9 @@ use crate::env::AgentEnv;
 pub struct Probe {
     pub windows: Option<Vec<Window>>,
     pub models: Vec<Model>,
+    /// The slash commands any session starts with: built-ins, the user's
+    /// own commands and skills (not a project's, which need its folder).
+    pub commands: Vec<dent_protocol::Command>,
 }
 
 /// Ask the CLI for the account's usage windows and its models.
@@ -28,6 +31,7 @@ pub fn probe(env: &AgentEnv) -> Probe {
     let none = || Probe {
         windows: None,
         models: Vec::new(),
+        commands: Vec::new(),
     };
     let Some((init, usage)) = ask(env) else {
         return none();
@@ -35,6 +39,10 @@ pub fn probe(env: &AgentEnv) -> Probe {
     Probe {
         windows: usage.as_ref().and_then(windows),
         models: init.as_ref().map(crate::claude::models).unwrap_or_default(),
+        commands: init
+            .as_ref()
+            .map(crate::claude::commands)
+            .unwrap_or_default(),
     }
 }
 
