@@ -1188,6 +1188,22 @@ impl Session {
                 answer: Answer::Expired,
             });
         }
+        // Stopped mid-reply: what you'd already read stays, as the reply,
+        // rather than vanishing. A final message, if one came, has already
+        // taken its place.
+        if matches!(outcome, Outcome::Interrupted { .. })
+            && let Some(text) = self.d.partial(&self.id)
+        {
+            // Logged while the stream still stands, then the stream goes
+            // (below): clients never show the words twice or not at all.
+            self.log(Body::Assistant {
+                parent: None,
+                blocks: vec![dent_protocol::Block::Text { text }],
+                uuid: None,
+            });
+            // The event took the stream's place; clients drop it too.
+            self.d.delta(&self.id, "", true);
+        }
         self.d.clear_partial(&self.id);
         self.settled = settled(&outcome);
         let was = self.in_turn;

@@ -128,6 +128,14 @@ impl Daemon {
         }
     }
 
+    /// What has streamed of the reply in progress.
+    pub fn partial(&self, session: &str) -> Option<String> {
+        lock(&self.partials)
+            .get(session)
+            .filter(|t| !t.trim().is_empty())
+            .cloned()
+    }
+
     pub fn partials(&self) -> Vec<(String, String)> {
         lock(&self.partials)
             .iter()
