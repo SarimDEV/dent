@@ -24,3 +24,4 @@ node_modules
 *.db-shm
 # Agents' working copies
 /.claude/worktrees
+/.claude/*.lock
