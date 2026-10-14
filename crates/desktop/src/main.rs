@@ -12,6 +12,7 @@ mod data;
 mod ds;
 mod live;
 mod markdown;
+mod notify;
 mod palette;
 mod popout;
 mod sidebar;
@@ -520,6 +521,7 @@ fn main() {
     }
     app.run(move |cx| {
         gpui_kit::init(cx);
+        notify::init();
         load_fonts(cx);
         app::bind_keys(cx);
         let (x, y, w, h) = window_rect();

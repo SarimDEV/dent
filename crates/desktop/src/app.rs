@@ -216,6 +216,8 @@ pub struct Dent {
     /// This machine's name, once connected; why not, when not.
     pub machine: String,
     pub connection: Result<(), String>,
+    /// The window is in front, so the person sees what changes.
+    pub window_active: bool,
     /// Times the connection dropped, for the walkthrough.
     pub drops: u32,
     pub models: Vec<Model>,
@@ -342,13 +344,15 @@ impl Dent {
         for input in [&composer, &starter, &comment_input, &search] {
             crate::style_input(input, &t, cx);
         }
-        cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, window, cx| {
-            match ev {
+        cx.subscribe_in(
+            &composer,
+            window,
+            |this, _, ev: &InputEvent, window, cx| match ev {
                 InputEvent::PressEnter { .. } => this.send(window, cx),
                 InputEvent::Change => cx.notify(),
                 _ => {}
-            }
-        })
+            },
+        )
         .detach();
         cx.subscribe_in(
             &starter,
@@ -387,6 +391,10 @@ impl Dent {
                 }
             },
         )
+        .detach();
+        cx.observe_window_activation(window, |this, window, _| {
+            this.window_active = window.is_window_active();
+        })
         .detach();
         // A background run never keeps the front: whatever activates dent's
         // window, activation goes straight back to the app you're using.
@@ -451,6 +459,7 @@ impl Dent {
             machine: String::new(),
             connection: Err("Starting dent…".into()),
             drops: 0,
+            window_active: true,
             models: Vec::new(),
             projects: Vec::new(),
             waiting: HashMap::new(),
@@ -872,6 +881,20 @@ impl Dent {
             self.births.remove(id);
         }
         let old_status = prev.map(|i| self.sessions[i].status);
+        // Tell the person when something needs them or is done, unless
+        // they're already looking at it.
+        let looking = self.window_active && self.selected.as_deref() == Some(id);
+        if self.core.live && !looking && old_status.is_some() && old_status != Some(s.status) {
+            match s.status {
+                Status::Needs => {
+                    crate::notify::post("Needs you", &format!("{} · {}", s.title, s.detail), id)
+                }
+                Status::Done if old_status == Some(Status::Working) => {
+                    crate::notify::post("Done", &format!("{} · {}", s.title, s.detail), id)
+                }
+                _ => {}
+            }
+        }
         if old_status != Some(s.status) {
             match s.status {
                 Status::Done | Status::Needs if old_status.is_some() => {
