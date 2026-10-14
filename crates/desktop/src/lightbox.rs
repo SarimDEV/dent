@@ -3,12 +3,18 @@
 //! the middle of the window as the backdrop darkens. Esc, Space or a click
 //! outside zooms it back.
 //!
+//! Pictures belong to a set (the attachments waiting to be sent, the
+//! pictures of one message): ← and → step through it, so a dozen dropped
+//! screenshots can be looked through in a row.
+//!
 //! Every picture that opens is drawn through `picture`, which notes where it
-//! sits each frame, so the lift starts from the thumbnail itself.
+//! sits each frame, so the zoom starts from the thumbnail itself and goes
+//! back to whichever one is showing when it closes.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Instant;
 
 use gpui_kit::prelude::*;
@@ -17,37 +23,72 @@ use gpui_kit::*;
 use crate::anim;
 use crate::app::Dent;
 use crate::ds::{LABEL, Typed, motion, radius, space};
-use crate::ui::{Control, Press, icon, tip};
+use crate::ui::{Control, Press, icon, tip_above};
 
 /// The lift takes a little longer than a small enter: the picture travels.
 const OPEN_MS: f32 = motion::SLOW + 40.;
 /// Exits are quicker than enters.
 const CLOSE_MS: f32 = motion::BASE;
 
+/// One picture that can open: its element id (where it sits) and its file.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Shot {
+    pub key: SharedString,
+    pub path: PathBuf,
+}
+
+/// The pictures that step together.
+pub type Set = Rc<Vec<Shot>>;
+
+/// Whether a picture covers the window, so what's under it keeps quiet.
+pub fn covering() -> bool {
+    OPEN.with(|o| o.get())
+}
+
+/// A set of one.
+pub fn single(key: impl Into<SharedString>, path: PathBuf) -> Set {
+    Rc::new(vec![Shot {
+        key: key.into(),
+        path,
+    }])
+}
+
 /// A picture open large.
 pub struct Lightbox {
-    path: PathBuf,
-    /// Where it sat when clicked, in window coordinates.
+    set: Set,
+    /// Which of the set is showing.
+    at: usize,
+    /// Where the picture zooms from and back to, in window coordinates.
     from: Bounds<Pixels>,
-    /// Its size in pixels, (0, 0) if unreadable.
+    /// The showing picture's size in pixels, (0, 0) if unreadable.
     size: (u32, u32),
     opened: Instant,
     closing: Option<Instant>,
 }
 
-thread_local! {
-    /// Where each picture that can open was drawn last frame, by its id:
-    /// the same file shown twice lifts from the one clicked.
-    static PLACED: RefCell<HashMap<SharedString, Bounds<Pixels>>> = RefCell::default();
-    /// A picture clicked this frame, opened by the next render.
-    static ASKED: RefCell<Option<(SharedString, PathBuf)>> = const { RefCell::new(None) };
+impl Lightbox {
+    fn shot(&self) -> &Shot {
+        &self.set[self.at]
+    }
 }
 
-/// A picture that opens large when clicked. `inner` is what's shown in place
-/// (the thumbnail, sized by the caller); the wrapper notes where it sits.
-pub fn picture(id: SharedString, path: &Path, inner: impl IntoElement) -> Stateful<Div> {
-    let at = path.to_path_buf();
-    let (key, mark) = (id.clone(), id.clone());
+thread_local! {
+    /// Where each picture that can open was drawn last frame, by its id:
+    /// the same file shown twice zooms from the one clicked.
+    static PLACED: RefCell<HashMap<SharedString, Bounds<Pixels>>> = RefCell::default();
+    /// A picture is open over the window this frame.
+    static OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A picture clicked this frame, opened by the next render.
+    static ASKED: RefCell<Option<(Set, usize)>> = const { RefCell::new(None) };
+}
+
+/// The `at`th picture of `set`, opening large when clicked. `inner` is
+/// what's shown in place (the thumbnail, sized by the caller); the wrapper
+/// notes where it sits.
+pub fn picture(set: &Set, at: usize, inner: impl IntoElement) -> Stateful<Div> {
+    let id = set[at].key.clone();
+    let mark = id.clone();
+    let set = set.clone();
     div()
         .id(id)
         .relative()
@@ -55,7 +96,7 @@ pub fn picture(id: SharedString, path: &Path, inner: impl IntoElement) -> Statef
         // A press here opens the picture, never starts a text selection.
         .control()
         .on_press(move |_, window, _| {
-            ASKED.with(|a| *a.borrow_mut() = Some((key.clone(), at.clone())));
+            ASKED.with(|a| *a.borrow_mut() = Some((set.clone(), at)));
             window.refresh();
         })
         .child(inner)
@@ -74,12 +115,22 @@ pub fn picture(id: SharedString, path: &Path, inner: impl IntoElement) -> Statef
 }
 
 /// A picture's size in pixels, read from the file's header.
-fn pixel_size(path: &Path) -> (u32, u32) {
+fn pixel_size(path: &std::path::Path) -> (u32, u32) {
     image::ImageReader::open(path)
         .ok()
         .and_then(|r| r.with_guessed_format().ok())
         .and_then(|r| r.into_dimensions().ok())
         .unwrap_or((0, 0))
+}
+
+/// Where a picture was last drawn, or a point in the middle if nowhere.
+fn placed(key: &SharedString, window: &Window) -> Bounds<Pixels> {
+    PLACED
+        .with(|p| p.borrow().get(key).copied())
+        .unwrap_or_else(|| {
+            let c = window.viewport_size();
+            Bounds::centered_at(point(c.width / 2., c.height / 2.), size(px(1.), px(1.)))
+        })
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -89,19 +140,14 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 impl Dent {
     /// Open a picture clicked since the last frame, from where it sat.
     pub fn take_lightbox_request(&mut self, window: &Window) {
-        let Some((key, path)) = ASKED.with(|a| a.borrow_mut().take()) else {
+        let Some((set, at)) = ASKED.with(|a| a.borrow_mut().take()) else {
             return;
         };
-        let from = PLACED
-            .with(|p| p.borrow().get(&key).copied())
-            .unwrap_or_else(|| {
-                // Nowhere known: from a point in the middle.
-                let c = window.viewport_size();
-                Bounds::centered_at(point(c.width / 2., c.height / 2.), size(px(1.), px(1.)))
-            });
-        let size = pixel_size(&path);
+        let from = placed(&set[at].key, window);
+        let size = pixel_size(&set[at].path);
         self.lightbox = Some(Lightbox {
-            path,
+            set,
+            at,
             from,
             size,
             opened: Instant::now(),
@@ -109,10 +155,31 @@ impl Dent {
         });
     }
 
+    /// Show the next (`1`) or previous (`-1`) picture of the set, at once:
+    /// stepping from the keyboard is never animated. False at either end.
+    pub fn step_lightbox(&mut self, by: isize, cx: &mut Context<Self>) -> bool {
+        let Some(l) = &mut self.lightbox else {
+            return false;
+        };
+        let next = l.at as isize + by;
+        if l.closing.is_some() || next < 0 || next as usize >= l.set.len() {
+            return false;
+        }
+        l.at = next as usize;
+        l.size = pixel_size(&l.shot().path);
+        cx.notify();
+        true
+    }
+
     /// Send it back to where it came from. True if one was open.
     pub fn close_lightbox(&mut self, cx: &mut Context<Self>) -> bool {
         match &mut self.lightbox {
             Some(l) if l.closing.is_none() => {
+                // Back to where the showing picture sits, which after
+                // stepping isn't the one first clicked.
+                if let Some(b) = PLACED.with(|p| p.borrow().get(&l.set[l.at].key).copied()) {
+                    l.from = b;
+                }
                 // Leaving mid-lift starts from where it got to.
                 let shown = 1. - anim::progress(l.opened, OPEN_MS);
                 l.closing = Some(
@@ -131,6 +198,7 @@ impl Dent {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        OPEN.with(|o| o.set(self.lightbox.is_some()));
         let l = self.lightbox.as_ref()?;
         let t = self.t;
         let still = crate::reduce_motion();
@@ -144,6 +212,7 @@ impl Dent {
                 };
                 if p >= 1. {
                     self.lightbox = None;
+                    OPEN.with(|o| o.set(false));
                     cx.notify();
                     return None;
                 }
@@ -186,15 +255,19 @@ impl Dent {
         let y = lerp(f.origin.y.as_f32(), ty, open);
         let w = lerp(f.size.width.as_f32(), tw, open);
         let h = lerp(f.size.height.as_f32(), th, open);
-        let name = l
-            .path
+        let path = l.shot().path.clone();
+        let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let caption = match l.size {
+        let mut caption = match l.size {
             (0, 0) => name,
             (pw, ph) => format!("{name} · {pw} × {ph}"),
         };
+        let (n, at) = (l.set.len(), l.at);
+        if n > 1 {
+            caption = format!("{caption} · {} of {n}", at + 1);
+        }
         // The backdrop is dark in either theme, as photos are shown.
         let shade = gpui_kit::black().opacity(if t.dark { 0.78 } else { 0.66 });
         Some(
@@ -244,11 +317,7 @@ impl Dent {
                         })
                         // A press on the picture itself keeps it open.
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(
-                            img(l.path.clone())
-                                .size_full()
-                                .object_fit(ObjectFit::Contain),
-                        ),
+                        .child(img(path).size_full().object_fit(ObjectFit::Contain)),
                 )
                 .child(
                     div()
@@ -279,28 +348,108 @@ impl Dent {
                         .right(px(space::S4))
                         .opacity(open)
                         .child(
-                            // Light on the dark backdrop, in either theme.
-                            div()
-                                .id("lightbox-close")
-                                .size(px(32.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_full()
-                                .cursor_pointer()
-                                .bg(gpui_kit::white().opacity(0.12))
-                                .hover(|d| d.bg(gpui_kit::white().opacity(0.2)))
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_press(cx.listener(|this, _, _, cx| {
+                            round("lightbox-close", "x", true, "Close", "Esc", t).on_press(
+                                cx.listener(|this, _, _, cx| {
                                     this.close_lightbox(cx);
-                                }))
-                                .tooltip(tip("Close", Some("Esc"), t))
-                                .child(icon("x", 14., gpui_kit::white().opacity(0.9))),
+                                }),
+                            ),
                         ),
                 )
+                // Through the set: the previous and next picture, at the
+                // window's sides, level with the picture's middle.
+                .when(n > 1, |d| {
+                    let mid = ty + th / 2. - 18.;
+                    let first = at == 0;
+                    let last = at + 1 == n;
+                    d.child(
+                        div()
+                            .absolute()
+                            .left(px(space::S4))
+                            .top(px(mid))
+                            .opacity(open)
+                            .child(
+                                round(
+                                    "lightbox-prev",
+                                    "chevron-left",
+                                    !first,
+                                    if first {
+                                        "This is the first picture"
+                                    } else {
+                                        "Previous"
+                                    },
+                                    "←",
+                                    t,
+                                )
+                                .on_press(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.step_lightbox(-1, cx);
+                                    },
+                                )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .right(px(space::S4))
+                            .top(px(mid))
+                            .opacity(open)
+                            .child(
+                                round(
+                                    "lightbox-next",
+                                    "chevron-right",
+                                    !last,
+                                    if last {
+                                        "This is the last picture"
+                                    } else {
+                                        "Next"
+                                    },
+                                    "→",
+                                    t,
+                                )
+                                .on_press(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.step_lightbox(1, cx);
+                                    },
+                                )),
+                            ),
+                    )
+                })
                 .into_any_element(),
         )
     }
+}
+
+/// A round button, light on the dark backdrop in either theme. One that
+/// can't be used looks off, shows the not-allowed cursor and says why.
+fn round(
+    id: &'static str,
+    name: &str,
+    on: bool,
+    says: &'static str,
+    keys: &'static str,
+    t: crate::theme::Theme,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(36.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(gpui_kit::white().opacity(if on { 0.12 } else { 0.05 }))
+        .when(on, |d| {
+            d.cursor_pointer()
+                .hover(|d| d.bg(gpui_kit::white().opacity(0.2)))
+        })
+        .when(!on, |d| d.cursor(CursorStyle::OperationNotAllowed))
+        // A press on a button never reaches the backdrop, which would close.
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .tooltip(tip_above(says, on.then_some(keys), t))
+        .child(icon(
+            name,
+            16.,
+            gpui_kit::white().opacity(if on { 0.9 } else { 0.3 }),
+        ))
 }
 
 #[cfg(test)]

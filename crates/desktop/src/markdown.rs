@@ -1031,8 +1031,8 @@ fn image_block(src: &str, alt: &str, t: &Theme, key: &str, r: &mut R) -> AnyElem
             .flex_col()
             .gap(px(space::S1))
             .child(crate::lightbox::picture(
-                SharedString::from(format!("{key}/pic")),
-                &path,
+                &crate::lightbox::single(format!("{key}/pic"), path.clone()),
+                0,
                 img(path.clone())
                     .max_w_full()
                     .max_h(px(520.))

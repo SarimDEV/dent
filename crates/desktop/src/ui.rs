@@ -342,11 +342,19 @@ pub struct Tip {
     text: SharedString,
     keys: Option<&'static str>,
     t: Theme,
+    /// It belongs to something drawn over the window (the large picture),
+    /// so it shows while that's open.
+    above: bool,
 }
 
 impl Render for Tip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let t = self.t;
+        // gpui decides a tooltip's hover by its element's bounds alone, so
+        // something covered (by the large picture) would still show its own.
+        if !self.above && crate::lightbox::covering() {
+            return div();
+        }
         div().pt(px(space::S1)).child(
             floating(&t)
                 .rounded(px(radius::MD))
@@ -380,12 +388,30 @@ pub fn tip(
             text: text.into(),
             keys,
             t,
+            above: false,
         })
         .into()
     }
 }
 
 /// A tooltip with text made at run time, like a file's full path.
+/// A tooltip for a control on the large picture, shown over it.
+pub fn tip_above(
+    text: &'static str,
+    keys: Option<&'static str>,
+    t: Theme,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    move |_, cx| {
+        cx.new(|_| Tip {
+            text: text.into(),
+            keys,
+            t,
+            above: true,
+        })
+        .into()
+    }
+}
+
 pub fn tip_owned(
     text: impl Into<SharedString>,
     t: Theme,
@@ -396,6 +422,7 @@ pub fn tip_owned(
             text: text.clone(),
             keys: None,
             t,
+            above: false,
         })
         .into()
     }

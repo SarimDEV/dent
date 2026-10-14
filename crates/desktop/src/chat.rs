@@ -695,11 +695,34 @@ impl Dent {
                             .flex()
                             .flex_col()
                             .gap(px(space::S2))
-                            .children(
-                                atts.iter().map(|a| {
-                                    sent_attachment(a.trim_start_matches("› "), &s.cwd, &t)
-                                }),
-                            )
+                            .children({
+                                // The message's pictures step together.
+                                let lines: Vec<&str> =
+                                    atts.iter().map(|a| a.trim_start_matches("› ")).collect();
+                                let pictures: crate::lightbox::Set = std::rc::Rc::new(
+                                    lines
+                                        .iter()
+                                        .enumerate()
+                                        .filter_map(|(j, l)| {
+                                            let (place, what) = l.split_once(" · ")?;
+                                            (place == "Attached").then_some(())?;
+                                            Some(crate::lightbox::Shot {
+                                                key: SharedString::from(format!("pic-{msg}-{j}")),
+                                                path: picture_path(what, &s.cwd)?,
+                                            })
+                                        })
+                                        .collect(),
+                                );
+                                lines
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(j, l)| {
+                                        let key = SharedString::from(format!("pic-{msg}-{j}"));
+                                        let at = pictures.iter().position(|p| p.key == key);
+                                        sent_attachment(l, at.map(|at| (&pictures, at)), &t)
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
                             .when(!body.is_empty(), |d| {
                                 // Long messages fold, so the reply stays in view.
                                 let full = body.join("\n");
@@ -1977,48 +2000,73 @@ impl Dent {
     /// prompt is showing: a session's composer or a new session's field.
     fn attachment_chips(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = self.t;
+        // Each chip is known by what it holds, not where it sits, so taking
+        // one off doesn't hand its state (a tooltip, a hover) to the next.
+        let ident = |i: usize, a: &crate::app::Attachment| match a {
+            crate::app::Attachment::File { path } => path.clone(),
+            _ => format!("#{i}"),
+        };
+        // The pictures waiting to go step together in the large view.
+        let pictures: crate::lightbox::Set = std::rc::Rc::new(
+            self.attachments
+                .iter()
+                .enumerate()
+                .filter_map(|(i, a)| match a {
+                    crate::app::Attachment::File { path }
+                        if Kind::of(path) == Some(Kind::Image) =>
+                    {
+                        Some(crate::lightbox::Shot {
+                            key: SharedString::from(format!("att-pic-{}", ident(i, a))),
+                            path: std::path::PathBuf::from(path),
+                        })
+                    }
+                    _ => None,
+                })
+                .collect(),
+        );
         let chips: Vec<AnyElement> = self
             .attachments
             .clone()
             .into_iter()
             .enumerate()
             .map(|(i, a)| {
+                let id = ident(i, &a);
+                let key = SharedString::from(format!("att-pic-{id}"));
+                let shown = pictures.iter().position(|p| p.key == key);
+                // What it is: a picture shows itself, small; anything else
+                // its kind's icon.
+                let what = div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S1H))
+                    .min_w_0()
+                    .h_full()
+                    .pl(px(space::S2))
+                    .child(match &a {
+                        crate::app::Attachment::File { path } if shown.is_some() => div()
+                            .size(px(16.))
+                            .flex_none()
+                            .rounded(px(3.))
+                            .overflow_hidden()
+                            .child(
+                                img(std::path::PathBuf::from(path))
+                                    .size_full()
+                                    .object_fit(ObjectFit::Cover),
+                            )
+                            .into_any_element(),
+                        _ => icon(a.icon(), 12., t.quiet).into_any_element(),
+                    })
+                    .child(div().truncate().ty(UI).text_color(t.ink).child(a.label()));
                 div()
-                    .id(SharedString::from(format!("att-{i}")))
+                    .id(SharedString::from(format!("att-{id}")))
                     .flex()
                     .items_center()
                     .gap(px(space::S1H))
                     .max_w(px(420.))
                     .h(px(size::CONTROL_SM + 2.))
-                    .pl(px(space::S2))
                     .pr(px(space::S1))
                     .rounded(px(radius::SM))
                     .bg(t.selected())
-                    // A picture shows itself, small.
-                    .child(match &a {
-                        // A picture shows itself, small, and opens large.
-                        crate::app::Attachment::File { path }
-                            if Kind::of(path) == Some(Kind::Image) =>
-                        {
-                            let at = std::path::PathBuf::from(path);
-                            crate::lightbox::picture(
-                                SharedString::from(format!("att-pic-{i}")),
-                                &at,
-                                div()
-                                    .size(px(16.))
-                                    .flex_none()
-                                    .rounded(px(3.))
-                                    .overflow_hidden()
-                                    .child(
-                                        img(at.clone()).size_full().object_fit(ObjectFit::Cover),
-                                    ),
-                            )
-                            .flex_none()
-                            .into_any_element()
-                        }
-                        _ => icon(a.icon(), 12., t.quiet).into_any_element(),
-                    })
-                    .child(div().truncate().ty(UI).text_color(t.ink).child(a.label()))
                     .tooltip(crate::ui::tip_owned(
                         match &a {
                             crate::app::Attachment::File { path } => path.replacen(&home(), "~", 1),
@@ -2026,10 +2074,20 @@ impl Dent {
                         },
                         t,
                     ))
+                    // A picture's whole chip opens it large; the x still
+                    // takes it off.
+                    .child(match shown {
+                        Some(j) => crate::lightbox::picture(&pictures, j, what)
+                            .min_w_0()
+                            .h_full()
+                            .into_any_element(),
+                        None => what.into_any_element(),
+                    })
                     .child(
                         div()
-                            .id(SharedString::from(format!("att-x-{i}")))
+                            .id(SharedString::from(format!("att-x-{id}")))
                             .size(px(18.))
+                            .flex_none()
                             .flex()
                             .items_center()
                             .justify_center()
@@ -3282,12 +3340,17 @@ fn picture_path(shown: &str, cwd: &str) -> Option<std::path::PathBuf> {
     path.exists().then_some(path)
 }
 
-fn sent_attachment(line: &str, cwd: &str, t: &theme::Theme) -> Div {
+/// One attachment line of a sent message; a picture (`shot`, its place in
+/// the message's pictures) shows as itself and opens large.
+fn sent_attachment(
+    line: &str,
+    shot: Option<(&crate::lightbox::Set, usize)>,
+    t: &theme::Theme,
+) -> Div {
     let (place, what) = line.split_once(" · ").unwrap_or((line, ""));
     // A picture shows as itself, with its name under it.
-    if place == "Attached"
-        && let Some(path) = picture_path(what, cwd)
-    {
+    if let Some((pictures, at)) = shot {
+        let path = pictures[at].path.clone();
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -3298,8 +3361,8 @@ fn sent_attachment(line: &str, cwd: &str, t: &theme::Theme) -> Div {
             .items_start()
             .gap(px(space::S1))
             .child(crate::lightbox::picture(
-                SharedString::from(format!("pic-{}", path.display())),
-                &path,
+                pictures,
+                at,
                 div()
                     .max_w(px(320.))
                     .max_h(px(220.))

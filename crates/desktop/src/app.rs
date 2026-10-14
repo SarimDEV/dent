@@ -1836,10 +1836,21 @@ impl Dent {
         }
         let plain = !k.modifiers.modified();
         // A picture open large: Space closes it (Esc is the Escape action's),
-        // and plain keys don't reach what's behind it.
+        // ← and → step through its set, and plain keys don't reach what's
+        // behind it.
         if self.lightbox.is_some() && plain && k.key != "escape" {
-            if k.key == "space" {
-                self.close_lightbox(cx);
+            match k.key.as_str() {
+                "space" => {
+                    self.close_lightbox(cx);
+                }
+                // Through the set, a picture at a time.
+                "left" => {
+                    self.step_lightbox(-1, cx);
+                }
+                "right" => {
+                    self.step_lightbox(1, cx);
+                }
+                _ => {}
             }
             return true;
         }
