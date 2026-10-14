@@ -37,6 +37,8 @@ pub struct Daemon {
     /// Each session's reply so far, for clients that subscribe mid-stream.
     partials: Mutex<HashMap<String, String>>,
     models: Mutex<Vec<Model>>,
+    /// Slash commands by session, as each agent reported them.
+    commands: Mutex<HashMap<String, Vec<dent_protocol::Command>>>,
 }
 
 pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -70,6 +72,7 @@ impl Daemon {
             holder: tokio::sync::Mutex::new(None),
             partials: Mutex::new(HashMap::new()),
             models: Mutex::new(models),
+            commands: Mutex::new(HashMap::new()),
         })
     }
 
@@ -140,6 +143,22 @@ impl Daemon {
             let _ = self.store().put("models", &s);
         }
         *lock(&self.models) = models;
+    }
+
+    pub fn set_commands(&self, session: &str, commands: Vec<dent_protocol::Command>) {
+        if !commands.is_empty() {
+            lock(&self.commands).insert(session.into(), commands);
+        }
+    }
+
+    /// A session's commands, or any session's when it hasn't started yet.
+    pub fn commands(&self, session: Option<&str>) -> Vec<dent_protocol::Command> {
+        let all = lock(&self.commands);
+        session
+            .and_then(|s| all.get(s))
+            .or_else(|| all.values().next())
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// The holder, connecting (and starting it) on first use.

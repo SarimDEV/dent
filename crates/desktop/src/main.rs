@@ -307,32 +307,10 @@ impl Render for Dent {
                 }
             }))
             // Esc reaches the app before a text field swallows it.
-            .capture_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+            .capture_key_down(cx.listener(|_, e: &KeyDownEvent, window, cx| {
                 let k = &e.keystroke;
                 if k.key == "escape" && !k.modifiers.modified() {
                     window.dispatch_action(Box::new(Escape), cx);
-                    cx.stop_propagation();
-                }
-                // ⌘V with a picture or files on the clipboard attaches them.
-                if k.key == "v"
-                    && k.modifiers.platform
-                    && !k.modifiers.shift
-                    && this.palette.is_none()
-                    && this.paste_attachment(window, cx)
-                {
-                    cx.stop_propagation();
-                }
-                // Right after closing, ⌘Z brings the session back even from a
-                // text field, as long as the field has nothing to undo.
-                let undo = k.key == "z" && k.modifiers.platform && !k.modifiers.shift;
-                let closing = this
-                    .toast
-                    .as_ref()
-                    .is_some_and(|t| matches!(t.action, ToastAction::Undo(_)));
-                let typed = !this.composer.read(cx).value().is_empty()
-                    || !this.starter.read(cx).value().is_empty();
-                if undo && closing && !typed {
-                    this.toast_action(window, cx);
                     cx.stop_propagation();
                 }
             }))

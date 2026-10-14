@@ -865,7 +865,10 @@ impl Session {
                 ok,
                 body,
             } => match (self.controls.remove(&request_id), ok) {
-                (Some(Ctl::Initialize), true) => self.d.set_models(claude::models(&body)),
+                (Some(Ctl::Initialize), true) => {
+                    self.d.set_models(claude::models(&body));
+                    self.d.set_commands(&self.id, claude::commands(&body));
+                }
                 (Some(Ctl::Interrupt), _) | (Some(Ctl::Other), true) | (None, _) => {}
                 (Some(_), false) => self.log_from(
                     Body::Notice {

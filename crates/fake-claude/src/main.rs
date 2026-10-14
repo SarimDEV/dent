@@ -155,7 +155,11 @@ impl Agent {
                 let sub = v["request"]["subtype"].as_str().unwrap_or_default();
                 let body = match sub {
                     "initialize" => json!({
-                        "commands": [],
+                        "commands": [
+                            {"name": "compact", "description": "Clear history but keep a summary in context", "argumentHint": "<instructions>"},
+                            {"name": "review", "description": "Review a pull request", "argumentHint": ""},
+                            {"name": "deep-research", "description": "Research a question across many sources", "argumentHint": "<question>"},
+                        ],
                         "agents": [],
                         "models": [
                             {"value": "default", "displayName": "Default (recommended)", "description": "Sonnet · Efficient for routine tasks"},

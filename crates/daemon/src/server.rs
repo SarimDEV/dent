@@ -197,6 +197,9 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             Reply::Projects { projects }
         }
         Request::Models => Reply::Models { models: d.models() },
+        Request::Commands { session } => Reply::Commands {
+            commands: d.commands(session.as_deref()),
+        },
         Request::Changes { session } => {
             let cwd = cwd_of(d, &session)?;
             let files =

@@ -12,7 +12,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use dent_client_core::Sessions;
-use dent_protocol::{Answer, Model, Out, Permission, Project, Reply, Request};
+use dent_protocol::{Answer, Command, Model, Out, Permission, Project, Reply, Request};
 
 use crate::data::{Artifact, FileDiff, Item, Session};
 use crate::live::{Incoming, Live};
@@ -188,6 +188,7 @@ pub struct Defaults {
 /// What a request's reply is for.
 enum Waiting {
     Models,
+    Commands(String),
     Projects,
     Changes(String),
     Create,
@@ -237,6 +238,10 @@ pub struct Dent {
     pub changes: HashMap<String, Rc<Vec<FileDiff>>>,
     /// Choices made so far on a question, by question id.
     pub picks: HashMap<String, Vec<Option<String>>>,
+    /// Slash commands the agent offers, by session.
+    pub commands: HashMap<String, Vec<Command>>,
+    /// The highlighted row of the slash menu.
+    pub slash_ix: usize,
     /// The message whose "Edit from here" is asking to confirm.
     pub rewinding: Option<(String, String)>,
     /// A new session is on its way.
@@ -403,6 +408,16 @@ impl Dent {
             },
         )
         .detach();
+        // Before any binding: a text field's own Tab or ⌘Z would win otherwise.
+        let me = cx.entity().downgrade();
+        cx.intercept_keystrokes(move |ev, window, cx| {
+            if let Some(me) = me.upgrade()
+                && me.update(cx, |this, cx| this.intercept(&ev.keystroke, window, cx))
+            {
+                cx.stop_propagation();
+            }
+        })
+        .detach();
         cx.observe_window_activation(window, |this, window, _| {
             this.window_active = window.is_window_active();
         })
@@ -478,6 +493,8 @@ impl Dent {
             picks: HashMap::new(),
             creating: false,
             rewinding: None,
+            commands: HashMap::new(),
+            slash_ix: 0,
             partial_len: HashMap::new(),
             just_sent: None,
             panel_open: true,
@@ -621,6 +638,11 @@ impl Dent {
             .unwrap_or_default();
         self.composer
             .update(cx, |c, cx| c.set_value(draft, window, cx));
+        if let Some(new) = id.clone()
+            && !self.commands.contains_key(&new)
+        {
+            self.fetch_commands(&new);
+        }
         self.selected = id;
         self.menu = None;
         self.picking = false;
@@ -735,6 +757,9 @@ impl Dent {
                                 && self.core.live
                             {
                                 self.fetch_changes(&e.session);
+                                if !self.commands.contains_key(&e.session) {
+                                    self.fetch_commands(&e.session);
+                                }
                             }
                         }
                     }
@@ -787,6 +812,17 @@ impl Dent {
                 }
             }
             (
+                Waiting::Commands(id),
+                Out::Reply {
+                    reply: Reply::Commands { commands },
+                },
+            ) => {
+                // An agent that hasn't started yet has none to tell: ask again later.
+                if !commands.is_empty() {
+                    self.commands.insert(id, commands);
+                }
+            }
+            (
                 Waiting::Projects,
                 Out::Reply {
                     reply: Reply::Projects { projects },
@@ -831,6 +867,107 @@ impl Dent {
             session: id.to_string(),
         });
         self.waiting.insert(n, Waiting::Changes(id.to_string()));
+    }
+
+    /// Keys the app handles before any text field or binding sees them:
+    /// the slash menu, pasting pictures, undoing a close. Returns whether
+    /// the key was used.
+    pub fn intercept(
+        &mut self,
+        k: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // The slash menu: arrows move, Tab or Return completes.
+        if !k.modifiers.modified()
+            && matches!(k.key.as_str(), "up" | "down" | "tab" | "enter")
+            && self.composer.read(cx).focus_handle(cx).is_focused(window)
+        {
+            let hits = self.slash_matches(cx);
+            let typed = self.composer.read(cx).value().to_string();
+            let exact = hits.iter().any(|c| typed == format!("/{}", c.name));
+            if !hits.is_empty() && !(k.key == "enter" && exact) {
+                match k.key.as_str() {
+                    "up" => self.slash_ix = self.slash_ix.saturating_sub(1),
+                    "down" => self.slash_ix = (self.slash_ix + 1).min(hits.len() - 1),
+                    _ => {
+                        let pick = hits[self.slash_ix.min(hits.len() - 1)].name.clone();
+                        self.complete_slash(&pick, window, cx);
+                    }
+                }
+                cx.notify();
+                return true;
+            }
+        }
+        // ⌘V with a picture or files on the clipboard attaches them.
+        if k.key == "v"
+            && k.modifiers.platform
+            && !k.modifiers.shift
+            && self.palette.is_none()
+            && self.paste_attachment(window, cx)
+        {
+            return true;
+        }
+        // Right after closing, ⌘Z brings the session back even from a
+        // text field, as long as the field has nothing to undo.
+        let undo = k.key == "z" && k.modifiers.platform && !k.modifiers.shift;
+        let closing = self
+            .toast
+            .as_ref()
+            .is_some_and(|t| matches!(t.action, ToastAction::Undo(_)));
+        let typed =
+            !self.composer.read(cx).value().is_empty() || !self.starter.read(cx).value().is_empty();
+        if undo && closing && !typed {
+            self.toast_action(window, cx);
+            return true;
+        }
+        false
+    }
+
+    /// Ask for a session's slash commands, once it has some.
+    pub fn fetch_commands(&mut self, id: &str) {
+        let n = self.live.send(Request::Commands {
+            session: Some(id.to_string()),
+        });
+        self.waiting.insert(n, Waiting::Commands(id.to_string()));
+    }
+
+    /// Commands matching what's typed, while the composer holds only `/word`.
+    pub fn slash_matches(&self, cx: &App) -> Vec<Command> {
+        let text = self.composer.read(cx).value().to_string();
+        let Some(word) = text.strip_prefix('/') else {
+            return Vec::new();
+        };
+        if word.contains(char::is_whitespace) {
+            return Vec::new();
+        }
+        let Some(list) = self.selected.as_ref().and_then(|s| self.commands.get(s)) else {
+            return Vec::new();
+        };
+        let word = word.to_lowercase();
+        let mut hits: Vec<(usize, &Command)> = list
+            .iter()
+            .filter_map(|c| {
+                let name = c.name.to_lowercase();
+                if name.starts_with(&word) {
+                    Some((0, c))
+                } else if name.contains(&word) {
+                    Some((1, c))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        hits.sort_by_key(|(rank, c)| (*rank, c.name.len()));
+        hits.into_iter().take(8).map(|(_, c)| c.clone()).collect()
+    }
+
+    /// Put the chosen command in the composer, ready for its arguments.
+    pub fn complete_slash(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer
+            .update(cx, |c, cx| c.set_value(format!("/{name} "), window, cx));
+        self.slash_ix = 0;
+        cx.notify();
     }
 
     /// Draw a session again from its timeline.

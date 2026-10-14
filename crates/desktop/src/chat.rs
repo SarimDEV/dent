@@ -1065,8 +1065,95 @@ impl Dent {
                             })
                             .child(action),
                     )
-                    .child(probe(&self.probes, "composer")),
+                    .child(probe(&self.probes, "composer"))
+                    .children(self.slash_menu(cx)),
             )
+    }
+
+    /// Commands matching a `/word` in the composer, above it.
+    fn slash_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = self.t;
+        let hits = self.slash_matches(cx);
+        if hits.is_empty() {
+            return None;
+        }
+        let at = self.slash_ix.min(hits.len() - 1);
+        let rows: Vec<AnyElement> = hits
+            .into_iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let name = c.name.clone();
+                div()
+                    .id(SharedString::from(format!("slash-{i}")))
+                    .relative()
+                    .px(px(space::S3))
+                    .py(px(space::S1H))
+                    .flex()
+                    .items_baseline()
+                    .gap(px(space::S2))
+                    .rounded(px(radius::SM))
+                    .cursor_pointer()
+                    .when(i == at, |d| d.bg(t.selected()))
+                    .hover(|d| d.bg(t.hover()))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.complete_slash(&name, window, cx);
+                        this.composer.update(cx, |c, cx| c.focus(window, cx));
+                    }))
+                    .child(
+                        div()
+                            .flex_none()
+                            .ty(CODE)
+                            .text_color(t.ink)
+                            .child(format!("/{}", c.name)),
+                    )
+                    .when(!c.hint.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .ty(CODE)
+                                .text_color(t.faint)
+                                .child(c.hint.clone()),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .ty(UI)
+                            .text_color(t.quiet)
+                            .child(c.description.clone()),
+                    )
+                    .child(probe(&self.probes, format!("slash-{i}")))
+                    .into_any_element()
+            })
+            .collect();
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(relative(1.))
+                .pb(px(space::S1))
+                .child(
+                    floating(&t)
+                        .id("slash-menu")
+                        .p(px(space::S1))
+                        .flex()
+                        .flex_col()
+                        .occlude()
+                        .children(rows)
+                        .child(
+                            div()
+                                .px(px(space::S3))
+                                .pt(px(space::S1))
+                                .ty(LABEL)
+                                .text_color(t.faint)
+                                .child("↑↓ choose · Tab complete"),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     fn starter_page(&mut self, cx: &mut Context<Self>) -> AnyElement {

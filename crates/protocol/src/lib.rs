@@ -278,6 +278,17 @@ pub struct Model {
     pub description: String,
 }
 
+/// A slash command or skill the agent offers in a session's folder.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Command {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// What goes after the name, like `<file>`.
+    #[serde(default)]
+    pub hint: String,
+}
+
 /// A directory sessions run in.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Project {
@@ -386,6 +397,11 @@ pub enum Request {
     },
     Projects,
     Models,
+    /// The agent's slash commands: the session's, or the last ones seen.
+    Commands {
+        #[serde(default)]
+        session: Option<SessionId>,
+    },
     /// What the session's directory has changed, against its last commit.
     Changes {
         session: SessionId,
@@ -444,6 +460,9 @@ pub enum Reply {
     },
     Models {
         models: Vec<Model>,
+    },
+    Commands {
+        commands: Vec<Command>,
     },
     Changes {
         files: Vec<FileChange>,

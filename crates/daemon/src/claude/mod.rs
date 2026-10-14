@@ -123,6 +123,23 @@ pub fn models(init: &Value) -> Vec<Model> {
         .unwrap_or_default()
 }
 
+pub fn commands(init: &Value) -> Vec<dent_protocol::Command> {
+    init["commands"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| {
+                    Some(dent_protocol::Command {
+                        name: c["name"].as_str()?.into(),
+                        description: c["description"].as_str().unwrap_or_default().into(),
+                        hint: c["argumentHint"].as_str().unwrap_or_default().into(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Models to offer before any session has told us the real list.
 pub fn default_models() -> Vec<Model> {
     [

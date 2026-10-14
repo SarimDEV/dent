@@ -418,6 +418,26 @@ fn checks() -> Vec<(f32, Act)> {
                 2.,
             ),
         ),
+        (0.2, Type(Field::Composer, "/com")),
+        (
+            0.1,
+            Until(
+                "typing / offers the agent's commands",
+                |d, cx| d.slash_matches(cx).iter().any(|c| c.name == "compact"),
+                5.,
+            ),
+        ),
+        (0.3, Shot("slash")),
+        (0.1, Key("tab")),
+        (
+            0.1,
+            Until(
+                "Tab completes the command",
+                |d, cx| d.composer.read(cx).value() == "/compact ",
+                3.,
+            ),
+        ),
+        (0.1, Type(Field::Composer, "")),
     ]);
     v.extend(new_session("please run it"));
     v.extend([
