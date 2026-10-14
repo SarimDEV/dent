@@ -80,7 +80,9 @@ Press a global shortcut from anywhere, type an idea, press Enter, and an agent s
 ## Markdown viewer
 
 - CommonMark plus GitHub extensions: tables, task lists, footnotes, alerts, autolinks.
-- Syntax highlighting with tree-sitter grammars; Mermaid diagrams and LaTeX math rendered to SVG off the UI thread and cached by content hash.
+- Syntax highlighting with tree-sitter grammars.
+- TeX maths drawn natively from RaTeX: inline, `$$…$$` and ` ```math ` blocks. Mermaid diagrams are rendered off the UI thread and cached by source and theme, with their source shown dimmed until they're ready.
+- Tables share column widths. Past 13 rows a table shows 10½ and scrolls on its own, with a row count, Copy (Markdown) and Copy CSV. Display maths, diagrams and small tables offer Copy on hover. Wide blocks scroll sideways ([chat-rendering.md](chat-rendering.md#sizes-and-overflow)).
 - Live reload on every write, keeping scroll position and briefly highlighting changed blocks.
 - Outline sidebar, in-doc search, relative links and images resolved against the file's repo, links between docs opening as tabs.
 - Tabs across machines and projects; a "recently written by agents" list per project.

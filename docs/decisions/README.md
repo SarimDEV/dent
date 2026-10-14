@@ -40,3 +40,6 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0036. Sessions are an inbox; a new session starts by typing](0036-sessions-as-an-inbox.md)
 - [0037. The viewer: everything a session made, beside the chat; pages run in the system web view](0037-viewer-system-web-view.md)
 - [0038. The local core: a Unix socket for clients on the same machine, SQLite through rusqlite](0038-local-core.md)
+- [0039. Diagrams rasterise with resvg](0039-svg-raster-resvg.md)
+- [0040. KaTeX Size glyphs drawn from outlines with ttf-parser](0040-glyph-outlines-ttf-parser.md)
+- [0041. Diagram labels measured with rustybuzz](0041-label-shaping-rustybuzz.md)

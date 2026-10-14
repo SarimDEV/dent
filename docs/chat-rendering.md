@@ -32,7 +32,13 @@ Every message is parsed into a tree of typed blocks, and each block type has one
 | Isolated, offline web view | HTML previews, rare formats, and the fallback if merman or RaTeX fails | Formats that need a real browser layout |
 
 - **Math:** RaTeX's display list is drawn with GPUI primitives in the KaTeX fonts. Glyphs from the KaTeX Size fonts are drawn from their outlines, because GPUI does not load fonts without an `m` glyph. Inline math reserves its width with invisible characters in the paragraph and is drawn at the text baseline.
-- **Mermaid:** merman renders SVG with its resvg-safe preset, a host theme mapped from the palette tokens, and label widths measured with the bundled fonts. A recolour pass snaps any remaining colour to the nearest token (C4, sankey and architecture otherwise keep their own). A diagram renders once its fence closes.
+- **Mermaid:** merman renders SVG with its resvg-safe preset, a host theme mapped from the palette tokens, and label widths measured with the bundled fonts through rustybuzz ([0041](decisions/0041-label-shaping-rustybuzz.md)). A recolour pass snaps any remaining colour to the nearest token (C4, sankey and architecture otherwise keep their own). resvg rasterises at 2x on a background thread ([0039](decisions/0039-svg-raster-resvg.md)), and the result is cached by source and theme. A diagram renders once its fence closes.
+
+**In the desktop app today** (`crates/desktop/src/markdown.rs`, `math.rs`, `diagram.rs`):
+- Inline maths, display maths (`$$…$$` and ` ```math ` fences), Mermaid fences and tables all behave as described on this page, in chat replies, plans and the doc viewer.
+- Size glyphs come from outlines through ttf-parser ([0040](decisions/0040-glyph-outlines-ttf-parser.md)).
+- Not built yet: the table side panel (Open), and in-app search reaching rows that a capped table keeps out of view.
+- The walkthrough's `markdown` scene checks it: `scripts/walk.sh markdown`, also part of `checks`.
 
 ## Sizes and overflow
 

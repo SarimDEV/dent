@@ -138,7 +138,7 @@ impl Dent {
         let body = match tab {
             Tab::Art(id) => match self.art(id).map(|a| a.kind) {
                 Some(Kind::Html | Kind::Server) => self.page(id, window, cx),
-                Some(Kind::Doc) => self.doc(id, cx),
+                Some(Kind::Doc) => self.doc(id, window, cx),
                 Some(Kind::Image) => self.image(id, cx),
                 None => div().into_any_element(),
             },
@@ -712,13 +712,22 @@ impl Dent {
             .into_any_element()
     }
 
-    fn doc(&mut self, id: &'static str, cx: &mut Context<Self>) -> AnyElement {
+    fn doc(&mut self, id: &'static str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.t;
         let Some(a) = self.art(id).cloned() else {
             return div().into_any_element();
         };
         let src = String::from_utf8_lossy(&a.versions[a.versions.len() - 1]).to_string();
         let blocks = self.markdown(&src);
+        let mut r = markdown::R {
+            md: self.mdv.clone(),
+            owner: cx.entity_id(),
+            window,
+            cx,
+            scope: format!("doc/{id}"),
+            bg: t.panel,
+        };
+        let page = markdown::render(blocks.as_slice(), &t, true, &mut r);
         div()
             .flex_1()
             .min_h_0()
@@ -772,7 +781,7 @@ impl Dent {
                             .mx_auto()
                             .px(px(space::S8))
                             .py(px(space::S6))
-                            .child(markdown::render(blocks.as_slice(), &t, true)),
+                            .child(page),
                     ),
             )
             .into_any_element()

@@ -331,7 +331,7 @@ impl Dent {
         s: &Session,
         ix: usize,
         item: &Item,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = self.t;
@@ -532,13 +532,24 @@ impl Dent {
                                 .map(|(_, at)| anim::ease_out(anim::progress(*at, motion::BASE)))
                                 .unwrap_or(1.)
                         };
+                        let face = markdown::Face::of(READING, theme::body(), t.ink, t.surface);
                         div()
                             .ty(READING)
                             .text_color(t.ink)
-                            .child(inline.element(&t, theme::body(), t.ink, Some(&fade)))
+                            .child(inline.element(&t, face, Some(&fade), &self.mdv, window))
                             .into_any_element()
                     }
-                    _ => markdown::render(blocks.as_slice(), &t, false).into_any_element(),
+                    _ => {
+                        let mut r = markdown::R {
+                            md: self.mdv.clone(),
+                            owner: cx.entity_id(),
+                            window,
+                            cx,
+                            scope: format!("{}/{ix}", s.id),
+                            bg: t.surface,
+                        };
+                        markdown::render(blocks.as_slice(), &t, false, &mut r).into_any_element()
+                    }
                 }
             }
             Item::Tools { summary, lines } => {
@@ -661,6 +672,15 @@ impl Dent {
             Item::Plan { plan, .. } => {
                 let (a, d) = (s.id.clone(), s.id.clone());
                 let blocks = self.markdown(plan);
+                let mut r = markdown::R {
+                    md: self.mdv.clone(),
+                    owner: cx.entity_id(),
+                    window,
+                    cx,
+                    scope: format!("{}/{ix}/plan", s.id),
+                    bg: t.raised,
+                };
+                let plan_view = markdown::render(blocks.as_slice(), &t, false, &mut r);
                 needs_card(&t)
                     .child(needs_title("Plan ready for review", &t))
                     .child(
@@ -671,7 +691,7 @@ impl Dent {
                             .bg(t.raised)
                             .border_1()
                             .border_color(t.hairline)
-                            .child(markdown::render(blocks.as_slice(), &t, false)),
+                            .child(plan_view),
                     )
                     .child(
                         div()

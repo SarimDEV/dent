@@ -141,6 +141,17 @@ thread_local! {
 }
 pub static FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Notes where something was laid out this frame, under `name`.
+pub fn record(
+    probes: &Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
+    name: String,
+    bounds: Bounds<Pixels>,
+) {
+    let frame = FRAME.load(std::sync::atomic::Ordering::Relaxed);
+    PROBE_FRAME.with(|f| f.borrow_mut().insert(name.clone(), frame));
+    probes.borrow_mut().insert(name, bounds);
+}
+
 /// Records an element's bounds under a name, so the walkthrough can click it
 /// through normal hit-testing and checks can measure it.
 pub fn probe(
@@ -150,11 +161,7 @@ pub fn probe(
     let probes = probes.clone();
     let name = name.into();
     canvas(
-        move |bounds, _, _| {
-            let frame = FRAME.load(std::sync::atomic::Ordering::Relaxed);
-            PROBE_FRAME.with(|f| f.borrow_mut().insert(name.clone(), frame));
-            probes.borrow_mut().insert(name, bounds);
-        },
+        move |bounds, _, _| record(&probes, name, bounds),
         |_, _, _, _| {},
     )
     .absolute()
