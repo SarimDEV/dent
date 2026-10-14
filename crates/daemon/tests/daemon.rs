@@ -109,7 +109,7 @@ impl World {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         self.daemon = Some(c.spawn().unwrap());
-        let sock = self.state.join("daemon.sock");
+        let sock = dent_protocol::daemon_socket(&self.state);
         let until = Instant::now() + Duration::from_secs(10);
         while UnixStream::connect(&sock).is_err() {
             assert!(Instant::now() < until, "daemon didn't start");
@@ -125,7 +125,7 @@ impl World {
     }
 
     fn client(&self) -> Client {
-        Client::connect(&self.state.join("daemon.sock"))
+        Client::connect(&dent_protocol::daemon_socket(&self.state))
     }
 
     fn cwd(&self) -> String {

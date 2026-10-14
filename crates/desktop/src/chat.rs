@@ -366,8 +366,9 @@ impl Dent {
                             .flex_col()
                             .gap(px(space::S2))
                             .children(
-                                atts.iter()
-                                    .map(|a| sent_attachment(a.trim_start_matches("› "), &t)),
+                                atts.iter().map(|a| {
+                                    sent_attachment(a.trim_start_matches("› "), &s.cwd, &t)
+                                }),
                             )
                             .when(!body.is_empty(), |d| {
                                 // Long messages fold, so the reply stays in view.
@@ -1952,8 +1953,54 @@ fn needs_title(text: &str, t: &theme::Theme) -> Div {
 }
 
 /// What rode along with a message, shown above its text.
-fn sent_attachment(line: &str, t: &theme::Theme) -> Div {
+/// Where an attached picture is on disk, if it's a picture that's still there.
+fn picture_path(shown: &str, cwd: &str) -> Option<std::path::PathBuf> {
+    let ext = shown.rsplit('.').next()?.to_ascii_lowercase();
+    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") {
+        return None;
+    }
+    let path = if let Some(rest) = shown.strip_prefix("~/") {
+        std::path::PathBuf::from(std::env::var_os("HOME")?).join(rest)
+    } else if shown.starts_with('/') {
+        std::path::PathBuf::from(shown)
+    } else {
+        std::path::Path::new(cwd).join(shown)
+    };
+    path.exists().then_some(path)
+}
+
+fn sent_attachment(line: &str, cwd: &str, t: &theme::Theme) -> Div {
     let (place, what) = line.split_once(" · ").unwrap_or((line, ""));
+    // A picture shows as itself, with its name under it.
+    if place == "Attached"
+        && let Some(path) = picture_path(what, cwd)
+    {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        return div()
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap(px(space::S1))
+            .child(
+                div()
+                    .max_w(px(320.))
+                    .max_h(px(220.))
+                    .rounded(px(radius::MD))
+                    .border_1()
+                    .border_color(t.hairline)
+                    .overflow_hidden()
+                    .child(
+                        img(path)
+                            .max_w(px(320.))
+                            .max_h(px(220.))
+                            .object_fit(ObjectFit::Contain),
+                    ),
+            )
+            .child(div().ty(LABEL).text_color(t.quiet).child(name));
+    }
     div()
         .flex()
         .items_start()

@@ -4,7 +4,10 @@
 //! `dent-daemon [--state DIR]` runs it in the foreground. Apps start it
 //! when it isn't running; it keeps going after they quit.
 //! `dent-daemon login-item on|off` starts it at login, or stops doing so.
+//! `dent-daemon check-transcripts [DIR] [--into STATE]` checks the import of
+//! Claude Code transcripts (see [`check`]).
 
+mod check;
 mod claude;
 mod daemon;
 mod env;
@@ -41,6 +44,9 @@ fn main() -> Result<()> {
             _ => anyhow::bail!("usage: dent-daemon login-item on|off"),
         };
         return login::set(on, &paths.state);
+    }
+    if args.first().map(String::as_str) == Some("check-transcripts") {
+        return check::run(&args[1..]);
     }
     std::fs::create_dir_all(&paths.state)
         .with_context(|| format!("create {}", paths.state.display()))?;

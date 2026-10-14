@@ -17,3 +17,8 @@ node_modules
 /spikes/phone-concepts/build
 /spikes/phone-concepts/*.xcodeproj
 /spikes/phone-concepts/Concepts/Info.plist
+# Never commit Claude Code transcripts or dent state (real conversations)
+*.jsonl
+*.db
+*.db-wal
+*.db-shm

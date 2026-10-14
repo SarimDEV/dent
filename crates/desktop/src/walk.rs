@@ -47,6 +47,30 @@ pub enum Act {
     /// window drew at most `max_fps` frames a second meanwhile.
     Idle(&'static str, f32, f32),
     Shot(&'static str),
+    /// Open every session in turn, timing each, and report.
+    Sweep,
+}
+
+/// Progress through [`Act::Sweep`]: a queue of small steps, one a frame,
+/// so each runs after the last one has been drawn.
+struct Sweep {
+    todo: std::collections::VecDeque<SweepStep>,
+    /// The session opened last, and when.
+    opened: Option<(String, Instant)>,
+    /// (session, ms from selecting to drawn, items).
+    times: Vec<(String, f64, usize)>,
+}
+
+enum SweepStep {
+    Open(String),
+    /// Note how long the last session took to draw.
+    Timed,
+    /// Scroll the conversation to its first item that matches.
+    ScrollTo(fn(&Item) -> bool),
+    Still(String),
+    Frame,
+    /// Stills are taken off the main thread: give one time to finish.
+    Until(Instant),
 }
 
 pub struct Walk {
@@ -60,6 +84,7 @@ pub struct Walk {
     hold: f32,
     /// While idling: when it ends, and the frame count it started from.
     pub resting: Option<(Instant, u64, f32, &'static str, f32)>,
+    sweep: Option<Sweep>,
 }
 
 use Act::*;
@@ -69,6 +94,7 @@ impl Walk {
         let steps = match name {
             "stills" => stills(),
             "real" => real(),
+            "sweep" => sweep(),
             _ => checks(),
         };
         Self {
@@ -81,6 +107,7 @@ impl Walk {
             shots,
             hold: 0.3,
             resting: None,
+            sweep: None,
         }
     }
 }
@@ -237,6 +264,9 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
                 advance = false;
             }
         }
+        Sweep => {
+            advance = sweep_step(&me, window, cx);
+        }
         Shot(name) => {
             let dir = me.read(cx).walk.as_ref().and_then(|d| d.shots.clone());
             if let Some(dir) = dir {
@@ -252,6 +282,149 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
             let wait = d.steps.get(d.ix).map(|(w, _)| *w).unwrap_or(0.);
             d.due = Instant::now() + Duration::from_secs_f32(wait);
         });
+    }
+}
+
+/// One step of a sweep. True when every session has been opened.
+fn sweep_step(me: &Entity<Dent>, window: &mut Window, cx: &mut App) -> bool {
+    me.update(cx, |this, _| {
+        let all: Vec<String> = this.sessions.iter().map(|s| s.id.clone()).collect();
+        let d = this.walk.as_mut().expect("walk");
+        if d.sweep.is_some() {
+            return;
+        }
+        // DENT_WALK_SESSIONS picks the sessions, and each is photographed
+        // at its end, its first compaction and its first slash command.
+        let picked = std::env::var("DENT_WALK_SESSIONS").ok();
+        let ids: Vec<String> = match &picked {
+            Some(list) => list.split(',').map(str::to_owned).collect(),
+            None => all,
+        };
+        let mut todo = std::collections::VecDeque::new();
+        for (n, id) in ids.into_iter().enumerate() {
+            todo.push_back(SweepStep::Open(id));
+            todo.push_back(SweepStep::Timed);
+            if picked.is_some() && d.shots.is_some() {
+                let n = n + 1;
+                todo.extend([
+                    SweepStep::Frame,
+                    SweepStep::Still(format!("session-{n}-end")),
+                    SweepStep::ScrollTo(|i| matches!(i, Item::Note { text, .. } if text == "Conversation compacted")),
+                    SweepStep::Frame,
+                    SweepStep::Still(format!("session-{n}-compacted")),
+                    SweepStep::ScrollTo(|i| matches!(i, Item::User { text, .. } if text.starts_with('/'))),
+                    SweepStep::Frame,
+                    SweepStep::Still(format!("session-{n}-slash")),
+                    SweepStep::ScrollTo(|i| matches!(i, Item::User { text, .. } if text.contains("Attached"))),
+                    SweepStep::Frame,
+                    SweepStep::Still(format!("session-{n}-picture")),
+                ]);
+            }
+        }
+        d.sweep = Some(Sweep {
+            todo,
+            opened: None,
+            times: Vec::new(),
+        });
+    });
+    let step = me.update(cx, |this, _| {
+        this.walk.as_mut()?.sweep.as_mut()?.todo.pop_front()
+    });
+    match step {
+        Some(SweepStep::Open(id)) => {
+            me.update(cx, |this, cx| {
+                this.select(Some(id.clone()), window, cx);
+                if let Some(sw) = this.walk.as_mut().and_then(|d| d.sweep.as_mut()) {
+                    sw.opened = Some((id, Instant::now()));
+                }
+            });
+            false
+        }
+        Some(SweepStep::Timed) => {
+            me.update(cx, |this, _| {
+                let items = this.current().map(|s| s.items.len()).unwrap_or(0);
+                if let Some(sw) = this.walk.as_mut().and_then(|d| d.sweep.as_mut())
+                    && let Some((id, at)) = sw.opened.take()
+                {
+                    sw.times
+                        .push((id, at.elapsed().as_secs_f64() * 1000.0, items));
+                }
+            });
+            false
+        }
+        Some(SweepStep::ScrollTo(f)) => {
+            me.update(cx, |this, cx| {
+                let at = this.current().and_then(|s| s.items.iter().position(f));
+                if let Some(ix) = at {
+                    this.transcript.scroll_to(ListOffset {
+                        item_ix: ix,
+                        offset_in_item: px(0.),
+                    });
+                    cx.notify();
+                }
+            });
+            false
+        }
+        Some(SweepStep::Still(name)) => {
+            if let Some(dir) = me.read(cx).walk.as_ref().and_then(|d| d.shots.clone()) {
+                let _ = std::fs::create_dir_all(&dir);
+                still(dir.join(format!("{name}.png")));
+            }
+            let until = Instant::now() + Duration::from_millis(1200);
+            me.update(cx, |this, _| {
+                if let Some(sw) = this.walk.as_mut().and_then(|d| d.sweep.as_mut()) {
+                    sw.todo.push_front(SweepStep::Until(until));
+                }
+            });
+            false
+        }
+        Some(SweepStep::Until(at)) => {
+            me.update(cx, |this, cx| {
+                if Instant::now() < at
+                    && let Some(sw) = this.walk.as_mut().and_then(|d| d.sweep.as_mut())
+                {
+                    sw.todo.push_front(SweepStep::Until(at));
+                }
+                cx.notify();
+            });
+            false
+        }
+        Some(SweepStep::Frame) => {
+            me.update(cx, |_, cx| cx.notify());
+            false
+        }
+        None => {
+            let sw = me
+                .update(cx, |this, _| {
+                    this.walk.as_mut().and_then(|d| d.sweep.take())
+                })
+                .expect("sweep");
+            let mut times = sw.times;
+            let empty = times.iter().filter(|t| t.2 == 0).count();
+            times.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let total: f64 = times.iter().map(|t| t.1).sum();
+            eprintln!(
+                "      opened {} sessions, {:.0} ms on average",
+                times.len(),
+                total / times.len().max(1) as f64
+            );
+            for (id, ms, items) in times.iter().take(8) {
+                eprintln!("      {ms:>8.1} ms  {items:>6} items  {id}");
+            }
+            note(
+                me,
+                cx,
+                "every session opens and shows its conversation",
+                empty == 0 && !times.is_empty(),
+            );
+            note(
+                me,
+                cx,
+                "each opens within half a second",
+                times.first().is_none_or(|t| t.1 < 500.0),
+            );
+            true
+        }
     }
 }
 
@@ -298,6 +471,22 @@ fn mouse(window: &mut Window, cx: &mut App, at: Point<Pixels>, down: bool) {
         })
     };
     window.dispatch_event(ev, cx);
+}
+
+/// Every session the daemon has, opened one by one: for checking the app
+/// against real transcripts loaded with `dent-daemon check-transcripts --into`.
+fn sweep() -> Vec<(f32, Act)> {
+    vec![
+        (
+            0.5,
+            Until(
+                "every session's history arrives",
+                |d, _| d.core.live && d.sessions.len() > 1,
+                120.,
+            ),
+        ),
+        (0.5, Sweep),
+    ]
 }
 
 // ---- Helpers for checks ----

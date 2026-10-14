@@ -79,7 +79,7 @@ fn run(
     ui: UnboundedSender<Incoming>,
     seq: Arc<AtomicU64>,
 ) {
-    let sock = state.join("daemon.sock");
+    let sock = dent_protocol::daemon_socket(&state);
     // Requests not yet answered, resent after a reconnect.
     let mut pending: BTreeMap<u64, Request> = BTreeMap::new();
     let mut started_at: Option<Instant> = None;
@@ -90,7 +90,7 @@ fn run(
             Err(_) => {
                 if started_at.is_none_or(|t| t.elapsed() > Duration::from_secs(10)) {
                     started_at = Some(Instant::now());
-                    if let Err(e) = start_daemon(&state) {
+                    if let Err(e) = start_daemon(&state, ui.clone()) {
                         let _ = ui.unbounded_send(Incoming::Down(e));
                     }
                 }
@@ -201,7 +201,7 @@ fn run(
 
 /// Start the daemon from beside this app, in its own process group so it
 /// outlives the window.
-fn start_daemon(state: &Path) -> Result<(), String> {
+fn start_daemon(state: &Path, ui: UnboundedSender<Incoming>) -> Result<(), String> {
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     let bin = me.with_file_name("dent-daemon");
     if !bin.exists() {
@@ -216,6 +216,7 @@ fn start_daemon(state: &Path) -> Result<(), String> {
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > 5 * 1024 * 1024) {
         let _ = std::fs::rename(&path, state.join("daemon.log.1"));
     }
+    let from = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -232,7 +233,28 @@ fn start_daemon(state: &Path) -> Result<(), String> {
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("couldn't start dent-daemon: {e}"))?;
-    // Reap it if it exits while we run (say, another daemon already had the lock).
-    std::thread::spawn(move || child.wait());
+    // Reap it if it exits while we run. Another daemon holding the lock is a
+    // quiet exit; a failure says why, from what it wrote to its log.
+    std::thread::spawn(move || {
+        let Ok(status) = child.wait() else { return };
+        if status.success() {
+            return;
+        }
+        let said = std::fs::read(&path)
+            .map(|b| String::from_utf8_lossy(&b[(from as usize).min(b.len())..]).into_owned())
+            .unwrap_or_default();
+        let why = said
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.starts_with("dent-daemon "))
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let why = if why.is_empty() {
+            format!("dent's background service stopped ({status})")
+        } else {
+            format!("dent's background service couldn't start: {why}")
+        };
+        let _ = ui.unbounded_send(Incoming::Down(why));
+    });
     Ok(())
 }

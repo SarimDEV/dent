@@ -38,6 +38,9 @@ pub enum Inbound {
         blocks: Vec<AssistantBlock>,
         /// Input plus cache tokens: how full the context is.
         context: Option<u64>,
+        /// Written by Claude Code itself, not the model: a usage limit or an
+        /// API error, which the turn's `result` also reports.
+        synthetic: bool,
     },
     /// Tool results come back as `user` messages.
     ToolResults {
@@ -69,6 +72,8 @@ pub enum Inbound {
     CancelRequest {
         request_id: String,
     },
+    /// Claude Code summarised the conversation so far to make room.
+    Compacted,
     /// The end of a turn.
     Result {
         terminal_reason: Option<String>,
@@ -139,6 +144,7 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
             version: s(&v, "claude_code_version"),
             permission_mode: s(&v, "permissionMode"),
         },
+        ("system", "compact_boundary") => Inbound::Compacted,
         ("system", "background_tasks_changed") => {
             Inbound::BackgroundTasks(serde_json::from_value(v["tasks"].clone()).unwrap_or_default())
         }
@@ -182,6 +188,7 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
                 uuid: v["uuid"].as_str().map(str::to_owned),
                 blocks,
                 context,
+                synthetic: m["model"] == "<synthetic>" || v["isApiErrorMessage"] == true,
             }
         }
         ("user", _) => {

@@ -476,12 +476,15 @@ impl Daemon {
         {
             bail!("that session is already in dent");
         }
-        let id = agent_session.to_string();
-        let (cwd, title, bodies) =
-            tokio::task::spawn_blocking(move || crate::terminal::import(&id))
-                .await?
-                .context("couldn't read that session")?;
         let session = new_id();
+        let id = agent_session.to_string();
+        let media = self.paths.state.join("attachments").join(&session);
+        let crate::terminal::Imported { cwd, title, bodies } =
+            tokio::task::spawn_blocking(move || {
+                crate::terminal::import(&crate::terminal::find(&id)?, &media)
+            })
+            .await?
+            .context("couldn't read that session")?;
         self.append(
             &session,
             Body::Created {
@@ -501,18 +504,21 @@ impl Daemon {
             },
             None,
         )?;
+        let ran = bodies.iter().any(|b| matches!(b, Body::TurnStarted));
         for b in bodies {
             self.append(&session, b, None)?;
         }
         // It has run before, so the agent resumes rather than starts.
-        self.append(&session, Body::TurnStarted, None)?;
-        self.append(
-            &session,
-            Body::TurnEnded {
-                outcome: dent_protocol::Outcome::Done,
-            },
-            None,
-        )?;
+        if !ran {
+            self.append(&session, Body::TurnStarted, None)?;
+            self.append(
+                &session,
+                Body::TurnEnded {
+                    outcome: dent_protocol::Outcome::Done,
+                },
+                None,
+            )?;
+        }
         self.append(
             &session,
             Body::Notice {

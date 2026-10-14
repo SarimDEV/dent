@@ -23,115 +23,29 @@ impl Dent {
         let clear = needs.is_empty() && done.is_empty();
         let new_selected = self.selected.is_none();
 
-        let mut body = div()
-            .id("inbox")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .pb(px(space::S4))
-            .flex()
-            .flex_col();
-        if clear {
-            // Nothing at all yet reads differently from nothing to do.
-            let fresh = self.sessions.is_empty();
-            let (head, line) = if fresh && !self.recent.is_empty() {
-                (
-                    "Nothing in dent yet",
-                    "Start a task, or pick up one from the terminal.",
-                )
-            } else if fresh {
-                ("No sessions yet", "Type a task to start one.")
-            } else {
-                ("All caught up", "Everything is working or closed.")
-            };
-            body = body.child(
+        // Only the rows on screen are laid out, however many sessions there are.
+        let rows = self.inbox_rows(&needs, &done, &working, &closed, clear);
+        self.sync_inbox(&rows);
+        let rows = std::rc::Rc::new(rows);
+        let body = list(
+            self.inbox_list.clone(),
+            cx.processor(move |this, ix: usize, _window, cx| {
+                // The list sizes each row to its width only through a wrapper.
+                let row = match rows.get(ix) {
+                    Some(r) => this.inbox_row(r, cx),
+                    None => div().into_any_element(),
+                };
                 div()
-                    .mx(px(space::S2))
-                    .mt(px(space::S2))
-                    .px(px(space::S2))
-                    .py(px(space::S3))
+                    .w_full()
                     .flex()
-                    .gap(px(space::S3))
-                    .child(div().pt(px(4.)).child(icon(
-                        if fresh {
-                            "message-square"
-                        } else {
-                            "check-check"
-                        },
-                        16.,
-                        t.quiet,
-                    )))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .ty(UI)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(t.ink)
-                                    .child(head),
-                            )
-                            .child(div().ty(UI).text_color(t.quiet).child(line)),
-                    ),
-            );
-        }
-        for (label, list, quiet) in [
-            ("Needs you", &needs, false),
-            ("Done", &done, false),
-            ("Working", &working, true),
-        ] {
-            if list.is_empty() {
-                continue;
-            }
-            body = body.child(section_label(label, Some(list.len()), &t).mt(px(space::S3)));
-            for s in list.iter() {
-                body = body.child(self.row(s, quiet, cx));
-            }
-        }
-        // Closed sessions are archived, never gone: one row opens them.
-        if !closed.is_empty() {
-            let open = self.show_closed;
-            body = body.child(
-                div()
-                    .id("closed-toggle")
-                    .relative()
-                    .mt(px(space::S3))
-                    .h(px(size::ROW))
-                    .px(px(space::S4))
-                    .flex()
-                    .items_center()
-                    .gap(px(space::S2))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(t.hover()))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_closed = !this.show_closed;
-                        cx.notify();
-                    }))
-                    .child(icon(
-                        if open {
-                            "chevron-down"
-                        } else {
-                            "chevron-right"
-                        },
-                        12.,
-                        t.faint,
-                    ))
-                    .child(div().ty(LABEL).text_color(t.quiet).child("CLOSED"))
-                    .child(
-                        div()
-                            .ty(LABEL)
-                            .text_color(t.faint)
-                            .child(closed.len().to_string()),
-                    )
-                    .child(probe(&self.probes, "closed-toggle")),
-            );
-            if open {
-                for s in closed.iter() {
-                    body = body.child(self.row(s, false, cx));
-                }
-            }
-        }
+                    .flex_col()
+                    .child(row)
+                    .into_any_element()
+            }),
+        )
+        .flex_1()
+        .min_h_0()
+        .pb(px(space::S4));
 
         div()
             .w(px(WIDTH))
@@ -182,6 +96,153 @@ impl Dent {
                     ),
             )
             .child(body)
+    }
+
+    /// The sidebar's rows, top to bottom.
+    fn inbox_rows(
+        &self,
+        needs: &[std::rc::Rc<Session>],
+        done: &[std::rc::Rc<Session>],
+        working: &[std::rc::Rc<Session>],
+        closed: &[std::rc::Rc<Session>],
+        clear: bool,
+    ) -> Vec<InboxRow> {
+        let mut rows = Vec::new();
+        if clear {
+            rows.push(InboxRow::Empty);
+        }
+        for (label, list, quiet) in [
+            ("Needs you", needs, false),
+            ("Done", done, false),
+            ("Working", working, true),
+        ] {
+            if list.is_empty() {
+                continue;
+            }
+            rows.push(InboxRow::Label(label, list.len()));
+            rows.extend(list.iter().map(|s| InboxRow::Session(s.clone(), quiet)));
+        }
+        // Closed sessions are archived, never gone: one row opens them.
+        if !closed.is_empty() {
+            rows.push(InboxRow::Closed(closed.len()));
+            if self.show_closed {
+                rows.extend(closed.iter().map(|s| InboxRow::Session(s.clone(), false)));
+            }
+        }
+        rows
+    }
+
+    /// Keep the list's measurements in step: only rows that changed, or
+    /// moved, are measured again.
+    fn sync_inbox(&mut self, rows: &[InboxRow]) {
+        let sigs: Vec<u64> = rows.iter().map(|r| r.sig(self)).collect();
+        let old = &self.inbox_sigs;
+        if old.is_empty() || sigs.is_empty() {
+            self.inbox_list.reset(sigs.len());
+        } else if *old != sigs {
+            let first = old
+                .iter()
+                .zip(&sigs)
+                .position(|(a, b)| a != b)
+                .unwrap_or(old.len().min(sigs.len()));
+            let same_tail = old[first..]
+                .iter()
+                .rev()
+                .zip(sigs[first..].iter().rev())
+                .take_while(|(a, b)| a == b)
+                .count();
+            self.inbox_list
+                .splice(first..old.len() - same_tail, sigs.len() - same_tail - first);
+        }
+        self.inbox_sigs = sigs;
+    }
+
+    fn inbox_row(&mut self, r: &InboxRow, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.t;
+        match r {
+            InboxRow::Empty => self.inbox_empty(),
+            InboxRow::Label(label, n) => section_label(label, Some(*n), &t)
+                .mt(px(space::S3))
+                .into_any_element(),
+            InboxRow::Session(s, quiet) => self.row(s, *quiet, cx),
+            InboxRow::Closed(n) => {
+                let open = self.show_closed;
+                div()
+                    .id("closed-toggle")
+                    .relative()
+                    .mt(px(space::S3))
+                    .h(px(size::ROW))
+                    .px(px(space::S4))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S2))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.hover()))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_closed = !this.show_closed;
+                        cx.notify();
+                    }))
+                    .child(icon(
+                        if open {
+                            "chevron-down"
+                        } else {
+                            "chevron-right"
+                        },
+                        12.,
+                        t.faint,
+                    ))
+                    .child(div().ty(LABEL).text_color(t.quiet).child("CLOSED"))
+                    .child(div().ty(LABEL).text_color(t.faint).child(n.to_string()))
+                    .child(probe(&self.probes, "closed-toggle"))
+                    .into_any_element()
+            }
+        }
+    }
+
+    /// Nothing at all yet reads differently from nothing to do.
+    fn inbox_empty(&self) -> AnyElement {
+        let t = self.t;
+        let fresh = self.sessions.is_empty();
+        let (head, line) = if fresh && !self.recent.is_empty() {
+            (
+                "Nothing in dent yet",
+                "Start a task, or pick up one from the terminal.",
+            )
+        } else if fresh {
+            ("No sessions yet", "Type a task to start one.")
+        } else {
+            ("All caught up", "Everything is working or closed.")
+        };
+        div()
+            .mx(px(space::S2))
+            .mt(px(space::S2))
+            .px(px(space::S2))
+            .py(px(space::S3))
+            .flex()
+            .gap(px(space::S3))
+            .child(div().pt(px(4.)).child(icon(
+                if fresh {
+                    "message-square"
+                } else {
+                    "check-check"
+                },
+                16.,
+                t.quiet,
+            )))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .ty(UI)
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(t.ink)
+                            .child(head),
+                    )
+                    .child(div().ty(UI).text_color(t.quiet).child(line)),
+            )
+            .into_any_element()
     }
 
     fn row(&mut self, s: &Session, quiet: bool, cx: &mut Context<Self>) -> AnyElement {
@@ -406,5 +467,30 @@ impl Dent {
                         .child(kbd("⌘J", &t)),
                 )
             })
+    }
+}
+
+/// One row of the sidebar.
+pub enum InboxRow {
+    Empty,
+    Label(&'static str, usize),
+    Session(std::rc::Rc<Session>, bool),
+    Closed(usize),
+}
+
+impl InboxRow {
+    /// Anything that changes the row's height, or which row it is.
+    fn sig(&self, d: &Dent) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        match self {
+            InboxRow::Empty => (0u8, d.sessions.is_empty(), d.recent.is_empty()).hash(&mut h),
+            InboxRow::Label(l, n) => (1u8, l, n).hash(&mut h),
+            InboxRow::Session(s, quiet) => {
+                (2u8, &s.id, quiet, &s.title, &s.detail, s.status as u8).hash(&mut h)
+            }
+            InboxRow::Closed(n) => (3u8, n, d.show_closed).hash(&mut h),
+        }
+        h.finish()
     }
 }

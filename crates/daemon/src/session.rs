@@ -959,11 +959,16 @@ impl Session {
             }
             Inbound::MessageStart { parent: None } => self.d.clear_partial(&self.id),
             Inbound::TextDelta { parent: None, text } => self.d.delta(&self.id, &text, false),
+            // The turn's result says the same thing, as an error.
+            Inbound::Assistant {
+                synthetic: true, ..
+            } => {}
             Inbound::Assistant {
                 parent,
                 uuid,
                 blocks,
                 context,
+                ..
             } => {
                 if parent.is_none()
                     && let Some(c) = context
@@ -1140,6 +1145,12 @@ impl Session {
                 }
                 self.end_turn_at(outcome, Some(end));
             }
+            Inbound::Compacted => self.log_from(
+                Body::Notice {
+                    text: "Conversation compacted".into(),
+                },
+                end,
+            ),
             Inbound::MessageStart { .. } | Inbound::TextDelta { .. } | Inbound::Other => {}
         }
     }

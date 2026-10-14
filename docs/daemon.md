@@ -89,6 +89,8 @@ The `cli` client speaks the same protocol as the apps, so scripts and agents can
 Sessions started with plain `claude` or `codex` in a terminal are not lost to the app.
 
 - The daemon lists recent sessions from each agent's local store, and adopting one resumes it under the daemon with full history. For Claude Code that's `~/.claude/projects`: only sessions run in a terminal (`entrypoint` `cli`), in folders that still exist, not already in dent and not touched in the last minute (likely still open). Listing reads each transcript's head and tail; adopting imports the conversation and resumes it with `--resume`.
+- The import keeps what the person saw: their prompts, including pictures (saved under the state folder), slash commands and `!` commands; replies and tool calls; stops; usage-limit and API errors as errors, not replies; compactions in the order they happened; and what local commands such as `/model` printed. Tooling lines (task notifications, reminders, command caveats) and subagents' own transcripts stay out of the main conversation. Its title is the session's own name in Claude Code when it has one.
+- `dent-daemon check-transcripts [DIR] [--into STATE]` runs every transcript through the import and checks it against the raw lines: nothing unreadable, no reply, tool call or result dropped, every event read back unchanged. It prints counts and session ids only. With `--into`, every conversation becomes a session in a scratch state folder, and `dent-desktop --walk sweep` opens each one and times it.
 - A thin `dent claude` and `dent codex` launcher keeps the terminal UI while the session streams live to the app, so you can take over from the phone and hand back.
 
 ## Performance limits

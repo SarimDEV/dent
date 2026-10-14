@@ -48,7 +48,7 @@ impl Paths {
 
 /// The socket clients connect to, for a given state directory.
 pub fn socket(state: &Path) -> PathBuf {
-    state.join("daemon.sock")
+    dent_protocol::daemon_socket(state)
 }
 
 pub fn default_state() -> PathBuf {

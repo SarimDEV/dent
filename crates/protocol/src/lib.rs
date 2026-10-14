@@ -546,6 +546,40 @@ pub enum Reply {
     },
 }
 
+/// The socket a daemon with state directory `state` listens on. Usually
+/// inside it; a state directory with a path too long for a socket address
+/// (about 104 bytes on macOS) gets one in a private folder under /tmp,
+/// named after the state path.
+pub fn daemon_socket(state: &std::path::Path) -> std::path::PathBuf {
+    let inside = state.join("daemon.sock");
+    if inside.as_os_str().len() < 100 {
+        return inside;
+    }
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in state.as_os_str().as_encoded_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    short_socket_dir(state).join(format!("{h:016x}.sock"))
+}
+
+/// `/tmp/dent-<uid>`, made private to this user. If someone else made it
+/// first, sockets go nowhere useful rather than somewhere they control.
+fn short_socket_dir(state: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let uid = std::fs::metadata(state)
+        .or_else(|_| std::fs::metadata(state.parent().unwrap_or(state)))
+        .map(|m| m.uid())
+        .unwrap_or(u32::MAX);
+    let dir = std::path::PathBuf::from(format!("/tmp/dent-{uid}"));
+    let _ = std::fs::create_dir(&dir);
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    match std::fs::symlink_metadata(&dir) {
+        Ok(m) if m.is_dir() && m.uid() == uid && m.mode() & 0o077 == 0 => dir,
+        _ => state.join("daemon.sock"),
+    }
+}
+
 /// A binary's build stamp: its size and modification time, so a replaced
 /// binary reads differently from the one that's running.
 pub fn build_stamp(path: &std::path::Path) -> String {

@@ -336,6 +336,9 @@ pub struct Dent {
     pub review: Vec<Attachment>,
     /// The conversation draws only the items on screen.
     pub transcript: ListState,
+    /// The sidebar's rows, drawn only where they're on screen.
+    pub inbox_list: ListState,
+    pub inbox_sigs: Vec<u64>,
     /// What the list was last measured for: the session, and a signature per item.
     pub transcript_sigs: (Option<String>, Vec<u64>),
     /// The diff draws only the lines on screen.
@@ -662,6 +665,8 @@ impl Dent {
             commenting: None,
             review: Vec::new(),
             transcript: ListState::new(0, ListAlignment::Top, px(600.)),
+            inbox_list: ListState::new(0, ListAlignment::Top, px(400.)),
+            inbox_sigs: Vec::new(),
             transcript_sigs: (None, Vec::new()),
             diff_list: ListState::new(0, ListAlignment::Top, px(400.)),
             diff_key: 0,
