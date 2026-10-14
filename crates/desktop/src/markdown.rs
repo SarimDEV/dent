@@ -2045,6 +2045,19 @@ fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement
     let prefix = COPY_PREFIX.with(|p| p.borrow().clone());
     let capped = data.capped();
     let bg = r.bg;
+    // The header first: it reads, and copies, before the rows.
+    let head = row(
+        &format!("{key}/h"),
+        &head_lead,
+        &data,
+        &table.head,
+        true,
+        true,
+        capped,
+        &r.md,
+        r.window,
+        t,
+    );
     let body: AnyElement = if capped {
         let state = list_for(&r.md, key, n);
         let top = -state.scroll_px_offset_for_scrollbar().y.as_f32();
@@ -2058,12 +2071,16 @@ fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement
             key.to_string(),
             prefix.clone(),
         );
+        // Rows are made as the list draws them, after this block: they keep
+        // its place in the reading order.
+        let slot = crate::select::slot();
         div()
             .relative()
             .h(px(h))
             .child(handoff(state.clone()))
             .child(
                 list(state.clone(), move |ix, window, _| {
+                    let _place = slot.enter(ix);
                     row(
                         &format!("{k}/r{ix}"),
                         &pre,
@@ -2104,18 +2121,6 @@ fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement
         div().children(rows).into_any_element()
     };
     let gutter = if capped { GUTTER } else { 0. };
-    let head = row(
-        &format!("{key}/h"),
-        &head_lead,
-        &data,
-        &table.head,
-        true,
-        true,
-        capped,
-        &r.md,
-        r.window,
-        t,
-    );
     let grid = div()
         .flex()
         .flex_col()

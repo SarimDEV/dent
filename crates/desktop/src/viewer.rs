@@ -1194,7 +1194,17 @@ impl Dent {
             // Links and pictures in a document are found from its folder.
             base: art_file(&a).and_then(|f| f.parent().map(|p| p.to_path_buf())),
         };
-        let page = markdown::render(blocks.as_slice(), &t, true, &mut r);
+        let area = crate::select::area(&format!("doc/{id}"));
+        let page = {
+            let _place = crate::select::item(area, 0);
+            markdown::render(blocks.as_slice(), &t, true, &mut r)
+        };
+        let scroll = self
+            .doc_scrolls
+            .entry(id)
+            .or_default()
+            .clone();
+        let by = scroll.clone();
         div()
             .flex_1()
             .min_h_0()
@@ -1242,9 +1252,15 @@ impl Dent {
                 // Each document keeps its own place.
                 div()
                     .id(SharedString::from(format!("doc-{id}")))
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&scroll)
+                    .child(crate::select::region(area, move |dy| {
+                        let (o, max) = (by.offset(), by.max_offset());
+                        by.set_offset(point(o.x, (o.y - px(dy)).clamp(-max.y, px(0.))));
+                    }))
                     .child(
                         div()
                             .max_w(px(680.))
@@ -1486,13 +1502,20 @@ impl Dent {
         // Notes and the comment box fit the visible diff, not the longest line.
         self.diff_view_w = self.panel_w - if compact { 0. } else { 200. } - space::S2;
         let (rows, comments) = (Rc::new(rows), Rc::new(comments));
+        let area = crate::select::area(&format!(
+            "diff/{}/{}",
+            s.id,
+            s.diff.get(selected).map_or("", |f| f.path.as_str())
+        ));
         let diff = list(
             self.diff_list.clone(),
             cx.processor(move |this, ix: usize, _, cx| {
+                let _place = crate::select::item(area, ix);
                 this.diff_row(&shared, selected, &rows, &comments, ix, cx)
             }),
         )
         .size_full();
+        let lines = self.diff_list.clone();
         let review = (!self.review.is_empty()).then(|| {
             let n = self.review.len();
             div()
@@ -1660,8 +1683,12 @@ impl Dent {
                                     } else {
                                         div()
                                             .id("diff")
+                                            .relative()
                                             .size_full()
                                             .overflow_x_scroll()
+                                            .child(crate::select::region(area, move |dy| {
+                                                lines.scroll_by(px(dy))
+                                            }))
                                             .child(
                                                 div()
                                                     .h_full()
@@ -1944,6 +1971,7 @@ impl Dent {
             );
         }
         for (i, a) in s.asides.iter().enumerate() {
+            let _place = crate::select::item(crate::select::area(&format!("aside/{}", s.id)), i);
             let question = div().flex().justify_end().child(
                 div()
                     .max_w(relative(0.85))

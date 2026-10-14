@@ -242,12 +242,6 @@ impl Render for Dent {
             .current_rc()
             .filter(|s| self.panel_open && self.shows_panel(s))
             .map(|s| self.panel(&s, window, cx));
-        // Where the viewer starts, for telling which side a press is on.
-        select::set_viewer_left(
-            panel
-                .as_ref()
-                .map(|_| window.viewport_size().width.as_f32() - self.panel_w),
-        );
         let toast =
             self.toast.clone().map(|toast| {
                 let label = match toast.action {
@@ -319,12 +313,10 @@ impl Render for Dent {
             .id("root")
             .key_context("Dent")
             // A click anywhere in dent takes the keyboard back from the page.
-            .capture_any_mouse_down(cx.listener(|this, e: &MouseDownEvent, window, cx| {
+            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, _| {
                 if let Some(p) = &this.preview {
                     p.borrow().release_focus();
                 }
-                // A press outside the viewer: the chat's text selects.
-                select::hover(e.position, true, window, cx);
             }))
             // Clicking a button, a chip or the chat keeps the keyboard in
             // the text field you were typing in, as on the Mac. Only another
@@ -425,9 +417,7 @@ impl Render for Dent {
                 if this.context.take().is_some() {
                 } else if this.palette.is_some() {
                     this.close_palette(window, cx);
-                } else if this.menu.take().is_some() {
-                } else if gpui_kit::base::TextSelection::has_selection(window, cx) {
-                    gpui_kit::base::TextSelection::clear(window, cx);
+                } else if this.menu.take().is_some() || select::clear(window) {
                 } else if this.picking {
                     this.toggle_pick(cx);
                 } else if this.renaming.is_some() || this.commenting.is_some() {
@@ -475,9 +465,6 @@ impl Render for Dent {
                 }
             }))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, cx| {
-                if e.pressed_button.is_none() {
-                    select::hover(e.position, false, window, cx);
-                }
                 if this.dragging_sidebar {
                     let w = window.viewport_size().width.as_f32();
                     // The chat keeps its minimum beside it.
@@ -522,6 +509,9 @@ impl Render for Dent {
                     }
                 }),
             )
+            // First, so each frame starts its text afresh and its press runs
+            // after every control's.
+            .child(select::layer())
             .child(
                 div()
                     .flex_1()

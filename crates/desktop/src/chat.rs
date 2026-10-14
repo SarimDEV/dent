@@ -447,6 +447,9 @@ impl Dent {
                 let Some(s) = this.current_rc() else {
                     return div().into_any_element();
                 };
+                // Each message keeps its place in the chat's selection,
+                // drawn or not.
+                let _place = crate::select::item(crate::select::area(&format!("chat/{}", s.id)), ix);
                 let body = match s.items.get(ix) {
                     Some(item) => this.item(&s, ix, item, window, cx),
                     None => this.working_line(&s),
@@ -479,9 +482,9 @@ impl Dent {
                             .pb(px(if ix + 1 == count {
                                 space::S8
                             } else if matches!(s.items.get(ix), Some(Item::User { .. })) {
-                                // Room for the time and actions shown on
-                                // hover below your message.
-                                YOURS_GAP
+                                // The time and actions below your message
+                                // take the rest of the gap.
+                                space::S1
                             } else {
                                 space::S4
                             }))
@@ -499,7 +502,24 @@ impl Dent {
                 .transcript
                 .bounds_for_item(count - 1)
                 .is_none_or(|b| b.bottom() > bottom + px(space::S8));
-        let transcript = div().relative().flex_1().min_h_0().child(transcript);
+        let state = self.transcript.clone();
+        // Messages never drawn still copy, from what was said.
+        let said = s.items.clone();
+        crate::select::source(
+            crate::select::area(&format!("chat/{}", s.id)),
+            s.items.len(),
+            move |ix| said.get(ix).and_then(Item::plain),
+        );
+        let transcript = div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(transcript)
+            // A drag past the top or bottom scrolls the chat under it.
+            .child(crate::select::region(
+                crate::select::area(&format!("chat/{}", s.id)),
+                move |dy| state.scroll_by(px(dy)),
+            ));
         // Drawn with the composer, above its fade.
         let latest = away.then(|| {
             div()
@@ -729,7 +749,7 @@ impl Dent {
                     .map(|d| {
                         if asking {
                             // Going back asks once, in place.
-                            d.child(div().ty(UI).text_color(t.quiet).child(if busy {
+                            d.pb(px(size::CONTROL_SM)).child(div().ty(UI).text_color(t.quiet).child(if busy {
                                 "Stop it first, then go back"
                             } else {
                                 "Go back to before this message? It goes back into the reply box."
@@ -798,11 +818,9 @@ impl Dent {
                                     .flex()
                                     .items_center()
                                     .gap(px(space::S1))
-                                    // Shown on hover in the gap below the message
-                                    // (`YOURS_GAP`), so it doesn't push the reply away.
-                                    .mt(px(space::S1))
+                                    // In the gap below the message, part of
+                                    // it: reaching for them keeps them shown.
                                     .h(px(size::CONTROL_SM))
-                                    .mb(px(-(size::CONTROL_SM + space::S1)))
                                     .reveal_on_hover(group.clone())
                                     // When you sent it, beside what you can do with it.
                                     .when(*at > 0, |d| {
@@ -3210,10 +3228,6 @@ pub fn code_lines(id: String, text: String, diff: bool, ink: Hsla, t: &crate::th
         .whitespace_normal()
         .child(crate::select::styled(id, text, runs, t))
 }
-
-/// The gap below a message you sent: its time and actions show there on
-/// hover, clear of what follows.
-const YOURS_GAP: f32 = space::S1 + size::CONTROL_SM + space::S1;
 
 /// Lines added and removed in `paths`, for the turn whose edits end at
 /// item `ix`. The counts are the files as they stand now, so they only

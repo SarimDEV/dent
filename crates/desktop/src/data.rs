@@ -142,6 +142,26 @@ pub enum Item {
     },
 }
 
+impl Item {
+    /// What it reads as in plain text, for copying when it isn't drawn:
+    /// your messages and the replies, the plan and notes. Folded work
+    /// (thinking, tools) has none.
+    pub fn plain(&self) -> Option<String> {
+        match self {
+            Item::User { text, .. } => Some(
+                text.lines()
+                    .filter(|l| !l.starts_with("› "))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            Item::Text(t) | Item::Note { text: t, .. } | Item::Plan { plan: t, .. } => {
+                Some(t.clone())
+            }
+            _ => None,
+        }
+    }
+}
+
 /// One line of an opened tool group. Subagents' work sits under the call
 /// that started it, a level deeper each time.
 #[derive(Clone, Debug, PartialEq, Hash)]

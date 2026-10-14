@@ -12,7 +12,9 @@ use crate::theme::Theme;
 
 /// Controls that show only while the pointer is over their `group` (a row,
 /// a tab, a message): hidden, not just transparent, so nothing unseen can
-/// be clicked.
+/// be clicked. The controls must sit inside the group's bounds (in its
+/// padding, not hung outside on a negative margin), or they hide as the
+/// pointer moves to them.
 pub trait RevealOnHover: InteractiveElement + Styled + Sized {
     fn reveal_on_hover(self, group: impl Into<SharedString>) -> Self {
         self.invisible().group_hover(group, |s| s.visible())
@@ -23,6 +25,15 @@ pub trait RevealOnHover: InteractiveElement + Styled + Sized {
     }
 }
 impl<T: InteractiveElement + Styled> RevealOnHover for T {}
+
+/// A control: a press on it is its own, not the start of a text selection
+/// underneath.
+pub trait Control: InteractiveElement + Sized {
+    fn control(self) -> Self {
+        self.on_mouse_down(MouseButton::Left, |_, _, _| crate::select::claim())
+    }
+}
+impl<T: InteractiveElement> Control for T {}
 
 pub fn icon(name: &str, px_size: f32, color: Hsla) -> Svg {
     svg()
@@ -43,6 +54,7 @@ pub fn icon_button(id: impl Into<SharedString>, name: &str, t: &Theme) -> Statef
         .justify_center()
         .rounded(px(radius::MD))
         .cursor_pointer()
+        .control()
         .hover(|s| s.bg(t.hover()))
         .active(|s| s.bg(t.press()))
         .child(icon(name, 15., t.quiet))
@@ -67,6 +79,7 @@ pub fn button(
         .ty(UI)
         .font_weight(FontWeight::MEDIUM)
         .cursor_pointer()
+        .control()
         .when(primary, |d| {
             d.bg(t.ink)
                 .text_color(t.surface)
@@ -105,6 +118,7 @@ pub fn action(
     let on = ready == Ready::Yes;
     let (off_bg, on_bg, off_fg, on_fg) = (t.ink.opacity(0.08), t.ink, t.faint, t.surface);
     let key = el.interactivity().element_id.clone();
+    let el = el.control();
     let el = match ready {
         Ready::Yes => el.cursor_pointer().active(|s| s.opacity(0.82)),
         Ready::No(why) => el.cursor_not_allowed().tooltip(tip(why, None, *t)),
@@ -143,6 +157,7 @@ pub fn ghost(
         .ty(UI)
         .text_color(t.quiet)
         .cursor_pointer()
+        .control()
         .hover(|s| s.bg(t.hover()).text_color(t.ink))
         .active(|s| s.bg(t.press()).text_color(t.ink))
         .child(label.into())
@@ -283,6 +298,7 @@ pub fn menu_row(
         .gap(px(space::S2))
         .rounded(px(radius::MD))
         .cursor_pointer()
+        .control()
         .hover(|s| s.bg(t.hover()))
         .active(|s| s.bg(t.press()))
         .child(

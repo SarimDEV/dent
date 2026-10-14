@@ -545,6 +545,8 @@ pub struct Dent {
     pub transcript_sigs: (Option<String>, Vec<u64>),
     /// The diff draws only the lines on screen.
     pub diff_list: ListState,
+    /// Each document's scroll, so each keeps its own place.
+    pub doc_scrolls: HashMap<&'static str, ScrollHandle>,
     pub diff_key: u64,
     pub diff_file_key: u64,
     /// The visible width of the diff, for notes and the comment box.
@@ -963,6 +965,7 @@ impl Dent {
             inbox_sigs: Vec::new(),
             transcript_sigs: (None, Vec::new()),
             diff_list: ListState::new(0, ListAlignment::Top, px(400.)),
+            doc_scrolls: HashMap::new(),
             diff_key: 0,
             diff_file_key: 0,
             diff_view_w: 400.,
@@ -1694,20 +1697,41 @@ impl Dent {
                 return true;
             }
         }
+        // ⌘A, after selecting text in the chat or viewer, takes all of it;
+        // with no text field in use, all of the chat.
+        if k.key == "a"
+            && k.modifiers.platform
+            && !k.modifiers.shift
+            && !k.modifiers.alt
+            && !k.modifiers.control
+        {
+            let area = crate::select::selected_area().or_else(|| {
+                field
+                    .is_none()
+                    .then(|| self.selected.clone())
+                    .flatten()
+                    .map(|id| crate::select::area(&format!("chat/{id}")))
+            });
+            if let Some(area) = area
+                && crate::select::select_all(area, window)
+            {
+                return true;
+            }
+        }
         // ⌘C copies text selected in the chat or viewer, even while a text
         // field keeps the keyboard, unless the field has a selection itself.
         if k.key == "c"
             && k.modifiers.platform
             && !k.modifiers.shift
             && !k.modifiers.alt
-            && gpui_kit::base::TextSelection::has_selection(window, cx)
+            && crate::select::has_selection()
         {
             let own = match field {
                 Some(f) => !self.field_entity(f).read(cx).selected_range().is_empty(),
                 None => false,
             };
             if !own {
-                let text = crate::select::copied(window, cx);
+                let text = crate::select::copied();
                 if !text.is_empty() {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                     return true;

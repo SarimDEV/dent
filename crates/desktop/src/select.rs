@@ -1,46 +1,189 @@
-//! Text you can select. Every run of text that should be copyable is one of
-//! these: it joins the window's single selection (the layer the root
-//! mounts), so a drag can run from a reply into a code block and ⌘C copies
-//! all of it. Double-click takes a word, triple-click a paragraph.
+//! Text you can select, and the one selection dent keeps.
+//!
+//! dent owns its selection rather than leaving it to the text on screen.
+//! Every piece of selectable text has a [`Key`]: the area it belongs to (a
+//! session's chat, a document, a diff) and its place in that area's reading
+//! order (message, then piece within it). The selection is two spots by key,
+//! so it holds however the chat scrolls: a drag can run from the third
+//! message to the thirtieth, past the edge with the chat scrolling under
+//! it, and ⌘C copies every message between, drawn or not.
+//!
+//! A drag stays in the area it began in, so the chat and the viewer never
+//! select into each other. Double-click takes a word, triple-click a piece
+//! (a paragraph, a line of code), Shift-click extends.
 //!
 //! Links stay clickable: a press and release on the same link opens it, a
 //! drag that starts on one selects instead.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::rc::Rc;
 
-use gpui_kit::base::{
-    TextSelection, TextSelectionHandle, TextSelectionRegistration, TextSelectionRun,
-    TextSelectionScopeId,
-};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use crate::theme::Theme;
 
-/// The chat and the viewer each select on their own: a drag in one never
-/// reaches into the other. The window keeps one scope active (the UI
-/// library's root resets it every frame), so the area you're not in is
-/// parked in a scope of its own instead. Which area a text belongs to is
-/// decided by where it sits, the same line the pointer is judged by.
-#[derive(Clone, Copy, PartialEq)]
-enum Area {
-    Chat,
-    Viewer,
+/// A region that selects on its own: a session's chat, a document.
+pub type Area = u64;
+
+/// The area named `name`, like `chat/<session>` or `doc/<path>`.
+pub fn area(name: &str) -> Area {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut h);
+    h.finish()
 }
 
+/// Where a piece of text sits: its area, then its place in reading order.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Key {
+    area: Area,
+    path: Vec<u32>,
+}
+
+/// A place in the text: a piece and a byte offset in it.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+struct Spot {
+    key: Key,
+    at: usize,
+}
+
+#[derive(Clone)]
+struct Sel {
+    anchor: Spot,
+    head: Spot,
+}
+
+impl Sel {
+    fn bounds(&self) -> (&Spot, &Spot) {
+        if self.anchor <= self.head {
+            (&self.anchor, &self.head)
+        } else {
+            (&self.head, &self.anchor)
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.anchor == self.head
+    }
+
+    /// The part of the piece `key` (of `len` bytes) that's selected.
+    fn range_in(&self, key: &Key, len: usize) -> Option<Range<usize>> {
+        let (start, end) = self.bounds();
+        if *key < start.key || *key > end.key {
+            return None;
+        }
+        let s = if *key == start.key { start.at } else { 0 };
+        let e = if *key == end.key { end.at } else { len };
+        (s < e).then(|| s.min(len)..e.min(len))
+    }
+}
+
+/// What a piece copies as.
+#[derive(Clone, Default)]
+struct Piece {
+    text: SharedString,
+    lead: SharedString,
+    swaps: Rc<Vec<(Range<usize>, String)>>,
+}
+
+impl Piece {
+    fn copy(&self, range: Range<usize>) -> String {
+        if range.is_empty() {
+            return String::new();
+        }
+        let mut out = String::new();
+        if range.start == 0 {
+            out.push_str(&self.lead);
+        }
+        let mut at = range.start;
+        for (r, with) in self.swaps.iter() {
+            if r.end <= at || r.start >= range.end {
+                continue;
+            }
+            out.push_str(&self.text[at..r.start.max(at)]);
+            out.push_str(with);
+            at = r.end.min(range.end).max(at);
+        }
+        out.push_str(&self.text[at..range.end]);
+        out
+    }
+}
+
+/// A piece as laid out this frame: where it is, for pointing at it.
+struct Placed {
+    key: Key,
+    win: WindowId,
+    bounds: Bounds<Pixels>,
+    layout: TextLayout,
+    hitbox: Hitbox,
+    links: Rc<Vec<(Range<usize>, String)>>,
+}
+
+/// An area as laid out this frame, and how to scroll it.
+struct Region {
+    area: Area,
+    win: WindowId,
+    bounds: Bounds<Pixels>,
+    scroll: Rc<dyn Fn(f32)>,
+}
+
+struct Drag {
+    area: Area,
+    win: WindowId,
+    down: Point<Pixels>,
+    at: Point<Pixels>,
+    /// The link the press began on, opened if it's let go on it unmoved.
+    link: Option<(Key, usize)>,
+    moved: bool,
+    ticking: bool,
+}
+
+/// Where new pieces are numbered: an area, a path in it, the next number.
+struct Here {
+    area: Area,
+    path: Vec<u32>,
+    next: u32,
+    /// The scope of a whole item, whose piece count is kept.
+    item: bool,
+}
+
+#[derive(Default)]
+struct State {
+    sel: Option<Sel>,
+    drag: Option<Drag>,
+    placed: Vec<Placed>,
+    regions: Vec<Region>,
+    /// What every piece ever laid out copies as, by area and path: a copy
+    /// reaches messages scrolled out of sight.
+    pieces: HashMap<Area, BTreeMap<Vec<u32>, Piece>>,
+    /// How many pieces each item had when last laid out; any past that are
+    /// left from an older version of it.
+    counts: HashMap<(Area, u32), u32>,
+    /// Which places in each item hold rows made later (see [`slot`]); rows
+    /// under any other place are left from an older version of it.
+    slots: HashMap<(Area, u32), Vec<u32>>,
+    here: Vec<Here>,
+    /// For areas drawn as a list: how many items, and each one's text, for
+    /// items never drawn (a long chat never scrolled through).
+    sources: HashMap<Area, Source>,
+    /// A control took this press: it doesn't start a selection.
+    claimed: bool,
+}
+
+type Source = (usize, Rc<dyn Fn(usize) -> Option<String>>);
+
 thread_local! {
-    /// Where the text of the area you're not in waits.
-    static PARKED: TextSelectionScopeId = TextSelectionScopeId::new();
-    static ACTIVE: Cell<Area> = const { Cell::new(Area::Chat) };
-    /// (frame, next): text is numbered in the order it's laid out each frame,
-    /// top to bottom, so a copy comes out in reading order.
-    static ORDER: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+    static STATE: RefCell<State> = RefCell::new(State::default());
     /// What the next text made copies with before it, set by the block
     /// laying it out (a list marker, a quote's `> `).
     static LEAD: RefCell<Option<SharedString>> = const { RefCell::new(None) };
-    static VIEWER_LEFT: Cell<Option<f32>> = const { Cell::new(None) };
+}
+
+fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
+    STATE.with(|s| f(&mut s.borrow_mut()))
 }
 
 /// Pieces of text copy one per line. A lead goes before a piece when the
@@ -66,10 +209,665 @@ pub fn take_lead() -> SharedString {
         .unwrap_or_else(|| SharedString::new_static("\n"))
 }
 
+// ---------------------------------------------------------------------------
+// Numbering: where each piece sits in its area's reading order.
+
+/// Text made while this lives is item `ix` of `area`, numbered in the order
+/// it's made. Make each item of a list inside one, so every piece keeps its
+/// place whether or not the items around it are drawn.
+#[must_use]
+pub struct Scope(());
+
+impl Drop for Scope {
+    fn drop(&mut self) {
+        with(|s| {
+            if let Some(h) = s.here.pop()
+                && h.item
+                && let Some(&ix) = h.path.first()
+            {
+                s.counts.insert((h.area, ix), h.next);
+            }
+        });
+    }
+}
+
+pub fn item(area: Area, ix: usize) -> Scope {
+    with(|s| {
+        s.slots.remove(&(area, ix as u32));
+        s.here.push(Here {
+            area,
+            path: vec![ix as u32],
+            next: 0,
+            item: true,
+        })
+    });
+    Scope(())
+}
+
+/// A place kept in the reading order for text made later: a list inside an
+/// item draws its rows after the item is made.
+#[derive(Clone)]
+pub struct Slot(Option<(Area, Vec<u32>)>);
+
+/// Keeps the next place in the current item for text made later.
+pub fn slot() -> Slot {
+    Slot(with(|s| {
+        let h = s.here.last_mut()?;
+        let mut path = h.path.clone();
+        path.push(h.next);
+        h.next += 1;
+        let area = h.area;
+        if let [ix, n] = path[..] {
+            s.slots.entry((area, ix)).or_default().push(n);
+        }
+        Some((area, path))
+    }))
+}
+
+impl Slot {
+    /// Text made while this lives is row `ix` of the slot.
+    pub fn enter(&self, ix: usize) -> Option<Scope> {
+        let (area, path) = self.0.clone()?;
+        with(|s| {
+            let mut path = path;
+            path.push(ix as u32);
+            s.here.push(Here {
+                area,
+                path,
+                next: 0,
+                item: false,
+            })
+        });
+        Some(Scope(()))
+    }
+}
+
+/// The key for the next piece made. Text made outside any item is an area
+/// of its own, named by its id.
+fn next_key(id: &ElementId) -> Key {
+    with(|s| match s.here.last_mut() {
+        Some(h) => {
+            let mut path = h.path.clone();
+            path.push(h.next);
+            h.next += 1;
+            Key { area: h.area, path }
+        }
+        None => Key {
+            area: area(&format!("loose/{id}")),
+            path: vec![0, 0],
+        },
+    })
+}
+
+// ---------------------------------------------------------------------------
+// The layer: pointing, dragging, and the highlight.
+
+/// Mounted first in each window's root: starts each frame's layout afresh
+/// and takes the presses, drags and releases that select.
+pub fn layer() -> impl IntoElement {
+    canvas(
+        |_, window, _| {
+            let win = window.window_handle().window_id();
+            with(|s| {
+                s.placed.retain(|p| p.win != win);
+                s.regions.retain(|r| r.win != win);
+            });
+        },
+        |_, _, window, _| {
+            // Registered first, these run last as the event bubbles: a
+            // control under the pointer has had its say.
+            window.on_mouse_event(|e: &MouseDownEvent, phase, window, cx| {
+                if phase.bubble() && e.button == MouseButton::Left {
+                    press(e, window, cx);
+                }
+            });
+            window.on_mouse_event(|e: &MouseMoveEvent, phase, window, cx| {
+                if phase.bubble() {
+                    drag_to(e.position, e.pressed_button == Some(MouseButton::Left), window, cx);
+                }
+            });
+            window.on_mouse_event(|e: &MouseUpEvent, phase, window, cx| {
+                if phase.bubble() && e.button == MouseButton::Left {
+                    release(e.position, window, cx);
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_0()
+}
+
+/// Lays out the bounds of `area` this frame, and how to scroll it while a
+/// drag runs past its edge: `scroll(dy)` moves the content up by `dy`.
+pub fn region(area: Area, scroll: impl Fn(f32) + 'static) -> impl IntoElement {
+    let scroll: Rc<dyn Fn(f32)> = Rc::new(scroll);
+    canvas(
+        move |bounds, window, _| {
+            let win = window.window_handle().window_id();
+            with(|s| {
+                s.regions.push(Region {
+                    area,
+                    win,
+                    bounds,
+                    scroll: scroll.clone(),
+                })
+            });
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+/// `area` is a list of `len` items, and `text(ix)` is what item `ix`
+/// copies as when it was never drawn.
+pub fn source(area: Area, len: usize, text: impl Fn(usize) -> Option<String> + 'static) {
+    with(|s| s.sources.insert(area, (len, Rc::new(text))));
+}
+
+/// Called by a control as it's pressed, so the press doesn't also select
+/// the text under it.
+pub fn claim() {
+    with(|s| s.claimed = true);
+}
+
+/// The piece under `p`, and the offset in it nearest `p`.
+fn hit(p: Point<Pixels>, win: WindowId, window: &Window) -> Option<(Spot, Option<usize>)> {
+    with(|s| {
+        // Last laid out is on top.
+        let placed = s
+            .placed
+            .iter()
+            .rev()
+            .find(|x| x.win == win && x.bounds.contains(&p) && x.hitbox.is_hovered(window))?;
+        let at = placed
+            .layout
+            .index_for_position(p)
+            .unwrap_or_else(|closest| closest);
+        let link = placed.links.iter().position(|(r, _)| r.contains(&at));
+        Some((
+            Spot {
+                key: placed.key.clone(),
+                at,
+            },
+            link,
+        ))
+    })
+}
+
+/// The area whose bounds hold `p`.
+fn region_at(p: Point<Pixels>, win: WindowId) -> Option<Area> {
+    with(|s| {
+        s.regions
+            .iter()
+            .rev()
+            .find(|r| r.win == win && r.bounds.contains(&p))
+            .map(|r| r.area)
+    })
+}
+
+/// The spot in `area` nearest `p`: in the piece under it; else, of the
+/// pieces whose lines span its height, the nearest across; else the start
+/// of the next piece down or the end of the last one up. Pieces of the
+/// area drawn this frame are all it looks at; a point past the area's edge
+/// is first brought inside it.
+fn nearest(area: Area, p: Point<Pixels>, win: WindowId) -> Option<Spot> {
+    with(|s| {
+        let p = match s.regions.iter().find(|r| r.area == area && r.win == win) {
+            Some(r) => point(
+                p.x.clamp(r.bounds.left(), r.bounds.right() - px(1.)),
+                p.y.clamp(r.bounds.top() + px(1.), r.bounds.bottom() - px(1.)),
+            ),
+            None => p,
+        };
+        let mine = || s.placed.iter().filter(|x| x.area_is(area, win));
+        let at = |x: &Placed, q: Point<Pixels>| {
+            x.layout.index_for_position(q).unwrap_or_else(|c| c)
+        };
+        // Pieces across whose height `p` falls: the nearest across.
+        let level = mine()
+            .filter(|x| x.bounds.top() <= p.y && p.y < x.bounds.bottom())
+            .min_by(|a, b| {
+                let d = |x: &Placed| {
+                    if p.x < x.bounds.left() {
+                        x.bounds.left() - p.x
+                    } else if p.x > x.bounds.right() {
+                        p.x - x.bounds.right()
+                    } else {
+                        px(0.)
+                    }
+                };
+                d(a).partial_cmp(&d(b)).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        if let Some(x) = level {
+            let q = point(
+                p.x.clamp(x.bounds.left(), x.bounds.right()),
+                p.y,
+            );
+            return Some(Spot {
+                key: x.key.clone(),
+                at: at(x, q),
+            });
+        }
+        // Between pieces: the start of the next one down, in reading order.
+        let below = mine()
+            .filter(|x| x.bounds.top() > p.y)
+            .min_by(|a, b| a.key.cmp(&b.key));
+        if let Some(x) = below {
+            return Some(Spot {
+                key: x.key.clone(),
+                at: 0,
+            });
+        }
+        let above = mine()
+            .filter(|x| x.bounds.bottom() <= p.y)
+            .max_by(|a, b| a.key.cmp(&b.key))?;
+        Some(Spot {
+            key: above.key.clone(),
+            at: above.layout.len(),
+        })
+    })
+}
+
+impl Placed {
+    fn area_is(&self, area: Area, win: WindowId) -> bool {
+        self.key.area == area && self.win == win
+    }
+}
+
+fn changed(window: &mut Window) {
+    window.refresh();
+}
+
+fn press(e: &MouseDownEvent, window: &mut Window, _cx: &mut App) {
+    let win = window.window_handle().window_id();
+    let claimed = with(|s| std::mem::take(&mut s.claimed));
+    let target = hit(e.position, win, window);
+    // Shift extends what's selected, within its area.
+    if e.modifiers.shift && !claimed {
+        let area = with(|s| s.sel.as_ref().map(|sel| sel.anchor.key.area));
+        if let Some(area) = area
+            && let Some(head) = target
+                .clone()
+                .map(|(spot, _)| spot)
+                .filter(|spot| spot.key.area == area)
+                .or_else(|| nearest(area, e.position, win))
+        {
+            with(|s| {
+                if let Some(sel) = s.sel.as_mut() {
+                    sel.head = head;
+                }
+                s.drag = Some(Drag {
+                    area,
+                    win,
+                    down: e.position,
+                    at: e.position,
+                    link: None,
+                    moved: true,
+                    ticking: false,
+                });
+            });
+            changed(window);
+            return;
+        }
+    }
+    let had = with(|s| s.sel.take().is_some() | s.drag.take().is_some());
+    if had {
+        changed(window);
+    }
+    if claimed {
+        return;
+    }
+    // On text, or in an area's margin: there, the nearest text.
+    let (spot, link) = match target {
+        Some(t) => t,
+        None => {
+            let Some(area) = region_at(e.position, win) else {
+                return;
+            };
+            let Some(spot) = nearest(area, e.position, win) else {
+                return;
+            };
+            (spot, None)
+        }
+    };
+    let area = spot.key.area;
+    let sel = match e.click_count {
+        1 => Sel {
+            anchor: spot.clone(),
+            head: spot.clone(),
+        },
+        n => {
+            let range = piece_text(&spot.key)
+                .map(|text| {
+                    if n == 2 {
+                        word_at(&text, spot.at)
+                    } else {
+                        0..text.len()
+                    }
+                })
+                .unwrap_or(spot.at..spot.at);
+            Sel {
+                anchor: Spot {
+                    key: spot.key.clone(),
+                    at: range.start,
+                },
+                head: Spot {
+                    key: spot.key.clone(),
+                    at: range.end,
+                },
+            }
+        }
+    };
+    with(|s| {
+        s.sel = Some(sel);
+        s.drag = Some(Drag {
+            area,
+            win,
+            down: e.position,
+            at: e.position,
+            link: link.filter(|_| e.click_count == 1).map(|l| (spot.key.clone(), l)),
+            moved: e.click_count > 1,
+            ticking: false,
+        });
+    });
+    changed(window);
+}
+
+/// The text of a piece, as last laid out.
+fn piece_text(key: &Key) -> Option<SharedString> {
+    with(|s| {
+        s.pieces
+            .get(&key.area)
+            .and_then(|m| m.get(&key.path))
+            .map(|p| p.text.clone())
+    })
+}
+
+/// The word around `at`: a run of letters and digits, or of anything else
+/// that isn't space; a space alone if that's what's there.
+fn word_at(text: &str, at: usize) -> Range<usize> {
+    let at = at.min(text.len());
+    let class = |c: char| {
+        if c.is_alphanumeric() || c == '_' {
+            0
+        } else if c.is_whitespace() {
+            1
+        } else {
+            2
+        }
+    };
+    // The character at `at`, or the one before at the end.
+    let Some((i, c)) = text[at..]
+        .char_indices()
+        .next()
+        .map(|(i, c)| (at + i, c))
+        .or_else(|| text[..at].char_indices().last())
+    else {
+        return at..at;
+    };
+    let k = class(c);
+    let start = text[..i]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| class(*c) == k)
+        .last()
+        .map_or(i, |(j, _)| j);
+    let end = text[i..]
+        .char_indices()
+        .find(|(_, c)| class(*c) != k)
+        .map_or(text.len(), |(j, _)| i + j);
+    start..end
+}
+
+fn drag_to(p: Point<Pixels>, held: bool, window: &mut Window, cx: &mut App) {
+    let Some((area, win, down, moved)) =
+        with(|s| s.drag.as_ref().map(|d| (d.area, d.win, d.down, d.moved)))
+    else {
+        return;
+    };
+    if win != window.window_handle().window_id() {
+        return;
+    }
+    // A release missed (outside the window): the drag is over.
+    if !held {
+        release(p, window, cx);
+        return;
+    }
+    // A press that wobbles a pixel or two is still a click.
+    if !moved && (p - down).magnitude() < 3. {
+        return;
+    }
+    with(|s| {
+        if let Some(d) = s.drag.as_mut() {
+            d.at = p;
+            d.moved = true;
+        }
+    });
+    follow(area, p, win, window);
+    // Past the area's top or bottom, it scrolls under the drag.
+    let outside = with(|s| {
+        s.regions
+            .iter()
+            .find(|r| r.area == area && r.win == win)
+            .is_some_and(|r| p.y < r.bounds.top() || p.y >= r.bounds.bottom())
+    });
+    if outside {
+        tick(window);
+    }
+}
+
+/// Moves the head to the text nearest `p`.
+fn follow(area: Area, p: Point<Pixels>, win: WindowId, window: &mut Window) {
+    let head = hit(p, win, window)
+        .map(|(spot, _)| spot)
+        .filter(|spot| spot.key.area == area)
+        .or_else(|| nearest(area, p, win));
+    let Some(head) = head else {
+        return;
+    };
+    let moved = with(|s| match s.sel.as_mut() {
+        Some(sel) if sel.head != head => {
+            sel.head = head;
+            true
+        }
+        _ => false,
+    });
+    if moved {
+        changed(window);
+    }
+}
+
+/// Each frame while the pointer is past the area's edge, scroll toward it,
+/// faster the further out it is, and carry the selection along.
+fn tick(window: &mut Window) {
+    let start = with(|s| match s.drag.as_mut() {
+        Some(d) if !d.ticking => {
+            d.ticking = true;
+            true
+        }
+        _ => false,
+    });
+    if !start {
+        return;
+    }
+    fn step(window: &mut Window) {
+        window.on_next_frame(|window, _| {
+            let go = with(|s| {
+                let d = s.drag.as_ref()?;
+                let r = s.regions.iter().find(|r| r.area == d.area && r.win == d.win)?;
+                let over = if d.at.y < r.bounds.top() {
+                    (d.at.y - r.bounds.top()).as_f32()
+                } else if d.at.y >= r.bounds.bottom() {
+                    (d.at.y - r.bounds.bottom()).as_f32() + 1.
+                } else {
+                    return None;
+                };
+                let speed = (over.abs() * 0.35 + 3.).min(48.) * over.signum();
+                Some((r.scroll.clone(), speed, d.area, d.at, d.win))
+            });
+            match go {
+                Some((scroll, speed, area, at, win)) => {
+                    scroll(speed);
+                    follow(area, at, win, window);
+                    window.refresh();
+                    step(window);
+                }
+                None => with(|s| {
+                    if let Some(d) = s.drag.as_mut() {
+                        d.ticking = false;
+                    }
+                }),
+            }
+        });
+    }
+    step(window);
+}
+
+fn release(p: Point<Pixels>, window: &mut Window, cx: &mut App) {
+    let Some(drag) = with(|s| s.drag.take()) else {
+        return;
+    };
+    // An empty selection stays, as a caret: Shift-click extends from it,
+    // and ⌘A selects the area it's in.
+    let empty = with(|s| s.sel.as_ref().is_none_or(Sel::is_empty));
+    if empty
+        && !drag.moved
+        && let Some((key, ix)) = drag.link
+        && let Some((spot, Some(now))) = hit(p, drag.win, window)
+        && spot.key == key
+        && now == ix
+    {
+        let url = with(|s| {
+            s.placed
+                .iter()
+                .find(|x| x.key == key)
+                .and_then(|x| x.links.get(ix).map(|(_, u)| u.clone()))
+        });
+        if let Some(url) = url {
+            open_link(&url, window, cx);
+        }
+    }
+    changed(window);
+}
+
+// ---------------------------------------------------------------------------
+// Asking about and changing the selection.
+
+pub fn has_selection() -> bool {
+    with(|s| s.sel.as_ref().is_some_and(|sel| !sel.is_empty()))
+}
+
+/// Clears the selection; whether there was one.
+pub fn clear(window: &mut Window) -> bool {
+    let had = with(|s| {
+        s.drag = None;
+        s.sel.take().is_some_and(|sel| !sel.is_empty())
+    });
+    if had {
+        changed(window);
+    }
+    had
+}
+
+/// Selects all of `area`, first item to last, drawn or not.
+pub fn select_all(area: Area, window: &mut Window) -> bool {
+    let ends = with(|s| {
+        let last = match s.sources.get(&area) {
+            Some((len, _)) => (*len as u32).checked_sub(1)?,
+            None => {
+                let pieces = s.pieces.get(&area)?;
+                *pieces.keys().next_back()?.first()?
+            }
+        };
+        // From before the first item's first piece to past the last item.
+        let key = |path| Key { area, path };
+        Some((
+            Spot {
+                key: key(vec![0]),
+                at: 0,
+            },
+            Spot {
+                key: key(vec![last + 1]),
+                at: 0,
+            },
+        ))
+    });
+    let Some((anchor, head)) = ends else {
+        return false;
+    };
+    with(|s| s.sel = Some(Sel { anchor, head }));
+    changed(window);
+    true
+}
+
+/// The area last pressed in, or selected in, if the last press was in one.
+pub fn selected_area() -> Option<Area> {
+    with(|s| s.sel.as_ref().map(|sel| sel.anchor.key.area))
+}
+
+/// Whether a piece at `path` is part of its item as last laid out, not
+/// left from an older version of it.
+fn live(s: &State, area: Area, path: &[u32]) -> bool {
+    match (path.first(), path.get(1)) {
+        (Some(ix), Some(n)) => {
+            s.counts.get(&(area, *ix)).is_none_or(|c| n < c)
+                && (path.len() <= 2
+                    || s.slots.get(&(area, *ix)).is_some_and(|v| v.contains(n)))
+        }
+        _ => true,
+    }
+}
+
 /// The selection as text, shaped like what was selected: paragraphs apart,
-/// list items with their markers, cells side by side, maths as TeX.
-pub fn copied(window: &mut Window, cx: &mut App) -> String {
-    shape(&TextSelection::selected_text(window, cx))
+/// list items with their markers, cells side by side, maths as TeX. Messages
+/// scrolled out of sight copy too.
+pub fn copied() -> String {
+    let joined = with(|s| {
+        let sel = s.sel.as_ref().filter(|sel| !sel.is_empty())?;
+        let (start, end) = sel.bounds();
+        let area = start.key.area;
+        let mut out: Vec<(Vec<u32>, String)> = Vec::new();
+        if let Some(pieces) = s.pieces.get(&area) {
+            for (path, piece) in pieces.range(start.key.path.clone()..=end.key.path.clone()) {
+                if !live(s, area, path) {
+                    continue;
+                }
+                let key = Key {
+                    area,
+                    path: path.clone(),
+                };
+                if let Some(r) = sel.range_in(&key, piece.text.len()) {
+                    out.push((path.clone(), piece.copy(r)));
+                }
+            }
+        }
+        // Items wholly inside that were never drawn copy from their source;
+        // so do those holding a list of their own (a long table), whose
+        // rows out of sight were never drawn either.
+        if let Some((len, text)) = s.sources.get(&area) {
+            let first = start.key.path.first().copied().unwrap_or(0);
+            let last = end.key.path.first().copied().unwrap_or(0);
+            for ix in first..=last.min((*len as u32).saturating_sub(1)) {
+                let inside = Key { area, path: vec![ix] } >= start.key
+                    && Key { area, path: vec![ix + 1] } <= end.key;
+                let partly_drawn = !s.counts.contains_key(&(area, ix))
+                    || s.slots.get(&(area, ix)).is_some_and(|v| !v.is_empty());
+                if inside
+                    && partly_drawn
+                    && let Some(t) = text(ix as usize)
+                {
+                    out.retain(|(p, _)| p.first() != Some(&ix));
+                    out.push((vec![ix], format!("\n{t}")));
+                }
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Some(out.into_iter().map(|(_, t)| t).collect::<Vec<_>>().join("\n"))
+    });
+    joined.map(|j| shape(&j)).unwrap_or_default()
 }
 
 /// The pieces as selected, one per line, made into the copy.
@@ -79,58 +877,12 @@ fn shape(joined: &str) -> String {
     out.trim_start_matches('\n').trim_end().to_string()
 }
 
-/// Where the viewer starts this frame, if it's open. Text to its right
-/// selects with the viewer, the rest with the chat; the pointer switches
-/// between them by the same line.
-pub fn set_viewer_left(x: Option<f32>) {
-    VIEWER_LEFT.with(|l| l.set(x));
-}
-
-fn in_viewer(x: f32) -> bool {
-    VIEWER_LEFT.with(Cell::get).is_some_and(|left| x >= left)
-}
-
-/// Text in the area being selected joins the active scope; the rest is
-/// parked, so a drag can't reach it.
-fn scope_at(x: f32) -> TextSelectionScopeId {
-    let area = if in_viewer(x) { Area::Viewer } else { Area::Chat };
-    if area == ACTIVE.with(Cell::get) {
-        TextSelectionScopeId::default()
-    } else {
-        PARKED.with(|p| *p)
-    }
-}
-
-/// The area under the pointer selects: the viewer's text or the chat's. It
-/// switches as the pointer moves between them, but never while something is
-/// selected, so a selection can't be lost on the way to ⌘C; a press in the
-/// other area switches then, and the drag picks up the text it reaches
-/// from the next frame on.
-pub fn hover(at: Point<Pixels>, pressed: bool, window: &mut Window, cx: &mut App) {
-    let area = if in_viewer(at.x.as_f32()) {
-        Area::Viewer
-    } else {
-        Area::Chat
-    };
-    if ACTIVE.with(Cell::get) == area || (!pressed && TextSelection::has_selection(window, cx)) {
-        return;
-    }
-    ACTIVE.with(|a| a.set(area));
-    window.refresh();
-}
-
-fn next_order() -> u64 {
-    let frame = crate::ui::FRAME.load(std::sync::atomic::Ordering::Relaxed);
-    ORDER.with(|o| {
-        let (f, n) = o.get();
-        let n = if f == frame { n + 1 } else { 0 };
-        o.set((frame, n));
-        n
-    })
-}
+// ---------------------------------------------------------------------------
+// The text element.
 
 pub struct Text {
     id: ElementId,
+    key: Key,
     text: SharedString,
     styled: StyledText,
     links: Rc<Vec<(Range<usize>, String)>>,
@@ -142,8 +894,10 @@ pub struct Text {
 /// Plain text in the surrounding style.
 pub fn text(id: impl Into<ElementId>, text: impl Into<SharedString>, t: &Theme) -> Text {
     let text = text.into();
+    let id = id.into();
     Text {
-        id: id.into(),
+        key: next_key(&id),
+        id,
         styled: StyledText::new(text.clone()),
         text,
         links: Rc::default(),
@@ -161,8 +915,10 @@ pub fn styled(
     t: &Theme,
 ) -> Text {
     let text = text.into();
+    let id = id.into();
     Text {
-        id: id.into(),
+        key: next_key(&id),
+        id,
         styled: StyledText::new(text.clone()).with_runs(runs),
         text,
         links: Rc::default(),
@@ -198,49 +954,6 @@ impl Text {
     }
 }
 
-/// Kept across frames: the selection handle, the link a press began on, and
-/// the redraw that keeps the highlight under the pointer while it drags.
-#[derive(Clone)]
-pub struct Kept {
-    handle: TextSelectionHandle,
-    /// What a copy reads: the text, its lead and swaps, and the part
-    /// selected when it was last painted.
-    copy: Rc<RefCell<Copy>>,
-    pressed: Rc<Cell<Option<usize>>>,
-    _redraw: Rc<Subscription>,
-}
-
-#[derive(Default)]
-struct Copy {
-    text: SharedString,
-    lead: SharedString,
-    swaps: Rc<Vec<(Range<usize>, String)>>,
-    range: Option<Range<usize>>,
-}
-
-impl Copy {
-    fn text(&self) -> String {
-        let Some(range) = self.range.clone().filter(|r| !r.is_empty()) else {
-            return String::new();
-        };
-        let mut out = String::new();
-        if range.start == 0 {
-            out.push_str(&self.lead);
-        }
-        let mut at = range.start;
-        for (r, with) in self.swaps.iter() {
-            if r.end <= at || r.start >= range.end {
-                continue;
-            }
-            out.push_str(&self.text[at..r.start.max(at)]);
-            out.push_str(with);
-            at = r.end.min(range.end).max(at);
-        }
-        out.push_str(&self.text[at..range.end]);
-        out
-    }
-}
-
 impl IntoElement for Text {
     type Element = Self;
     fn into_element(self) -> Self::Element {
@@ -249,7 +962,7 @@ impl IntoElement for Text {
 }
 
 impl Element for Text {
-    type RequestLayoutState = Kept;
+    type RequestLayoutState = ();
     type PrepaintState = Hitbox;
 
     fn id(&self) -> Option<ElementId> {
@@ -266,39 +979,19 @@ impl Element for Text {
         inspector: Option<&InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
-    ) -> (LayoutId, Kept) {
-        let kept = window.with_element_state(
-            id.expect("selectable text has an id"),
-            |kept: Option<Kept>, window| {
-                let kept = kept.unwrap_or_else(|| {
-                    let handle = TextSelectionHandle::new(self.text.to_string(), cx);
-                    let redraw = handle.refresh_window_on_change(window, cx);
-                    let copy: Rc<RefCell<Copy>> = Rc::default();
-                    handle.copy_with(
-                        {
-                            let copy = copy.clone();
-                            move |_| copy.borrow().text()
-                        },
-                        cx,
-                    );
-                    Kept {
-                        handle,
-                        copy,
-                        pressed: Rc::default(),
-                        _redraw: Rc::new(redraw),
-                    }
-                });
-                {
-                    let mut c = kept.copy.borrow_mut();
-                    c.text = self.text.clone();
-                    c.lead = self.lead.clone();
-                    c.swaps = self.swaps.clone();
-                }
-                (kept.clone(), kept)
-            },
-        );
-        let (layout, ()) = self.styled.request_layout(id, inspector, window, cx);
-        (layout, kept)
+    ) -> (LayoutId, ()) {
+        // What it copies as, kept for when it's out of sight.
+        with(|s| {
+            s.pieces.entry(self.key.area).or_default().insert(
+                self.key.path.clone(),
+                Piece {
+                    text: self.text.clone(),
+                    lead: self.lead.clone(),
+                    swaps: self.swaps.clone(),
+                },
+            );
+        });
+        self.styled.request_layout(id, inspector, window, cx)
     }
 
     fn prepaint(
@@ -306,20 +999,24 @@ impl Element for Text {
         id: Option<&GlobalElementId>,
         inspector: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        kept: &mut Kept,
+        _: &mut (),
         window: &mut Window,
         cx: &mut App,
     ) -> Hitbox {
         self.styled
             .prepaint(id, inspector, bounds, &mut (), window, cx);
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-        let registration = TextSelectionRegistration::new(hitbox.clone(), bounds)
-            .with_document_order(next_order())
-            // The viewer and the chat each select on their own.
-            .with_scope(scope_at(bounds.origin.x.as_f32()))
-            .with_text_bounds(vec![bounds])
-            .with_rendered_element(&kept.handle, window, cx);
-        kept.handle.register(registration, window, cx);
+        let win = window.window_handle().window_id();
+        with(|s| {
+            s.placed.push(Placed {
+                key: self.key.clone(),
+                win,
+                bounds,
+                layout: self.styled.layout().clone(),
+                hitbox: hitbox.clone(),
+                links: self.links.clone(),
+            })
+        });
         hitbox
     }
 
@@ -328,38 +1025,28 @@ impl Element for Text {
         id: Option<&GlobalElementId>,
         inspector: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        kept: &mut Kept,
+        _: &mut (),
         hitbox: &mut Hitbox,
         window: &mut Window,
         cx: &mut App,
     ) {
         let layout = self.styled.layout().clone();
-        let projection = kept.handle.update_runs(
-            &[TextSelectionRun::new(
-                self.text.clone(),
-                layout.clone(),
-                bounds,
-            )],
-            cx,
-        );
-        kept.copy.borrow_mut().range = projection.ranges().first().cloned().flatten();
-        for range in projection.ranges().iter().flatten() {
-            paint_range(&layout, range.clone(), self.color, window);
+        let range = with(|s| {
+            s.sel
+                .as_ref()
+                .and_then(|sel| sel.range_in(&self.key, self.text.len()))
+        });
+        if let Some(range) = range {
+            paint_range(&layout, range, self.color, window);
         }
         self.styled
             .paint(id, inspector, bounds, &mut (), &mut (), window, cx);
-
-        let link_at = {
-            let links = self.links.clone();
-            let layout = layout.clone();
-            move |p: Point<Pixels>| {
-                let ix = layout.index_for_position(p).ok()?;
-                links.iter().position(|(r, _)| r.contains(&ix))
-            }
-        };
         let over_link = hitbox.is_hovered(window)
             && !self.links.is_empty()
-            && link_at(window.mouse_position()).is_some();
+            && layout
+                .index_for_position(window.mouse_position())
+                .ok()
+                .is_some_and(|ix| self.links.iter().any(|(r, _)| r.contains(&ix)));
         window.set_cursor_style(
             if over_link {
                 CursorStyle::PointingHand
@@ -368,36 +1055,6 @@ impl Element for Text {
             },
             hitbox,
         );
-        if self.links.is_empty() {
-            return;
-        }
-        window.on_mouse_event({
-            let (hitbox, pressed, link_at) =
-                (hitbox.clone(), kept.pressed.clone(), link_at.clone());
-            move |e: &MouseDownEvent, phase, window, _| {
-                if phase.bubble() && e.button == MouseButton::Left && hitbox.is_hovered(window) {
-                    pressed.set(link_at(e.position));
-                }
-            }
-        });
-        window.on_mouse_event({
-            let (hitbox, pressed, links) =
-                (hitbox.clone(), kept.pressed.clone(), self.links.clone());
-            move |e: &MouseUpEvent, phase, window, cx| {
-                if !phase.bubble() || e.button != MouseButton::Left {
-                    return;
-                }
-                let down = pressed.take();
-                if !hitbox.is_hovered(window) || TextSelection::has_selection(window, cx) {
-                    return;
-                }
-                if let Some(ix) = down.filter(|ix| link_at(e.position) == Some(*ix))
-                    && let Some((_, url)) = links.get(ix)
-                {
-                    open_link(url, window, cx);
-                }
-            }
-        });
     }
 }
 
@@ -458,18 +1115,27 @@ fn paint_range(layout: &TextLayout, range: Range<usize>, color: Hsla, window: &m
 
 #[cfg(test)]
 mod tests {
-    use super::{Copy, SAME_LINE, shape};
+    use super::{Key, Piece, SAME_LINE, Sel, Spot, shape, word_at};
     use std::ops::Range;
     use std::rc::Rc;
 
     fn piece(text: &str, lead: &str, range: Range<usize>) -> String {
-        Copy {
+        Piece {
             text: text.to_string().into(),
             lead: lead.to_string().into(),
             swaps: Rc::default(),
-            range: Some(range),
         }
-        .text()
+        .copy(range)
+    }
+
+    fn spot(path: &[u32], at: usize) -> Spot {
+        Spot {
+            key: Key {
+                area: 1,
+                path: path.to_vec(),
+            },
+            at,
+        }
     }
 
     #[test]
@@ -495,18 +1161,40 @@ mod tests {
 
     #[test]
     fn stand_ins_copy_as_what_they_stand_for() {
-        let c = Copy {
+        let c = Piece {
             text: "a mmmm b".into(),
             lead: "".into(),
             swaps: Rc::new(vec![(2..6, "$x^2$".into())]),
-            range: Some(0..8),
         };
-        assert_eq!(c.text(), "a $x^2$ b");
+        assert_eq!(c.copy(0..8), "a $x^2$ b");
         // Part of a formula selected copies all of it.
-        let part = Copy {
-            range: Some(4..8),
-            ..c
+        assert_eq!(c.copy(4..8), "$x^2$ b");
+    }
+
+    #[test]
+    fn a_selection_spans_messages_in_reading_order() {
+        // Dragged upward, from message 7 back to message 2.
+        let sel = Sel {
+            anchor: spot(&[7, 0], 4),
+            head: spot(&[2, 1], 3),
         };
-        assert_eq!(part.text(), "$x^2$ b");
+        let key = |p: &[u32]| spot(p, 0).key;
+        assert_eq!(sel.range_in(&key(&[2, 0]), 10), None);
+        assert_eq!(sel.range_in(&key(&[2, 1]), 10), Some(3..10));
+        // Everything between, whole, including rows of a list in message 4.
+        assert_eq!(sel.range_in(&key(&[4, 2, 9, 0]), 6), Some(0..6));
+        assert_eq!(sel.range_in(&key(&[7, 0]), 10), Some(0..4));
+        assert_eq!(sel.range_in(&key(&[7, 1]), 10), None);
+        assert_eq!(sel.range_in(&key(&[8, 0]), 10), None);
+    }
+
+    #[test]
+    fn words_are_runs_of_letters_or_of_marks() {
+        let t = "let x_1 = foo(bar);";
+        assert_eq!(&t[word_at(t, 5)], "x_1");
+        assert_eq!(&t[word_at(t, 13)], "(");
+        assert_eq!(&t[word_at(t, 3)], " ");
+        assert_eq!(&t[word_at(t, t.len())], ");");
+        assert_eq!(word_at("", 0), 0..0);
     }
 }
