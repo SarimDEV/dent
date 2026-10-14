@@ -1014,15 +1014,15 @@ fn checks() -> Vec<(f32, Act)> {
         0.1,
         Until("a subagent shows how far it got", |d, _| {
             status_is(d, Status::Done)
-                && has(d, |i| matches!(i, Item::Tools { lines, .. } if lines.iter().any(|l| l.text.contains("Subagent:") && l.text.contains("done · 3 steps"))))
+                && has(d, |i| matches!(i, Item::Tools { summary, lines } if summary.contains("Subagent:") && summary.contains("done · 3 steps") && !lines.iter().any(|l| l.text.contains("Survey the tests"))))
         }, 10.),
     ), (
         0.1,
         Until("a subagent's own subagent sits a level deeper, with its report", |d, _| {
             has(d, |i| matches!(i, Item::Tools { lines, .. }
-                if lines.iter().any(|l| l.depth == 1 && l.text.contains("Time the db tests"))
-                && lines.iter().any(|l| l.depth == 2 && l.text.contains("cargo test db"))
-                && lines.iter().any(|l| l.depth == 1 && l.report.as_deref().is_some_and(|r| r.contains("Slow tests")))))
+                if lines.iter().any(|l| l.depth == 0 && l.text.contains("Time the db tests"))
+                && lines.iter().any(|l| l.depth == 1 && l.text.contains("cargo test db"))
+                && lines.iter().any(|l| l.depth == 0 && l.report.as_deref().is_some_and(|r| r.contains("Slow tests")))))
         }, 3.),
     ), (
         0.1,

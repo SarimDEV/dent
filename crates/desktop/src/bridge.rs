@@ -241,10 +241,17 @@ pub fn session(
                 if carded {
                     continue;
                 }
-                items.push(Item::Tools {
-                    summary: summary(&calls, cwd),
-                    lines: tree(&calls, cwd),
-                });
+                let mut lines = tree(&calls, cwd);
+                let mut summary = summary(&calls, cwd);
+                // One call at the top: the folded line is that call, so its
+                // line doesn't repeat it, and what's under it moves up.
+                if lines.iter().filter(|l| l.depth == 0).count() == 1 && lines.len() > 1 {
+                    summary = lines.remove(0).text;
+                    for l in &mut lines {
+                        l.depth -= 1;
+                    }
+                }
+                items.push(Item::Tools { summary, lines });
             }
             Entry::Ask {
                 id,

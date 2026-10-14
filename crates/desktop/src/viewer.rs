@@ -1452,9 +1452,10 @@ impl Dent {
                         .when(agent.is_some(), |d| {
                             d.child(
                                 div().flex().child(
-                                    ghost(
+                                    button(
                                         SharedString::from(format!("promote-{i}")),
                                         "Make it a fork",
+                                        false,
                                         &t,
                                     )
                                     .relative()
@@ -1498,7 +1499,20 @@ impl Dent {
                     .ty(UI)
                     .text_color(t.ink)
                     .relative()
-                    .child(Textarea::new(&self.aside_input))
+                    .flex()
+                    .items_end()
+                    .gap(px(space::S2))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Textarea::new(&self.aside_input)),
+                    )
+                    .child(
+                        icon_button("aside-send", "arrow-up", &t)
+                            .on_click(cx.listener(|this, _, window, cx| this.ask_aside(window, cx)))
+                            .tooltip(tip("Ask", Some("↩"), t)),
+                    )
                     .child(probe(&self.probes, "aside-input")),
             );
         div()

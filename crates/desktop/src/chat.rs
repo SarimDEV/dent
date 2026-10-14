@@ -51,13 +51,6 @@ impl Dent {
                     .tooltip(tip("A new session that carries on from here", None, t))
                     .child(probe(&self.probes, "fork")),
             );
-            actions = actions.child(
-                icon_button("side-chat", "message-circle-question-mark", &t)
-                    .relative()
-                    .on_click(cx.listener(|this, _, window, cx| this.open_side_chat(window, cx)))
-                    .tooltip(tip("Ask on the side", Some("⌘;"), t))
-                    .child(probe(&self.probes, "side-chat")),
-            );
         }
         if Self::can_close(s) {
             let sid = id.clone();
@@ -67,6 +60,16 @@ impl Dent {
                     .child(kbd("⌘W", &t))
                     .on_click(cx.listener(move |this, _, window, cx| this.close(&sid, window, cx)))
                     .child(probe(&self.probes, "close")),
+            );
+        }
+        // Icon actions sit together, after the text ones.
+        if !s.items.is_empty() {
+            actions = actions.child(
+                icon_button("side-chat", "message-circle-question-mark", &t)
+                    .relative()
+                    .on_click(cx.listener(|this, _, window, cx| this.open_side_chat(window, cx)))
+                    .tooltip(tip("Ask on the side", Some("⌘;"), t))
+                    .child(probe(&self.probes, "side-chat")),
             );
         }
         if has_viewer {
@@ -394,28 +397,37 @@ impl Dent {
                                     full
                                 };
                                 let key = msg.clone();
-                                d.child(div().ty(READING).text_color(t.ink).child(shown))
-                                    .when(long, |d| {
-                                        d.child(
-                                            div()
-                                                .id(SharedString::from(format!("fold-{ix}")))
-                                                .ty(UI)
-                                                .text_color(t.quiet)
-                                                .cursor_pointer()
-                                                .hover(|d| d.text_color(t.ink))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    if !this.expanded.remove(&key) {
-                                                        this.expanded.insert(key.clone());
-                                                    }
-                                                    cx.notify();
-                                                }))
-                                                .child(if open {
-                                                    "Show less"
-                                                } else {
-                                                    "Show full message"
-                                                }),
-                                        )
-                                    })
+                                // A slash command reads as one.
+                                let command = shown.starts_with('/')
+                                    && !shown.contains('\n')
+                                    && shown.len() < 80;
+                                d.child(
+                                    div()
+                                        .ty(if command { CODE } else { READING })
+                                        .text_color(t.ink)
+                                        .child(shown),
+                                )
+                                .when(long, |d| {
+                                    d.child(
+                                        div()
+                                            .id(SharedString::from(format!("fold-{ix}")))
+                                            .ty(UI)
+                                            .text_color(t.quiet)
+                                            .cursor_pointer()
+                                            .hover(|d| d.text_color(t.ink))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if !this.expanded.remove(&key) {
+                                                    this.expanded.insert(key.clone());
+                                                }
+                                                cx.notify();
+                                            }))
+                                            .child(if open {
+                                                "Show less"
+                                            } else {
+                                                "Show full message"
+                                            }),
+                                    )
+                                })
                             }),
                     )
                     .map(|d| {
@@ -570,31 +582,58 @@ impl Dent {
                                 }
                                 cx.notify();
                             }))
-                            .child(div().text_color(t.faint).child(if open {
+                            .child(div().text_color(t.quiet.opacity(0.6)).child(if open {
                                 "┬"
                             } else {
                                 "├"
                             }))
-                            .child(summary.clone()),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(summary.clone()),
+                            ),
                     )
                     .when(open, |d| {
-                        let n = lines.len();
+                        let depths: Vec<usize> = lines.iter().map(|l| l.depth).collect();
                         let rows: Vec<AnyElement> = lines
                             .iter()
                             .enumerate()
                             .map(|(i, l)| {
-                                let branch = if i + 1 == n { "└" } else { "├" };
-                                let row = div()
-                                    .flex()
-                                    .gap(px(space::S2))
-                                    .ty(CODE)
-                                    .text_color(t.quiet)
-                                    .child(div().text_color(t.faint).child(branch))
-                                    // A subagent's work steps in under it.
-                                    .child(div().w(px(l.depth as f32 * space::S4)).flex_none());
+                                // Each level gets a column: a rule while that
+                                // level carries on below, then this row's branch.
+                                let mut row =
+                                    div().flex().items_start().ty(CODE).text_color(t.quiet);
+                                for k in 0..=l.depth {
+                                    let more = continues(&depths, i, k);
+                                    let mark = match (k == l.depth, more) {
+                                        (true, true) => "├",
+                                        (true, false) => "└",
+                                        (false, true) => "│",
+                                        (false, false) => "",
+                                    };
+                                    row = row.child(
+                                        div()
+                                            .w(px(space::S4))
+                                            .flex_none()
+                                            .text_color(t.quiet.opacity(0.6))
+                                            .child(mark),
+                                    );
+                                }
                                 match &l.report {
                                     None => row
-                                        .child(div().min_w_0().child(l.text.clone()))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .child(l.text.clone()),
+                                        )
                                         .into_any_element(),
                                     Some(report) => row
                                         .child(self.report(ix, &l.id, report, cx))
@@ -1971,6 +2010,20 @@ fn needs_title(text: &str, t: &theme::Theme) -> Div {
 }
 
 /// What rode along with a message, shown above its text.
+/// Whether level `k` of the tree carries on below row `i`: another row at
+/// that level comes before the tree steps out past it.
+fn continues(depths: &[usize], i: usize, k: usize) -> bool {
+    for &d in &depths[i + 1..] {
+        if d < k {
+            return false;
+        }
+        if d == k {
+            return true;
+        }
+    }
+    false
+}
+
 impl Dent {
     /// A finished subagent's report under its steps: rendered, and folded
     /// to its first lines until opened.
@@ -1994,7 +2047,7 @@ impl Dent {
             .min_w_0()
             .my(px(space::S1))
             .pl(px(space::S3))
-            .border_l_2()
+            .border_l_1()
             .border_color(t.hairline)
             .flex()
             .flex_col()

@@ -415,7 +415,7 @@ impl Dent {
         let aside_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 8)
-                .placeholder("Ask about this session. It stays out of the conversation.")
+                .placeholder("Ask about this session")
                 .submit_on_enter(true)
         });
         cx.subscribe_in(

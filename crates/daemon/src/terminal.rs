@@ -348,7 +348,7 @@ fn typed(t: &str) -> Option<String> {
         return None;
     }
     if !t.starts_with('<') {
-        return Some(t.to_string());
+        return Some(without_image_marks(t));
     }
     if let Some(name) = between(t, "<command-name>", "</command-name>") {
         let args = between(t, "<command-args>", "</command-args>").unwrap_or_default();
@@ -377,6 +377,26 @@ fn typed(t: &str) -> Option<String> {
         return (!out.is_empty()).then_some(out);
     }
     None
+}
+
+/// Text without the `[Image #2]` marks Claude Code leaves where a picture
+/// was pasted; the pictures themselves come in as attachments.
+fn without_image_marks(t: &str) -> String {
+    let mut out = String::new();
+    let mut rest = t;
+    while let Some(at) = rest.find("[Image #") {
+        let tail = &rest[at + 8..];
+        let digits = tail.chars().take_while(char::is_ascii_digit).count();
+        if digits > 0 && tail[digits..].starts_with(']') {
+            out.push_str(&rest[..at]);
+            rest = &tail[digits + 1..];
+        } else {
+            out.push_str(&rest[..at + 8]);
+            rest = tail;
+        }
+    }
+    out.push_str(rest);
+    out.trim().to_string()
 }
 
 /// Text without terminal colour codes.
@@ -434,7 +454,7 @@ mod tests {
 {"type":"assistant","uuid":"a1","message":{"model":"m","content":[{"type":"text","text":"On it."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}
 {"type":"user","uuid":"r1","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"a.txt"}]}}
 {"type":"user","uuid":"s1","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}
-{"type":"user","uuid":"u2","message":{"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}},{"type":"text","text":"Like this"}]}}
+{"type":"user","uuid":"u2","message":{"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}},{"type":"text","text":"Like this [Image #1]"}]}}
 {"type":"assistant","uuid":"x1","isApiErrorMessage":true,"message":{"model":"<synthetic>","content":[{"type":"text","text":"You've hit your limit"}]}}
 {"type":"system","subtype":"compact_boundary","uuid":"c1"}
 {"type":"user","isCompactSummary":true,"uuid":"c2","message":{"content":"This session is being continued"}}
