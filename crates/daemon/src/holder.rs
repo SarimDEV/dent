@@ -141,6 +141,11 @@ pub async fn connect(
 /// a thread reaps it if it exits while we're still running.
 fn launch(dir: &Path, start: &Start) -> Result<()> {
     std::fs::create_dir_all(dir)?;
+    // Logs rotate by size, one old file kept.
+    let path = dir.join("holder.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 5 * 1024 * 1024) {
+        let _ = std::fs::rename(&path, dir.join("holder.log.1"));
+    }
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

@@ -211,6 +211,11 @@ fn start_daemon(state: &Path) -> Result<(), String> {
         ));
     }
     std::fs::create_dir_all(state).map_err(|e| e.to_string())?;
+    // Logs rotate by size, one old file kept.
+    let path = state.join("daemon.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 5 * 1024 * 1024) {
+        let _ = std::fs::rename(&path, state.join("daemon.log.1"));
+    }
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
