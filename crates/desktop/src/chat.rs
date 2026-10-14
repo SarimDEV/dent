@@ -1057,6 +1057,15 @@ impl Dent {
                                 false,
                                 cx,
                             ))
+                            .when(self.chat_w >= 620., |d| {
+                                d.child(self.chip(
+                                    Menu::SessionEffort,
+                                    "gauge",
+                                    effort_label(s.effort.as_deref()),
+                                    s.effort.is_none(),
+                                    cx,
+                                ))
+                            })
                             .child(div().flex_1())
                             .when_some(
                                 s.context.filter(|_| self.chat_w >= 680.),
@@ -1297,7 +1306,14 @@ impl Dent {
             .ml(px(-space::S2))
             .child(self.chip(Menu::Project, "folder", &project, d.project.is_none(), cx))
             .child(self.chip(Menu::Model, "sparkle", &model, false, cx))
-            .child(self.chip(Menu::Permission, "shield", d.permission.label(), false, cx));
+            .child(self.chip(Menu::Permission, "shield", d.permission.label(), false, cx))
+            .child(self.chip(
+                Menu::Effort,
+                "gauge",
+                effort_label(d.effort.as_deref()),
+                d.effort.is_none(),
+                cx,
+            ));
         let start = div()
             .id("start")
             .relative()
@@ -1570,6 +1586,37 @@ impl Dent {
                     })
                     .collect()
             }
+            Menu::Effort | Menu::SessionEffort => {
+                let current = if which == Menu::Effort {
+                    d.effort.clone()
+                } else {
+                    self.current().and_then(|s| s.effort.clone())
+                };
+                EFFORTS
+                    .iter()
+                    .map(|(value, note)| {
+                        let v = value.map(str::to_string);
+                        menu_row(
+                            &self.probes,
+                            format!("m-effort-{}", value.unwrap_or("default")),
+                            effort_label(*value),
+                            Some(note.to_string()),
+                            current.as_deref() == *value,
+                            &t,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if which == Menu::Effort {
+                                this.defaults.effort = v.clone();
+                            } else {
+                                this.set_effort(v.clone(), cx);
+                            }
+                            this.menu = None;
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                    })
+                    .collect()
+            }
         };
         floating(&t)
             .id("menu")
@@ -1593,6 +1640,28 @@ pub fn duration(secs: u64) -> String {
 
 fn home() -> String {
     std::env::var("HOME").unwrap_or_default()
+}
+
+/// Effort levels, with what each is for.
+const EFFORTS: [(Option<&str>, &str); 6] = [
+    (None, "The model's own default"),
+    (Some("low"), "Fastest; for quick questions"),
+    (Some("medium"), "Balanced"),
+    (Some("high"), "Thinks harder before acting"),
+    (Some("xhigh"), "For tricky problems"),
+    (Some("max"), "Thinks longest; uses the most"),
+];
+
+pub fn effort_label(e: Option<&str>) -> &'static str {
+    match e {
+        None => "Default effort",
+        Some("low") => "Low effort",
+        Some("medium") => "Medium effort",
+        Some("high") => "High effort",
+        Some("xhigh") => "Extra high effort",
+        Some("max") => "Max effort",
+        Some(_) => "Custom effort",
+    }
 }
 
 /// What each permission mode lets the agent do, in a line.

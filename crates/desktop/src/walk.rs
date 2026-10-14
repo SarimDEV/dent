@@ -649,17 +649,46 @@ fn checks() -> Vec<(f32, Act)> {
     ]);
     v.extend(new_session("make a plan please"));
     v.extend([
-        (0.1, Until("the agent's plan shows above the composer", |d, _| current(d).is_some_and(|s| s.todos.len() == 3 && s.todos.iter().any(|(st, ..)| st == "in_progress")), 10.)),
-        (0.2, Call(|d, _, cx| {
-            d.plan_open = true;
-            cx.notify();
-        })),
+        (
+            0.1,
+            Until(
+                "the agent's plan shows above the composer",
+                |d, _| {
+                    current(d).is_some_and(|s| {
+                        s.todos.len() == 3 && s.todos.iter().any(|(st, ..)| st == "in_progress")
+                    })
+                },
+                10.,
+            ),
+        ),
+        (
+            0.2,
+            Call(|d, _, cx| {
+                d.plan_open = true;
+                cx.notify();
+            }),
+        ),
         (0.4, Shot("plan")),
-        (0.1, Until("the plan moves along and the turn ends", |d, _| status_is(d, Status::Done) && current(d).is_some_and(|s| s.todos.iter().filter(|(st, ..)| st == "completed").count() == 1), 10.)),
-        (0.1, Call(|d, _, cx| {
-            d.plan_open = false;
-            cx.notify();
-        })),
+        (
+            0.1,
+            Until(
+                "the plan moves along and the turn ends",
+                |d, _| {
+                    status_is(d, Status::Done)
+                        && current(d).is_some_and(|s| {
+                            s.todos.iter().filter(|(st, ..)| st == "completed").count() == 1
+                        })
+                },
+                10.,
+            ),
+        ),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                d.plan_open = false;
+                cx.notify();
+            }),
+        ),
     ]);
     v.extend(new_session("write first.md please"));
     v.extend([

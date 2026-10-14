@@ -283,6 +283,7 @@ pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
         machine: cx.machine.to_string(),
         agent: format!("Claude · {}", model_name(cx.models, v.model.as_deref())),
         model: v.model.clone(),
+        effort: v.effort.clone(),
         permission: v.permission,
         status,
         detail: detail(v),

@@ -117,11 +117,14 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             cwd,
             model,
             permission,
+            effort,
             id,
             text,
             attachments,
         } => Reply::Created {
-            session: d.create(cwd, model, permission, id, text, attachments).await?,
+            session: d
+                .create(cwd, model, permission, effort, id, text, attachments)
+                .await?,
         },
         Request::Send {
             session,
@@ -171,6 +174,10 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             permission,
         } => {
             d.command(&session, Op::SetPermission(permission)).await?;
+            Reply::Ok
+        }
+        Request::SetEffort { session, effort } => {
+            d.command(&session, Op::SetEffort(effort)).await?;
             Reply::Ok
         }
         Request::Rename { session, title } => {

@@ -19,6 +19,7 @@ pub fn argv(
     model: Option<&str>,
     permission: Permission,
     start: &Start,
+    effort: Option<&str>,
 ) -> Vec<String> {
     let mut v: Vec<String> = [
         "/usr/bin/env",
@@ -55,6 +56,9 @@ pub fn argv(
     }
     if let Some(m) = model {
         v.extend(["--model".into(), m.into()]);
+    }
+    if let Some(e) = effort {
+        v.extend(["--effort".into(), e.into()]);
     }
     match start {
         Start::Fresh(id) => v.extend(["--session-id".into(), id.clone()]),

@@ -63,6 +63,7 @@ pub enum Op {
     },
     SetModel(String),
     SetPermission(Permission),
+    SetEffort(String),
     Rename(String),
     Close,
     Reopen,
@@ -110,6 +111,10 @@ struct Session {
     id: String,
     cwd: String,
     model: Option<String>,
+    effort: Option<String>,
+    /// A setting that only takes effect in a new agent process changed
+    /// while a turn ran: start a new one once it ends.
+    respawn: bool,
     permission: Permission,
     agent_session: Option<String>,
     status: Status,
@@ -149,6 +154,8 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
         id: row.id.clone(),
         cwd: row.cwd.clone(),
         model: row.model.clone(),
+        effort: None,
+        respawn: false,
         permission: row.permission,
         agent_session: row.agent_session.clone(),
         status: row.status,
@@ -230,6 +237,9 @@ impl Session {
                     self.settled = settled(&outcome);
                 }
                 Body::Background { tasks } => self.background = tasks,
+                Body::Settings {
+                    effort: Some(e), ..
+                } => self.effort = (!e.is_empty()).then_some(e),
                 Body::Context { used, max } => {
                     self.context = Some(used);
                     self.max_context = max.or(self.max_context);
@@ -330,6 +340,7 @@ impl Session {
                 }
                 self.model = Some(model.clone());
                 self.log(Body::Settings {
+                    effort: None,
                     model: Some(model),
                     permission: None,
                     title: None,
@@ -344,14 +355,33 @@ impl Session {
                 }
                 self.permission = p;
                 self.log(Body::Settings {
+                    effort: None,
                     model: None,
                     permission: Some(p),
                     title: None,
                 });
                 Ok(())
             }
+            Op::SetEffort(effort) => {
+                self.effort = (!effort.is_empty()).then(|| effort.clone());
+                self.log(Body::Settings {
+                    effort: Some(effort),
+                    model: None,
+                    permission: None,
+                    title: None,
+                });
+                // Effort is fixed when the agent starts: start a fresh process,
+                // now or once this turn ends; it resumes the same conversation.
+                if self.in_turn {
+                    self.respawn = true;
+                } else {
+                    self.retire_proc().await;
+                }
+                Ok(())
+            }
             Op::Rename(title) => {
                 self.log(Body::Settings {
+                    effort: None,
                     model: None,
                     permission: None,
                     title: Some(title),
@@ -376,6 +406,9 @@ impl Session {
                 bytes,
             } => {
                 self.output(&proc, err, off, &bytes);
+                if self.respawn && !self.in_turn {
+                    self.retire_proc().await;
+                }
                 if !self.in_turn && self.asked.is_empty() && !self.held.is_empty() {
                     self.deliver_held().await;
                 }
@@ -551,12 +584,7 @@ impl Session {
         self.resume_at = Some(resume_point(&events[..at]));
         // The running process holds the whole conversation; the next message
         // starts one that picks up at the rewind.
-        if let Some(p) = self.proc.take() {
-            let _ = self.d.store().clear_proc(&self.id);
-            if let Ok(h) = self.d.holder().await {
-                let _ = h.stop(&p.id, Duration::from_secs(1)).await;
-            }
-        }
+        self.retire_proc().await;
         self.idle_at = None;
         for (id, _, _) in std::mem::take(&mut self.held) {
             self.log(Body::Unqueued { id });
@@ -564,6 +592,17 @@ impl Session {
         self.settled = Status::Done;
         self.log(Body::Rewound { to, files });
         Ok(())
+    }
+
+    /// Let go of the agent process; the next message starts a new one.
+    async fn retire_proc(&mut self) {
+        self.respawn = false;
+        if let Some(p) = self.proc.take() {
+            let _ = self.d.store().clear_proc(&self.id);
+            if let Ok(h) = self.d.holder().await {
+                let _ = h.stop(&p.id, Duration::from_secs(1)).await;
+            }
+        }
     }
 
     async fn ensure_proc(&mut self) -> Result<()> {
@@ -610,6 +649,7 @@ impl Session {
             self.model.as_deref(),
             self.permission,
             &start,
+            self.effort.as_deref(),
         );
         h.spawn(&proc, argv, Some(self.cwd.clone().into()), Vec::new())
             .await?;
@@ -775,6 +815,7 @@ impl Session {
                     self.permission = p;
                     self.log_from(
                         Body::Settings {
+                            effort: None,
                             model: None,
                             permission: Some(p),
                             title: None,

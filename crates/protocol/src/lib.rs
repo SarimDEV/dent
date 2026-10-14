@@ -52,6 +52,10 @@ pub enum Body {
         permission: Option<Permission>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+        /// How hard the agent thinks: low, medium, high, xhigh or max.
+        /// Empty means the agent's default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
     },
     /// Something the person sent. `id` is the client's, so a resend after a
     /// reconnect is recognised and never runs twice.
@@ -337,6 +341,8 @@ pub enum Request {
         model: Option<String>,
         #[serde(default)]
         permission: Permission,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
         /// The first message; its id, as for [`Request::Send`].
         id: String,
         text: String,
@@ -384,6 +390,11 @@ pub enum Request {
     SetPermission {
         session: SessionId,
         permission: Permission,
+    },
+    /// low, medium, high, xhigh or max; empty for the agent's default.
+    SetEffort {
+        session: SessionId,
+        effort: String,
     },
     Rename {
         session: SessionId,

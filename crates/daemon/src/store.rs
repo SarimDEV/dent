@@ -282,6 +282,7 @@ fn project(tx: &rusqlite::Transaction<'_>, session: &str, at: u64, body: &Body) 
             model,
             permission,
             title,
+            ..
         } => {
             if let Some(m) = model {
                 tx.execute(

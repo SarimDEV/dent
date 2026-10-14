@@ -265,6 +265,7 @@ impl Client {
             cwd: cwd.into(),
             model: None,
             permission,
+            effort: None,
             id: format!("m-{text}"),
             text: text.into(),
             attachments: Vec::new(),
@@ -867,4 +868,37 @@ fn rewinding_restores_files_and_picks_the_conversation_up_there() {
     let last = c.text(&s);
     let last = last.lines().last().unwrap_or_default();
     assert!(last.contains("--session-id") && !last.contains("--resume"), "{last}");
+}
+
+#[test]
+fn effort_reaches_the_agent_and_changing_it_starts_a_new_process() {
+    let w = World::new(&[]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = match c.call(Request::Create {
+        cwd: w.cwd(),
+        model: None,
+        permission: Permission::Ask,
+        effort: Some("low".into()),
+        id: "e1".into(),
+        text: "tell me your args".into(),
+        attachments: Vec::new(),
+    }) {
+        Ok(Out::Reply {
+            reply: dent_protocol::Reply::Created { session },
+        }) => session,
+        other => panic!("{other:?}"),
+    };
+    c.wait_turns(&s, 1);
+    assert!(c.text(&s).contains("--effort low"), "{}", c.text(&s));
+    c.call(Request::SetEffort {
+        session: s.clone(),
+        effort: "max".into(),
+    })
+    .unwrap();
+    c.say(&s, "e2", "your args again", false);
+    c.wait_turns(&s, 2);
+    let last = c.text(&s);
+    let last = last.lines().last().unwrap_or_default();
+    assert!(last.contains("--effort max") && last.contains("--resume"), "{last}");
 }

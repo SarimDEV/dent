@@ -262,6 +262,7 @@ impl Daemon {
         cwd: String,
         model: Option<String>,
         permission: Permission,
+        effort: Option<String>,
         id: String,
         text: String,
         attachments: Vec<String>,
@@ -281,6 +282,18 @@ impl Daemon {
             },
             None,
         )?;
+        if let Some(e) = effort.filter(|e| !e.is_empty()) {
+            self.append(
+                &session,
+                Body::Settings {
+                    model: None,
+                    permission: None,
+                    title: None,
+                    effort: Some(e),
+                },
+                None,
+            )?;
+        }
         let row = self
             .store()
             .session(&session)?

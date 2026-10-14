@@ -140,6 +140,7 @@ pub struct Session {
     pub agent: String,
     pub model: Option<String>,
     pub permission: Permission,
+    pub effort: Option<String>,
     pub status: Status,
     /// What it is doing, or what it wants, in plain words.
     pub detail: String,

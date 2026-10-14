@@ -25,6 +25,8 @@ pub struct SessionView {
     pub agent: String,
     pub model: Option<String>,
     pub permission: Permission,
+    /// The agent's effort level, when not its default.
+    pub effort: Option<String>,
     pub status: Status,
     pub closed: bool,
     pub created: u64,
@@ -293,7 +295,11 @@ impl SessionView {
                 model,
                 permission,
                 title,
+                effort,
             } => {
+                if let Some(e) = effort {
+                    self.effort = (!e.is_empty()).then(|| e.clone());
+                }
                 if let Some(m) = model {
                     self.model = Some(m.clone());
                 }

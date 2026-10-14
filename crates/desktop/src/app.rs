@@ -98,15 +98,20 @@ pub enum Menu {
     Project,
     Model,
     Permission,
+    Effort,
     /// The open session's model and permissions, switchable mid-session.
     SessionModel,
     SessionPermission,
+    SessionEffort,
 }
 
 impl Menu {
     /// Menus under the composer open upward.
     pub fn upward(self) -> bool {
-        matches!(self, Menu::SessionModel | Menu::SessionPermission)
+        matches!(
+            self,
+            Menu::SessionModel | Menu::SessionPermission | Menu::SessionEffort
+        )
     }
 }
 
@@ -183,6 +188,8 @@ pub struct Defaults {
     pub project_picked: bool,
     pub model: Option<String>,
     pub permission: Permission,
+    /// The agent's effort level; `None` is its default.
+    pub effort: Option<String>,
 }
 
 /// What a request's reply is for.
@@ -475,6 +482,7 @@ impl Dent {
                 project_picked: false,
                 model: None,
                 permission: Permission::Ask,
+                effort: None,
             },
             menu: None,
             toast: None,
@@ -1196,6 +1204,7 @@ impl Dent {
             cwd,
             model: d.model,
             permission: d.permission,
+            effort: d.effort,
             id: crate::message_id(),
             text,
             attachments: std::mem::take(&mut self.attachments)
@@ -1467,6 +1476,17 @@ impl Dent {
             });
         }
         self.defaults.model = Some(model);
+        cx.notify();
+    }
+
+    pub fn set_effort(&mut self, effort: Option<String>, cx: &mut Context<Self>) {
+        if let Some(id) = self.selected.clone() {
+            self.live.send(Request::SetEffort {
+                session: id,
+                effort: effort.clone().unwrap_or_default(),
+            });
+        }
+        self.defaults.effort = effort;
         cx.notify();
     }
 
