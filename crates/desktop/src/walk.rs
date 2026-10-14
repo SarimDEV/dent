@@ -466,6 +466,26 @@ fn checks() -> Vec<(f32, Act)> {
             ),
         ),
         (0.1, Type(Field::Composer, "")),
+        (0.2, Type(Field::Composer, "look at @read")),
+        (
+            0.1,
+            Until(
+                "typing @ offers the project's files",
+                |d, cx| d.completions(cx).1.iter().any(|c| c.name == "README.md"),
+                5.,
+            ),
+        ),
+        (0.3, Shot("mention")),
+        (0.1, Key("tab")),
+        (
+            0.1,
+            Until(
+                "Tab puts the file in the message",
+                |d, cx| d.composer.read(cx).value() == "look at @README.md ",
+                3.,
+            ),
+        ),
+        (0.1, Type(Field::Composer, "")),
         (
             0.1,
             Call(|d, w, cx| {

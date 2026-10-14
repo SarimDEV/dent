@@ -1352,7 +1352,7 @@ impl Dent {
     /// Commands matching a `/word` in the composer, above it.
     fn slash_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = self.t;
-        let hits = self.slash_matches(cx);
+        let (mention, hits) = self.completions(cx);
         if hits.is_empty() {
             return None;
         }

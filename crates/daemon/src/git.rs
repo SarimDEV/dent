@@ -62,6 +62,53 @@ pub fn changes(dir: &Path) -> Vec<FileChange> {
     files
 }
 
+/// Files in a folder for @ mentions: what git tracks plus untracked files
+/// it doesn't ignore; outside git, a shallow walk.
+pub fn files(dir: &Path, cap: usize) -> Vec<String> {
+    if let Some(out) = git(
+        dir,
+        &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+    ) {
+        return out
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .take(cap)
+            .map(str::to_owned)
+            .collect();
+    }
+    let mut out = Vec::new();
+    let mut stack = vec![(dir.to_path_buf(), 0)];
+    while let Some((d, depth)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || name == "node_modules" || name == "target" {
+                continue;
+            }
+            if p.is_dir() {
+                if depth < 4 {
+                    stack.push((p, depth + 1));
+                }
+            } else if let Ok(rel) = p.strip_prefix(dir) {
+                out.push(rel.display().to_string());
+                if out.len() >= cap {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// One [`FileChange`] per `diff --git` section.
 fn split(diff: &str) -> Vec<FileChange> {
     let mut out: Vec<FileChange> = Vec::new();

@@ -458,6 +458,11 @@ pub enum Request {
     Changes {
         session: SessionId,
     },
+    /// Files in the session's directory, for @ mentions: tracked and
+    /// untracked, ignoring what git ignores, at most a few thousand.
+    Files {
+        session: SessionId,
+    },
     /// A file in the session's directory, for the viewer.
     ReadFile {
         session: SessionId,
@@ -531,6 +536,10 @@ pub enum Reply {
     },
     Changes {
         files: Vec<FileChange>,
+    },
+    /// Paths relative to the session's folder.
+    Files {
+        paths: Vec<String>,
     },
     File {
         bytes_b64: String,

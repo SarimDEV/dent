@@ -226,6 +226,7 @@ type SearchText = ((usize, u64), Rc<str>);
 /// What a request's reply is for.
 enum Waiting {
     Models,
+    Files(String),
     Recent,
     Usage,
     Commands(String),
@@ -285,6 +286,8 @@ pub struct Dent {
     pub recent: Vec<RecentSession>,
     /// The account's usage, as the provider last reported it, and when.
     pub usage: Option<(Vec<dent_protocol::Window>, u64)>,
+    /// Each session's files, for @ mentions.
+    pub files: HashMap<String, Rc<Vec<String>>>,
     /// Slash commands the agent offers, by session.
     pub commands: HashMap<String, Vec<Command>>,
     /// What was last written to the prefs file.
@@ -628,6 +631,7 @@ impl Dent {
             creating: false,
             rewinding: None,
             commands: HashMap::new(),
+            files: HashMap::new(),
             usage: None,
             recent: Vec::new(),
             slash_ix: 0,
@@ -784,6 +788,13 @@ impl Dent {
             && !self.commands.contains_key(&new)
         {
             self.fetch_commands(&new);
+        }
+        if let Some(new) = id.clone() {
+            // Files change as the agent works: look again on each visit.
+            let n = self.live.send(Request::Files {
+                session: new.clone(),
+            });
+            self.waiting.insert(n, Waiting::Files(new));
         }
         if let Some(new) = id.clone()
             && !self.changes.contains_key(&new)
@@ -983,6 +994,14 @@ impl Dent {
                 },
             ) => self.recent = sessions,
             (
+                Waiting::Files(id),
+                Out::Reply {
+                    reply: Reply::Files { paths },
+                },
+            ) => {
+                self.files.insert(id, Rc::new(paths));
+            }
+            (
                 Waiting::Usage,
                 Out::Reply {
                     reply: Reply::Usage { windows, at },
@@ -1053,16 +1072,20 @@ impl Dent {
             && matches!(k.key.as_str(), "up" | "down" | "tab" | "enter")
             && self.composer.read(cx).focus_handle(cx).is_focused(window)
         {
-            let hits = self.slash_matches(cx);
+            let (mention, hits) = self.completions(cx);
             let typed = self.composer.read(cx).value().to_string();
-            let exact = hits.iter().any(|c| typed == format!("/{}", c.name));
+            let exact = !mention && hits.iter().any(|c| typed == format!("/{}", c.name));
             if !hits.is_empty() && !(k.key == "enter" && exact) {
                 match k.key.as_str() {
                     "up" => self.slash_ix = self.slash_ix.saturating_sub(1),
                     "down" => self.slash_ix = (self.slash_ix + 1).min(hits.len() - 1),
                     _ => {
                         let pick = hits[self.slash_ix.min(hits.len() - 1)].name.clone();
-                        self.complete_slash(&pick, window, cx);
+                        if mention {
+                            self.complete_mention(&pick, window, cx);
+                        } else {
+                            self.complete_slash(&pick, window, cx);
+                        }
                     }
                 }
                 cx.notify();
@@ -1210,6 +1233,71 @@ impl Dent {
             .collect();
         hits.sort_by_key(|(rank, c)| (*rank, c.name.len()));
         hits.into_iter().take(8).map(|(_, c)| c.clone()).collect()
+    }
+
+    /// What the composer could complete: an `@file` being typed at its end,
+    /// or a lone `/command`. True for mentions.
+    pub fn completions(&self, cx: &App) -> (bool, Vec<Command>) {
+        let slash = self.slash_matches(cx);
+        if !slash.is_empty() {
+            return (false, slash);
+        }
+        let text = self.composer.read(cx).value().to_string();
+        let tail = text.rsplit(char::is_whitespace).next().unwrap_or_default();
+        let Some(q) = tail.strip_prefix('@') else {
+            return (true, Vec::new());
+        };
+        let Some(files) = self.selected.as_ref().and_then(|s| self.files.get(s)) else {
+            return (true, Vec::new());
+        };
+        let q = q.to_lowercase();
+        // Name starts with it, then name contains it, then the path, then
+        // the letters in order anywhere.
+        let mut hits: Vec<(u8, usize, &String)> = files
+            .iter()
+            .filter_map(|p| {
+                let lower = p.to_lowercase();
+                let name = lower.rsplit('/').next().unwrap_or(&lower);
+                let rank = if q.is_empty() {
+                    3
+                } else if name.starts_with(&q) {
+                    0
+                } else if name.contains(&q) {
+                    1
+                } else if lower.contains(&q) {
+                    2
+                } else {
+                    let mut it = lower.chars();
+                    if !q.chars().all(|c| it.any(|x| x == c)) {
+                        return None;
+                    }
+                    3
+                };
+                Some((rank, p.len(), p))
+            })
+            .collect();
+        hits.sort();
+        let list = hits
+            .into_iter()
+            .take(8)
+            .map(|(_, _, p)| Command {
+                name: p.clone(),
+                description: String::new(),
+                hint: String::new(),
+            })
+            .collect();
+        (true, list)
+    }
+
+    /// Put an @-mentioned file in place of what was typed after the @.
+    pub fn complete_mention(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.composer.read(cx).value().to_string();
+        let cut = text.rfind('@').unwrap_or(text.len());
+        let value = format!("{}@{path} ", &text[..cut]);
+        self.composer
+            .update(cx, |c, cx| c.set_value(value, window, cx));
+        self.slash_ix = 0;
+        cx.notify();
     }
 
     /// Put the chosen command in the composer, ready for its arguments.

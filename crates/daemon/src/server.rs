@@ -252,6 +252,13 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
                 tokio::task::spawn_blocking(move || crate::git::changes(Path::new(&cwd))).await?;
             Reply::Changes { files }
         }
+        Request::Files { session } => {
+            let cwd = cwd_of(d, &session)?;
+            let paths =
+                tokio::task::spawn_blocking(move || crate::git::files(Path::new(&cwd), 20_000))
+                    .await?;
+            Reply::Files { paths }
+        }
         Request::ReadFile { session, path } => {
             let cwd = cwd_of(d, &session)?;
             let bytes =
