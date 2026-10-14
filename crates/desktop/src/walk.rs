@@ -733,6 +733,8 @@ fn checks() -> Vec<(f32, Act)> {
                 && current(d).is_some_and(|s| !s.servers.is_empty() && matches!(d.tab(s), Tab::Art(a) if d.art(a).is_some_and(|a| a.kind == crate::data::Kind::Server)))
         }, 10.)),
         (1.5, Shot("dev-server")),
+        (0.1, Page("window.ipc.postMessage(JSON.stringify({t:'probe', msg: document.title}))")),
+        (0.1, Until("the live page talks back", |d, _| d.page_probe.as_deref() == Some("Dev"), 3.)),
     ]);
     v.extend(new_session("use a subagent please"));
     v.extend([(
