@@ -726,6 +726,45 @@ fn checks() -> Vec<(f32, Act)> {
         (0.1, Key("enter")),
         (0.1, Until("a dropped picture goes with the message", |d, _| has(d, |i| matches!(i, Item::User { text: t, .. } if t.contains("Attached") && t.contains("red.png"))) && status_is(d, Status::Done), 10.)),
     ]);
+    v.extend(new_session("this will fail"));
+    v.extend([
+        (
+            0.1,
+            Until(
+                "a failed turn says what went wrong",
+                |d, _| {
+                    status_is(d, Status::Needs)
+                        && has(d, |i| {
+                            matches!(
+                                i,
+                                Item::Note {
+                                    icon: "circle-alert",
+                                    ..
+                                }
+                            )
+                        })
+                },
+                10.,
+            ),
+        ),
+        (0.2, Click("retry-2")),
+        (
+            0.1,
+            Until(
+                "Try again sends the message again",
+                |d, _| {
+                    current(d).is_some_and(|s| {
+                        s.items
+                            .iter()
+                            .filter(|i| matches!(i, Item::User { .. }))
+                            .count()
+                            == 2
+                    })
+                },
+                10.,
+            ),
+        ),
+    ]);
     v.extend(new_session("start the dev server please"));
     v.extend([
         (0.1, Until("a dev server it starts gets a live page", |d, _| {

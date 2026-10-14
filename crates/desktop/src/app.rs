@@ -1687,6 +1687,28 @@ impl Dent {
         cx.notify();
     }
 
+    /// Send the last message again, after a turn that failed.
+    pub fn retry(&mut self, id: &str, cx: &mut Context<Self>) {
+        let last = self.session(id).and_then(|s| {
+            s.items.iter().rev().find_map(|i| match i {
+                Item::User { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+        });
+        if let Some(text) = last {
+            // Attachment lines were shown, not sent as text.
+            let words: Vec<&str> = text.lines().filter(|l| !l.starts_with("› ")).collect();
+            self.live.send(Request::Send {
+                session: id.to_string(),
+                id: crate::message_id(),
+                text: words.join("\n"),
+                steer: false,
+                attachments: Vec::new(),
+            });
+            cx.notify();
+        }
+    }
+
     /// A waiting message goes into the running turn now instead.
     pub fn steer_queued(&mut self, id: &str, msg: &str, text: &str, cx: &mut Context<Self>) {
         self.live.send(Request::Unqueue {

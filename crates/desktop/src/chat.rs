@@ -807,6 +807,23 @@ impl Dent {
                         .child(icon(name, 13., t.quiet)),
                 )
                 .child(div().flex_1().min_w_0().child(text.clone()))
+                // The last thing that went wrong can be tried again.
+                .when(
+                    *name == "circle-alert"
+                        && s.status != Status::Working
+                        && !s.items[ix + 1..]
+                            .iter()
+                            .any(|i| matches!(i, Item::User { .. })),
+                    |d| {
+                        let sid = s.id.clone();
+                        d.child(
+                            ghost(SharedString::from(format!("retry-{ix}")), "Try again", &t)
+                                .relative()
+                                .on_click(cx.listener(move |this, _, _, cx| this.retry(&sid, cx)))
+                                .child(probe(&self.probes, format!("retry-{ix}"))),
+                        )
+                    },
+                )
                 .into_any_element(),
             Item::Queued { id: msg, text } => {
                 let (sid, msg, back) = (s.id.clone(), msg.clone(), text.clone());
