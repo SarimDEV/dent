@@ -59,7 +59,11 @@ impl Dent {
             .map(|a| {
                 (
                     Tab::Art(a.id),
-                    a.path.rsplit('/').next().unwrap_or(a.path).to_string(),
+                    if a.kind == Kind::Server {
+                        a.title.trim_start_matches("Dev server · ").to_string()
+                    } else {
+                        a.path.rsplit('/').next().unwrap_or(a.path).to_string()
+                    },
                     a.kind.icon(),
                 )
             })

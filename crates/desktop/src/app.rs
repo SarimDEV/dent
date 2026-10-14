@@ -194,6 +194,32 @@ pub struct Defaults {
     pub effort: Option<String>,
 }
 
+/// A dev server's address as the web view can load it. WebKit won't load
+/// `localhost` by name here, but loads an address: whichever of IPv4 and
+/// IPv6 the server answers on.
+fn reachable(url: &str) -> String {
+    let Some(rest) = url.strip_prefix("http://localhost:") else {
+        return url.to_string();
+    };
+    let port: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let Ok(p) = port.parse::<u16>() else {
+        return url.to_string();
+    };
+    let tail = &rest[port.len()..];
+    let answers = |addr: std::net::SocketAddr| {
+        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(150)).is_ok()
+    };
+    let host = if answers(([127, 0, 0, 1], p).into()) {
+        "127.0.0.1"
+    } else if answers((std::net::Ipv6Addr::LOCALHOST, p).into()) {
+        "[::1]"
+    } else {
+        // Not up yet: IPv4 is the usual answer.
+        "127.0.0.1"
+    };
+    format!("http://{host}:{p}{tail}")
+}
+
 /// A session's search text, with the size it was made at.
 type SearchText = ((usize, u64), Rc<str>);
 
@@ -1235,6 +1261,23 @@ impl Dent {
         } else {
             Vec::new()
         };
+        // Its dev servers are pages too: live, with no versions.
+        for url in &s.servers {
+            let id = crate::bridge::art_id(&s.id, url);
+            if !self.arts.iter().any(|a| a.id == id) {
+                self.arts.push(Artifact {
+                    id,
+                    kind: crate::data::Kind::Server,
+                    title: crate::data::intern(&format!(
+                        "Dev server · {}",
+                        url.trim_start_matches("http://").trim_end_matches('/')
+                    )),
+                    path: crate::data::intern(&reachable(url)),
+                    dir: None,
+                    versions: Vec::new(),
+                });
+            }
+        }
         // New versions of what it made show straight away when followed.
         for a in arts {
             match self.arts.iter_mut().find(|x| x.id == a.id) {

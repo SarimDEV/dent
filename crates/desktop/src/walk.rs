@@ -726,6 +726,14 @@ fn checks() -> Vec<(f32, Act)> {
         (0.1, Key("enter")),
         (0.1, Until("a dropped picture goes with the message", |d, _| has(d, |i| matches!(i, Item::User { text: t, .. } if t.contains("Attached") && t.contains("red.png"))) && status_is(d, Status::Done), 10.)),
     ]);
+    v.extend(new_session("start the dev server please"));
+    v.extend([
+        (0.1, Until("a dev server it starts gets a live page", |d, _| {
+            status_is(d, Status::Done)
+                && current(d).is_some_and(|s| !s.servers.is_empty() && matches!(d.tab(s), Tab::Art(a) if d.art(a).is_some_and(|a| a.kind == crate::data::Kind::Server)))
+        }, 10.)),
+        (1.5, Shot("dev-server")),
+    ]);
     v.extend(new_session("use a subagent please"));
     v.extend([(
         0.1,

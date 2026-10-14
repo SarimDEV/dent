@@ -231,6 +231,9 @@ impl Preview {
             .with_initialization_script(SCRIPT)
             // Pages stay on their own origin; anything else opens in the browser.
             .with_navigation_handler(move |url| {
+                if std::env::var_os("DENT_DEBUG_WEB").is_some() {
+                    eprintln!("web: navigate {url}");
+                }
                 let own = url.starts_with("dent:")
                     || url.starts_with("about:")
                     || url.starts_with("data:")
@@ -417,7 +420,10 @@ impl Preview {
             Source::Server(url) => url.clone(),
         };
         self.showing = Some(src);
-        let _ = self.web.load_url(&url);
+        let r = self.web.load_url(&url);
+        if std::env::var_os("DENT_DEBUG_WEB").is_some() {
+            eprintln!("web: load {url} -> {r:?}");
+        }
     }
 
     pub fn reload(&mut self) {

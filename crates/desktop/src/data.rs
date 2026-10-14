@@ -159,6 +159,8 @@ pub struct Session {
     pub made_sig: usize,
     /// The agent's plan, as its latest todo list: (state, what, doing-form).
     pub todos: Vec<(String, String, String)>,
+    /// Dev servers it started, by address.
+    pub servers: Vec<String>,
     /// Messages with a snapshot of the files from just before them.
     pub checkpoints: std::collections::HashSet<String>,
     /// Tokens in context, and the window's size when known.
@@ -190,6 +192,7 @@ impl Session {
             terminal: Vec::new(),
             context: None,
             checkpoints: Default::default(),
+            servers: Vec::new(),
             made_sig: 0,
             todos: Vec::new(),
         }

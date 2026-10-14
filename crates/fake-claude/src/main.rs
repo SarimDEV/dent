@@ -10,6 +10,7 @@
 //! - `write <path>`: writes the file in its directory (asks first in Ask mode)
 //! - `background`: starts background work, ends the turn, then follows up
 //! - `subagent`: a Task call whose steps nest under it
+//! - `dev server`: serves a page on a free port and prints its address
 //! - `long`: a long reply, for stopping halfway
 //! - `fail`: the turn errors
 //! - `crash`: the process exits mid-turn
@@ -426,6 +427,44 @@ impl Agent {
         if lower.contains("crash") {
             self.say("Starting on that now, ", None)?;
             std::process::exit(3);
+        }
+        if lower.contains("dev server") {
+            // A real little server, so a preview has something to show.
+            let listener = std::net::TcpListener::bind("localhost:0").map_err(|_| Cut::Closed)?;
+            let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let mut stream = stream;
+                    let mut buf = [0u8; 1024];
+                    let _ = std::io::Read::read(&mut stream, &mut buf);
+                    let body = "<!doctype html><title>Dev</title><body style=\"font:16px system-ui;margin:40px\"><h1>Admin dashboard</h1><p>Served by the dev server.</p></body>";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
+            });
+            let id = self.tool(
+                "Bash",
+                json!({"command": "npm run dev", "run_in_background": true}),
+                None,
+            );
+            self.pause(300)?;
+            self.result(
+                &id,
+                &format!(
+                    "> vite\n\n  VITE ready in 312 ms\n\n  ➜  Local:   http://localhost:{port}/\n"
+                ),
+                false,
+                None,
+            );
+            self.say(
+                &format!("The dev server is up at http://localhost:{port}/."),
+                None,
+            )?;
+            self.end("done", false);
+            return Ok(());
         }
         if lower.contains("make a plan") {
             let todo = |done: usize| {

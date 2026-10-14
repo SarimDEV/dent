@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Embedded in the binary, so a development build loads dev-server
+     previews over plain http on this machine, as dent.app does. -->
+<plist version="1.0">
+<dict>
+  <key>NSAppTransportSecurity</key>
+  <dict><key>NSAllowsLocalNetworking</key><true/></dict>
+</dict>
+</plist>

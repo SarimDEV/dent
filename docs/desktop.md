@@ -50,7 +50,7 @@ The viewer shows, as tabs, everything the open session made or changed ([0037](d
   - **Widths:** desktop, tablet (768) and phone (390), the narrow ones framed in the panel.
   - **Point:** click anything on the page, and the element (tag, text, selector) rides along with your next message as a chip you can remove.
   - **Errors:** page errors appear in a bar under the page with **Ask to fix**, which sends the error to the agent straight away.
-  - **Dev servers:** a running server shows "running" instead of versions. Links to other sites open in your browser.
+  - **Dev servers:** an address like `http://localhost:5173` in a command's output or a reply becomes a card and a live page, loaded by the address the server answers on (127.0.0.1 or ::1), since WebKit here won't load `localhost` by name. A running server shows "running" instead of versions. Links to other sites open in your browser.
   - **Pop out:** a page can move to its own window and back. The panel says where it went; closing the window brings it back.
   - **Covered pages:** when search or a menu has to cover the page, dent shows the page's last snapshot in its place.
   - Reload and open in your browser.

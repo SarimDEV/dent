@@ -119,6 +119,8 @@ pub struct Built {
     /// Items that come from entries; the streaming reply and waiting
     /// messages follow them.
     body: usize,
+    /// Dev servers found so far, with the entry each first appeared in.
+    servers: Vec<(usize, String)>,
 }
 
 /// Turn a timeline into what the window draws. `from` is the first entry
@@ -153,8 +155,19 @@ pub fn session(
     let keep = built.starts.get(start).copied().unwrap_or(built.body);
     items.truncate(keep);
     built.starts.truncate(start);
-    for e in &v.entries[start..] {
+    built.servers.retain(|(at, _)| *at < start);
+    for (k, e) in v.entries[start..].iter().enumerate() {
         built.starts.push(items.len());
+        // A dev server it started gets a card where it first shows up.
+        for url in servers_in(e) {
+            if !built.servers.iter().any(|(_, u)| *u == url) {
+                built.servers.push((start + k, url.clone()));
+                items.push(Item::Made {
+                    art: art_id(&v.id, &url),
+                    version: 1,
+                });
+            }
+        }
         match e {
             Entry::User {
                 id,
@@ -337,9 +350,54 @@ pub fn session(
         terminal: terminal(v),
         context: v.context,
         checkpoints: v.checkpoints.clone(),
+        servers: built.servers.iter().map(|(_, u)| u.clone()).collect(),
         made_sig: v.made.iter().map(|m| m.versions.len()).sum::<usize>() + v.made.len() * 1000,
         todos: todos(v),
     }
+}
+
+/// Local dev-server addresses in an entry: command output and replies.
+fn servers_in(e: &Entry) -> Vec<String> {
+    let mut texts: Vec<&str> = Vec::new();
+    match e {
+        Entry::Text { text } => texts.push(text),
+        Entry::Tools { calls } => {
+            for c in calls {
+                if let Some((false, out)) = &c.result
+                    && c.name == "Bash"
+                {
+                    texts.push(out);
+                }
+            }
+        }
+        _ => {}
+    }
+    let mut out = Vec::new();
+    for t in texts {
+        for (host, shown) in [
+            ("http://localhost:", "localhost"),
+            ("http://127.0.0.1:", "127.0.0.1"),
+            // Listening everywhere: this machine reaches it as localhost.
+            ("http://0.0.0.0:", "localhost"),
+        ] {
+            let mut rest = t;
+            while let Some(at) = rest.find(host) {
+                let tail = &rest[at + host.len()..];
+                let port: String = tail.chars().take_while(char::is_ascii_digit).collect();
+                if let Ok(p) = port.parse::<u16>()
+                    && p > 0
+                {
+                    // As printed: localhost may be IPv6 only, 127.0.0.1 IPv4 only.
+                    let url = format!("http://{shown}:{p}/");
+                    if !out.contains(&url) {
+                        out.push(url);
+                    }
+                }
+                rest = &tail[port.len()..];
+            }
+        }
+    }
+    out
 }
 
 /// The last commands it ran and what they printed, newest last, capped.
