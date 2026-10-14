@@ -20,6 +20,9 @@ mkdir -p "$root/home/.claude/projects/-proj"
 cat > "$root/home/.claude/projects/-proj/22222222-3333-4444-8555-666666666666.jsonl" <<JSONL
 {"type":"user","entrypoint":"cli","cwd":"$root/proj","uuid":"t1","message":{"role":"user","content":"Tidy up the README"}}
 {"type":"assistant","uuid":"t2","message":{"content":[{"type":"text","text":"I tidied the README and fixed two broken links."}]}}
+{"type":"user","entrypoint":"cli","cwd":"$root/proj","uuid":"t3","message":{"role":"user","content":"Now check the links in the footer too"}}
+{"type":"assistant","uuid":"t4","message":{"content":[{"type":"text","text":"The footer links all work."}]}}
+{"type":"ai-title","aiTitle":"README cleanup"}
 JSONL
 touch -t 202601010000 "$root/home/.claude/projects/-proj/"*.jsonl
 cargo build -q -p dent-desktop -p dent-daemon -p dent-session-holder -p dent-fake-claude

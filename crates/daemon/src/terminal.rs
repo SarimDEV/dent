@@ -59,11 +59,18 @@ fn summary(path: &Path, id: &str, updated: u64) -> Option<RecentSession> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path).ok()?;
     let (mut cwd, mut title, mut cli) = (None, None, false);
+    let (mut ai_title, mut custom_title): (Option<String>, Option<String>) = (None, None);
     for line in BufReader::new(&f).lines().map_while(Result::ok).take(400) {
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         cli |= v["entrypoint"] == "cli";
+        if let Some(t) = v["aiTitle"].as_str() {
+            ai_title = Some(t.to_string());
+        }
+        if let Some(t) = v["customTitle"].as_str() {
+            custom_title = Some(t.to_string());
+        }
         if cwd.is_none() {
             cwd = v["cwd"].as_str().map(str::to_owned);
         }
@@ -90,6 +97,12 @@ fn summary(path: &Path, id: &str, updated: u64) -> Option<RecentSession> {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
         };
+        if let Some(t) = v["aiTitle"].as_str() {
+            ai_title = Some(t.to_string());
+        }
+        if let Some(t) = v["customTitle"].as_str() {
+            custom_title = Some(t.to_string());
+        }
         if let Some(p) = prompt(&v) {
             last = Some(p);
         } else if v["type"] == "last-prompt"
@@ -98,11 +111,25 @@ fn summary(path: &Path, id: &str, updated: u64) -> Option<RecentSession> {
             last = Some(p.to_string());
         }
     }
+    let first = title?;
+    let last = last.map(|l| one_line(&l)).unwrap_or_default();
+    // Named the way Claude Code's own resume list names it; failing that,
+    // by the latest thing said, which is what's easiest to recognise.
+    let title = custom_title
+        .or(ai_title)
+        .map(|t| one_line(&t))
+        .unwrap_or_else(|| {
+            if last.is_empty() {
+                one_line(&first)
+            } else {
+                last.clone()
+            }
+        });
     Some(RecentSession {
         agent_session: id.to_string(),
         cwd,
-        title: one_line(&title?),
-        last: last.map(|l| one_line(&l)).unwrap_or_default(),
+        title,
+        last,
         updated,
     })
 }

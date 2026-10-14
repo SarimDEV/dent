@@ -1659,7 +1659,7 @@ impl Dent {
                 let detail = if r.last.is_empty() || r.last == r.title {
                     Self::project_name(&r.cwd)
                 } else {
-                    format!("{} · last: {}", Self::project_name(&r.cwd), r.last)
+                    format!("{} · Last: “{}”", Self::project_name(&r.cwd), r.last)
                 };
                 div()
                     .id(SharedString::from(format!("adopt-{i}")))

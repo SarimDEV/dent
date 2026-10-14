@@ -324,8 +324,10 @@ pub struct RecentSession {
     /// The agent's own session id.
     pub agent_session: String,
     pub cwd: String,
-    /// The first thing asked, and the latest.
+    /// Its name in Claude Code (yours, or the one it gave it), else the
+    /// latest thing asked.
     pub title: String,
+    /// The latest thing asked.
     #[serde(default)]
     pub last: String,
     /// Unix milliseconds of its last change.
