@@ -44,6 +44,8 @@ pub struct SessionView {
     /// Messages with a snapshot of the files from just before them, so
     /// rewinding can bring the files back too.
     pub checkpoints: std::collections::HashSet<String>,
+    /// Where the current turn's entries begin.
+    turn_from: usize,
     /// The first entry that changed since [`SessionView::take_changes`].
     changed_from: Option<usize>,
     /// Where each tool call lives: entry index and position in it.
@@ -87,6 +89,10 @@ pub enum Entry {
     Note {
         note: Note,
         text: String,
+    },
+    /// A turn ended having edited these files.
+    Changed {
+        paths: Vec<String>,
     },
 }
 
@@ -418,10 +424,34 @@ impl SessionView {
                 if self.working_since.is_none() {
                     self.working_since = Some(e.at);
                 }
+                self.turn_from = self.entries.len();
             }
             Body::TurnEnded { outcome } => {
                 self.working_since = None;
                 self.partial.clear();
+                // What the turn edited, to review in one place.
+                let mut paths: Vec<String> = Vec::new();
+                for e in self.entries.get(self.turn_from..).unwrap_or_default() {
+                    if let Entry::Tools { calls } = e {
+                        for c in calls {
+                            let edits = matches!(
+                                c.name.as_str(),
+                                "Write" | "Edit" | "MultiEdit" | "NotebookEdit"
+                            );
+                            if edits
+                                && matches!(c.result, Some((false, _)))
+                                && let Some(p) = c.path()
+                                && !p.contains("/.claude/")
+                                && !paths.contains(&p)
+                            {
+                                paths.push(p);
+                            }
+                        }
+                    }
+                }
+                if !paths.is_empty() {
+                    self.push(Entry::Changed { paths });
+                }
                 match outcome {
                     Outcome::Done => {}
                     Outcome::Interrupted { reason } => self.push(Entry::Note {

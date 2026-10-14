@@ -661,6 +661,7 @@ fn checks() -> Vec<(f32, Act)> {
                 10.,
             ),
         ),
+        (0.1, Until("the turn's edits get a Review line", |d, _| has(d, |i| matches!(i, Item::Changed { paths } if paths.iter().any(|p| p == "site/page.html"))), 5.)),
         (1.0, Shot("viewer-page")),
         (
             0.2,

@@ -295,6 +295,9 @@ pub fn session(
                 art: art_id(&v.id, path),
                 version: *version,
             }),
+            Entry::Changed { paths } => items.push(Item::Changed {
+                paths: paths.iter().map(|p| relative(cwd, p)).collect(),
+            }),
             Entry::Note { note, text } => items.push(Item::Note {
                 icon: match note {
                     Note::Stopped => "square",

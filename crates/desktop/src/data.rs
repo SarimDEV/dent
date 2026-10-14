@@ -127,6 +127,10 @@ pub enum Item {
         id: String,
         text: String,
     },
+    /// Files a turn edited; opens Changes.
+    Changed {
+        paths: Vec<String>,
+    },
 }
 
 #[derive(Clone)]

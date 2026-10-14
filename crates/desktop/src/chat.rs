@@ -825,6 +825,42 @@ impl Dent {
                     },
                 )
                 .into_any_element(),
+            Item::Changed { paths } => {
+                // Counts from the session's diff, for the files this turn touched.
+                let (added, removed) = s
+                    .diff
+                    .iter()
+                    .filter(|f| paths.contains(&f.path))
+                    .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
+                let n = paths.len();
+                div()
+                    .id(SharedString::from(format!("changed-{ix}")))
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S2))
+                    .ty(CODE)
+                    .text_color(t.quiet)
+                    .cursor_pointer()
+                    .hover(|d| d.text_color(t.ink))
+                    .on_click(cx.listener(|this, _, _, cx| this.show_tab(Tab::Changes, cx)))
+                    .child(icon("git-compare", 13., t.quiet))
+                    .child(if n == 1 {
+                        format!("Changed {}", paths[0])
+                    } else {
+                        format!("Changed {n} files")
+                    })
+                    .when(added + removed > 0, |d| {
+                        d.child(
+                            div()
+                                .text_color(t.faint)
+                                .child(format!("+{added} −{removed}")),
+                        )
+                    })
+                    .child(div().ty(UI).text_color(t.ink).child("Review"))
+                    .child(probe(&self.probes, format!("changed-{ix}")))
+                    .into_any_element()
+            }
             Item::Queued { id: msg, text } => {
                 let (sid, msg, back) = (s.id.clone(), msg.clone(), text.clone());
                 let (sid2, msg2, now) = (s.id.clone(), msg.clone(), text.clone());

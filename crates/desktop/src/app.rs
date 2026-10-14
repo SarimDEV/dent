@@ -2066,6 +2066,7 @@ impl Dent {
                     .hash(&mut h);
             }
             Item::Note { text, .. } => fp(text, &mut h),
+            Item::Changed { paths } => paths.hash(&mut h),
         }
         h.finish()
     }
