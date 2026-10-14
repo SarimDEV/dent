@@ -984,7 +984,12 @@ impl Dent {
                             .ty(UI)
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(if old { t.quiet } else { t.ink })
-                            .child(a.title),
+                            // The address is on the line below; the title names the kind.
+                            .child(if a.kind == Kind::Server {
+                                "Dev server"
+                            } else {
+                                a.title
+                            }),
                     )
                     .child(div().truncate().ty(LABEL).text_color(t.quiet).child(note)),
             )
@@ -1142,7 +1147,7 @@ impl Dent {
                                 if self.chat_w >= 620. {
                                     effort_label(s.effort.as_deref())
                                 } else {
-                                    ""
+                                    "Effort"
                                 },
                                 false,
                                 cx,

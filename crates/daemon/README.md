@@ -15,3 +15,5 @@ cargo test -p dent-daemon                                   # end to end, with t
 - `server.rs`: the socket, catch-up and live streaming.
 
 State lives in `~/Library/Application Support/dent` on macOS (`--state` or `DENT_STATE` to change it). Agents that sit idle for 5 minutes stop and resume on the next message (`DENT_IDLE_MS`).
+
+`dent-daemon login-item on` (run from the installed `dent.app/Contents/MacOS/`) starts the daemon at login through a launchd agent, so sessions resume after a restart without opening the app; `off` removes it. It refuses to run a binary from Documents, Desktop or Downloads.

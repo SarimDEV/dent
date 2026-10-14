@@ -414,6 +414,7 @@ fn checks() -> Vec<(f32, Act)> {
                 "picking one up brings its history",
                 |d, _| {
                     says(d, "tidied the README")
+                        && status_is(d, Status::Done)
                         && has(
                             d,
                             |i| matches!(i, Item::Note { text, .. } if text.contains("terminal")),

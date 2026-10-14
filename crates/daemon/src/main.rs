@@ -3,12 +3,14 @@
 //!
 //! `dent-daemon [--state DIR]` runs it in the foreground. Apps start it
 //! when it isn't running; it keeps going after they quit.
+//! `dent-daemon login-item on|off` starts it at login, or stops doing so.
 
 mod claude;
 mod daemon;
 mod env;
 mod git;
 mod holder;
+mod login;
 mod paths;
 mod projects;
 mod server;
@@ -31,6 +33,15 @@ fn main() -> Result<()> {
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from);
     let paths = paths::Paths::new(state);
+    // `dent-daemon login-item on|off`: start at login, or stop doing so.
+    if args.first().map(String::as_str) == Some("login-item") {
+        let on = match args.get(1).map(String::as_str) {
+            Some("on") => true,
+            Some("off") => false,
+            _ => anyhow::bail!("usage: dent-daemon login-item on|off"),
+        };
+        return login::set(on, &paths.state);
+    }
     std::fs::create_dir_all(&paths.state)
         .with_context(|| format!("create {}", paths.state.display()))?;
     std::fs::set_permissions(&paths.state, std::fs::Permissions::from_mode(0o700))?;

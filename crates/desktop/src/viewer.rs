@@ -303,7 +303,8 @@ impl Dent {
                         .child(div().ty(LABEL).text_color(t.ink).child("running")),
                 )
             })
-            .when(!server, |d| {
+            // One version needs no stepper.
+            .when(!server && latest > 1, |d| {
                 d.child(step(
                     "prev-version",
                     "chevron-left",
