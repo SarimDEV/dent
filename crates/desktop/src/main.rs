@@ -236,6 +236,7 @@ impl Render for Dent {
             .min(w - side - viewer::CHAT_MIN)
             .max(viewer::MIN_WIDTH);
         self.chat_w = w - side - if wants_panel { self.panel_w } else { 0. };
+        self.sidebar_hovered = self.over_sidebar(window.mouse_position(), window);
         let sidebar = (!self.sidebar_hidden).then(|| self.sidebar(cx));
         let main = self.main_column(window, cx);
         let panel = self
@@ -465,6 +466,11 @@ impl Render for Dent {
                 }
             }))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, cx| {
+                // Into or out of the sidebar: its rows hold their places, or
+                // let go.
+                if this.over_sidebar(e.position, window) != this.sidebar_hovered {
+                    cx.notify();
+                }
                 if this.dragging_sidebar {
                     let w = window.viewport_size().width.as_f32();
                     // The chat keeps its minimum beside it.

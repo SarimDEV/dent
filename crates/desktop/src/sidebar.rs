@@ -20,9 +20,19 @@ pub const MAX_WIDTH: f32 = 440.;
 impl Dent {
     pub fn sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = self.t;
-        let needs = self.needs();
-        let done = self.done();
-        let working = self.working();
+        let [needs, done, working] = self.shown_sections();
+        // Hold these places while the pointer is here; let go when it leaves.
+        self.inbox_hold = self.sidebar_hovered.then(|| {
+            [&needs, &done, &working]
+                .iter()
+                .enumerate()
+                .flat_map(|(sec, list)| {
+                    list.iter()
+                        .enumerate()
+                        .map(move |(ix, s)| (s.id.clone(), (sec, ix)))
+                })
+                .collect()
+        });
         let closed = self.closed();
         let clear = needs.is_empty() && done.is_empty();
         let new_selected = self.selected.is_none();

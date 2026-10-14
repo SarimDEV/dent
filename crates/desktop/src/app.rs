@@ -515,6 +515,12 @@ pub struct Dent {
     pub undo_closes: Vec<String>,
     /// The terminal session being picked up.
     pub adopting: Option<String>,
+    /// While the pointer is over the sidebar: each session's section and
+    /// place there, held (see `shown_sections`).
+    pub inbox_hold: Option<HashMap<String, (usize, usize)>>,
+    /// The pointer is over the sidebar, judged by where it is (typing
+    /// hides the pointer, and with it the hover state).
+    pub sidebar_hovered: bool,
     /// A row to scroll into view in the sidebar on its next draw.
     pub reveal_row: Option<String>,
     /// Files you opened from links, per session, beside what the agent made.
@@ -898,6 +904,8 @@ impl Dent {
             md_docs: HashMap::new(),
             undo_closes: Vec::new(),
             adopting: None,
+            inbox_hold: None,
+            sidebar_hovered: false,
             reveal_row: None,
             opened: HashMap::new(),
             opened_at: HashMap::new(),
@@ -1050,6 +1058,41 @@ impl Dent {
         v.sort_by_key(|s| std::cmp::Reverse(s.working_since));
         v
     }
+    /// The sidebar's sections as shown: needs you, done, working. While
+    /// the pointer is over the sidebar, rows hold the places they had, so
+    /// a session that finishes doesn't jump away from a click on its way;
+    /// new sessions still come in, and closed ones still go.
+    pub fn shown_sections(&self) -> [Vec<Rc<Session>>; 3] {
+        let fresh = [self.needs(), self.done(), self.working()];
+        let Some(hold) = &self.inbox_hold else {
+            return fresh;
+        };
+        let mut all: Vec<((usize, bool, usize), Rc<Session>)> = Vec::new();
+        for (sec, list) in fresh.into_iter().enumerate() {
+            for (ix, s) in list.into_iter().enumerate() {
+                let place = match hold.get(&s.id) {
+                    Some(&(sec, ix)) => (sec, true, ix),
+                    None => (sec, false, ix),
+                };
+                all.push((place, s));
+            }
+        }
+        all.sort_by_key(|(place, _)| *place);
+        let mut out: [Vec<Rc<Session>>; 3] = Default::default();
+        for ((sec, ..), s) in all {
+            out[sec].push(s);
+        }
+        out
+    }
+
+    /// Whether `p` is over the sidebar.
+    pub fn over_sidebar(&self, p: Point<Pixels>, window: &Window) -> bool {
+        let (x, y) = (p.x.as_f32(), p.y.as_f32());
+        !self.sidebar_hidden
+            && (0. ..self.sidebar_w).contains(&x)
+            && (0. ..window.viewport_size().height.as_f32()).contains(&y)
+    }
+
     pub fn closed(&self) -> Vec<Rc<Session>> {
         self.sessions.iter().filter(|s| s.closed).cloned().collect()
     }
@@ -3411,10 +3454,11 @@ impl Dent {
         } else {
             Vec::new()
         };
-        self.needs()
+        let [needs, done, working] = self.shown_sections();
+        needs
             .into_iter()
-            .chain(self.done())
-            .chain(self.working())
+            .chain(done)
+            .chain(working)
             .chain(closed)
             .map(|s| s.id.clone())
             .collect()
