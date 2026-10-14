@@ -4,6 +4,8 @@
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use crate::ui::RevealOnHover;
+
 use crate::anim;
 use crate::app::Dent;
 use crate::data::Session;
@@ -394,9 +396,7 @@ impl Dent {
                 div()
                     .ty(LABEL)
                     .text_color(t.faint)
-                    .when(has_button, |d| {
-                        d.group_hover(group.clone(), |s| s.opacity(0.))
-                    })
+                    .when(has_button, |d| d.hide_on_hover(group.clone()))
                     .child(age),
             )
             .children(button.map(|b| {
@@ -404,8 +404,7 @@ impl Dent {
                     .absolute()
                     .right(px(-4.))
                     .top(px(-2.))
-                    .invisible()
-                    .group_hover(group.clone(), |s| s.visible())
+                    .reveal_on_hover(group.clone())
                     .child(b)
             }))
             .into_any_element();

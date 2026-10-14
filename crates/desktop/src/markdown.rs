@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+
+use crate::ui::RevealOnHover;
 use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
 use ratex_types::display_item::DisplayList;
 
@@ -1246,8 +1248,7 @@ fn hover_actions(body: impl IntoElement, actions: impl IntoElement, key: &str, t
             .bg(t.raised)
             .border_1()
             .border_color(t.hairline)
-            .opacity(0.)
-            .group_hover(group, |s| s.opacity(1.))
+            .reveal_on_hover(group)
             .child(actions),
     )
 }

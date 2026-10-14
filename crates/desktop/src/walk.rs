@@ -1439,8 +1439,8 @@ fn checks() -> Vec<(f32, Act)> {
         0.1,
         Call(|d, _, cx| {
             let Some(s) = d.current_rc() else { return };
-            if let Some(ix) = s.items.iter().position(|i| matches!(i, Item::Tools { lines, .. } if lines.iter().any(|l| l.report.is_some()))) {
-                d.open_tools.insert((s.id.clone(), ix));
+            if let Some(Item::Tools { lines, .. }) = s.items.iter().find(|i| matches!(i, Item::Tools { lines, .. } if lines.iter().any(|l| l.report.is_some()))) {
+                d.open_tools.insert(lines[0].id.clone());
                 cx.notify();
             }
         }),

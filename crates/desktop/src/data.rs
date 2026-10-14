@@ -107,6 +107,8 @@ pub enum Item {
         title: String,
         command: String,
         why: String,
+        /// The command is an edit: its lines read as removed and added.
+        diff: bool,
     },
     /// The agent's plan, waiting for a go-ahead.
     Plan {
@@ -143,6 +145,33 @@ pub struct ToolLine {
     pub report: Option<String>,
     /// The call it belongs to.
     pub id: String,
+    /// Everything about the call, for when the line is opened.
+    pub detail: Option<std::rc::Rc<CallDetail>>,
+}
+
+/// What a tool call did in full: what it was given, what came back, and
+/// the file it worked on.
+#[derive(Debug, PartialEq)]
+pub struct CallDetail {
+    /// The command, the edit as removed and added lines, or the input.
+    pub input: String,
+    /// What came back, and whether it failed.
+    pub output: Option<(bool, String)>,
+    /// The file, made whole from the session's folder.
+    pub path: Option<String>,
+    /// It changed that file.
+    pub edits: bool,
+}
+
+/// Hashed by length and ends, not whole: a command's output can be large,
+/// and items are fingerprinted every frame. Output only ever arrives whole.
+impl std::hash::Hash for CallDetail {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.input.len().hash(h);
+        self.output.as_ref().map(|(f, o)| (*f, o.len())).hash(h);
+        self.path.hash(h);
+        self.edits.hash(h);
+    }
 }
 
 #[derive(Clone)]

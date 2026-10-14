@@ -579,6 +579,7 @@ fn branch(calls: &[Call], parent: Option<&str>, depth: usize, cwd: &Path, out: &
             depth,
             report: None,
             id: c.id.clone(),
+            detail: (!agent).then(|| Rc::new(call_detail(c, cwd))),
         });
         if !agent || depth > 8 {
             continue;
@@ -591,15 +592,65 @@ fn branch(calls: &[Call], parent: Option<&str>, depth: usize, cwd: &Path, out: &
                 depth: depth + 1,
                 report: None,
                 id: c.id.clone(),
+                detail: None,
             }),
             (Some((false, report)), _) if !report.trim().is_empty() => out.push(ToolLine {
                 text: String::new(),
                 depth: depth + 1,
                 report: Some(report.trim().to_string()),
                 id: c.id.clone(),
+                detail: None,
             }),
             _ => {}
         }
+    }
+}
+
+/// What an edit does, as the lines it takes out ("- ") and puts in ("+ ");
+/// for a new file, its contents.
+pub fn edit_text(tool: &str, v: &Value) -> Option<String> {
+    let edit = |old: &str, new: &str| {
+        let mut out: Vec<String> = old.lines().map(|l| format!("- {l}")).collect();
+        out.extend(new.lines().map(|l| format!("+ {l}")));
+        out.join("\n")
+    };
+    let s = |e: &Value, k: &str| e[k].as_str().unwrap_or_default().to_string();
+    match tool {
+        "Edit" => Some(edit(&s(v, "old_string"), &s(v, "new_string"))),
+        "MultiEdit" => v["edits"].as_array().map(|es| {
+            es.iter()
+                .map(|e| edit(&s(e, "old_string"), &s(e, "new_string")))
+                .collect::<Vec<_>>()
+                .join("\n…\n")
+        }),
+        "Write" => Some(s(v, "content")),
+        _ => None,
+    }
+}
+
+/// A call in full, for its line opened up.
+fn call_detail(c: &Call, cwd: &Path) -> crate::data::CallDetail {
+    let name = c.name.trim_start_matches("waiting:");
+    let v = c.input();
+    let s = |k: &str| v[k].as_str().unwrap_or_default().to_string();
+    let input = match name {
+        "Bash" => format!("$ {}", s("command")),
+        "Edit" | "MultiEdit" | "Write" => edit_text(name, &v).unwrap_or_default(),
+        "Read" => String::new(),
+        _ => serde_json::to_string_pretty(&v).unwrap_or_default(),
+    };
+    let path = c.path().map(|p| {
+        if p.starts_with('/') {
+            p
+        } else {
+            cwd.join(p).display().to_string()
+        }
+    });
+    crate::data::CallDetail {
+        input,
+        output: c.result.clone(),
+        path,
+        edits: matches!(name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit"),
     }
 }
 
@@ -746,12 +797,18 @@ fn ask(id: &str, tool: &str, input: &Value, description: Option<&str>, cwd: &Pat
             plan: input["plan"].as_str().unwrap_or_default().into(),
         },
         _ => {
-            let (title, command) = what(tool, input, cwd);
+            let (title, mut command) = what(tool, input, cwd);
+            // An edit to approve shows what it changes, under its path.
+            let change = edit_text(tool, input).filter(|e| !e.trim().is_empty());
+            if let Some(e) = &change {
+                command = format!("{command}\n\n{e}");
+            }
             Item::Approval {
                 id: id.into(),
                 title,
                 command,
                 why: description.unwrap_or_default().into(),
+                diff: change.is_some() && tool != "Write",
             }
         }
     }

@@ -418,7 +418,11 @@ pub struct Dent {
     /// What was last written to the prefs file.
     saved_prefs: Option<crate::prefs::Prefs>,
     /// Tool groups the person unfolded, by session and item.
-    pub open_tools: HashSet<(String, usize)>,
+    /// Tool groups opened, by their first call's id: ids stay put when
+    /// items are inserted above.
+    pub open_tools: HashSet<String>,
+    /// Tool calls opened to show what they did in full, by id.
+    pub open_calls: HashSet<String>,
     /// What the bridge built per session, to extend rather than rebuild.
     built: HashMap<String, crate::bridge::Built>,
     /// Each session's search text, with the size it was made at.
@@ -477,7 +481,8 @@ pub struct Dent {
     pub opened: HashMap<String, Vec<&'static str>>,
     /// When each opened file last changed, to notice edits on disk.
     pub opened_at: HashMap<&'static str, std::time::SystemTime>,
-    pub resumed_at: HashMap<String, Instant>,
+    /// When each one-shot action was last pressed, by name.
+    pub pressed: HashMap<String, Instant>,
     /// The palette row last scrolled to.
     pub palette_shown: Option<usize>,
     pub preview: Option<Rc<RefCell<Preview>>>,
@@ -860,7 +865,7 @@ impl Dent {
             reveal_row: None,
             opened: HashMap::new(),
             opened_at: HashMap::new(),
-            resumed_at: HashMap::new(),
+            pressed: HashMap::new(),
             palette_shown: None,
             toast: None,
             show_closed: false,
@@ -891,6 +896,7 @@ impl Dent {
             plan_open: false,
             search_cache: RefCell::new(HashMap::new()),
             open_tools: HashSet::new(),
+            open_calls: HashSet::new(),
             built: HashMap::new(),
             saved_prefs: None,
             partial_len: HashMap::new(),
@@ -1710,7 +1716,7 @@ impl Dent {
                 .unwrap_or(0);
             if let Some((label, _)) = questions.get(q).and_then(|q| q.options.get(d as usize - 1)) {
                 let label = label.clone();
-                self.answer(&id, q, label, cx);
+                self.answer(&id, Some(&ask), q, label, cx);
                 return true;
             }
         }
@@ -2358,16 +2364,26 @@ impl Dent {
     }
 
     /// After a stop: carry on from where it was.
+    /// For actions that send something: true when `key` was pressed in the
+    /// last few seconds, so a double-click doesn't do it twice.
+    pub fn pressed_again(&mut self, key: String) -> bool {
+        let again = self
+            .pressed
+            .get(&key)
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(3));
+        if !again {
+            self.pressed
+                .retain(|_, at| at.elapsed() < Duration::from_secs(3));
+            self.pressed.insert(key, Instant::now());
+        }
+        again
+    }
+
     pub fn resume(&mut self, id: &str, cx: &mut Context<Self>) {
         // A second press before it's running again would send it twice.
-        if self
-            .resumed_at
-            .get(id)
-            .is_some_and(|at| at.elapsed() < Duration::from_secs(3))
-        {
+        if self.pressed_again(format!("resume/{id}")) {
             return;
         }
-        self.resumed_at.insert(id.to_string(), Instant::now());
         self.live.send(Request::Send {
             session: id.to_string(),
             id: crate::message_id(),
@@ -2409,17 +2425,43 @@ impl Dent {
         cx.notify();
     }
 
-    pub fn allow(&mut self, id: &str, always: bool, cx: &mut Context<Self>) {
-        if let Some(Item::Approval { id: ask, .. } | Item::Plan { id: ask, .. }) = self.open_ask(id)
+    /// The ask a button belongs to (by its id), or with none given, the
+    /// latest: buttons answer their own card, typing answers the newest.
+    fn ask_for(&self, id: &str, ask: Option<&str>) -> Option<Item> {
+        match ask {
+            None => self.open_ask(id),
+            Some(want) => self.session(id)?.items.iter().find_map(|i| match i {
+                Item::Approval { id: a, .. }
+                | Item::Plan { id: a, .. }
+                | Item::Question { id: a, .. }
+                    if a == want =>
+                {
+                    Some(i.clone())
+                }
+                _ => None,
+            }),
+        }
+    }
+
+    pub fn allow(&mut self, id: &str, ask: Option<&str>, always: bool, cx: &mut Context<Self>) {
+        if let Some(Item::Approval { id: ask, .. } | Item::Plan { id: ask, .. }) =
+            self.ask_for(id, ask)
         {
             self.reply_to_ask(id, ask, Answer::Allow { always }, cx);
         }
     }
 
     /// Deny, with what's in the composer as the reason the agent hears.
-    pub fn deny(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn deny(
+        &mut self,
+        id: &str,
+        ask: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let reason = self.composer.read(cx).value().trim().to_string();
-        if let Some(Item::Approval { id: ask, .. } | Item::Plan { id: ask, .. }) = self.open_ask(id)
+        if let Some(Item::Approval { id: ask, .. } | Item::Plan { id: ask, .. }) =
+            self.ask_for(id, ask)
         {
             if !reason.is_empty() {
                 self.composer.update(cx, |c, cx| put(c, "", window, cx));
@@ -2430,8 +2472,15 @@ impl Dent {
 
     /// Pick an option for question `q`; when every question has an answer,
     /// the answers go.
-    pub fn answer(&mut self, id: &str, q: usize, option: String, cx: &mut Context<Self>) {
-        let Some(Item::Question { id: ask, questions }) = self.open_ask(id) else {
+    pub fn answer(
+        &mut self,
+        id: &str,
+        ask: Option<&str>,
+        q: usize,
+        option: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Item::Question { id: ask, questions }) = self.ask_for(id, ask) else {
             return;
         };
         let picks = self
@@ -2462,7 +2511,7 @@ impl Dent {
         if q >= questions.len() {
             return false;
         }
-        self.answer(id, q, text.to_string(), cx);
+        self.answer(id, Some(&ask), q, text.to_string(), cx);
         true
     }
 
@@ -2551,14 +2600,9 @@ impl Dent {
 
     /// Send the last message again, after a turn that failed.
     pub fn retry(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self
-            .resumed_at
-            .get(id)
-            .is_some_and(|at| at.elapsed() < Duration::from_secs(3))
-        {
+        if self.pressed_again(format!("retry/{id}")) {
             return;
         }
-        self.resumed_at.insert(id.to_string(), Instant::now());
         let last = self.session(id).and_then(|s| {
             s.items.iter().rev().find_map(|i| match i {
                 Item::User { text, .. } => Some(text.clone()),
@@ -2745,6 +2789,17 @@ impl Dent {
         });
         self.waiting.insert(n, Waiting::Create);
         cx.notify();
+    }
+
+    /// Open Changes at one file of the session's diff.
+    pub fn review(&mut self, session: &str, path: &str, cx: &mut Context<Self>) {
+        if let Some(i) = self
+            .session(session)
+            .and_then(|s| s.diff.iter().position(|f| f.path == path))
+        {
+            self.diff_file.insert(session.to_string(), i);
+        }
+        self.show_tab(Tab::Changes, cx);
     }
 
     pub fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
@@ -2971,8 +3026,7 @@ impl Dent {
         let sigs: Vec<u64> = s
             .items
             .iter()
-            .enumerate()
-            .map(|(ix, i)| self.item_sig(&s.id, ix, i))
+            .map(|i| self.item_sig(i))
             .chain((s.status == Status::Working).then_some(u64::MAX))
             .collect();
         let (id, old) = &self.transcript_sigs;
@@ -3008,7 +3062,7 @@ impl Dent {
     }
 
     /// Anything about an item that changes its height.
-    fn item_sig(&self, sid: &str, ix: usize, item: &Item) -> u64 {
+    fn item_sig(&self, item: &Item) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         std::mem::discriminant(item).hash(&mut h);
@@ -3033,9 +3087,13 @@ impl Dent {
             Item::Text(t) | Item::Queued { text: t, .. } => fp(t, &mut h),
             Item::Tools { lines, summary } => {
                 (lines, summary).hash(&mut h);
-                self.open_tools
-                    .contains(&(sid.to_string(), ix))
+                lines
+                    .first()
+                    .is_some_and(|l| self.open_tools.contains(&l.id))
                     .hash(&mut h);
+                for l in lines.iter().filter(|l| l.detail.is_some()) {
+                    self.open_calls.contains(&l.id).hash(&mut h);
+                }
                 for l in lines.iter().filter(|l| l.report.is_some()) {
                     self.expanded
                         .contains(&format!("report-{}", l.id))

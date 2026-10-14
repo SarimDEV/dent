@@ -5,6 +5,8 @@ use gpui_kit::base::input::Textarea;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use crate::ui::RevealOnHover;
+
 use crate::anim;
 use crate::app::{Dent, Menu, Tab};
 use dent_protocol::Permission;
@@ -244,6 +246,117 @@ impl Dent {
                     }),
             )
             .child(actions)
+    }
+
+    /// A tool call opened up: the command or edit, what came back, and the
+    /// way to its file. All of it selects and copies.
+    fn call_detail(
+        &self,
+        s: &Session,
+        key: &str,
+        d: &crate::data::CallDetail,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let t = self.t;
+        const MAX: usize = 60;
+        // Long text shows its start; the rest is a line saying how much.
+        let clip = |text: &str| -> (String, usize) {
+            let n = text.lines().count();
+            if n <= MAX {
+                (text.trim_end().to_string(), 0)
+            } else {
+                (
+                    text.lines().take(MAX).collect::<Vec<_>>().join("\n"),
+                    n - MAX,
+                )
+            }
+        };
+        let block = |id: String, text: String, ink: Hsla| code_lines(id, text, d.edits, ink, &t);
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .gap(px(space::S2))
+            .p(px(space::S3))
+            .rounded(px(radius::MD))
+            .bg(t.raised)
+            .border_1()
+            .border_color(t.hairline)
+            .ty(CODE)
+            .text_color(t.ink);
+        if !d.input.trim().is_empty() {
+            let (text, more) = clip(&d.input);
+            col = col
+                .child(block(format!("call-in-{key}"), text, t.ink))
+                .when(more > 0, |c| {
+                    c.child(
+                        div()
+                            .text_color(t.faint)
+                            .child(format!("… {more} more lines")),
+                    )
+                });
+        }
+        if let Some((failed, out)) = &d.output
+            && !out.trim().is_empty()
+            && !d.edits
+        {
+            let (text, more) = clip(out);
+            col = col
+                .child(
+                    div()
+                        .ty(LABEL)
+                        .text_color(if *failed { t.needs.0 } else { t.faint })
+                        .child(if *failed { "Failed" } else { "Output" }),
+                )
+                .child(block(format!("call-out-{key}"), text, t.quiet))
+                .when(more > 0, |c| {
+                    c.child(
+                        div()
+                            .text_color(t.faint)
+                            .child(format!("… {more} more lines")),
+                    )
+                });
+        }
+        // Its file: shown in dent when it can be, and its changes.
+        let in_diff = d.path.as_ref().and_then(|p| {
+            let rel = crate::bridge::relative(std::path::Path::new(&s.cwd), p);
+            s.diff.iter().any(|f| f.path == rel).then_some(rel)
+        });
+        let openable = d
+            .path
+            .as_ref()
+            .filter(|p| std::path::Path::new(p).is_file())
+            .cloned();
+        if openable.is_some() || in_diff.is_some() {
+            let sid = s.id.clone();
+            col = col.child(
+                div()
+                    .flex()
+                    .gap(px(space::S1))
+                    .when_some(openable, |c, p| {
+                        c.child(
+                            ghost(
+                                SharedString::from(format!("call-open-{key}")),
+                                "Open file",
+                                &t,
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| this.open_file(&p, cx))),
+                        )
+                    })
+                    .when_some(in_diff.filter(|_| d.edits), |c, rel| {
+                        c.child(
+                            ghost(
+                                SharedString::from(format!("call-review-{key}")),
+                                "Review changes",
+                                &t,
+                            )
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.review(&sid, &rel, cx)),
+                            ),
+                        )
+                    }),
+            );
+        }
+        col
     }
 
     /// Up and down through your own messages, joined as one small pair (Alt+Up
@@ -672,8 +785,7 @@ impl Dent {
                                 div()
                                     .flex()
                                     .gap(px(space::S1))
-                                    .opacity(0.)
-                                    .group_hover(group.clone(), |s| s.opacity(1.))
+                                    .reveal_on_hover(group.clone())
                                     .child(
                                         ghost(
                                             SharedString::from(format!("fork-from-{ix}")),
@@ -755,10 +867,21 @@ impl Dent {
                 }
             }
             Item::Tools { summary, lines } => {
-                let key = (s.id.clone(), ix);
-                // One call with nothing under it has nothing more to show.
-                let more = lines.len() > 1 || lines.iter().any(|l| l.report.is_some());
-                let open = more && self.open_tools.contains(&key);
+                // A lone call opens straight to what it did; a group opens
+                // to its calls, each of which opens in turn.
+                let lone = lines.len() == 1 && lines[0].detail.is_some();
+                let key = if lone {
+                    lines[0].id.clone()
+                } else {
+                    lines.first().map(|l| l.id.clone()).unwrap_or_default()
+                };
+                let more = lone || lines.len() > 1 || lines.iter().any(|l| l.report.is_some());
+                let open = more
+                    && if lone {
+                        self.open_calls.contains(&key)
+                    } else {
+                        self.open_tools.contains(&key)
+                    };
                 div()
                     .flex()
                     .flex_col()
@@ -773,8 +896,13 @@ impl Dent {
                             .when(more, |d| {
                                 d.cursor_pointer().hover(|d| d.text_color(t.ink)).on_click(
                                     cx.listener(move |this, _, _, cx| {
-                                        if !this.open_tools.remove(&key) {
-                                            this.open_tools.insert(key.clone());
+                                        let set = if lone {
+                                            &mut this.open_calls
+                                        } else {
+                                            &mut this.open_tools
+                                        };
+                                        if !set.remove(&key) {
+                                            set.insert(key.clone());
                                         }
                                         cx.notify();
                                     }),
@@ -809,7 +937,15 @@ impl Dent {
                                     .child(summary.clone()),
                             ),
                     )
-                    .when(open, |d| {
+                    .when(open && lone, |d| {
+                        let detail = lines[0].detail.clone();
+                        d.children(detail.map(|dt| {
+                            self.call_detail(s, &format!("{ix}-0"), &dt, cx)
+                                .ml(px(space::S4))
+                                .mt(px(space::S1))
+                        }))
+                    })
+                    .when(open && !lone, |d| {
                         let depths: Vec<usize> = lines.iter().map(|l| l.depth).collect();
                         let rows: Vec<AnyElement> = lines
                             .iter()
@@ -860,21 +996,48 @@ impl Dent {
                                     );
                                 }
                                 match &l.report {
-                                    None => row
-                                        .child(
+                                    None => {
+                                        let call = l.id.clone();
+                                        let opened = self.open_calls.contains(&call);
+                                        let detail = l.detail.clone().filter(|_| opened);
+                                        let line = div()
+                                            .id(SharedString::from(format!("tool-line-{ix}-{i}")))
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .when(l.detail.is_some(), |d| {
+                                                d.cursor_pointer()
+                                                    .hover(|d| d.text_color(t.ink))
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        if !this.open_calls.remove(&call) {
+                                                            this.open_calls.insert(call.clone());
+                                                        }
+                                                        cx.notify();
+                                                    }))
+                                            })
+                                            .child(l.text.clone());
+                                        // Opened, its details sit in the row, so the
+                                        // tree's rails run on beside them.
+                                        row.child(
                                             div()
                                                 .flex_1()
                                                 .min_w_0()
-                                                .overflow_hidden()
-                                                .whitespace_nowrap()
-                                                .text_ellipsis()
-                                                .child(crate::select::text(
-                                                    SharedString::from(format!("tool-{ix}-{i}")),
-                                                    l.text.clone(),
-                                                    &t,
-                                                )),
+                                                .flex()
+                                                .flex_col()
+                                                .child(line)
+                                                .children(detail.map(|dt| {
+                                                    self.call_detail(
+                                                        s,
+                                                        &format!("{ix}-{i}"),
+                                                        &dt,
+                                                        cx,
+                                                    )
+                                                    .my(px(space::S1))
+                                                })),
                                         )
-                                        .into_any_element(),
+                                        .into_any_element()
+                                    }
                                     Some(report) => row
                                         .child(self.report(s, ix, &l.id, report, window, cx))
                                         .into_any_element(),
@@ -887,12 +1050,14 @@ impl Dent {
             }
             Item::Made { art, version } => self.made_card(s, art, *version, cx),
             Item::Approval {
+                id: ask,
                 title,
                 command,
                 why,
-                ..
+                diff,
             } => {
                 let (a, a2, d) = (s.id.clone(), s.id.clone(), s.id.clone());
+                let (k1, k2, k3) = (ask.clone(), ask.clone(), ask.clone());
                 needs_card(&t)
                     .child(needs_title(title, &t))
                     .when(!command.is_empty(), |c| {
@@ -906,7 +1071,17 @@ impl Dent {
                                 .border_color(t.hairline)
                                 .ty(CODE)
                                 .text_color(t.ink)
-                                .child(command.clone()),
+                                // A long edit scrolls inside the card.
+                                .max_h(px(320.))
+                                .id(SharedString::from(format!("ask-{ask}")))
+                                .overflow_y_scroll()
+                                .child(code_lines(
+                                    format!("ask-text-{ask}"),
+                                    command.clone(),
+                                    *diff,
+                                    t.ink,
+                                    &t,
+                                )),
                         )
                     })
                     .when(!why.is_empty(), |c| {
@@ -921,28 +1096,24 @@ impl Dent {
                             .child(
                                 button("allow", "Allow once", true, &t)
                                     .relative()
-                                    .on_click(
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.allow(&a, false, cx)
-                                        }),
-                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.allow(&a, Some(&k1), false, cx)
+                                    }))
                                     .child(probe(&self.probes, "allow")),
                             )
                             .child(
                                 button("allow-session", "Allow for this session", false, &t)
                                     .relative()
-                                    .on_click(
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.allow(&a2, true, cx)
-                                        }),
-                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.allow(&a2, Some(&k2), true, cx)
+                                    }))
                                     .child(probe(&self.probes, "allow-session")),
                             )
                             .child(
                                 button("deny", "Deny", false, &t)
                                     .relative()
                                     .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.deny(&d, window, cx)
+                                        this.deny(&d, Some(&k3), window, cx)
                                     }))
                                     .child(probe(&self.probes, "deny")),
                             ),
@@ -955,8 +1126,9 @@ impl Dent {
                     )
                     .into_any_element()
             }
-            Item::Plan { plan, .. } => {
+            Item::Plan { id: ask, plan } => {
                 let (a, d) = (s.id.clone(), s.id.clone());
+                let (k1, k3) = (ask.clone(), ask.clone());
                 let blocks = self.markdown(plan);
                 let mut r = markdown::R {
                     md: self.mdv.clone(),
@@ -989,18 +1161,16 @@ impl Dent {
                             .child(
                                 button("plan-go", "Start building", true, &t)
                                     .relative()
-                                    .on_click(
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.allow(&a, false, cx)
-                                        }),
-                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.allow(&a, Some(&k1), false, cx)
+                                    }))
                                     .child(probe(&self.probes, "plan-go")),
                             )
                             .child(
                                 button("plan-keep", "Keep planning", false, &t)
                                     .relative()
                                     .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.deny(&d, window, cx)
+                                        this.deny(&d, Some(&k3), window, cx)
                                     }))
                                     .child(probe(&self.probes, "plan-keep")),
                             ),
@@ -1039,7 +1209,7 @@ impl Dent {
                             )
                             .child(div().flex().flex_col().gap(px(space::S1)).children(
                                 q.options.iter().enumerate().map(|(i, (label, desc))| {
-                                    let (sid, o2) = (s.id.clone(), label.clone());
+                                    let (sid, o2, k) = (s.id.clone(), label.clone(), ask.clone());
                                     let on = chosen.as_deref() == Some(label.as_str());
                                     let key = format!("opt-{qi}-{i}");
                                     div()
@@ -1058,7 +1228,7 @@ impl Dent {
                                         .cursor_pointer()
                                         .hover(|d| d.border_color(t.ink.opacity(0.3)))
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.answer(&sid, qi, o2.clone(), cx)
+                                            this.answer(&sid, Some(&k), qi, o2.clone(), cx)
                                         }))
                                         .flex()
                                         .items_start()
@@ -1138,13 +1308,21 @@ impl Dent {
                 )
                 .into_any_element(),
             Item::Changed { paths } => {
-                // Counts from the session's diff, for the files this turn touched.
-                let (added, removed) = s
-                    .diff
+                // Counts are the files' changes as they stand now, which only
+                // describe this turn if it's the latest to touch them.
+                let latest = !s.items[ix + 1..]
                     .iter()
-                    .filter(|f| paths.contains(&f.path))
-                    .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
+                    .any(|i| matches!(i, Item::Changed { paths: p } if p.iter().any(|x| paths.contains(x))));
+                let (added, removed) = if latest {
+                    s.diff
+                        .iter()
+                        .filter(|f| paths.contains(&f.path))
+                        .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed))
+                } else {
+                    (0, 0)
+                };
                 let n = paths.len();
+                let (sid, first) = (s.id.clone(), paths[0].clone());
                 div()
                     .id(SharedString::from(format!("changed-{ix}")))
                     .relative()
@@ -1155,7 +1333,8 @@ impl Dent {
                     .text_color(t.quiet)
                     .cursor_pointer()
                     .hover(|d| d.text_color(t.ink))
-                    .on_click(cx.listener(|this, _, _, cx| this.show_tab(Tab::Changes, cx)))
+                    // Opens Changes at the file this turn changed.
+                    .on_click(cx.listener(move |this, _, _, cx| this.review(&sid, &first, cx)))
                     .child(icon("git-compare", 13., t.quiet))
                     .child(if n == 1 {
                         format!("Changed {}", paths[0])
@@ -1583,11 +1762,9 @@ impl Dent {
                                         match s.items.iter().rev().find_map(|i| match i {
                                             Item::Question { .. } => Some("↩ answer"),
                                             Item::Approval { .. } => {
-                                                Some("↩ deny, with what’s typed as the reason")
+                                                Some("↩ deny with this reason")
                                             }
-                                            Item::Plan { .. } => {
-                                                Some("↩ ask for changes to the plan")
-                                            }
+                                            Item::Plan { .. } => Some("↩ ask for changes"),
                                             _ => None,
                                         }) {
                                             Some(h) => h,
@@ -2764,4 +2941,31 @@ fn sent_attachment(line: &str, cwd: &str, t: &theme::Theme) -> Div {
                 .child(div().ty(LABEL).text_color(t.quiet).child(place.to_string()))
                 .child(div().text_color(t.ink).child(what.to_string())),
         )
+}
+
+/// Lines of code or output that select and copy; with `diff`, removed
+/// ("- ") and added ("+ ") lines take the diff's colours.
+pub fn code_lines(id: String, text: String, diff: bool, ink: Hsla, t: &crate::theme::Theme) -> Div {
+    let mut runs = Vec::new();
+    for l in text.split_inclusive('\n') {
+        let color = if diff && l.starts_with("- ") {
+            t.needs.0
+        } else if diff && l.starts_with("+ ") {
+            t.done.0
+        } else {
+            ink
+        };
+        runs.push(TextRun {
+            len: l.len(),
+            font: font(crate::theme::mono()),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        });
+    }
+    div()
+        .min_w_0()
+        .whitespace_normal()
+        .child(crate::select::styled(id, text, runs, t))
 }

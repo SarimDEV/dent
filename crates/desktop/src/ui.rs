@@ -10,6 +10,20 @@ use gpui_kit::*;
 use crate::ds::{LABEL, Typed, UI, motion, radius, size, space};
 use crate::theme::Theme;
 
+/// Controls that show only while the pointer is over their `group` (a row,
+/// a tab, a message): hidden, not just transparent, so nothing unseen can
+/// be clicked.
+pub trait RevealOnHover: InteractiveElement + Styled + Sized {
+    fn reveal_on_hover(self, group: impl Into<SharedString>) -> Self {
+        self.invisible().group_hover(group, |s| s.visible())
+    }
+    /// The opposite: what makes way for the controls on hover.
+    fn hide_on_hover(self, group: impl Into<SharedString>) -> Self {
+        self.group_hover(group, |s| s.invisible())
+    }
+}
+impl<T: InteractiveElement + Styled> RevealOnHover for T {}
+
 pub fn icon(name: &str, px_size: f32, color: Hsla) -> Svg {
     svg()
         .path(format!("icons/{name}.svg"))
@@ -153,9 +167,12 @@ pub fn kbd(keys: &str, t: &Theme) -> Div {
 }
 
 /// A quiet one-line hint that gives way before anything else does.
+/// A quiet keyboard hint. Hints give way first: they shrink far faster
+/// than the controls beside them.
 pub fn hint(text: &str, t: &Theme) -> Div {
     div()
         .min_w_0()
+        .flex_shrink(8.)
         .overflow_hidden()
         .whitespace_nowrap()
         .text_ellipsis()

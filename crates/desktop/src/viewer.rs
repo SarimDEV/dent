@@ -8,6 +8,8 @@ use gpui_kit::base::input::Textarea;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use crate::ui::RevealOnHover;
+
 use crate::app::{Dent, Tab, Viewport};
 use crate::data::{Kind, Line, Session};
 use crate::ds::{CODE, LABEL, Typed, UI, radius, size, space};
@@ -254,10 +256,7 @@ impl Dent {
                                         .items_center()
                                         .justify_center()
                                         .rounded(px(radius::SM))
-                                        .when(!on, |d| {
-                                            d.opacity(0.)
-                                                .group_hover(group.clone(), |s| s.opacity(1.))
-                                        })
+                                        .when(!on, |d| d.reveal_on_hover(group.clone()))
                                         .hover(|d| d.bg(t.hover()))
                                         .active(|d| d.bg(t.press()))
                                         .on_mouse_down(MouseButton::Left, |_, _, cx| {
