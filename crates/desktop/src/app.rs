@@ -156,6 +156,22 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// Make a field one line: a typed or pasted line break becomes a space, and
+/// any Return submits. For names and searches.
+pub fn single_line(field: &Entity<TextareaState>, window: &mut Window, cx: &mut App) {
+    window
+        .subscribe(field, cx, |input, ev: &InputEvent, window, cx| {
+            if let InputEvent::Change = ev {
+                let v = input.read(cx).value().to_string();
+                if v.contains('\n') {
+                    let one = v.replace('\n', " ");
+                    input.update(cx, |i, cx| put(i, one, window, cx));
+                }
+            }
+        })
+        .detach();
+}
+
 /// Put text in a field with the caret after it, as typing would leave it.
 pub fn put(
     field: &mut TextareaState,
@@ -381,6 +397,8 @@ pub struct Dent {
     pub window_h: f32,
     /// Where the open menu is scrolled.
     pub menu_scroll: ScrollHandle,
+    /// The menu row the keyboard is on.
+    pub menu_ix: Option<usize>,
     pub toast: Option<Toast>,
     pub show_closed: bool,
     pub stopped: HashSet<String>,
@@ -597,21 +615,13 @@ impl Dent {
         cx.subscribe_in(
             &rename_input,
             window,
-            |this, input, ev: &InputEvent, window, cx| match ev {
+            |this, _, ev: &InputEvent, window, cx| match ev {
                 // Return saves, and so does clicking away, as in Finder.
                 InputEvent::PressEnter { .. } => {
                     this.commit_rename(window, cx);
                     this.composer.update(cx, |c, cx| c.focus(window, cx));
                 }
                 InputEvent::Blur => this.commit_rename(window, cx),
-                // One line: a pasted or typed line break becomes a space.
-                InputEvent::Change => {
-                    let v = input.read(cx).value().to_string();
-                    if v.contains('\n') {
-                        let one = v.replace('\n', " ");
-                        input.update(cx, |i, cx| put(i, one, window, cx));
-                    }
-                }
                 _ => {}
             },
         )
@@ -625,14 +635,9 @@ impl Dent {
         cx.subscribe_in(
             &search,
             window,
-            |this, input, ev: &InputEvent, window, cx| match ev {
+            |this, _, ev: &InputEvent, window, cx| match ev {
                 InputEvent::PressEnter { .. } => this.palette_open_selected(window, cx),
                 InputEvent::Change if this.palette.is_some() => {
-                    let v = input.read(cx).value().to_string();
-                    if v.contains('\n') {
-                        let one = v.replace('\n', " ");
-                        input.update(cx, |i, cx| put(i, one, window, cx));
-                    }
                     this.palette = Some(0);
                     cx.notify();
                 }
@@ -640,6 +645,8 @@ impl Dent {
             },
         )
         .detach();
+        single_line(&rename_input, window, cx);
+        single_line(&search, window, cx);
         // Only edits redraw the window: watching the fields themselves would
         // redraw on every caret blink, even after they lose focus.
         for input in [
@@ -841,6 +848,7 @@ impl Dent {
             older_models: false,
             window_h: 800.,
             menu_scroll: ScrollHandle::new(),
+            menu_ix: None,
             closed_tabs: prefs
                 .closed_tabs
                 .iter()
@@ -1680,6 +1688,39 @@ impl Dent {
                     return true;
                 }
             }
+        }
+        // An open menu: arrows move, Return or Space chooses.
+        if let Some(which) = self.menu
+            && plain
+            && matches!(k.key.as_str(), "up" | "down" | "enter" | "space")
+        {
+            let entries = self.menu_entries(which, cx);
+            let ok: Vec<usize> = (0..entries.len())
+                .filter(|i| entries[*i].choosable())
+                .collect();
+            if ok.is_empty() {
+                return true;
+            }
+            let at = self.menu_ix.and_then(|i| ok.iter().position(|x| *x == i));
+            match k.key.as_str() {
+                "up" => {
+                    let n = at.map_or(ok.len() - 1, |p| p.saturating_sub(1));
+                    self.menu_ix = Some(ok[n]);
+                    self.menu_scroll.scroll_to_item(ok[n]);
+                }
+                "down" => {
+                    let n = at.map_or(0, |p| (p + 1).min(ok.len() - 1));
+                    self.menu_ix = Some(ok[n]);
+                    self.menu_scroll.scroll_to_item(ok[n]);
+                }
+                _ => {
+                    if let Some(e) = self.menu_ix.and_then(|i| entries.get(i)).cloned() {
+                        self.choose_entry(&e, window, cx);
+                    }
+                }
+            }
+            cx.notify();
+            return true;
         }
         // ⌥⌘↑ and ⌥⌘↓ step between sessions, from a text field too.
         if k.modifiers.alt

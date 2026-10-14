@@ -4,6 +4,7 @@
 use gpui_kit::base::input::Textarea;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use std::rc::Rc;
 
 use crate::ui::RevealOnHover;
 
@@ -2270,8 +2271,10 @@ impl Dent {
                         this.menu = if this.menu == Some(which) {
                             None
                         } else {
-                            // Each menu opens at its top.
+                            // Each menu opens at its top, the current choice lit
+                            // for the keyboard.
                             this.menu_scroll = ScrollHandle::new();
+                            this.menu_ix = this.menu_entries(which, cx).iter().position(|e| e.on);
                             Some(which)
                         };
                         cx.notify();
@@ -2371,19 +2374,16 @@ impl Dent {
             .into_any_element()
     }
 
-    fn menu_list(
-        &mut self,
-        which: Menu,
-        max_h: f32,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let t = self.t;
+    /// What a menu holds, as data: the mouse and the keyboard both act on
+    /// these, so a row does the same thing however it's chosen.
+    pub fn menu_entries(&self, which: Menu, cx: &mut Context<Self>) -> Vec<Entry> {
         let d = self.defaults.clone();
-        let rows: Vec<AnyElement> = match which {
+        let act = |f: Box<dyn Fn(&mut Dent, &mut Window, &mut Context<Dent>)>| Some(Rc::from(f));
+        match which {
             Menu::Project => {
                 // Every project, newest first; the menu scrolls.
                 let scratch = crate::scratch_dir().display().to_string();
-                let mut v: Vec<AnyElement> = self
+                let mut v: Vec<Entry> = self
                     .projects
                     .iter()
                     // The scratch folder is "No project", below.
@@ -2397,55 +2397,35 @@ impl Dent {
                             // One line: a long path keeps its start and end.
                             crate::viewer::middle_ellipsis(&p.path.replacen(&home(), "~", 1), 38)
                         };
-                        menu_row(
-                            &self.probes,
+                        Entry::row(
                             format!("m-{}", p.name),
                             &p.name,
                             Some(note),
                             on,
-                            &t,
+                            act(Box::new(move |this, _, _| {
+                                this.defaults.project = Some(path.clone());
+                                this.defaults.project_picked = true;
+                            })),
                         )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.defaults.project = Some(path.clone());
-                            this.defaults.project_picked = true;
-                            this.menu = None;
-                            cx.notify();
-                        }))
-                        .into_any_element()
                     })
                     .collect();
-                v.push(
-                    menu_row(
-                        &self.probes,
-                        "m-choose",
-                        "Choose a folder…",
-                        Some("Any folder on this Mac".into()),
-                        false,
-                        &t,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.menu = None;
-                        this.choose_project_folder(cx);
-                    }))
-                    .into_any_element(),
-                );
-                v.push(
-                    menu_row(
-                        &self.probes,
-                        "m-none",
-                        "No project",
-                        Some("A scratch folder, ~/dent/scratch".into()),
-                        d.project.is_none(),
-                        &t,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
+                v.push(Entry::row(
+                    "m-choose".into(),
+                    "Choose a folder…",
+                    Some("Any folder on this Mac".into()),
+                    false,
+                    act(Box::new(|this, _, cx| this.choose_project_folder(cx))),
+                ));
+                v.push(Entry::row(
+                    "m-none".into(),
+                    "No project",
+                    Some("A scratch folder, ~/dent/scratch".into()),
+                    d.project.is_none(),
+                    act(Box::new(|this, _, _| {
                         this.defaults.project = None;
                         this.defaults.project_picked = true;
-                        this.menu = None;
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-                );
+                    })),
+                ));
                 v
             }
             Menu::Model | Menu::SessionModel => {
@@ -2464,7 +2444,7 @@ impl Dent {
                 };
                 older.sort_by_key(|m| family(m));
                 let open = self.older_models || older.iter().any(|m| m.id == current);
-                let row = |this: &mut Self, m: &dent_protocol::Model, cx: &mut Context<Self>| {
+                let row = |m: &dent_protocol::Model| {
                     let id = m.id.clone();
                     // Each model is described once: the default names what it
                     // runs, older versions are only their names.
@@ -2478,77 +2458,42 @@ impl Dent {
                     } else {
                         (m.name.clone(), m.description.clone())
                     };
-                    menu_row(
-                        &this.probes,
+                    Entry::row(
                         format!("m-{}", m.id),
                         &name,
                         (!note.is_empty()).then_some(note),
                         current == m.id,
-                        &t,
+                        act(Box::new(move |this, _, cx| {
+                            if which == Menu::Model {
+                                this.defaults.model = Some(id.clone());
+                            } else {
+                                this.set_model(id.clone(), cx);
+                            }
+                        })),
                     )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if which == Menu::Model {
-                            this.defaults.model = Some(id.clone());
-                        } else {
-                            this.set_model(id.clone(), cx);
-                        }
-                        this.menu = None;
-                        cx.notify();
-                    }))
-                    .into_any_element()
                 };
-                let mut v: Vec<AnyElement> = latest.iter().map(|m| row(self, m, cx)).collect();
+                let mut v: Vec<Entry> = latest.iter().map(row).collect();
                 if v.is_empty() {
-                    v.push(menu_note("Asking Claude Code for its models…", &t));
+                    v.push(Entry::note("Asking Claude Code for its models…"));
                 }
                 if !older.is_empty() {
-                    let older_at = v.len();
-                    v.push(
-                        div()
-                            .id("m-older")
-                            .flex_none()
-                            .relative()
-                            .child(probe(&self.probes, "m-older"))
-                            .mx(px(space::S1))
-                            .mt(px(space::S1))
-                            .px(px(space::S2))
-                            .h(px(size::ROW))
-                            .flex()
-                            .items_center()
-                            .gap(px(space::S2))
-                            .rounded(px(radius::MD))
-                            .border_t_1()
-                            .border_color(t.hairline)
-                            .cursor_pointer()
-                            .hover(|d| d.bg(t.hover()))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.older_models = !this.older_models;
-                                // What opened comes into view.
-                                if this.older_models {
-                                    this.menu_scroll.scroll_to_top_of_item(older_at);
-                                }
-                                cx.notify();
-                            }))
-                            .child(icon(
-                                if open {
-                                    "chevron-down"
-                                } else {
-                                    "chevron-right"
-                                },
-                                12.,
-                                t.quiet,
-                            ))
-                            .child(
-                                div()
-                                    .ty(UI)
-                                    .text_size(px(12.))
-                                    .text_color(t.quiet)
-                                    .child(format!("Older versions · {}", older.len())),
-                            )
-                            .into_any_element(),
-                    );
+                    let at = v.len();
+                    v.push(Entry {
+                        key: "m-older".into(),
+                        name: format!("Older versions · {}", older.len()),
+                        note: None,
+                        on: false,
+                        kind: EntryKind::Fold(open),
+                        act: act(Box::new(move |this, _, _| {
+                            this.older_models = !this.older_models;
+                            // What opened comes into view.
+                            if this.older_models {
+                                this.menu_scroll.scroll_to_top_of_item(at);
+                            }
+                        })),
+                    });
                     if open {
-                        v.extend(older.iter().map(|m| row(self, m, cx)));
+                        v.extend(older.iter().map(row));
                     }
                 }
                 v
@@ -2563,24 +2508,19 @@ impl Dent {
                     .iter()
                     .map(|p| {
                         let p = *p;
-                        menu_row(
-                            &self.probes,
+                        Entry::row(
                             format!("m-{p:?}").to_lowercase(),
                             p.label(),
                             Some(permission_note(p).to_string()),
                             current == p,
-                            &t,
+                            act(Box::new(move |this, _, cx| {
+                                if which == Menu::Permission {
+                                    this.defaults.permission = p;
+                                } else {
+                                    this.set_permission(p, cx);
+                                }
+                            })),
                         )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if which == Menu::Permission {
-                                this.defaults.permission = p;
-                            } else {
-                                this.set_permission(p, cx);
-                            }
-                            this.menu = None;
-                            cx.notify();
-                        }))
-                        .into_any_element()
                     })
                     .collect()
             }
@@ -2617,28 +2557,114 @@ impl Dent {
                     })
                     .map(|(value, note)| {
                         let v = value.map(str::to_string);
-                        menu_row(
-                            &self.probes,
+                        Entry::row(
                             format!("m-effort-{}", value.unwrap_or("default")),
                             effort_name(*value),
                             Some(note.to_string()),
                             current.as_deref() == *value,
-                            &t,
+                            act(Box::new(move |this, _, cx| {
+                                if which == Menu::Effort {
+                                    this.defaults.effort = v.clone();
+                                } else {
+                                    this.set_effort(v.clone(), cx);
+                                }
+                            })),
                         )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if which == Menu::Effort {
-                                this.defaults.effort = v.clone();
-                            } else {
-                                this.set_effort(v.clone(), cx);
-                            }
-                            this.menu = None;
-                            cx.notify();
-                        }))
-                        .into_any_element()
                     })
                     .collect()
             }
-        };
+        }
+    }
+
+    /// Run a menu entry: a row closes the menu; a fold stays open.
+    pub fn choose_entry(&mut self, e: &Entry, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(act) = e.act.clone() else { return };
+        if !matches!(e.kind, EntryKind::Fold(_)) {
+            self.menu = None;
+        }
+        act(self, window, cx);
+        cx.notify();
+    }
+
+    fn menu_list(
+        &mut self,
+        which: Menu,
+        max_h: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let t = self.t;
+        let entries = self.menu_entries(which, cx);
+        let hi = self.menu_ix;
+        let rows: Vec<AnyElement> = entries
+            .into_iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let lit = hi == Some(i);
+                match &e.kind {
+                    EntryKind::Note => menu_note_owned(e.name.clone(), &t),
+                    EntryKind::Fold(open) => {
+                        div()
+                            .id(SharedString::from(e.key.clone()))
+                            .flex_none()
+                            .relative()
+                            .child(probe(&self.probes, e.key.clone()))
+                            .mx(px(space::S1))
+                            .mt(px(space::S1))
+                            .px(px(space::S2))
+                            .h(px(size::ROW))
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S2))
+                            .rounded(px(radius::MD))
+                            .border_t_1()
+                            .border_color(t.hairline)
+                            .cursor_pointer()
+                            .when(lit, |d| d.bg(t.hover()))
+                            .hover(|d| d.bg(t.hover()))
+                            .active(|d| d.bg(t.press()))
+                            .child(icon(
+                                if *open {
+                                    "chevron-down"
+                                } else {
+                                    "chevron-right"
+                                },
+                                12.,
+                                t.quiet,
+                            ))
+                            .child(
+                                div()
+                                    .ty(UI)
+                                    .text_size(px(12.))
+                                    .text_color(t.quiet)
+                                    .child(e.name.clone()),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.choose_entry(&e, window, cx)
+                            }))
+                            .into_any_element()
+                    }
+                    EntryKind::Row => menu_row(
+                        &self.probes,
+                        e.key.clone(),
+                        &e.name,
+                        e.note.clone(),
+                        e.on,
+                        &t,
+                    )
+                    .when(lit, |d| d.bg(t.hover()))
+                    .on_hover(cx.listener(move |this, h: &bool, _, cx| {
+                        if *h && this.menu_ix != Some(i) {
+                            this.menu_ix = Some(i);
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.choose_entry(&e, window, cx)),
+                    )
+                    .into_any_element(),
+                }
+            })
+            .collect();
         // A list that scrolls fades at an edge with more beyond it, so a
         // row cut by the edge reads as "there's more", not as a mistake.
         let (y, max_y) = (
@@ -2691,6 +2717,72 @@ impl Dent {
 }
 
 /// A quiet line in a menu that isn't a choice.
+/// One thing in a menu.
+#[derive(Clone)]
+pub struct Entry {
+    pub key: String,
+    pub name: String,
+    pub note: Option<String>,
+    /// It's the current choice: a check beside it.
+    pub on: bool,
+    pub kind: EntryKind,
+    pub act: Option<Rc<dyn Fn(&mut Dent, &mut Window, &mut Context<Dent>)>>,
+}
+
+#[derive(Clone)]
+pub enum EntryKind {
+    Row,
+    /// Shows or hides more rows (open or not); the menu stays.
+    Fold(bool),
+    /// Words, not a choice.
+    Note,
+}
+
+impl Entry {
+    fn row(
+        key: String,
+        name: &str,
+        note: Option<String>,
+        on: bool,
+        act: Option<Rc<dyn Fn(&mut Dent, &mut Window, &mut Context<Dent>)>>,
+    ) -> Self {
+        Self {
+            key,
+            name: name.to_string(),
+            note,
+            on,
+            kind: EntryKind::Row,
+            act,
+        }
+    }
+    fn note(text: &str) -> Self {
+        Self {
+            key: String::new(),
+            name: text.to_string(),
+            note: None,
+            on: false,
+            kind: EntryKind::Note,
+            act: None,
+        }
+    }
+    /// Whether the keyboard can land on it.
+    pub fn choosable(&self) -> bool {
+        self.act.is_some()
+    }
+}
+
+fn menu_note_owned(text: String, t: &theme::Theme) -> AnyElement {
+    div()
+        .px(px(space::S3))
+        .py(px(space::S2))
+        .ty(UI)
+        .text_size(px(12.))
+        .text_color(t.quiet)
+        .child(text)
+        .into_any_element()
+}
+
+#[allow(dead_code)]
 fn menu_note(text: &'static str, t: &theme::Theme) -> AnyElement {
     div()
         .px(px(space::S3))
