@@ -75,21 +75,25 @@ impl Dent {
                     .child(probe(&self.probes, "fork")),
             );
         }
-        if Self::can_close(s) {
+        // Close is always there; while it works or waits on you, it's off and
+        // says why. The shortcut is in its tooltip and the menu bar.
+        if !s.closed {
             let sid = id.clone();
             let close = if tight {
-                icon_button("close", "archive", &t).tooltip(tip("Close", Some("⌘ W"), t))
+                icon_button("close", "archive", &t)
             } else {
-                button("close", "Close", false, &t).child(kbd("⌘ W", &t))
+                button("close", "Close", false, &t)
             };
-            actions = actions.child(
+            let close = if Self::can_close(s) {
                 close
-                    .relative()
+                    .tooltip(tip("Close", Some("⌘ W"), t))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.close(&sid, window, cx);
                     }))
-                    .child(probe(&self.probes, "close")),
-            );
+            } else {
+                crate::ui::off(close, "Answer it or stop it first", &t)
+            };
+            actions = actions.child(close.relative().child(probe(&self.probes, "close")));
         }
         // Icon actions sit together, after the text ones.
         // Once the viewer shows a Terminal tab, the tab is the way there.
@@ -790,6 +794,10 @@ impl Dent {
                                     .flex()
                                     .items_center()
                                     .gap(px(space::S1))
+                                    // Shown on hover in the gap below the message,
+                                    // so it doesn't push the reply away.
+                                    .h(px(size::CONTROL))
+                                    .mb(px(-(size::CONTROL + space::S1)))
                                     .reveal_on_hover(group.clone())
                                     // When you sent it, beside what you can do with it.
                                     .when(*at > 0, |d| {
@@ -1192,12 +1200,6 @@ impl Dent {
                                     }))
                                     .child(probe(&self.probes, "deny")),
                             ),
-                    )
-                    .child(
-                        div()
-                            .ty(LABEL)
-                            .text_color(t.quiet)
-                            .child("Typed text is sent as the reason"),
                     )
                     .into_any_element()
             }
@@ -1616,6 +1618,9 @@ impl Dent {
         let id = s.id.clone();
         // While it works and nothing is typed, the button stops it. Right after
         // sending it stays inert, so a double press never lands on Stop.
+        // Ink only while it works: waiting on you, the card's own answer is
+        // the one loud thing, and Stop steps back to an outline.
+        let loud = s.status == Status::Working;
         let action: AnyElement = if working && empty && !settling {
             div()
                 .id("send")
@@ -1626,11 +1631,21 @@ impl Dent {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(t.ink)
+                .when(loud, |d| d.bg(t.ink).active(|d| d.opacity(0.8)))
+                .when(!loud, |d| {
+                    d.border_1()
+                        .border_color(t.ink.opacity(0.16))
+                        .hover(|d| d.bg(t.hover()))
+                        .active(|d| d.bg(t.press()))
+                })
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, window, cx| this.stop(&id, window, cx)))
                 .tooltip(tip("Stop", Some("⌘ ."), t))
-                .child(div().size(px(9.)).bg(t.surface))
+                .child(
+                    div()
+                        .size(px(9.))
+                        .bg(if loud { t.surface } else { t.quiet }),
+                )
                 .child(probe(&self.probes, "send"))
                 .into_any_element()
         } else {
@@ -1668,6 +1683,49 @@ impl Dent {
             .map_or(s.agent.as_str(), |(_, m)| m)
             .to_string();
         let permission = s.permission.label().to_string();
+        let hint_text = if s.status == Status::Needs {
+            match s.items.iter().rev().find_map(|i| match i {
+                Item::Question { .. } => Some("↩ answer"),
+                Item::Approval { .. } => Some("↩ deny with this reason"),
+                Item::Plan { .. } => Some("↩ ask for changes"),
+                _ => None,
+            }) {
+                Some(h) => h,
+                None => "↩ send",
+            }
+        } else if working {
+            "↩ queue · ⌘ ↩ steer"
+        } else {
+            "↩ send"
+        };
+        // Short of room, things give way one at a time, in this order: the
+        // hint, the context reading, "Default ·", effort's word, then the
+        // permission's. Each chip keeps its icon and says what it is on hover.
+        let room = self.chat_w.min(size::COLUMN + space::S8 * 2.) - space::S8 * 2. - space::S4 * 2.
+            + space::S2
+            - size::CONTROL
+            - space::S2;
+        let effort_word = match s.effort.as_deref() {
+            None => "Effort",
+            e => effort_name(e),
+        };
+        let fit = fit_footer(
+            room,
+            [
+                (
+                    model.clone(),
+                    model.trim_start_matches("Default · ").to_string(),
+                ),
+                (permission.clone(), String::new()),
+                (
+                    effort_label(s.effort.as_deref()).to_string(),
+                    effort_word.to_string(),
+                ),
+            ],
+            s.context.is_some(),
+            hint_text,
+        );
+        let labels = fit.labels.clone();
         let chips: Vec<AnyElement> = self
             .attachments
             .clone()
@@ -1773,86 +1831,35 @@ impl Dent {
                             // label, then permission's; each keeps its icon
                             // and says what it is on hover. The model's name
                             // always shows.
-                            .child(self.chip(
-                                Menu::SessionModel,
-                                "claude",
-                                if self.chat_w >= 620. {
-                                    &model
-                                } else {
-                                    model.trim_start_matches("Default · ")
-                                },
-                                false,
-                                cx,
-                            ))
+                            .child(self.chip(Menu::SessionModel, "claude", &labels[0], false, cx))
                             .child(self.chip(
                                 Menu::SessionPermission,
                                 "shield",
-                                if self.chat_w >= 500. { &permission } else { "" },
+                                &labels[1],
                                 false,
                                 cx,
                             ))
-                            .child(self.chip(
-                                Menu::SessionEffort,
-                                "gauge",
-                                if self.chat_w >= 760. {
-                                    effort_label(s.effort.as_deref())
-                                } else if self.chat_w >= 540. {
-                                    // The gauge says "effort"; "Default" alone wouldn't.
-                                    match s.effort.as_deref() {
-                                        None => "Effort",
-                                        e => effort_name(e),
-                                    }
-                                } else {
-                                    ""
-                                },
-                                false,
-                                cx,
-                            ))
+                            .child(self.chip(Menu::SessionEffort, "gauge", &labels[2], false, cx))
                             .child(div().flex_1())
-                            .when_some(
-                                s.context.filter(|_| self.chat_w >= 680.),
-                                |d, (used, max)| {
-                                    let max = max.unwrap_or(200_000).max(1);
-                                    let pct = used as f32 / max as f32 * 100.;
-                                    d.child(
-                                        div()
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
-                                            .flex_shrink(2.)
-                                            .ty(LABEL)
-                                            .text_color(if pct > 90. { t.needs.0 } else { t.faint })
-                                            .child(if pct < 10. {
-                                                format!("context {pct:.1}% · ")
-                                            } else {
-                                                format!("context {pct:.0}% · ")
-                                            }),
-                                    )
-                                },
-                            )
-                            // The hint gives way before the buttons do.
-                            .when(self.chat_w >= 560., |d| {
-                                d.child(hint(
-                                    if s.status == Status::Needs {
-                                        match s.items.iter().rev().find_map(|i| match i {
-                                            Item::Question { .. } => Some("↩ answer"),
-                                            Item::Approval { .. } => {
-                                                Some("↩ deny with this reason")
-                                            }
-                                            Item::Plan { .. } => Some("↩ ask for changes"),
-                                            _ => None,
-                                        }) {
-                                            Some(h) => h,
-                                            None => "↩ send",
-                                        }
-                                    } else if working {
-                                        "↩ queue · ⌘ ↩ steer"
-                                    } else {
-                                        "↩ send"
-                                    },
-                                    &t,
-                                ))
+                            .when_some(s.context.filter(|_| fit.context), |d, (used, max)| {
+                                let max = max.unwrap_or(200_000).max(1);
+                                let pct = used as f32 / max as f32 * 100.;
+                                d.child(
+                                    div()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .flex_shrink(2.)
+                                        .ty(LABEL)
+                                        .text_color(if pct > 90. { t.needs.0 } else { t.faint })
+                                        .child(if pct < 10. {
+                                            format!("context {pct:.1}% · ")
+                                        } else {
+                                            format!("context {pct:.0}% · ")
+                                        }),
+                                )
                             })
+                            .when(fit.hint, |d| d.child(hint(hint_text, &t)))
                             .child(action),
                     )
                     .child(probe(&self.probes, "composer"))
@@ -2483,13 +2490,10 @@ impl Dent {
                         )
                     })
                     .collect();
-                v.push(Entry::row(
-                    "m-choose".into(),
-                    "Choose a folder…",
-                    Some("Any folder on this Mac".into()),
-                    false,
-                    act(Box::new(|this, _, cx| this.choose_project_folder(cx))),
-                ));
+                // Mac menu order: the choices, then the action that opens a panel.
+                if !v.is_empty() {
+                    v.push(Entry::separator());
+                }
                 v.push(Entry::row(
                     "m-none".into(),
                     "No project",
@@ -2499,6 +2503,14 @@ impl Dent {
                         this.defaults.project = None;
                         this.defaults.project_picked = true;
                     })),
+                ));
+                v.push(Entry::separator());
+                v.push(Entry::row(
+                    "m-choose".into(),
+                    "Choose a folder…",
+                    None,
+                    false,
+                    act(Box::new(|this, _, cx| this.choose_project_folder(cx))),
                 ));
                 v
             }
@@ -2676,6 +2688,13 @@ impl Dent {
                 let lit = hi == Some(i);
                 match &e.kind {
                     EntryKind::Note => menu_note_owned(e.name.clone(), &t),
+                    EntryKind::Separator => div()
+                        .flex_none()
+                        .my(px(space::S1))
+                        .mx(px(space::S2))
+                        .h(px(1.))
+                        .bg(t.hairline)
+                        .into_any_element(),
                     EntryKind::Fold(open) => {
                         div()
                             .id(SharedString::from(e.key.clone()))
@@ -2814,6 +2833,8 @@ pub enum EntryKind {
     Fold(bool),
     /// Words, not a choice.
     Note,
+    /// A hairline between groups.
+    Separator,
 }
 
 impl Entry {
@@ -2825,6 +2846,16 @@ impl Entry {
             on,
             kind: EntryKind::Row,
             act,
+        }
+    }
+    fn separator() -> Self {
+        Self {
+            key: String::new(),
+            name: String::new(),
+            note: None,
+            on: false,
+            kind: EntryKind::Separator,
+            act: None,
         }
     }
     fn note(text: &str) -> Self {
@@ -3132,4 +3163,77 @@ pub fn code_lines(id: String, text: String, diff: bool, ink: Hsla, t: &crate::th
         .min_w_0()
         .whitespace_normal()
         .child(crate::select::styled(id, text, runs, t))
+}
+
+/// How a composer's footer fits its room: which words each chip keeps,
+/// and whether the context reading and the hint show.
+#[derive(Clone)]
+pub struct Fit {
+    pub labels: [String; 3],
+    pub context: bool,
+    pub hint: bool,
+}
+
+/// Fit chips (each with its full and short label; an empty short label is
+/// the icon alone) and the optional readings into `room` points. Things give
+/// way one at a time: the hint, the context, then each chip's words in turn,
+/// model first and permission last.
+pub fn fit_footer(room: f32, chips: [(String, String); 3], context: bool, hint: &str) -> Fit {
+    // Widths from the label lengths: the interface face runs about 7 pt a
+    // character; a chip adds its icon, chevron and padding.
+    let text = |t: &str| t.chars().count() as f32 * 7.2;
+    let chip = |t: &str| if t.is_empty() { 44. } else { 52. + text(t) };
+    let gap = space::S1;
+    let ctx_w = text("context 9.9% · ");
+    let hint_w = text(hint) + space::S2;
+    // The steps, least loss first.
+    let mut steps: Vec<([bool; 3], [bool; 3], bool, bool)> = Vec::new();
+    // (short?, icon only?) per chip, context, hint
+    let full = [false; 3];
+    steps.push((full, full, true, true));
+    steps.push((full, full, true, false));
+    steps.push((full, full, false, false));
+    steps.push(([true, false, false], full, false, false));
+    steps.push(([true, false, true], full, false, false));
+    steps.push(([true, false, true], [false, false, true], false, false));
+    steps.push(([true, true, true], [false, true, true], false, false));
+    for (short, icon, ctx, h) in &steps {
+        let labels: [String; 3] = std::array::from_fn(|i| {
+            if icon[i] {
+                String::new()
+            } else if short[i] {
+                chips[i].1.clone()
+            } else {
+                chips[i].0.clone()
+            }
+        });
+        let mut w: f32 = labels.iter().map(|l| chip(l)).sum::<f32>() + gap * 2.;
+        if *ctx && context {
+            w += ctx_w;
+        }
+        if *h {
+            w += hint_w;
+        }
+        if w <= room {
+            return Fit {
+                labels,
+                context: *ctx && context,
+                hint: *h,
+            };
+        }
+    }
+    let (short, icon, ..) = steps[steps.len() - 1];
+    Fit {
+        labels: std::array::from_fn(|i| {
+            if icon[i] {
+                String::new()
+            } else if short[i] {
+                chips[i].1.clone()
+            } else {
+                chips[i].0.clone()
+            }
+        }),
+        context: false,
+        hint: false,
+    }
 }

@@ -6,7 +6,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use crate::app::Dent;
-use crate::ds::{LABEL, READING, Typed, UI, radius, size, space};
+use crate::ds::{DISPLAY_COMPACT, LABEL, Typed, UI, radius, size, space};
 use crate::theme::status_square;
 use crate::ui::{floating, icon, kbd, probe};
 
@@ -140,6 +140,10 @@ impl Dent {
                                     .child("closed"),
                             )
                         })
+                        // Return opens whichever row is lit; its keycap says so.
+                        .when(on, |d| {
+                            d.child(div().h(px(20.)).flex().items_center().child(kbd("↩", &t)))
+                        })
                         .child(probe(&self.probes, format!("result-{i}")))
                         .into_any_element(),
                 )
@@ -191,7 +195,9 @@ impl Dent {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .ty(READING)
+                                    // The query is set in the display face (type.display, compact).
+                                    .ty(DISPLAY_COMPACT)
+                                    .font_family(crate::theme::serif())
                                     .text_color(t.ink)
                                     .child(Textarea::new(&self.search)),
                             ),
@@ -235,7 +241,7 @@ impl Dent {
                                                 format!("Start a session: {query}")
                                             },
                                         ))
-                                        .child(kbd("↩", &t)),
+                                        .when(on, |d| d.child(kbd("↩", &t))),
                                 )
                             }),
                     ),

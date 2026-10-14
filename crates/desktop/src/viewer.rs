@@ -558,7 +558,13 @@ impl Dent {
                     cx,
                 ))
                 .when(shown_vp == vp, |d| d.bg(t.selected()))
-                .when(!ok, |d| d.cursor_not_allowed().opacity(0.4))
+                .map(|d| {
+                    if ok {
+                        d
+                    } else {
+                        crate::ui::off(d, "Needs a wider panel", &t)
+                    }
+                })
                 .when(ok, |d| {
                     d.on_click(cx.listener(move |this, _, _, cx| {
                         this.viewport = vp;

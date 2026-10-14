@@ -808,11 +808,15 @@ fn ask(id: &str, tool: &str, input: &Value, description: Option<&str>, cwd: &Pat
             plan: input["plan"].as_str().unwrap_or_default().into(),
         },
         _ => {
-            let (title, mut command) = what(tool, input, cwd);
-            // An edit to approve shows what it changes, under its path.
+            let (mut title, mut command) = what(tool, input, cwd);
+            // An edit to approve names its file in the title, and the box
+            // holds what it changes.
             let change = edit_text(tool, input).filter(|e| !e.trim().is_empty());
             if let Some(e) = &change {
-                command = format!("{command}\n\n{e}");
+                if let Some(t) = title.strip_suffix(" a file") {
+                    title = format!("{t} {command}");
+                }
+                command = e.clone();
             }
             Item::Approval {
                 id: id.into(),

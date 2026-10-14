@@ -167,6 +167,15 @@ pub fn kbd(keys: &str, t: &Theme) -> Div {
 }
 
 /// A quiet one-line hint that gives way before anything else does.
+/// A control that can't be used right now: dimmed, the not-allowed
+/// cursor, and on hover the reason. Shown rather than hidden, so things
+/// don't shift about. The caller adds no click.
+pub fn off(el: Stateful<Div>, why: &'static str, t: &Theme) -> Stateful<Div> {
+    el.opacity(0.45)
+        .cursor_not_allowed()
+        .tooltip(tip(why, None, *t))
+}
+
 /// A quiet keyboard hint. Hints give way first: they shrink far faster
 /// than the controls beside them.
 pub fn hint(text: &str, t: &Theme) -> Div {
