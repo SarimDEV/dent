@@ -59,13 +59,12 @@ impl Dent {
                                         .text_color(t.ink)
                                         .child(s.title.clone()),
                                 )
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .ty(UI)
-                                        .text_color(t.quiet)
-                                        .child(format!("{} · {}", s.project, s.detail)),
-                                ),
+                                .child(div().truncate().ty(UI).text_color(t.quiet).child(
+                                    match self.search_snippet(&s, cx) {
+                                        Some(found) => format!("{} · {found}", s.project),
+                                        None => format!("{} · {}", s.project, s.detail),
+                                    },
+                                )),
                         )
                         .when(s.closed, |d| {
                             d.child(

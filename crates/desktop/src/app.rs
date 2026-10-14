@@ -194,6 +194,9 @@ pub struct Defaults {
     pub effort: Option<String>,
 }
 
+/// A session's search text, with the size it was made at.
+type SearchText = ((usize, u64), Rc<str>);
+
 /// What a request's reply is for.
 enum Waiting {
     Models,
@@ -264,6 +267,8 @@ pub struct Dent {
     pub open_tools: HashSet<(String, usize)>,
     /// What the bridge built per session, to extend rather than rebuild.
     built: HashMap<String, crate::bridge::Built>,
+    /// Each session's search text, with the size it was made at.
+    search_cache: RefCell<HashMap<String, SearchText>>,
     /// The plan above the composer is open.
     pub plan_open: bool,
     /// Long messages you've unfolded.
@@ -602,6 +607,7 @@ impl Dent {
             slash_ix: 0,
             expanded: HashSet::new(),
             plan_open: false,
+            search_cache: RefCell::new(HashMap::new()),
             open_tools: HashSet::new(),
             built: HashMap::new(),
             saved_prefs: None,
@@ -2177,6 +2183,34 @@ impl Dent {
     }
 
     /// Sessions matching the query, closed ones included, best first.
+    /// A session's words, lowercased, for search: what you sent and what
+    /// came back. Kept until the session changes.
+    fn search_text(&self, s: &Session) -> Rc<str> {
+        let key = (s.items.len(), s.updated);
+        if let Some((k, text)) = self.search_cache.borrow().get(&s.id)
+            && *k == key
+        {
+            return text.clone();
+        }
+        let mut text = String::new();
+        for i in s.items.iter() {
+            match i {
+                Item::User { text: t, .. } | Item::Text(t) => {
+                    text.push_str(&t.to_lowercase());
+                    text.push('\n');
+                }
+                _ => {}
+            }
+        }
+        let text: Rc<str> = text.into();
+        self.search_cache
+            .borrow_mut()
+            .insert(s.id.clone(), (key, text.clone()));
+        text
+    }
+
+    /// Sessions matching the query, closed ones included, best first: titles
+    /// count most, then what was said.
     pub fn palette_results(&self, cx: &App) -> Vec<String> {
         let q = self.search.read(cx).value().to_lowercase();
         let words: Vec<&str> = q.split_whitespace().collect();
@@ -2184,15 +2218,62 @@ impl Dent {
             .sessions
             .iter()
             .filter_map(|s| {
-                let hay =
+                let meta =
                     format!("{} {} {} {}", s.title, s.project, s.machine, s.detail).to_lowercase();
-                let score = words.iter().filter(|w| hay.contains(*w)).count();
-                (words.is_empty() || score == words.len())
-                    .then(|| (score + usize::from(!s.closed) * 10, s.id.clone()))
+                let body = if words.is_empty() {
+                    Rc::from("")
+                } else {
+                    self.search_text(s)
+                };
+                let mut score = 0;
+                for w in &words {
+                    if meta.contains(w) {
+                        score += 3;
+                    } else if body.contains(w) {
+                        score += 1;
+                    } else {
+                        return None;
+                    }
+                }
+                Some((score + usize::from(!s.closed) * 10, s.id.clone()))
             })
             .collect();
         hits.sort_by_key(|h| std::cmp::Reverse(h.0));
         hits.into_iter().take(8).map(|(_, id)| id).collect()
+    }
+
+    /// Where in a session the query was found, when it isn't in the title.
+    pub fn search_snippet(&self, s: &Session, cx: &App) -> Option<String> {
+        let q = self.search.read(cx).value().to_lowercase();
+        let w = q.split_whitespace().next()?;
+        if s.title.to_lowercase().contains(w) {
+            return None;
+        }
+        for i in s.items.iter() {
+            let (Item::User { text, .. } | Item::Text(text)) = i else {
+                continue;
+            };
+            let lower = text.to_lowercase();
+            if let Some(at) = lower.find(w) {
+                // A few words either side, on a char boundary.
+                let mut start = at.saturating_sub(40);
+                while !text.is_char_boundary(start) {
+                    start -= 1;
+                }
+                let mut end = (at + w.len() + 60).min(text.len());
+                while !text.is_char_boundary(end) {
+                    end += 1;
+                }
+                let piece = text[start..end]
+                    .replace('\n', " ")
+                    .replace("**", "")
+                    .replace('`', "");
+                let lead = if start > 0 { "…" } else { "" };
+                let tail = if end < text.len() { "…" } else { "" };
+                return Some(format!("{lead}{}{tail}", piece.trim()));
+            }
+        }
+        None
     }
 
     pub fn palette_open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
