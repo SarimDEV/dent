@@ -337,14 +337,16 @@ impl Dent {
             },
         )
         .detach();
-        cx.observe(&composer, |_, _, cx| cx.notify()).detach();
-        cx.observe(&starter, |_, _, cx| cx.notify()).detach();
+        // Only edits redraw the window: watching the fields themselves would
+        // redraw on every caret blink, even after they lose focus.
         for input in [&composer, &starter, &comment_input, &search] {
             crate::style_input(input, &t, cx);
         }
         cx.subscribe_in(&composer, window, |this, _, ev: &InputEvent, window, cx| {
-            if let InputEvent::PressEnter { .. } = ev {
-                this.send(window, cx);
+            match ev {
+                InputEvent::PressEnter { .. } => this.send(window, cx),
+                InputEvent::Change => cx.notify(),
+                _ => {}
             }
         })
         .detach();
@@ -354,6 +356,7 @@ impl Dent {
             |this, s, ev: &InputEvent, window, cx| match ev {
                 InputEvent::PressEnter { .. } => this.start(window, cx),
                 InputEvent::Change => {
+                    cx.notify();
                     // The project follows what you type, a beat behind, until you pick one.
                     let text = s.read(cx).value().to_string();
                     cx.spawn_in(window, async move |this, cx| {
