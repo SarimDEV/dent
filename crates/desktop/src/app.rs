@@ -471,6 +471,8 @@ pub struct Dent {
     pub panel_left: Option<f32>,
     /// Where you were reading each session, and whether you were at the end.
     pub read_at: HashMap<String, (ListOffset, bool)>,
+    /// Parsed documents by file and version.
+    pub md_docs: HashMap<(&'static str, usize), Rc<Vec<Block>>>,
     /// Sessions closed while the Undo has been showing, oldest first.
     pub undo_closes: Vec<String>,
     /// The terminal session being picked up.
@@ -860,6 +862,7 @@ impl Dent {
             palette_scroll: ScrollHandle::new(),
             panel_left: None,
             read_at: HashMap::new(),
+            md_docs: HashMap::new(),
             undo_closes: Vec::new(),
             adopting: None,
             reveal_row: None,
@@ -2090,7 +2093,18 @@ impl Dent {
                     *old = a;
                 }
                 Some(old) => *old = a,
-                None => self.arts.push(a),
+                None => {
+                    // A file it just made comes forward, unless you're in
+                    // your terminal or a side chat.
+                    let fresh = a.id;
+                    self.arts.push(a);
+                    if !first && !matches!(self.tabs.get(id), Some(Tab::Terminal | Tab::Aside)) {
+                        self.tabs.insert(id.to_string(), Tab::Art(fresh));
+                        if let Some(c) = self.closed_tabs.get_mut(id) {
+                            c.remove(fresh);
+                        }
+                    }
+                }
             }
         }
         // A reply streaming in fades in word by word.
@@ -2924,13 +2938,24 @@ impl Dent {
         };
         for ev in events {
             match ev {
+                // Each load starts clean: what the last one reported is gone.
+                PageEvent::Started => {
+                    self.errors.remove(&(art, v));
+                }
                 PageEvent::Loaded => {}
+                PageEvent::Logged(msg) => {
+                    let list = self.errors.entry((art, v)).or_default();
+                    if !list.contains(&msg) {
+                        list.push(msg);
+                    }
+                }
                 PageEvent::Error(msg) => {
                     let list = self.errors.entry((art, v)).or_default();
                     if !list.contains(&msg) {
                         list.push(msg);
                     }
-                    // A broken latest page needs you, like any other error.
+                    // A broken latest page needs you, like any other error;
+                    // a line it only logged doesn't.
                     let latest = self.art(art).map(|x| x.versions.len().max(1)) == Some(v);
                     if latest
                         && let Some(s) = self
@@ -2974,6 +2999,7 @@ impl Dent {
                 PageEvent::PickCancel => self.picking = false,
                 PageEvent::Probe(text) => self.page_probe = Some(text),
                 PageEvent::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+                PageEvent::Dropped(paths) => self.attach_paths(&paths, window, cx),
                 PageEvent::External(url) => cx.open_url(&url),
             }
         }
@@ -2993,6 +3019,25 @@ impl Dent {
             .entry(key)
             .or_insert_with(|| Rc::new(crate::markdown::parse(src)))
             .clone()
+    }
+
+    /// A document version, parsed once: a big file isn't copied and hashed
+    /// each frame.
+    pub fn doc_blocks(&mut self, art: &'static str, v: usize) -> Rc<Vec<Block>> {
+        if let Some(b) = self.md_docs.get(&(art, v)) {
+            return b.clone();
+        }
+        let src = self
+            .art(art)
+            .and_then(|a| a.versions.get(v.wrapping_sub(1)).cloned())
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
+        let blocks = Rc::new(crate::markdown::parse(&src));
+        if self.md_docs.len() > 64 {
+            self.md_docs.clear();
+        }
+        self.md_docs.insert((art, v), blocks.clone());
+        blocks
     }
 
     /// The decoded picture for an artifact version, decoded once.

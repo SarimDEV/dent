@@ -55,6 +55,36 @@ pub fn shown_path(a: &crate::data::Artifact, cwd: &str) -> String {
     }
 }
 
+/// A picture's size in pixels, read from the file itself whatever its
+/// format; remembered per version, as an SVG has to be parsed for it.
+fn picture_size(id: &'static str, v: usize, bytes: &[u8]) -> (u32, u32) {
+    thread_local! {
+        static SIZES: std::cell::RefCell<std::collections::HashMap<(&'static str, usize), (u32, u32)>> =
+            std::cell::RefCell::default();
+    }
+    if let Some(s) = SIZES.with(|m| m.borrow().get(&(id, v)).copied()) {
+        return s;
+    }
+    let raster = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.into_dimensions().ok());
+    let size = raster
+        .or_else(|| {
+            resvg::usvg::Tree::from_data(bytes, &resvg::usvg::Options::default())
+                .ok()
+                .map(|t| {
+                    (
+                        t.size().width().round() as u32,
+                        t.size().height().round() as u32,
+                    )
+                })
+        })
+        .unwrap_or((0, 0));
+    SIZES.with(|m| m.borrow_mut().insert((id, v), size));
+    size
+}
+
 /// Half the width of the grip on the panel's left edge.
 const GRIP: f32 = 4.;
 
@@ -165,7 +195,9 @@ impl Dent {
                     // The strip's own measure lags a frame behind new tabs:
                     // look again until the tab fits, a few frames at most.
                     self.reveal_tries += 1;
-                    if shown || self.reveal_tries > 8 {
+                    // Settled means it fit two frames running: a new tab's
+                    // own width lands a frame after it does.
+                    if (shown && self.reveal_tries >= 2) || self.reveal_tries > 8 {
                         self.reveal_pending = false;
                         self.reveal_tries = 0;
                     }
@@ -299,7 +331,7 @@ impl Dent {
             Tab::Art(id) => match self.art(id).map(|a| a.kind) {
                 Some(Kind::Html | Kind::Server) => self.page(id, window, cx),
                 Some(Kind::Doc) => self.doc(id, window, cx),
-                Some(Kind::Image) => self.image(id, cx),
+                Some(Kind::Image) => self.image(id, window, cx),
                 None => div().into_any_element(),
             },
             Tab::Changes => self.changes(s, window, cx),
@@ -356,6 +388,82 @@ impl Dent {
     /// An artifact's path as shown in the viewer, for the open session.
     fn shown(&self, a: &crate::data::Artifact) -> String {
         shown_path(a, self.current().map_or("", |s| s.cwd.as_str()))
+    }
+
+    /// Earlier and later versions of a file the agent wrote more than once:
+    /// "‹ v2 of 3 ›". One version needs no stepper.
+    fn versions(&self, a: &crate::data::Artifact, cx: &mut Context<Self>) -> Option<Div> {
+        let t = self.t;
+        let latest = a.versions.len();
+        if latest < 2 {
+            return None;
+        }
+        let v = self.version(a);
+        let id = a.id;
+        let step = |label: &'static str,
+                    name: &'static str,
+                    to: Option<usize>,
+                    says: &'static str,
+                    cx: &mut Context<Self>| {
+            let enabled = to.is_some();
+            div()
+                .id(label)
+                .relative()
+                .size(px(size::CONTROL))
+                .on_hover(Self::hint(says, cx))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(radius::SM))
+                .when(enabled, |d| {
+                    d.cursor_pointer()
+                        .hover(|d| d.bg(t.hover()))
+                        .active(|d| d.bg(t.press()))
+                })
+                .when(!enabled, |d| d.cursor_not_allowed())
+                .when_some(to, |d, to| {
+                    d.on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_art(id, Some(to), cx);
+                    }))
+                })
+                .child(icon(
+                    name,
+                    14.,
+                    if enabled {
+                        t.quiet
+                    } else {
+                        t.faint.opacity(0.5)
+                    },
+                ))
+                .child(probe(&self.probes, label))
+        };
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .child(step(
+                    "prev-version",
+                    "chevron-left",
+                    (v > 1).then(|| v - 1),
+                    "Earlier version",
+                    cx,
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .ty(LABEL)
+                        .text_color(t.ink)
+                        .child(format!("v{v}"))
+                        .child(div().text_color(t.faint).child(format!(" of {latest}"))),
+                )
+                .child(step(
+                    "next-version",
+                    "chevron-right",
+                    (v < latest).then(|| v + 1),
+                    "Later version",
+                    cx,
+                )),
+        )
     }
 
     /// Hovering a preview control says what it does, in the toolbar itself.
@@ -417,52 +525,37 @@ impl Dent {
             .map(|at| at.elapsed().as_secs_f32())
             .filter(|s| *s < 2.5);
         let viewport = self.viewport;
+        let dragging = self.dragging || self.dragging_sidebar;
+        // A width wider than the panel can't be shown: its button is off,
+        // says why, and Full width is what's selected meanwhile.
+        let panel_w = self.panel_w;
+        let fits = move |vp: Viewport| vp.width().is_none_or(|w| panel_w > w + space::S8);
+        let shown_vp = if fits(viewport) {
+            viewport
+        } else {
+            Viewport::Fill
+        };
         let seg = |vp: Viewport,
                    name: &'static str,
                    label: &'static str,
                    says: &'static str,
                    cx: &mut Context<Self>| {
+            let ok = fits(vp);
             icon_button(format!("vp-{label}"), name, &t)
                 .relative()
-                .on_hover(Self::hint(says, cx))
-                .when(viewport == vp, |d| d.bg(t.selected()))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.viewport = vp;
-                    cx.notify();
-                }))
-                .child(probe(&self.probes, format!("vp-{label}")))
-        };
-        let step = |label: &'static str,
-                    name: &'static str,
-                    to: Option<usize>,
-                    says: &'static str,
-                    cx: &mut Context<Self>| {
-            let enabled = to.is_some();
-            div()
-                .id(label)
-                .relative()
-                .size(px(size::CONTROL))
-                .on_hover(Self::hint(says, cx))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(radius::SM))
-                .when(enabled, |d| d.cursor_pointer().hover(|d| d.bg(t.hover())))
-                .when_some(to, |d, to| {
+                .on_hover(Self::hint(
+                    if ok { says } else { "Needs a wider panel" },
+                    cx,
+                ))
+                .when(shown_vp == vp, |d| d.bg(t.selected()))
+                .when(!ok, |d| d.cursor_not_allowed().opacity(0.4))
+                .when(ok, |d| {
                     d.on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_art(id, Some(to), cx);
+                        this.viewport = vp;
+                        cx.notify();
                     }))
                 })
-                .child(icon(
-                    name,
-                    14.,
-                    if enabled {
-                        t.quiet
-                    } else {
-                        t.faint.opacity(0.5)
-                    },
-                ))
-                .child(probe(&self.probes, label))
+                .child(probe(&self.probes, format!("vp-{label}")))
         };
         let machine = self
             .current()
@@ -480,31 +573,7 @@ impl Dent {
                         .child(div().ty(LABEL).text_color(t.ink).child("running")),
                 )
             })
-            // One version needs no stepper.
-            .when(!server && latest > 1, |d| {
-                d.child(step(
-                    "prev-version",
-                    "chevron-left",
-                    (v > 1).then(|| v - 1),
-                    "Earlier version",
-                    cx,
-                ))
-                .child(
-                    div()
-                        .ty(LABEL)
-                        .text_color(t.ink)
-                        .child(format!("v{v}"))
-                        .child(div().text_color(t.faint).child(format!(" of {latest}")))
-                        .flex(),
-                )
-                .child(step(
-                    "next-version",
-                    "chevron-right",
-                    (v < latest).then(|| v + 1),
-                    "Later version",
-                    cx,
-                ))
-            })
+            .when(!server, |d| d.children(self.versions(&a, cx)))
             .child(div().w(px(1.)).h(px(16.)).mx(px(space::S1)).bg(t.hairline))
             .child(match self.toolbar_hint {
                 Some(h) => div()
@@ -618,7 +687,13 @@ impl Dent {
             })
             .child({
                 let server_url = a.path.to_string();
-                let file = (!server).then(|| {
+                // The latest version is the file itself, beside its styles
+                // and pictures; an older one is written out on its own.
+                let on_disk = (v == latest)
+                    .then(|| art_file(&a))
+                    .flatten()
+                    .filter(|f| f.is_file());
+                let file = (!server && on_disk.is_none()).then(|| {
                     (
                         a.versions[v - 1].clone(),
                         a.path.rsplit('/').next().unwrap_or(a.path).to_string(),
@@ -626,15 +701,16 @@ impl Dent {
                 });
                 icon_button("external", "external-link", &t)
                     .on_hover(Self::hint("Open in your browser", cx))
-                    .on_click(move |_, _, cx| match &file {
-                        Some((bytes, name)) => {
+                    .on_click(move |_, _, cx| match (&on_disk, &file) {
+                        (Some(path), _) => cx.open_url(&format!("file://{}", path.display())),
+                        (None, Some((bytes, name))) => {
                             let path =
                                 std::env::temp_dir().join(format!("dent-preview-v{v}-{name}"));
                             if std::fs::write(&path, &bytes[..]).is_ok() {
                                 cx.open_url(&format!("file://{}", path.display()));
                             }
                         }
-                        None => cx.open_url(&server_url),
+                        (None, None) => cx.open_url(&server_url),
                     })
             });
 
@@ -669,16 +745,25 @@ impl Dent {
                                     (bounds, area_preview)
                                 },
                                 move |_, (inner, preview), window, _| {
-                                    if let Some(snap) =
-                                        preview.and_then(|p| p.borrow().snapshot(inner.size))
+                                    if let Some(snap) = preview
+                                        .and_then(|p| p.borrow().snapshot(inner.size, dragging))
                                     {
-                                        let _ = window.paint_image(
-                                            inner,
-                                            inner,
-                                            Corners::default(),
-                                            snap.image,
-                                            0,
-                                            false,
+                                        // While resizing, the last picture stays at its
+                                        // own size, pinned top left and clipped, rather
+                                        // than leaving the area blank.
+                                        let at = Bounds::new(inner.origin, snap.size);
+                                        window.with_content_mask(
+                                            Some(ContentMask { bounds: inner }),
+                                            |window| {
+                                                let _ = window.paint_image(
+                                                    at,
+                                                    at,
+                                                    Corners::default(),
+                                                    snap.image,
+                                                    0,
+                                                    false,
+                                                );
+                                            },
                                         );
                                     }
                                     if width.is_some() {
@@ -895,8 +980,9 @@ impl Dent {
         let Some(a) = self.art(id).cloned() else {
             return div().into_any_element();
         };
-        let src = String::from_utf8_lossy(&a.versions[a.versions.len() - 1]).to_string();
-        let blocks = self.markdown(&src);
+        // The version you chose, the latest unless you stepped back.
+        let v = self.version(&a);
+        let blocks = self.doc_blocks(id, v);
         let mut r = markdown::R {
             md: self.mdv.clone(),
             owner: cx.entity_id(),
@@ -916,6 +1002,7 @@ impl Dent {
             .child(
                 self.toolbar()
                     .pl(px(space::S3))
+                    .children(self.versions(&a, cx))
                     .child(
                         div()
                             .flex_1()
@@ -929,10 +1016,12 @@ impl Dent {
                         let copied = self
                             .copied_at
                             .is_some_and(|at| at.elapsed().as_secs_f32() < 1.5);
-                        let src = src.clone();
+                        // The text is read when you copy, not each frame.
+                        let bytes = a.versions[v - 1].clone();
                         ghost("copy-doc", if copied { "Copied" } else { "Copy" }, &t).on_click(
                             cx.listener(move |this, _, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(src.clone()));
+                                let src = String::from_utf8_lossy(&bytes).into_owned();
+                                cx.write_to_clipboard(ClipboardItem::new_string(src));
                                 this.copied_at = Some(std::time::Instant::now());
                                 cx.notify();
                             }),
@@ -949,8 +1038,9 @@ impl Dent {
                     }),
             )
             .child(
+                // Each document keeps its own place.
                 div()
-                    .id("doc")
+                    .id(SharedString::from(format!("doc-{id}")))
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -966,21 +1056,16 @@ impl Dent {
             .into_any_element()
     }
 
-    fn image(&mut self, id: &'static str, cx: &mut Context<Self>) -> AnyElement {
+    fn image(&mut self, id: &'static str, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.t;
         let Some(a) = self.art(id).cloned() else {
             return div().into_any_element();
         };
-        let bytes = a.versions[a.versions.len() - 1].clone();
-        // PNG size from the IHDR chunk.
-        let dim = |at: usize| {
-            bytes
-                .get(at..at + 4)
-                .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-                .unwrap_or(0)
-        };
-        let (w, h) = (dim(16), dim(20));
+        let v = self.version(&a);
+        let (w, h) = picture_size(id, v, &a.versions[v - 1]);
         let actual = self.image_actual;
+        // Actual size is one image pixel per screen pixel.
+        let scale = window.scale_factor().max(1.);
         let seg = |key: &'static str,
                    label: &'static str,
                    on: bool,
@@ -1001,6 +1086,7 @@ impl Dent {
             .child(
                 self.toolbar()
                     .pl(px(space::S3))
+                    .children(self.versions(&a, cx))
                     .child(
                         div()
                             .flex_1()
@@ -1010,18 +1096,20 @@ impl Dent {
                             .text_color(t.quiet)
                             .child(self.shown(&a)),
                     )
-                    .child(
-                        div()
-                            .ty(LABEL)
-                            .text_color(t.faint)
-                            .child(format!("{w} × {h}")),
-                    )
+                    .when(w > 0, |d| {
+                        d.child(
+                            div()
+                                .ty(LABEL)
+                                .text_color(t.faint)
+                                .child(format!("{w} × {h}")),
+                        )
+                    })
                     .child(seg("img-fit", "Fit", !actual, false, cx))
                     .child(seg("img-full", "Actual size", actual, true, cx)),
             )
             .child(
                 div()
-                    .id("image")
+                    .id(SharedString::from(format!("image-{id}")))
                     .flex_1()
                     .min_h_0()
                     .overflow_scroll()
@@ -1029,12 +1117,13 @@ impl Dent {
                     .flex()
                     .when(!actual, |d| d.items_center().justify_center())
                     .bg(t.surface)
-                    .children(self.picture(id, a.versions.len()).map(|picture| {
+                    .children(self.picture(id, v).map(|picture| {
                         img(picture)
                             .map(|i| {
-                                if actual {
-                                    // Screenshots are @2x: actual size is half the pixels.
-                                    i.flex_none().w(px(w as f32 / 2.)).h(px(h as f32 / 2.))
+                                if actual && w > 0 {
+                                    i.flex_none()
+                                        .w(px(w as f32 / scale))
+                                        .h(px(h as f32 / scale))
                                 } else {
                                     i.max_w_full().max_h_full()
                                 }

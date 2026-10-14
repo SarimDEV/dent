@@ -195,7 +195,13 @@ pub fn session(
         built.starts.push(items.len());
         // A dev server it started gets a card where it first shows up.
         for url in servers_in(e) {
-            if !built.servers.iter().any(|(_, u)| *u == url) {
+            // The same port seen again, under another host name, is the same server.
+            let port = url.rsplit(':').next().unwrap_or_default().to_string();
+            if !built
+                .servers
+                .iter()
+                .any(|(_, u)| u.ends_with(&format!(":{port}")))
+            {
                 built.servers.push((start + k, url.clone()));
                 items.push(Item::Made {
                     art: art_id(&v.id, &url),
@@ -417,8 +423,10 @@ fn servers_in(e: &Entry) -> Vec<String> {
                     && p > 0
                 {
                     // As printed: localhost may be IPv6 only, 127.0.0.1 IPv4 only.
+                    // One server per port, however it's written.
                     let url = format!("http://{shown}:{p}/");
-                    if !out.contains(&url) {
+                    let port = format!(":{p}/");
+                    if !out.iter().any(|u: &String| u.ends_with(&port)) {
                         out.push(url);
                     }
                 }

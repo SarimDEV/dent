@@ -99,6 +99,8 @@ pub fn close(h: AnyWindowHandle, view: Entity<PopOut>, cx: &mut App) {
 
 impl Render for PopOut {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // dent's theme is the one theme: light or dark follows it here too.
+        self.t = self.dent.read(cx).t;
         let t = self.t;
         let art = self.art;
         let Some(a) = self.dent.read(cx).art(art).cloned() else {

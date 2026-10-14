@@ -25,8 +25,13 @@ use wry::{Rect, WebView, WebViewBuilder};
 
 #[derive(Clone, Debug)]
 pub enum PageEvent {
+    /// A load began, before any of the page's own scripts ran.
+    Started,
     Loaded,
+    /// An uncaught error or rejected promise: the page is broken.
     Error(String),
+    /// A line the page logged with console.error: worth listing, not alarm.
+    Logged(String),
     /// The person pointed at an element: its tag, visible text and a selector.
     Pick {
         tag: String,
@@ -40,6 +45,8 @@ pub enum PageEvent {
     Probe(String),
     /// Text you copied in the page, for the clipboard.
     Copy(String),
+    /// Files dropped on the page, to attach.
+    Dropped(Vec<std::path::PathBuf>),
 }
 
 /// What the web view shows.
@@ -54,15 +61,19 @@ pub enum Source {
 const SCRIPT: &str = r#"
 (() => {
   const send = (o) => window.ipc.postMessage(JSON.stringify(o));
+  // A load begins: what the last one reported no longer stands.
+  send({ t: 'start' });
   window.addEventListener('error', (e) => {
     const file = (e.filename || '').split('/').pop();
     send({ t: 'error', msg: e.message + (file ? ' · ' + file + ':' + e.lineno : '') });
   });
   window.addEventListener('unhandledrejection', (e) => send({ t: 'error', msg: 'Unhandled: ' + String(e.reason) }));
   const err = console.error;
-  console.error = (...a) => { send({ t: 'error', msg: a.map(String).join(' ') }); err(...a); };
-  // Live reload keeps your place.
-  addEventListener('beforeunload', () => sessionStorage.setItem('dent-y', String(scrollY)));
+  console.error = (...a) => { send({ t: 'logged', msg: a.map(String).join(' ') }); err(...a); };
+  // Live reload keeps your place, page by page: a new version of this page
+  // opens where you were; another page opens at its top.
+  const place = 'dent-y:' + location.host + location.pathname.replace(/^\/\d+\//, '/');
+  addEventListener('beforeunload', () => sessionStorage.setItem(place, String(scrollY)));
   // When the page settles after a change, dent takes a fresh snapshot.
   let settle = 0;
   const settled = () => { clearTimeout(settle); settle = setTimeout(() => send({ t: 'settled' }), 220); };
@@ -82,7 +93,7 @@ const SCRIPT: &str = r#"
   // A press inside the page: it may keep the keyboard.
   addEventListener('pointerdown', () => send({ t: 'down' }), { passive: true, capture: true });
   addEventListener('DOMContentLoaded', () => {
-    const y = +sessionStorage.getItem('dent-y') || 0;
+    const y = +sessionStorage.getItem(place) || 0;
     if (y) scrollTo(0, y);
     send({ t: 'loaded' });
     new MutationObserver(settled).observe(document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true });
@@ -251,8 +262,13 @@ impl Preview {
         let ipc_settled = settled.clone();
         let pressed = Arc::new(AtomicBool::new(false));
         let ipc_pressed = pressed.clone();
-        let (nav_origin, nav_push, win_push, ipc_push) =
-            (origin.clone(), push.clone(), push.clone(), push.clone());
+        let (nav_origin, nav_push, win_push, ipc_push, drop_push) = (
+            origin.clone(),
+            push.clone(),
+            push.clone(),
+            push.clone(),
+            push.clone(),
+        );
         let builder = WebViewBuilder::new()
             .with_custom_protocol("dent".into(), move |_, req| {
                 let mut path = req.uri().path().trim_start_matches('/').to_string();
@@ -318,7 +334,9 @@ impl Preview {
                 };
                 ipc_push(match s("t").as_str() {
                     "loaded" => PageEvent::Loaded,
+                    "start" => PageEvent::Started,
                     "error" => PageEvent::Error(s("msg")),
+                    "logged" => PageEvent::Logged(s("msg")),
                     "pick" => PageEvent::Pick {
                         tag: s("tag"),
                         text: s("text"),
@@ -338,6 +356,14 @@ impl Preview {
                     }
                     _ => return,
                 });
+            })
+            // Files dropped on a page attach to your message, as anywhere
+            // else in dent, instead of the page opening them.
+            .with_drag_drop_handler(move |e| {
+                if let wry::DragDropEvent::Drop { paths, .. } = e {
+                    drop_push(PageEvent::Dropped(paths));
+                }
+                true
             })
             .with_visible(false)
             // The composer keeps focus when a page is made.
@@ -689,11 +715,13 @@ impl Preview {
 
     /// The last picture of the page, if it still matches what's showing at
     /// this size.
-    pub fn snapshot(&self, size: Size<Pixels>) -> Option<Snapshot> {
+    /// The page's last picture, if it shows what's showing. `any_size`
+    /// takes one of another size too, as while the panel is being resized.
+    pub fn snapshot(&self, size: Size<Pixels>, any_size: bool) -> Option<Snapshot> {
         let snap = self.snapshot.lock().ok()?.clone()?;
         let same_size = (snap.size.width - size.width).abs() < px(1.)
             && (snap.size.height - size.height).abs() < px(1.);
-        (Some(&snap.source) == self.showing.as_ref() && same_size).then_some(snap)
+        (Some(&snap.source) == self.showing.as_ref() && (same_size || any_size)).then_some(snap)
     }
 
     /// Ask the web view for a picture of itself. It arrives a moment later.
