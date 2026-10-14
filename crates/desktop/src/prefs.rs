@@ -15,6 +15,8 @@ pub struct Prefs {
     pub sidebar_width: Option<f32>,
     pub dark: Option<bool>,
     /// Viewer tabs you closed, per session: file and its versions then.
+    /// Files opened from links in each session's viewer, by path.
+    pub opened: std::collections::BTreeMap<String, Vec<String>>,
     pub closed_tabs: std::collections::BTreeMap<String, std::collections::BTreeMap<String, usize>>,
 }
 

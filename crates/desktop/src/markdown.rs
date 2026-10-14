@@ -29,6 +29,7 @@ struct Style {
     emph: bool,
     code: bool,
     link: bool,
+    strike: bool,
 }
 
 /// One paragraph's text with its styled runs.
@@ -42,6 +43,8 @@ pub struct Inline {
     href: Option<String>,
     /// Inline maths: where in `text` it sits (always between runs) and its TeX.
     math: Vec<(usize, String)>,
+    /// Pictures read while this paragraph had no text yet.
+    images: Vec<(String, String)>,
 }
 
 /// How an inline's text is set: its family, size and colour, and what it
@@ -286,12 +289,20 @@ impl Inline {
                 .map(|(_, n)| n)
                 .sum::<usize>()
         };
-        // Links open in the browser; paths open in their default app.
-        let links = self
-            .links
-            .iter()
-            .map(|(r, u)| (shift(r.start, true)..shift(r.end, false), u.clone()))
-            .collect();
+        // Links open in the browser; paths are made whole from the document's
+        // folder, and open in the viewer when it can show them.
+        let links = LINK_BASE.with(|b| {
+            let b = b.borrow();
+            self.links
+                .iter()
+                .map(|(r, u)| {
+                    (
+                        shift(r.start, true)..shift(r.end, false),
+                        resolve(u, b.as_deref()),
+                    )
+                })
+                .collect()
+        });
         let styled = crate::select::styled(
             SharedString::from(format!("md-{key}")),
             text.clone(),
@@ -389,20 +400,41 @@ fn run(len: usize, font: Font, color: Hsla, st: &Style, t: &Theme) -> TextRun {
             color: Some(t.quiet.opacity(0.6)),
             wavy: false,
         }),
-        strikethrough: None,
+        strikethrough: st.strike.then(|| StrikethroughStyle {
+            thickness: px(1.),
+            color: Some(color),
+        }),
     }
 }
 
-/// Depth, number (if ordered), checkbox (if a task), text.
-pub type ListItem = (usize, Option<u64>, Option<bool>, Inline);
+/// One item of a list: its number (if ordered), checkbox (if a task), and
+/// what it holds, nested lists, code and all.
+#[derive(Clone)]
+pub struct ListItem {
+    pub number: Option<u64>,
+    pub task: Option<bool>,
+    pub blocks: Vec<Block>,
+}
+
+/// GitHub's callouts: > [!NOTE] and friends.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Callout {
+    Note,
+    Tip,
+    Important,
+    Warning,
+    Caution,
+}
 
 #[derive(Clone)]
 pub enum Block {
     Heading(u8, Inline),
     Para(Inline),
-    /// Items with their depth, number (if ordered) and checkbox (if a task).
     List(Vec<ListItem>),
-    Quote(Vec<Inline>),
+    /// A quote, or a callout, holding its own blocks.
+    Quote(Option<Callout>, Vec<Block>),
+    /// A picture on a line of its own: where it is, and its words.
+    Image(String, String),
     Code(String, String),
     /// Display maths, and whether it is finished (a fence still streaming isn't).
     Math(String, bool),
@@ -511,28 +543,69 @@ fn fence_closed(src: &str) -> bool {
     })
 }
 
+/// What the parser is inside, innermost last.
+enum Frame {
+    Root(Vec<Block>),
+    Quote(Option<Callout>, Vec<Block>),
+    List(Vec<ListItem>, Option<u64>),
+    Item(ListItem),
+}
+
+impl Frame {
+    /// Where finished blocks go: a list keeps them in its open item.
+    fn blocks(&mut self) -> Option<&mut Vec<Block>> {
+        match self {
+            Frame::Root(b) | Frame::Quote(_, b) => Some(b),
+            Frame::Item(i) => Some(&mut i.blocks),
+            Frame::List(..) => None,
+        }
+    }
+}
+
+fn push_block(stack: &mut [Frame], b: Block) {
+    if let Some(v) = stack.last_mut().and_then(Frame::blocks) {
+        v.push(b);
+    }
+}
+
+/// Text waiting for its paragraph to end becomes one now, before a block
+/// that follows it (a tight list item's text has no paragraph of its own).
+fn flush(stack: &mut [Frame], cur: &mut Inline) {
+    if cur.is_empty() {
+        for (src, alt) in std::mem::take(&mut cur.images) {
+            push_block(stack, Block::Image(src, alt));
+        }
+    } else {
+        cur.images.clear();
+        let p = std::mem::take(cur);
+        push_block(stack, Block::Para(p));
+    }
+}
+
 pub fn parse(src: &str) -> Vec<Block> {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_TASKLISTS);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_MATH);
-    let mut out = Vec::new();
+    opts.insert(Options::ENABLE_FOOTNOTES);
+    opts.insert(Options::ENABLE_GFM);
+    let mut stack: Vec<Frame> = vec![Frame::Root(Vec::new())];
     let mut cur = Inline::default();
     let mut st = Style::default();
-    let mut lists: Vec<Option<u64>> = Vec::new();
-    let mut items: Vec<ListItem> = Vec::new();
-    let mut task: Option<bool> = None;
-    let mut quote: Option<Vec<Inline>> = None;
     // Language, body, and whether the fence has closed.
     let mut code: Option<(String, String, bool)> = None;
     let mut table: Option<TableState> = None;
+    // A picture being read: where it is, and its words so far.
+    let mut image: Option<(String, String)> = None;
     for (ev, range) in Parser::new_ext(src, opts).into_offset_iter() {
         match ev {
             Event::Start(Tag::Strong) => st.strong = true,
             Event::End(TagEnd::Strong) => st.strong = false,
             Event::Start(Tag::Emphasis) => st.emph = true,
             Event::End(TagEnd::Emphasis) => st.emph = false,
+            Event::Start(Tag::Strikethrough) => st.strike = true,
+            Event::End(TagEnd::Strikethrough) => st.strike = false,
             Event::Start(Tag::Link { dest_url, .. }) => {
                 st.link = true;
                 cur.href = Some(dest_url.to_string());
@@ -541,29 +614,86 @@ pub fn parse(src: &str) -> Vec<Block> {
                 st.link = false;
                 cur.href = None;
             }
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                image = Some((dest_url.to_string(), String::new()));
+            }
+            Event::End(TagEnd::Image) => {
+                if let Some((src_url, alt)) = image.take() {
+                    // On its own line it's a picture; amid text, a link to it.
+                    let alone = cur.is_empty();
+                    if alone {
+                        cur.images.push((src_url, alt));
+                    } else {
+                        let words = if alt.is_empty() {
+                            "picture".into()
+                        } else {
+                            alt
+                        };
+                        cur.href = Some(src_url);
+                        cur.push(&words, Style { link: true, ..st });
+                        cur.href = None;
+                    }
+                }
+            }
+            // A file named in code is a link to it, as long as it isn't one already.
+            Event::Code(c) if !st.link && looks_like_path(&c) => {
+                cur.href = Some(c.to_string());
+                cur.push(
+                    &c,
+                    Style {
+                        code: true,
+                        link: true,
+                        ..st
+                    },
+                );
+                cur.href = None;
+            }
             Event::Code(c) => cur.push(&c, Style { code: true, ..st }),
             Event::InlineMath(m) if is_price(&m) => cur.push(&format!("${m}$"), st),
             Event::InlineMath(m) => cur.math.push((cur.text.len(), m.to_string())),
             // Display maths stands as its own block, splitting a paragraph
             // around it; inside a list, quote or table it sits inline.
             Event::DisplayMath(m) => {
-                if lists.is_empty() && quote.is_none() && table.is_none() {
-                    if !cur.is_empty() {
-                        out.push(Block::Para(std::mem::take(&mut cur)));
-                    }
-                    out.push(Block::Math(m.trim().to_string(), true));
+                if stack.len() == 1 && table.is_none() {
+                    flush(&mut stack, &mut cur);
+                    push_block(&mut stack, Block::Math(m.trim().to_string(), true));
                 } else {
                     cur.math.push((cur.text.len(), m.to_string()));
                 }
             }
-            Event::Text(s) => match &mut code {
-                Some((_, body, _)) => body.push_str(&s),
-                None if st.link => cur.push(&s, st),
-                None => push_linking(&mut cur, &s, st),
+            Event::Text(s) => match (&mut code, &mut image) {
+                (Some((_, body, _)), _) => body.push_str(&s),
+                (None, Some((_, alt))) => alt.push_str(&s),
+                (None, None) if st.link => cur.push(&s, st),
+                (None, None) => push_linking(&mut cur, &s, st),
             },
-            Event::SoftBreak | Event::HardBreak => cur.push(" ", st),
-            Event::TaskListMarker(done) => task = Some(done),
+            // Raw HTML in the text shows as written: `Vec<String>` stays.
+            Event::InlineHtml(h) => cur.push(&h, st),
+            Event::Html(h) => {
+                if code.is_none() {
+                    flush(&mut stack, &mut cur);
+                    let h = h.trim_end();
+                    if !h.is_empty() {
+                        push_block(&mut stack, Block::Code("html".into(), h.to_string()));
+                    }
+                }
+            }
+            Event::SoftBreak => cur.push(" ", st),
+            Event::HardBreak => cur.push("\n", st),
+            Event::FootnoteReference(label) => {
+                cur.push(&format!("[{label}]"), Style { code: false, ..st })
+            }
+            Event::Start(Tag::FootnoteDefinition(label)) => {
+                flush(&mut stack, &mut cur);
+                cur.push(&format!("[{label}] "), Style { strong: true, ..st });
+            }
+            Event::TaskListMarker(done) => {
+                if let Some(Frame::Item(i)) = stack.last_mut() {
+                    i.task = Some(done);
+                }
+            }
             Event::Start(Tag::CodeBlock(kind)) => {
+                flush(&mut stack, &mut cur);
                 let (lang, closed) = match kind {
                     pulldown_cmark::CodeBlockKind::Fenced(l) => {
                         (l.to_string(), fence_closed(&src[range]))
@@ -575,58 +705,85 @@ pub fn parse(src: &str) -> Vec<Block> {
             Event::End(TagEnd::CodeBlock) => {
                 if let Some((lang, body, closed)) = code.take() {
                     let body = body.trim_end().to_string();
-                    out.push(match lang.as_str() {
-                        "math" => Block::Math(body, closed),
-                        "mermaid" => Block::Diagram(body, closed),
-                        _ => Block::Code(lang, body),
-                    });
+                    push_block(
+                        &mut stack,
+                        match lang.as_str() {
+                            "math" => Block::Math(body, closed),
+                            "mermaid" => Block::Diagram(body, closed),
+                            _ => Block::Code(lang, body),
+                        },
+                    );
                 }
             }
             Event::Start(Tag::List(start)) => {
-                if !cur.is_empty() && !lists.is_empty() {
-                    let n = lists.last().copied().flatten();
-                    items.push((lists.len() - 1, n, task.take(), std::mem::take(&mut cur)));
-                }
-                lists.push(start);
+                flush(&mut stack, &mut cur);
+                stack.push(Frame::List(Vec::new(), start));
             }
             Event::End(TagEnd::List(_)) => {
-                lists.pop();
-                if lists.is_empty() {
-                    out.push(Block::List(std::mem::take(&mut items)));
+                flush(&mut stack, &mut cur);
+                if let Some(Frame::List(items, _)) = stack.pop() {
+                    push_block(&mut stack, Block::List(items));
                 }
+            }
+            Event::Start(Tag::Item) => {
+                let number = match stack.last() {
+                    Some(Frame::List(_, n)) => *n,
+                    _ => None,
+                };
+                stack.push(Frame::Item(ListItem {
+                    number,
+                    task: None,
+                    blocks: Vec::new(),
+                }));
             }
             Event::End(TagEnd::Item) => {
-                if !cur.is_empty() {
-                    let depth = lists.len().saturating_sub(1);
-                    let n = lists.last().copied().flatten();
-                    items.push((depth, n, task.take(), std::mem::take(&mut cur)));
-                }
-                if let Some(Some(n)) = lists.last_mut() {
-                    *n += 1;
+                flush(&mut stack, &mut cur);
+                if let Some(Frame::Item(item)) = stack.pop()
+                    && let Some(Frame::List(items, n)) = stack.last_mut()
+                {
+                    items.push(item);
+                    if let Some(n) = n {
+                        *n += 1;
+                    }
                 }
             }
-            Event::Start(Tag::BlockQuote(_)) => quote = Some(Vec::new()),
+            Event::Start(Tag::BlockQuote(kind)) => {
+                flush(&mut stack, &mut cur);
+                use pulldown_cmark::BlockQuoteKind as K;
+                let callout = kind.map(|k| match k {
+                    K::Note => Callout::Note,
+                    K::Tip => Callout::Tip,
+                    K::Important => Callout::Important,
+                    K::Warning => Callout::Warning,
+                    K::Caution => Callout::Caution,
+                });
+                stack.push(Frame::Quote(callout, Vec::new()));
+            }
             Event::End(TagEnd::BlockQuote(_)) => {
-                if let Some(q) = quote.take() {
-                    out.push(Block::Quote(q));
+                flush(&mut stack, &mut cur);
+                if let Some(Frame::Quote(c, blocks)) = stack.pop() {
+                    push_block(&mut stack, Block::Quote(c, blocks));
                 }
             }
-            Event::End(TagEnd::Paragraph) => {
-                if !lists.is_empty() {
-                    continue;
-                }
-                let p = std::mem::take(&mut cur);
-                match &mut quote {
-                    Some(q) => q.push(p),
-                    // A paragraph that was only display maths leaves nothing.
-                    None if p.is_empty() => {}
-                    None => out.push(Block::Para(p)),
+            Event::End(TagEnd::Paragraph) | Event::End(TagEnd::FootnoteDefinition) => {
+                // A paragraph that was only a picture is the picture.
+                if cur.text.is_empty() && cur.math.is_empty() && !cur.images.is_empty() {
+                    for (src_url, alt) in std::mem::take(&mut cur.images) {
+                        push_block(&mut stack, Block::Image(src_url, alt));
+                    }
+                } else {
+                    // Pictures that shared a line with text were links.
+                    cur.images.clear();
+                    flush(&mut stack, &mut cur);
                 }
             }
+            Event::Start(Tag::Heading { .. }) => flush(&mut stack, &mut cur),
             Event::End(TagEnd::Heading(level)) => {
-                out.push(Block::Heading(level as u8, std::mem::take(&mut cur)));
+                let h = std::mem::take(&mut cur);
+                push_block(&mut stack, Block::Heading(level as u8, h));
             }
             Event::Start(Tag::Table(aligns)) => {
+                flush(&mut stack, &mut cur);
                 table = Some((Vec::new(), Vec::new(), Vec::new(), aligns))
             }
             Event::End(TagEnd::TableHead) => {
@@ -647,14 +804,37 @@ pub fn parse(src: &str) -> Vec<Block> {
             }
             Event::End(TagEnd::Table) => {
                 if let Some((head, rows, _, aligns)) = table.take() {
-                    out.push(Block::Table(Rc::new(Table { head, rows, aligns })));
+                    push_block(
+                        &mut stack,
+                        Block::Table(Rc::new(Table { head, rows, aligns })),
+                    );
                 }
             }
-            Event::Rule => out.push(Block::Rule),
+            Event::Rule => {
+                flush(&mut stack, &mut cur);
+                push_block(&mut stack, Block::Rule);
+            }
             _ => {}
         }
     }
-    out
+    // A reply still streaming may end mid-list or mid-quote: close what's open.
+    flush(&mut stack, &mut cur);
+    while stack.len() > 1 {
+        match stack.pop() {
+            Some(Frame::Item(item)) => {
+                if let Some(Frame::List(items, _)) = stack.last_mut() {
+                    items.push(item);
+                }
+            }
+            Some(Frame::List(items, _)) => push_block(&mut stack, Block::List(items)),
+            Some(Frame::Quote(c, blocks)) => push_block(&mut stack, Block::Quote(c, blocks)),
+            _ => {}
+        }
+    }
+    match stack.pop() {
+        Some(Frame::Root(b)) => b,
+        _ => Vec::new(),
+    }
 }
 
 // ---- Render state ----
@@ -756,11 +936,124 @@ pub struct R<'a> {
     pub scope: String,
     /// What the blocks sit on, for edge fades.
     pub bg: Hsla,
+    /// The folder relative links and pictures are found from: the
+    /// document's own, or the session's.
+    pub base: Option<std::path::PathBuf>,
+}
+
+thread_local! {
+    /// The folder links resolve from while blocks are being built.
+    static LINK_BASE: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Whether a code span names a file: `notes/plan.md`, `/abs/x.rs`, `~/a.txt`.
+fn looks_like_path(c: &str) -> bool {
+    if c.contains(char::is_whitespace) || c.len() > 300 || c.contains("://") {
+        return false;
+    }
+    let last = c.rsplit('/').next().unwrap_or(c);
+    let ext_ok = last.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty()
+            && (1..=8).contains(&ext.len())
+            && ext.chars().all(|x| x.is_ascii_alphanumeric())
+    });
+    ext_ok && (c.contains('/') || c.starts_with('~'))
+}
+
+/// Where a link or picture in a document points: a web address as it is,
+/// a path made whole from the document's folder (`~` is home).
+pub fn resolve(href: &str, base: Option<&std::path::Path>) -> String {
+    if href.contains("://") || href.starts_with("mailto:") || href.starts_with('#') {
+        return href.to_string();
+    }
+    let path = href.split(['#', '?']).next().unwrap_or(href);
+    let path = crate::web::percent_decode(path);
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(h) = std::env::var_os("HOME")
+    {
+        return std::path::Path::new(&h).join(rest).display().to_string();
+    }
+    if path.starts_with('/') {
+        return path;
+    }
+    match base {
+        Some(b) => {
+            // Tidy ./ and ../ so the path reads cleanly.
+            let mut out = b.to_path_buf();
+            for part in std::path::Path::new(&path).components() {
+                match part {
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir => {
+                        out.pop();
+                    }
+                    p => out.push(p),
+                }
+            }
+            out.display().to_string()
+        }
+        None => path,
+    }
+}
+
+/// A picture on its own line: a local file is shown, fitted to the column;
+/// a web picture is a link to it.
+fn image_block(src: &str, alt: &str, t: &Theme, key: &str, r: &mut R) -> AnyElement {
+    let at = resolve(src, r.base.as_deref());
+    if at.starts_with('/') && std::path::Path::new(&at).is_file() {
+        div()
+            .id(SharedString::from(format!("{key}/img")))
+            .flex()
+            .flex_col()
+            .gap(px(space::S1))
+            .child(
+                img(std::path::PathBuf::from(&at))
+                    .max_w_full()
+                    .max_h(px(520.))
+                    .object_fit(ObjectFit::Contain)
+                    .rounded(px(radius::MD)),
+            )
+            .when(!alt.is_empty(), |d| {
+                d.child(div().ty(LABEL).text_color(t.quiet).child(alt.to_string()))
+            })
+            .into_any_element()
+    } else {
+        let mut i = Inline {
+            href: Some(at),
+            ..Inline::default()
+        };
+        let words = if alt.is_empty() {
+            src.to_string()
+        } else {
+            alt.to_string()
+        };
+        i.push(
+            &words,
+            Style {
+                link: true,
+                ..Style::default()
+            },
+        );
+        let f = Face::of(READING, theme::body(), t.ink, r.bg);
+        div()
+            .ty(READING)
+            .child(i.element(key, t, f, None, &r.md, r.window))
+            .into_any_element()
+    }
 }
 
 /// Render blocks in the reading column. `doc` sets headings for a document;
 /// replies in chat never have big headings.
 pub fn render(blocks: &[Block], t: &Theme, doc: bool, r: &mut R) -> Div {
+    let prev = LINK_BASE.with(|b| b.replace(r.base.clone()));
+    let out = render_in(blocks, t, doc, r, space::S3, false);
+    LINK_BASE.with(|b| *b.borrow_mut() = prev);
+    out
+}
+
+/// Blocks with `gap` between them; `quiet` sets their text in the quiet
+/// ink (a quote, or a task that's done).
+fn render_in(blocks: &[Block], t: &Theme, doc: bool, r: &mut R, gap: f32, quiet: bool) -> Div {
+    let ink = if quiet { t.quiet } else { t.ink };
     let reading = theme::body();
     let mut out = Vec::with_capacity(blocks.len());
     let bg = r.bg;
@@ -787,18 +1080,18 @@ pub fn render(blocks: &[Block], t: &Theme, doc: bool, r: &mut R) -> Div {
                     .into_any_element()
             }
             Block::Para(i) => {
-                let f = face(READING, reading, t.ink);
+                let f = face(READING, reading, ink);
                 div()
                     .ty(READING)
-                    .text_color(t.ink)
+                    .text_color(ink)
                     .child(i.element(&key, t, f, None, &r.md, r.window))
                     .into_any_element()
             }
             Block::List(items) => {
                 let mut rows = Vec::with_capacity(items.len());
-                for (li, (depth, n, task, i)) in items.iter().enumerate() {
-                    let marker: AnyElement = match (task, n) {
-                        (Some(done), _) => checkbox(*done, t).into_any_element(),
+                for (li, item) in items.iter().enumerate() {
+                    let marker: AnyElement = match (item.task, item.number) {
+                        (Some(done), _) => checkbox(done, t).into_any_element(),
                         (None, Some(n)) => div()
                             .ty(READING)
                             .text_color(t.quiet)
@@ -810,24 +1103,28 @@ pub fn render(blocks: &[Block], t: &Theme, doc: bool, r: &mut R) -> Div {
                             .child("–")
                             .into_any_element(),
                     };
-                    let done = matches!(task, Some(true));
-                    let f = face(READING, reading, if done { t.quiet } else { t.ink });
+                    // What the item holds, nested lists and code included,
+                    // sits in its own column beside the marker.
+                    let done = matches!(item.task, Some(true));
+                    let saved = std::mem::replace(&mut r.scope, format!("{key}.{li}"));
+                    let body = render_in(&item.blocks, t, doc, r, space::S2, done || quiet);
+                    r.scope = saved;
                     rows.push(
                         div()
                             .relative()
-                            .pl(px(24. + *depth as f32 * 20.))
+                            .pl(px(24.))
                             .ty(READING)
                             .child(
                                 div()
                                     .absolute()
-                                    .left(px(*depth as f32 * 20.))
+                                    .left_0()
                                     .top_0()
                                     .h(px(READING.line))
                                     .flex()
                                     .items_center()
                                     .child(marker),
                             )
-                            .child(i.element(&format!("{key}.{li}"), t, f, None, &r.md, r.window)),
+                            .child(body),
                     );
                 }
                 div()
@@ -837,29 +1134,53 @@ pub fn render(blocks: &[Block], t: &Theme, doc: bool, r: &mut R) -> Div {
                     .children(rows)
                     .into_any_element()
             }
-            Block::Quote(ps) => {
-                let f = face(READING, reading, t.quiet);
-                let mut paras = Vec::with_capacity(ps.len());
-                for (pi, i) in ps.iter().enumerate() {
-                    paras.push(div().ty(READING).text_color(t.quiet).child(i.element(
-                        &format!("{key}.{pi}"),
-                        t,
-                        f,
-                        None,
-                        &r.md,
-                        r.window,
-                    )));
+            Block::Quote(callout, blocks) => {
+                let saved = std::mem::replace(&mut r.scope, format!("{key}.q"));
+                // A quote reads quieter; a callout is meant to be read.
+                let body = render_in(blocks, t, doc, r, space::S2, callout.is_none() || quiet);
+                r.scope = saved;
+                match callout {
+                    None => div()
+                        .pl(px(space::S4))
+                        .border_l_2()
+                        .border_color(t.hairline)
+                        .child(body)
+                        .into_any_element(),
+                    Some(c) => {
+                        let (label, icon_name, ink) = match c {
+                            Callout::Note => ("Note", "info", t.working.0),
+                            Callout::Tip => ("Tip", "lightbulb", t.done.0),
+                            Callout::Important => {
+                                ("Important", "message-square-warning", t.needs.0)
+                            }
+                            Callout::Warning => ("Warning", "triangle-alert", t.waiting.0),
+                            Callout::Caution => ("Caution", "octagon-alert", t.needs.0),
+                        };
+                        div()
+                            .pl(px(space::S4))
+                            .py(px(space::S1))
+                            .border_l_2()
+                            .border_color(ink)
+                            .flex()
+                            .flex_col()
+                            .gap(px(space::S1))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(space::S1H))
+                                    .ty(UI)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(ink)
+                                    .child(crate::ui::icon(icon_name, 14., ink))
+                                    .child(label),
+                            )
+                            .child(body)
+                            .into_any_element()
+                    }
                 }
-                div()
-                    .pl(px(space::S4))
-                    .border_l_2()
-                    .border_color(t.hairline)
-                    .flex()
-                    .flex_col()
-                    .gap(px(space::S2))
-                    .children(paras)
-                    .into_any_element()
             }
+            Block::Image(src, alt) => image_block(src, alt, t, &key, r),
             Block::Code(lang, body) => code_block(lang, body, t, &key, r),
             Block::Math(tex, closed) => display_math(tex, *closed, t, &key, r),
             Block::Diagram(src, closed) => diagram_block(src, *closed, t, &key, r),
@@ -868,7 +1189,7 @@ pub fn render(blocks: &[Block], t: &Theme, doc: bool, r: &mut R) -> Div {
         };
         out.push(el);
     }
-    div().flex().flex_col().gap(px(space::S3)).children(out)
+    div().flex().flex_col().gap(px(gap)).children(out)
 }
 
 /// A small text button that copies `text` and says so for a moment. `text`
@@ -1754,7 +2075,7 @@ fn checkbox(done: bool, t: &Theme) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{Block, is_price, parse};
+    use super::{Block, Callout, is_price, parse, resolve};
 
     #[test]
     fn links_and_bare_addresses_are_found() {
@@ -1826,12 +2147,60 @@ mod tests {
         let Block::List(items) = &blocks[0] else {
             panic!()
         };
-        assert_eq!(items[0].3.math.len(), 1);
+        let Block::Para(p) = &items[0].blocks[0] else {
+            panic!()
+        };
+        assert_eq!(p.math.len(), 1);
         let Block::Table(t) = &blocks[1] else {
             panic!()
         };
         assert_eq!(t.rows[0][0].math[0].1, "y^2");
         assert_eq!(t.aligns[1], pulldown_cmark::Alignment::Right);
+    }
+
+    #[test]
+    fn blocks_stay_inside_their_list_item() {
+        let blocks = parse(
+            "1. Install:\n\n   ```bash\n   cargo test\n   ```\n\n   Then run it.\n2. Next\n   - nested\n",
+        );
+        assert_eq!(blocks.len(), 1);
+        let Block::List(items) = &blocks[0] else {
+            panic!()
+        };
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].number, Some(1));
+        assert!(matches!(&items[0].blocks[0], Block::Para(p) if p.text == "Install:"));
+        assert!(
+            matches!(&items[0].blocks[1], Block::Code(l, b) if l == "bash" && b == "cargo test")
+        );
+        assert!(matches!(&items[0].blocks[2], Block::Para(p) if p.text == "Then run it."));
+        assert_eq!(items[1].number, Some(2));
+        assert!(matches!(&items[1].blocks[1], Block::List(n) if n.len() == 1));
+    }
+
+    #[test]
+    fn quotes_callouts_breaks_and_html() {
+        let blocks = parse(
+            "> [!WARNING]\n> Careful\n> - one\n\nline one  \nline two\n\nReturns Vec<String> here.\n\n~~old~~\n",
+        );
+        assert!(matches!(&blocks[0], Block::Quote(Some(Callout::Warning), b) if b.len() == 2));
+        assert!(matches!(&blocks[1], Block::Para(p) if p.text == "line one\nline two"));
+        assert!(matches!(&blocks[2], Block::Para(p) if p.text == "Returns Vec<String> here."));
+        assert!(matches!(&blocks[3], Block::Para(p) if p.runs[0].1.strike));
+    }
+
+    #[test]
+    fn pictures_and_file_paths() {
+        let blocks = parse("![chart](img/chart.png)\n\nSee `notes/plan.md` and `cargo test`.\n");
+        assert!(matches!(&blocks[0], Block::Image(s, a) if s == "img/chart.png" && a == "chart"));
+        let Block::Para(p) = &blocks[1] else { panic!() };
+        assert_eq!(p.links.len(), 1);
+        assert_eq!(p.links[0].1, "notes/plan.md");
+        assert_eq!(
+            resolve("../b.md#top", Some(std::path::Path::new("/p/docs"))),
+            "/p/b.md"
+        );
+        assert_eq!(resolve("https://x.dev/a", None), "https://x.dev/a");
     }
 
     #[test]

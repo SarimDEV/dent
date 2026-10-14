@@ -744,6 +744,7 @@ impl Dent {
                             cx,
                             scope: format!("{}/{ix}", s.id),
                             bg: t.surface,
+                            base: Some(std::path::PathBuf::from(&s.cwd)),
                         };
                         div()
                             .relative()
@@ -964,6 +965,7 @@ impl Dent {
                     cx,
                     scope: format!("{}/{ix}/plan", s.id),
                     bg: t.raised,
+                    base: Some(std::path::PathBuf::from(&s.cwd)),
                 };
                 let plan_view = markdown::render(blocks.as_slice(), &t, false, &mut r);
                 needs_card(&t)
@@ -2663,6 +2665,7 @@ impl Dent {
             cx,
             scope: format!("{}/{ix}/report-{call}", s.id),
             bg: t.surface,
+            base: Some(std::path::PathBuf::from(&s.cwd)),
         };
         let body = markdown::render(blocks, &t, false, &mut r);
         div()

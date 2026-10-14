@@ -473,6 +473,10 @@ pub struct Dent {
     pub adopting: Option<String>,
     /// A row to scroll into view in the sidebar on its next draw.
     pub reveal_row: Option<String>,
+    /// Files you opened from links, per session, beside what the agent made.
+    pub opened: HashMap<String, Vec<&'static str>>,
+    /// When each opened file last changed, to notice edits on disk.
+    pub opened_at: HashMap<&'static str, std::time::SystemTime>,
     pub resumed_at: HashMap<String, Instant>,
     /// The palette row last scrolled to.
     pub palette_shown: Option<usize>,
@@ -854,6 +858,8 @@ impl Dent {
             undo_closes: Vec::new(),
             adopting: None,
             reveal_row: None,
+            opened: HashMap::new(),
+            opened_at: HashMap::new(),
             resumed_at: HashMap::new(),
             palette_shown: None,
             toast: None,
@@ -938,6 +944,12 @@ impl Dent {
             last_frame: Instant::now(),
         };
         this.mdv = crate::markdown::Md::new(this.probes.clone());
+        // Files you had opened come back as tabs, if they're still there.
+        for (sid, paths) in &prefs.opened {
+            for p in paths {
+                this.load_opened(sid, p);
+            }
+        }
         if std::env::var_os("DENT_NO_PREVIEW").is_none() {
             this.preview = Preview::new(window).map(|p| Rc::new(RefCell::new(p)));
         }
@@ -1022,15 +1034,121 @@ impl Dent {
     /// those you closed and that haven't changed since.
     pub fn open_arts(&self, s: &Session) -> Vec<&'static str> {
         let closed = self.closed_tabs.get(&s.id);
+        let opened = self.opened.get(&s.id).cloned().unwrap_or_default();
         s.arts
             .iter()
             .copied()
+            .chain(opened.into_iter().filter(|a| !s.arts.contains(a)))
             .filter(|a| {
                 closed
                     .and_then(|c| c.get(a))
                     .is_none_or(|&n| self.art(a).is_some_and(|x| x.versions.len() > n))
             })
             .collect()
+    }
+
+    /// Show a file in the viewer: one the agent made opens its tab; any
+    /// other document, page or picture opens as a tab of its own that
+    /// follows the file on disk. With no session open, it opens in its app.
+    pub fn open_file(&mut self, path: &str, cx: &mut Context<Self>) {
+        let Some(s) = self.current().cloned() else {
+            cx.open_url(&format!("file://{path}"));
+            return;
+        };
+        let target = std::path::Path::new(path);
+        let known = s
+            .arts
+            .iter()
+            .chain(self.opened.get(&s.id).into_iter().flatten())
+            .copied()
+            .find(|a| {
+                self.art(a)
+                    .and_then(crate::viewer::art_file)
+                    .is_some_and(|f| f == target)
+            });
+        if let Some(a) = known {
+            self.open_art(a, None, cx);
+            return;
+        }
+        if crate::data::Kind::of(path).is_none() {
+            cx.open_url(&format!("file://{path}"));
+            return;
+        }
+        match self.load_opened(&s.id, path) {
+            Some(id) => {
+                self.save_prefs();
+                self.open_art(id, None, cx);
+            }
+            None => {
+                self.toast(ToastAction::Info, format!("Can't open {path}"));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Read a file into a viewer tab of `session`'s; its id, if it could.
+    fn load_opened(&mut self, session: &str, path: &str) -> Option<&'static str> {
+        let kind = crate::data::Kind::of(path)?;
+        let bytes = std::fs::read(path).ok()?;
+        let id = crate::data::intern(&format!("{session}/open/{path}"));
+        let name = std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string());
+        self.arts.retain(|a| a.id != id);
+        self.arts.push(Artifact {
+            id,
+            kind,
+            title: crate::data::intern(&name),
+            path: crate::data::intern(path),
+            dir: None,
+            versions: vec![Rc::from(bytes)],
+        });
+        if let Ok(m) = std::fs::metadata(path).and_then(|m| m.modified()) {
+            self.opened_at.insert(id, m);
+        }
+        let list = self.opened.entry(session.to_string()).or_default();
+        if !list.contains(&id) {
+            list.push(id);
+        }
+        Some(id)
+    }
+
+    /// Whether the opened file showing in the viewer changed on disk.
+    fn opened_changed(&self) -> bool {
+        let Some(Tab::Art(a)) = self.current().map(|s| self.tab(s)) else {
+            return false;
+        };
+        let (Some(seen), Some(art)) = (self.opened_at.get(a), self.art(a)) else {
+            return false;
+        };
+        self.panel_open
+            && std::fs::metadata(art.path)
+                .and_then(|m| m.modified())
+                .is_ok_and(|m| m != *seen)
+    }
+
+    /// A file you opened changed on disk: its tab shows the new version.
+    pub fn refresh_opened(&mut self, art: &'static str) {
+        let Some(&seen) = self.opened_at.get(art) else {
+            return;
+        };
+        let Some(path) = self.art(art).map(|a| a.path) else {
+            return;
+        };
+        let Ok(m) = std::fs::metadata(path).and_then(|m| m.modified()) else {
+            return;
+        };
+        if m == seen {
+            return;
+        }
+        self.opened_at.insert(art, m);
+        if let Ok(bytes) = std::fs::read(path)
+            && let Some(a) = self.arts.iter_mut().find(|a| a.id == art)
+        {
+            a.versions.push(Rc::from(bytes));
+            self.updated_at.insert(art, Instant::now());
+        }
     }
 
     /// Close a file's tab. The tab beside it shows instead; with none left
@@ -2054,6 +2172,18 @@ impl Dent {
             panel_width: Some(self.panel_width),
             sidebar_width: Some(self.sidebar_w),
             dark: Some(self.t.dark),
+            opened: self
+                .opened
+                .iter()
+                .map(|(sid, ids)| {
+                    (
+                        sid.clone(),
+                        ids.iter()
+                            .filter_map(|a| self.art(a).map(|x| x.path.to_string()))
+                            .collect(),
+                    )
+                })
+                .collect(),
             closed_tabs: self
                 .closed_tabs
                 .iter()
@@ -3299,12 +3429,15 @@ impl Dent {
             .is_some_and(|(until, ..)| Instant::now() >= until);
         // Once a minute, so "now" and "5m" in the sidebar stay true.
         let new_minute = new_second && second.is_multiple_of(60);
+        // Once a second, whether the file you opened in the viewer changed.
+        let disk = new_second && self.opened_changed();
         let due = page
             || toast_expired
             || copied
             || squares
             || (working_shown && new_second)
             || new_minute
+            || disk
             || rest_over;
         if due && self.walk.as_ref().is_some_and(|w| w.resting.is_some()) {
             eprintln!(

@@ -124,6 +124,16 @@ impl Render for Dent {
         self.frames += 1;
         ui::FRAME.store(self.frames, std::sync::atomic::Ordering::Relaxed);
         self.drain_page(window, cx);
+        // A link asked to show a file.
+        if let Some(path) = select::take_open() {
+            self.open_file(&path, cx);
+        }
+        // A file you opened in the viewer follows its changes on disk.
+        if let Some(Tab::Art(a)) = self.current().map(|s| self.tab(s))
+            && self.panel_open
+        {
+            self.refresh_opened(a);
+        }
         // A clicked notification opens its session.
         let clicked = notify::take_clicked();
         if let Some(id) = clicked.clone() {

@@ -6,7 +6,7 @@
 //! Links stay clickable: a press and release on the same link opens it, a
 //! drag that starts on one selects instead.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -261,15 +261,36 @@ impl Element for Text {
                 if let Some(ix) = down.filter(|ix| link_at(e.position) == Some(*ix))
                     && let Some((_, url)) = links.get(ix)
                 {
-                    if url.starts_with('/') {
-                        cx.open_url(&format!("file://{url}"));
-                    } else {
-                        cx.open_url(url);
-                    }
+                    open_link(url, window, cx);
                 }
             }
         });
     }
+}
+
+thread_local! {
+    /// A file a link asked dent to show, for the app to open on its next draw.
+    static OPEN: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Follow a link: web addresses in the browser; a file dent can show (a
+/// document, page or picture) in the viewer; any other file in its app.
+pub fn open_link(url: &str, window: &mut Window, cx: &mut App) {
+    if url.starts_with('/') {
+        if crate::data::Kind::of(url).is_some() {
+            OPEN.with(|o| *o.borrow_mut() = Some(url.to_string()));
+            window.refresh();
+        } else if std::path::Path::new(url).exists() {
+            cx.open_url(&format!("file://{url}"));
+        }
+    } else if !url.starts_with('#') {
+        cx.open_url(url);
+    }
+}
+
+/// The file a link asked to show, once.
+pub fn take_open() -> Option<String> {
+    OPEN.with(|o| o.borrow_mut().take())
 }
 
 /// The highlight behind `range`: one band per line it covers.

@@ -913,7 +913,8 @@ fn from_disk(root: &std::path::Path, path: &str) -> Option<Arc<[u8]>> {
     std::fs::read(full).ok().map(Into::into)
 }
 
-fn percent_decode(s: &str) -> String {
+/// `%20` and friends back to their characters, for paths in links.
+pub fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;

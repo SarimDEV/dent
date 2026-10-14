@@ -43,6 +43,16 @@ pub fn middle_ellipsis(s: &str, max: usize) -> String {
     format!("{head}…{tail}")
 }
 
+/// A file's path as the viewer shows it: relative to the session's folder
+/// when it's inside, from `~` when it's in home.
+pub fn shown_path(a: &crate::data::Artifact, cwd: &str) -> String {
+    if a.path.starts_with('/') {
+        crate::bridge::relative(std::path::Path::new(cwd), a.path)
+    } else {
+        a.path.to_string()
+    }
+}
+
 /// Half the width of the grip on the panel's left edge.
 const GRIP: f32 = 4.;
 
@@ -123,7 +133,7 @@ impl Dent {
                     a.path.rsplit('/').next().unwrap_or(a.path).to_string()
                 },
                 a.kind.icon(),
-                Some(a.path),
+                Some(crate::data::intern(&self.shown(a))),
             ));
         }
         // Keep the tab you're looking at in view as tabs come and go.
@@ -344,6 +354,11 @@ impl Dent {
             .into_any_element()
     }
 
+    /// An artifact's path as shown in the viewer, for the open session.
+    fn shown(&self, a: &crate::data::Artifact) -> String {
+        shown_path(a, self.current().map_or("", |s| s.cwd.as_str()))
+    }
+
     /// Hovering a preview control says what it does, in the toolbar itself.
     fn hint(
         text: &'static str,
@@ -512,7 +527,7 @@ impl Dent {
                             a.title.trim_start_matches("Dev server · ")
                         )
                     } else {
-                        a.path.to_string()
+                        self.shown(&a)
                     }),
             })
             .when_some(updated, |d, secs| {
@@ -806,7 +821,7 @@ impl Dent {
                         .truncate()
                         .ty(LABEL)
                         .text_color(t.quiet)
-                        .child(a.path),
+                        .child(self.shown(a)),
                 ),
             )
             .child(
@@ -890,6 +905,8 @@ impl Dent {
             cx,
             scope: format!("doc/{id}"),
             bg: t.panel,
+            // Links and pictures in a document are found from its folder.
+            base: art_file(&a).and_then(|f| f.parent().map(|p| p.to_path_buf())),
         };
         let page = markdown::render(blocks.as_slice(), &t, true, &mut r);
         div()
@@ -907,7 +924,7 @@ impl Dent {
                             .truncate()
                             .ty(LABEL)
                             .text_color(t.quiet)
-                            .child(a.path),
+                            .child(self.shown(&a)),
                     )
                     .child({
                         let copied = self
@@ -992,7 +1009,7 @@ impl Dent {
                             .truncate()
                             .ty(LABEL)
                             .text_color(t.quiet)
-                            .child(a.path),
+                            .child(self.shown(&a)),
                     )
                     .child(
                         div()
@@ -1672,6 +1689,7 @@ impl Dent {
                         cx: &mut *cx,
                         scope: format!("{}/aside-{}", s.id, a.id),
                         bg: t.panel,
+                        base: Some(std::path::PathBuf::from(&s.cwd)),
                     };
                     let body = markdown::render(blocks.as_slice(), &t, false, &mut r);
                     div()

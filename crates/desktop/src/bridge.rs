@@ -116,7 +116,9 @@ pub fn art_id(session: &str, path: &str) -> &'static str {
 
 /// A path as the person would say it: relative to the session's folder
 /// when it's inside it.
-fn relative(cwd: &Path, path: &str) -> String {
+/// A path as people read it: inside the session's folder, relative to it;
+/// elsewhere in home, from `~`.
+pub fn relative(cwd: &Path, path: &str) -> String {
     let p = PathBuf::from(path);
     if let Ok(r) = p.strip_prefix(cwd) {
         return r.display().to_string();
