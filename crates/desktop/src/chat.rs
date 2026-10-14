@@ -1488,10 +1488,85 @@ impl Dent {
                             .child(div().flex().justify_end().child(start))
                             .child(probe(&self.probes, "starter")),
                     )
-                    .child(chips),
+                    .child(chips)
+                    .children(self.terminal_sessions(cx)),
             )
             .child(div().flex_1())
             .into_any_element()
+    }
+
+    /// Sessions started in a terminal, to carry on here with their history.
+    fn terminal_sessions(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.recent.is_empty() {
+            return None;
+        }
+        let t = self.t;
+        let rows: Vec<AnyElement> = self
+            .recent
+            .iter()
+            .take(6)
+            .enumerate()
+            .map(|(i, r)| {
+                let id = r.agent_session.clone();
+                let detail = if r.last.is_empty() || r.last == r.title {
+                    Self::project_name(&r.cwd)
+                } else {
+                    format!("{} · last: {}", Self::project_name(&r.cwd), r.last)
+                };
+                div()
+                    .id(SharedString::from(format!("adopt-{i}")))
+                    .relative()
+                    .px(px(space::S3))
+                    .py(px(space::S2))
+                    .rounded(px(radius::MD))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(t.hover()))
+                    .on_click(cx.listener(move |this, _, _, cx| this.adopt(&id, cx)))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S3))
+                    .child(icon("square-terminal", 14., t.quiet))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .ty(UI)
+                                    .text_color(t.ink)
+                                    .child(r.title.clone()),
+                            )
+                            .child(div().truncate().ty(UI).text_color(t.quiet).child(detail)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .ty(LABEL)
+                            .text_color(t.faint)
+                            .child(crate::data::ago(r.updated)),
+                    )
+                    .child(probe(&self.probes, format!("adopt-{i}")))
+                    .into_any_element()
+            })
+            .collect();
+        Some(
+            div()
+                .pt(px(space::S6))
+                .flex()
+                .flex_col()
+                .gap(px(space::S1))
+                .child(
+                    div()
+                        .px(px(space::S3))
+                        .pb(px(space::S1))
+                        .ty(LABEL)
+                        .text_color(t.quiet)
+                        .child("PICK UP FROM THE TERMINAL"),
+                )
+                .children(rows)
+                .into_any_element(),
+        )
     }
 
     /// One remembered choice; a click opens its menu.

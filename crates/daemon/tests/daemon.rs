@@ -990,3 +990,75 @@ fn a_fork_copies_the_conversation_and_resumes_it_as_a_new_agent_session() {
     c.wait(&g, "the shorter copy", |b| matches!(b, Body::Forked { .. }));
     assert_eq!(c.count(&g, |b| matches!(b, Body::User { .. })), 1);
 }
+
+#[test]
+fn terminal_sessions_are_listed_and_carried_on_with_their_history() {
+    let home = std::env::temp_dir().join(format!("dent-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    let w0 = World::new(&[]);
+    let cwd = w0.cwd();
+    drop(w0);
+    std::fs::create_dir_all(&cwd).unwrap();
+    let dir = home.join(".claude/projects/-some-project");
+    std::fs::create_dir_all(&dir).unwrap();
+    let id = "11111111-2222-4333-8444-555555555555";
+    let lines = [
+        format!(r#"{{"type":"user","entrypoint":"cli","cwd":"{cwd}","uuid":"u1","message":{{"role":"user","content":"Make the parser faster"}}}}"#),
+        r#"{"type":"assistant","uuid":"a1","message":{"content":[{"type":"text","text":"I made it faster."}]}}"#.to_string(),
+        r#"{"type":"user","uuid":"m1","isMeta":true,"message":{"role":"user","content":"<command-name>/clear</command-name>"}}"#.to_string(),
+        r#"{"type":"last-prompt","lastPrompt":"Make the parser faster"}"#.to_string(),
+    ];
+    let file = dir.join(format!("{id}.jsonl"));
+    std::fs::write(&file, lines.join("\n") + "\n").unwrap();
+    // Not touched in the last minute, so not open in a terminal.
+    Command::new("touch")
+        .args(["-t", "202001010000"])
+        .arg(&file)
+        .status()
+        .unwrap();
+
+    let w = World::new(&[("HOME", home.to_str().unwrap())]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let listed = match c.call(Request::Recent).unwrap() {
+        Out::Reply {
+            reply: dent_protocol::Reply::Recent { sessions },
+        } => sessions,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].title, "Make the parser faster");
+    let s = match c.call(Request::Adopt {
+        agent_session: id.into(),
+    }) {
+        Ok(Out::Reply {
+            reply: dent_protocol::Reply::Created { session },
+        }) => session,
+        other => panic!("{other:?}"),
+    };
+    c.wait(&s, "the import", |b| matches!(b, Body::Status { .. }));
+    assert!(c.text(&s).contains("I made it faster."));
+    assert_eq!(
+        c.count(&s, |b| matches!(b, Body::User { .. })),
+        1,
+        "meta prompts stay out"
+    );
+    // Listed no more, and adopting twice is refused.
+    match c.call(Request::Recent).unwrap() {
+        Out::Reply {
+            reply: dent_protocol::Reply::Recent { sessions },
+        } => assert!(sessions.is_empty()),
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        c.call(Request::Adopt {
+            agent_session: id.into()
+        })
+        .is_err()
+    );
+    c.say(&s, "next", "tell me your args", false);
+    c.wait_turns(&s, 2);
+    let t = c.text(&s);
+    assert!(t.contains(&format!("--resume {id}")), "{t}");
+    let _ = std::fs::remove_dir_all(&home);
+}

@@ -12,7 +12,9 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use dent_client_core::Sessions;
-use dent_protocol::{Answer, Command, Model, Out, Permission, Project, Reply, Request};
+use dent_protocol::{
+    Answer, Command, Model, Out, Permission, Project, RecentSession, Reply, Request,
+};
 
 use crate::data::{Artifact, FileDiff, Item, Session};
 use crate::live::{Incoming, Live};
@@ -195,6 +197,7 @@ pub struct Defaults {
 /// What a request's reply is for.
 enum Waiting {
     Models,
+    Recent,
     Usage,
     Commands(String),
     Projects,
@@ -249,6 +252,8 @@ pub struct Dent {
     pub changes: HashMap<String, Rc<Vec<FileDiff>>>,
     /// Choices made so far on a question, by question id.
     pub picks: HashMap<String, Vec<Option<String>>>,
+    /// Sessions started in a terminal that could carry on here.
+    pub recent: Vec<RecentSession>,
     /// The account's usage, as the provider last reported it, and when.
     pub usage: Option<(Vec<dent_protocol::Window>, u64)>,
     /// Slash commands the agent offers, by session.
@@ -593,6 +598,7 @@ impl Dent {
             rewinding: None,
             commands: HashMap::new(),
             usage: None,
+            recent: Vec::new(),
             slash_ix: 0,
             expanded: HashSet::new(),
             plan_open: false,
@@ -747,6 +753,9 @@ impl Dent {
         {
             self.fetch_commands(&new);
         }
+        if id.is_none() && self.connection.is_ok() {
+            self.fetch_recent();
+        }
         self.selected = id;
         self.menu = None;
         self.picking = false;
@@ -847,6 +856,7 @@ impl Dent {
                     self.waiting
                         .insert(self.live.send(Request::Projects), Waiting::Projects);
                     self.fetch_usage();
+                    self.fetch_recent();
                 }
                 Incoming::Down(why) => {
                     if self.connection.is_ok() {
@@ -927,6 +937,12 @@ impl Dent {
                     self.commands.insert(id, commands);
                 }
             }
+            (
+                Waiting::Recent,
+                Out::Reply {
+                    reply: Reply::Recent { sessions },
+                },
+            ) => self.recent = sessions,
             (
                 Waiting::Usage,
                 Out::Reply {
@@ -1078,6 +1094,22 @@ impl Dent {
         });
         cx.notify();
         true
+    }
+
+    /// Ask for sessions started in a terminal.
+    pub fn fetch_recent(&mut self) {
+        let n = self.live.send(Request::Recent);
+        self.waiting.insert(n, Waiting::Recent);
+    }
+
+    /// Carry on a terminal session here; it opens once it's in.
+    pub fn adopt(&mut self, agent_session: &str, cx: &mut Context<Self>) {
+        let n = self.live.send(Request::Adopt {
+            agent_session: agent_session.to_string(),
+        });
+        self.waiting.insert(n, Waiting::Create);
+        self.recent.retain(|r| r.agent_session != agent_session);
+        cx.notify();
     }
 
     /// Ask the daemon for the account's usage.

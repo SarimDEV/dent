@@ -302,6 +302,20 @@ pub struct Command {
     pub hint: String,
 }
 
+/// A session someone started with the agent in a terminal.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct RecentSession {
+    /// The agent's own session id.
+    pub agent_session: String,
+    pub cwd: String,
+    /// The first thing asked, and the latest.
+    pub title: String,
+    #[serde(default)]
+    pub last: String,
+    /// Unix milliseconds of its last change.
+    pub updated: u64,
+}
+
 /// A directory sessions run in.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Project {
@@ -426,6 +440,12 @@ pub enum Request {
     Models,
     /// The account's usage windows, read from the provider.
     Usage,
+    /// Sessions started with the agent in a terminal, newest first.
+    Recent,
+    /// Carry on a terminal session in dent, with its history.
+    Adopt {
+        agent_session: String,
+    },
     /// The agent's slash commands: the session's, or the last ones seen.
     Commands {
         #[serde(default)]
@@ -499,6 +519,9 @@ pub enum Reply {
     },
     Commands {
         commands: Vec<Command>,
+    },
+    Recent {
+        sessions: Vec<RecentSession>,
     },
     /// Empty when the agent can't say (signed out, or an API key).
     Usage {

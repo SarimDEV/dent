@@ -444,6 +444,76 @@ impl Daemon {
         Ok(session)
     }
 
+    /// Carry on a session started in a terminal: its history comes in, and
+    /// its agent resumes it.
+    pub async fn adopt(self: &Arc<Self>, agent_session: &str) -> Result<String> {
+        if self
+            .store()
+            .sessions()?
+            .iter()
+            .any(|r| r.agent_session.as_deref() == Some(agent_session))
+        {
+            bail!("that session is already in dent");
+        }
+        let id = agent_session.to_string();
+        let (cwd, title, bodies) =
+            tokio::task::spawn_blocking(move || crate::terminal::import(&id))
+                .await?
+                .context("couldn't read that session")?;
+        let session = new_id();
+        self.append(
+            &session,
+            Body::Created {
+                agent: "claude".into(),
+                cwd,
+                model: None,
+                permission: Permission::Ask,
+                title,
+            },
+            None,
+        )?;
+        self.append(
+            &session,
+            Body::Agent {
+                agent_session: Some(agent_session.to_string()),
+                version: None,
+            },
+            None,
+        )?;
+        for b in bodies {
+            self.append(&session, b, None)?;
+        }
+        // It has run before, so the agent resumes rather than starts.
+        self.append(&session, Body::TurnStarted, None)?;
+        self.append(
+            &session,
+            Body::TurnEnded {
+                outcome: dent_protocol::Outcome::Done,
+            },
+            None,
+        )?;
+        self.append(
+            &session,
+            Body::Notice {
+                text: "Picked up from the terminal".into(),
+            },
+            None,
+        )?;
+        self.append(
+            &session,
+            Body::Status {
+                status: dent_protocol::Status::Done,
+            },
+            None,
+        )?;
+        let row = self
+            .store()
+            .session(&session)?
+            .context("session row missing")?;
+        session::start(self.clone(), row, Vec::new());
+        Ok(session)
+    }
+
     /// Bring back every session after a start: reattach running agents and
     /// mark turns that died with the old daemon.
     pub async fn restore(self: &Arc<Self>) -> Result<()> {

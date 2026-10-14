@@ -14,6 +14,13 @@ git -C "$root/proj" init -q
 echo "# Scratch project" > "$root/proj/README.md"
 git -C "$root/proj" add . && git -C "$root/proj" -c user.name=walk -c user.email=walk@example.com commit -qm init
 unset DENT_CLAUDE
+# A session someone ran in a terminal, to pick up in dent.
+mkdir -p "$root/home/.claude/projects/-proj"
+cat > "$root/home/.claude/projects/-proj/22222222-3333-4444-8555-666666666666.jsonl" <<JSONL
+{"type":"user","entrypoint":"cli","cwd":"$root/proj","uuid":"t1","message":{"role":"user","content":"Tidy up the README"}}
+{"type":"assistant","uuid":"t2","message":{"content":[{"type":"text","text":"I tidied the README and fixed two broken links."}]}}
+JSONL
+touch -t 202601010000 "$root/home/.claude/projects/-proj/"*.jsonl
 cargo build -q -p dent-desktop -p dent-daemon -p dent-session-holder -p dent-fake-claude
 bin=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug
 if [[ "$name" == "real" ]]; then

@@ -225,6 +225,20 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             Reply::Projects { projects }
         }
         Request::Models => Reply::Models { models: d.models() },
+        Request::Recent => {
+            let owned: std::collections::HashSet<String> = d
+                .store()
+                .sessions()?
+                .into_iter()
+                .filter_map(|r| r.agent_session)
+                .collect();
+            let sessions =
+                tokio::task::spawn_blocking(move || crate::terminal::recent(&owned, 12)).await?;
+            Reply::Recent { sessions }
+        }
+        Request::Adopt { agent_session } => Reply::Created {
+            session: d.adopt(&agent_session).await?,
+        },
         Request::Usage => {
             let (windows, at) = d.usage().await;
             Reply::Usage { windows, at }

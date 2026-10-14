@@ -396,6 +396,33 @@ fn checks() -> Vec<(f32, Act)> {
             15.,
         ),
     )];
+    v.extend([
+        (0.3, Key("cmd-n")),
+        (
+            0.1,
+            Until(
+                "sessions from the terminal are offered",
+                |d, _| !d.recent.is_empty(),
+                5.,
+            ),
+        ),
+        (0.3, Shot("terminal-sessions")),
+        (0.1, Click("adopt-0")),
+        (
+            0.1,
+            Until(
+                "picking one up brings its history",
+                |d, _| {
+                    says(d, "tidied the README")
+                        && has(
+                            d,
+                            |i| matches!(i, Item::Note { text, .. } if text.contains("terminal")),
+                        )
+                },
+                5.,
+            ),
+        ),
+    ]);
     v.extend(new_session("hello there"));
     v.extend([
         (
