@@ -2,6 +2,7 @@
 # Walk through the real desktop app against a daemon running the fake agent.
 #   scripts/walk.sh checks [--dark] [--size WxH] [--shots DIR]
 #   scripts/walk.sh stills --shots DIR [--dark] [--size WxH]
+#   scripts/walk.sh markdown [--shots DIR] [--dark] [--size WxH]   (only the maths, diagram and table reply)
 # Everything runs in a scratch home, state and project, so no account, real
 # project or setting is touched. The window opens in the background and
 # never takes focus. Stills need WINID (a build of crates/desktop/tools/winid.swift).

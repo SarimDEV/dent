@@ -667,6 +667,9 @@ impl Agent {
         }
         let reply = if lower.contains("long") {
             LONG.to_string()
+        } else if lower.contains("math") || lower.contains("diagram") || lower.contains("big table")
+        {
+            rich()
         } else {
             format!(
                 "Here's what I'd do about **{}**:\n\n1. Read the code that handles it.\n2. Make the smallest change that works.\n3. Run the tests.\n\n```rust\nfn main() {{\n    println!(\"hello\");\n}}\n```\n\nWant me to start?",
@@ -682,6 +685,48 @@ impl Agent {
         self.end(&reply, false);
         Ok(())
     }
+}
+
+/// Maths, inline and display, a diagram and a table too tall for the chat.
+fn rich() -> String {
+    let mut s = String::from(
+        r#"Here's the frame budget, worked through.
+
+With $n$ events and a viewport of $k$ rows, layout costs $O(k)$ rather than $O(n)$. A plan at $10/mo ($30/mo yearly) is still just a price.
+
+$$
+\mathrm{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V, \qquad \sum_{i=1}^{n} \alpha_i = 1
+$$
+
+The cost grows with every term:
+
+$$
+f(x) = a_0 + a_1 x + a_2 x^2 + a_3 x^3 + a_4 x^4 + a_5 x^5 + a_6 x^6 + a_7 x^7 + a_8 x^8 + a_9 x^9 + a_{10} x^{10} + a_{11} x^{11} + a_{12} x^{12}
+$$
+
+```mermaid
+flowchart LR
+  A[Chunk arrives] --> B[Re-parse tail]
+  B --> C{Block closed?}
+  C -- yes --> D[Commit]
+  C -- no --> E[Draw]
+```
+
+Every event, timed:
+
+| # | Event | Duration |
+| ---: | --- | ---: |
+"#,
+    );
+    for r in 1..=60 {
+        s.push_str(&format!(
+            "| {r} | event number {r} | {}.{} ms |\n",
+            r % 9,
+            r % 7
+        ));
+    }
+    s.push_str("\nThat's all sixty.");
+    s
 }
 
 fn file_body(path: &str, prompt: &str) -> String {

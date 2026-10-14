@@ -355,6 +355,9 @@ pub struct Dent {
     pub diff_view_w: f32,
     /// Parsed Markdown by source, so a redraw never parses again.
     pub md: HashMap<u64, Rc<Vec<Block>>>,
+    /// What rendered Markdown remembers between frames: maths, diagrams,
+    /// scroll positions of wide blocks and tall tables.
+    pub mdv: crate::markdown::Md,
     /// Decoded pictures by artifact version, so a redraw never decodes or hashes again.
     pub pictures: HashMap<(&'static str, usize), Arc<Image>>,
     /// Pages open in their own windows, by artifact.
@@ -704,6 +707,7 @@ impl Dent {
             diff_file_key: 0,
             diff_view_w: 400.,
             md: HashMap::new(),
+            mdv: crate::markdown::Md::default(),
             pictures: HashMap::new(),
             popouts: HashMap::new(),
             frames: 0,
@@ -720,6 +724,7 @@ impl Dent {
             walk: None,
             last_frame: Instant::now(),
         };
+        this.mdv = crate::markdown::Md::new(this.probes.clone());
         if std::env::var_os("DENT_NO_PREVIEW").is_none() {
             this.preview = Preview::new(window).map(|p| Rc::new(RefCell::new(p)));
         }

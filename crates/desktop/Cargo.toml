@@ -25,6 +25,17 @@ libc = "=0.2.190"
 # Syntax highlighting (0016): the languages agents write most.
 arborium = { version = "=2.18.2", default-features = false, features = ["lang-rust", "lang-python", "lang-javascript", "lang-typescript", "lang-tsx", "lang-json", "lang-toml", "lang-yaml", "lang-bash", "lang-html", "lang-css", "lang-go", "lang-swift", "lang-sql", "lang-c", "lang-cpp", "lang-java", "lang-ruby", "lang-diff", "lang-markdown"] }
 futures = { version = "=0.3.34", default-features = false, features = ["std", "async-await"] }
+# Maths (0014): TeX typeset by RaTeX, drawn natively in the KaTeX fonts.
+ratex-parser = "=0.1.14"
+ratex-layout = "=0.1.14"
+ratex-types = "=0.1.14"
+ratex-katex-fonts = "=0.1.14"
+# KaTeX's Size fonts have no "m", so GPUI won't load them: their glyphs are drawn from outlines (0040).
+ttf-parser = "=0.25.1"
+# Diagrams (0015): Mermaid to SVG by merman, labels measured with rustybuzz (0041), drawn by resvg (0039).
+merman = { version = "=0.8.0", default-features = false, features = ["all-diagrams", "svg", "layout-cytoscape"] }
+resvg = { version = "=0.46.0", default-features = false, features = ["text"] }
+rustybuzz = "=0.20.1"
 
 # Snapshots of the live page, drawn under menus while the web view hides.
 [target.'cfg(target_os = "macos")'.dependencies]
