@@ -220,16 +220,56 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             d.command(&session, Op::Reopen).await?;
             Reply::Ok
         }
-        Request::Projects => {
-            let recent: Vec<(String, u64)> = d
-                .store()
-                .sessions()?
-                .into_iter()
-                .map(|r| (r.cwd, r.updated))
-                .collect();
-            let projects =
-                tokio::task::spawn_blocking(move || crate::projects::list(&recent)).await?;
-            Reply::Projects { projects }
+        Request::Projects => Reply::Projects {
+            projects: project_list(d).await?,
+        },
+        Request::Folders { partial } => {
+            let (parent, folders) =
+                tokio::task::spawn_blocking(move || crate::projects::folders(&partial)).await??;
+            Reply::Folders { parent, folders }
+        }
+        Request::AddProject { path, create } => {
+            let dir = std::path::PathBuf::from(&path);
+            if !dir.is_absolute() {
+                bail!("{path} isn't a full path");
+            }
+            if create {
+                std::fs::create_dir_all(&dir)?;
+            } else if !dir.is_dir() {
+                bail!("{path} isn't a folder");
+            }
+            remember_project(d, &path)?;
+            Reply::Projects {
+                projects: project_list(d).await?,
+            }
+        }
+        Request::HideProject { path, hidden } => {
+            let mut set = hidden_projects(d)?;
+            if hidden {
+                set.insert(path);
+            } else {
+                set.remove(&path);
+            }
+            d.store().put(HIDDEN, &serde_json::to_string(&set)?)?;
+            Reply::Projects {
+                projects: project_list(d).await?,
+            }
+        }
+        Request::NewProject { name } => {
+            let (dir, warning) =
+                tokio::task::spawn_blocking(move || crate::projects::create(&name)).await??;
+            let path = dir.display().to_string();
+            remember_project(d, &path)?;
+            Reply::ProjectMade { path, warning }
+        }
+        Request::CloneProject { url } => {
+            let dir = tokio::task::spawn_blocking(move || crate::projects::clone(&url)).await??;
+            let path = dir.display().to_string();
+            remember_project(d, &path)?;
+            Reply::ProjectMade {
+                path,
+                warning: None,
+            }
         }
         Request::Models => Reply::Models { models: d.models() },
         Request::Recent => {
@@ -284,6 +324,51 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             }
         }
     })
+}
+
+/// Where the folders added here are kept, with when; and the ones taken
+/// off the list.
+const ADDED: &str = "projects.added";
+const HIDDEN: &str = "projects.hidden";
+
+fn added_projects(d: &Daemon) -> Result<std::collections::HashMap<String, u64>> {
+    Ok(d.store()
+        .get(ADDED)?
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default())
+}
+
+fn hidden_projects(d: &Daemon) -> Result<std::collections::HashSet<String>> {
+    Ok(d.store()
+        .get(HIDDEN)?
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default())
+}
+
+/// Keep a folder on the list, newest, and back on it if it was taken off.
+fn remember_project(d: &Daemon, path: &str) -> Result<()> {
+    let mut added = added_projects(d)?;
+    added.insert(path.to_string(), crate::daemon::now_ms());
+    let mut hidden = hidden_projects(d)?;
+    hidden.remove(path);
+    let store = d.store();
+    store.put(ADDED, &serde_json::to_string(&added)?)?;
+    store.put(HIDDEN, &serde_json::to_string(&hidden)?)?;
+    Ok(())
+}
+
+async fn project_list(d: &Daemon) -> Result<Vec<dent_protocol::Project>> {
+    let recent: Vec<(String, u64)> = d
+        .store()
+        .sessions()?
+        .into_iter()
+        .map(|r| (r.cwd, r.updated))
+        .collect();
+    let (added, hidden) = (added_projects(d)?, hidden_projects(d)?);
+    Ok(
+        tokio::task::spawn_blocking(move || crate::projects::list(&recent, &added, &hidden))
+            .await?,
+    )
 }
 
 fn cwd_of(d: &Daemon, session: &str) -> Result<String> {

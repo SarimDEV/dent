@@ -38,7 +38,7 @@ The desktop app is a GPUI client for macOS, Linux and Windows, built around a ch
 
 Cmd/Ctrl+N opens an empty chat with the cursor in the composer: you start by typing. Under the composer are the session's settings, already chosen, each a click (or a key) to change:
 
-- **Project:** filled in from what you type, updating as you go; "New project" or "No project" when nothing fits.
+- **Project:** filled in from what you type, updating as you go, until you pick one. Its chip opens a picker you type into ([0044](decisions/0044-project-picker.md)): words search the projects (name, then a folder on the path), newest first, ⌘1–⌘9 for the first nine; a path starting with `/` or `~` goes to a folder, Tab steps into the lit subfolder and "Make …" creates one that isn't there; a name that matches nothing offers New project, a Git repository with a first commit in `~/dent/projects`; a pasted Git URL offers Clone into the same place. "Choose a folder…" opens the Mac's folder picker and "No project" uses `~/dent/scratch`. ⌘⌫ or the lit row's × takes a project off the list (its folder stays), with Undo. Esc steps back out of naming or cloning, then closes.
 - **Machine:** the least busy online machine with the project's repo.
 - **Model, permissions, worktree:** whatever you used last.
 

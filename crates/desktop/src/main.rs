@@ -20,6 +20,7 @@ mod markdown;
 mod math;
 mod notify;
 mod palette;
+mod picker;
 mod popout;
 mod prefs;
 mod select;
@@ -240,6 +241,12 @@ impl Render for Dent {
             .max(viewer::MIN_WIDTH);
         self.chat_w = w - side - if wants_panel { self.panel_w } else { 0. };
         self.sidebar_hovered = self.over_sidebar(window.mouse_position(), window);
+        // A menu's field gives the keyboard back to the prompt however the
+        // menu closed: a choice, Esc, a click away.
+        if self.menu.is_none() && self.menu_query.read(cx).focus_handle(cx).is_focused(window) {
+            let prompt = self.prompt().clone();
+            prompt.update(cx, |f, cx| f.focus(window, cx));
+        }
         let sidebar = (!self.sidebar_hidden).then(|| self.sidebar(cx));
         let main = self.main_column(window, cx);
         let panel = self
@@ -249,7 +256,7 @@ impl Render for Dent {
         let toast =
             self.toast.clone().map(|toast| {
                 let label = match toast.action {
-                    ToastAction::Undo(_) => "Undo",
+                    ToastAction::Undo(_) | ToastAction::UnhideProject(_) => "Undo",
                     ToastAction::Resume(_) => "Resume",
                     ToastAction::Info => "OK",
                 };
@@ -282,6 +289,7 @@ impl Render for Dent {
                             .child(ui::icon(
                                 match toast.action {
                                     ToastAction::Undo(_) => "archive",
+                                    ToastAction::UnhideProject(_) => "folder",
                                     ToastAction::Resume(_) => "square",
                                     ToastAction::Info => "info",
                                 },
@@ -301,9 +309,7 @@ impl Render for Dent {
                                     })
                                     .child(toast.text.clone()),
                             )
-                            .when(matches!(toast.action, ToastAction::Undo(_)), |d| {
-                                d.child(ui::kbd("⌘ Z", &t))
-                            })
+                            .when(toast.action.undoes(), |d| d.child(ui::kbd("⌘ Z", &t)))
                             .child(
                                 ui::button("toast-action", label, false, &t)
                                     .relative()
@@ -366,11 +372,7 @@ impl Render for Dent {
                 }
             }))
             .on_action(cx.listener(|this, _: &UndoClose, window, cx| {
-                if this
-                    .toast
-                    .as_ref()
-                    .is_some_and(|t| matches!(t.action, ToastAction::Undo(_)))
-                {
+                if this.toast.as_ref().is_some_and(|t| t.action.undoes()) {
                     this.toast_action(window, cx);
                 }
             }))
@@ -438,7 +440,8 @@ impl Render for Dent {
                 if this.context.take().is_some() {
                 } else if this.palette.is_some() {
                     this.close_palette(window, cx);
-                } else if this.menu.take().is_some()
+                } else if this.project_back(window, cx)
+                    || this.menu.take().is_some()
                     || this.dismiss_completion(cx)
                     || select::clear(window)
                 {

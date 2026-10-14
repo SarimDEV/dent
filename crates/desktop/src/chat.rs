@@ -11,7 +11,7 @@ use std::rc::Rc;
 use crate::ui::RevealOnHover;
 
 use crate::anim;
-use crate::app::{Dent, Menu, Tab};
+use crate::app::{Dent, Menu, Tab, home};
 use crate::complete;
 use dent_protocol::Permission;
 
@@ -2508,12 +2508,12 @@ impl Dent {
                     .when(open, |d| d.bg(t.selected()))
                     .hover(|d| d.bg(t.hover()))
                     .active(|d| d.bg(t.press()))
-                    .on_press(cx.listener(move |this, _, _, cx| {
+                    .on_press(cx.listener(move |this, _, window, cx| {
                         if this.menu == Some(which) {
                             this.menu = None;
                             cx.notify();
                         } else {
-                            this.open_menu(which, cx);
+                            this.open_menu(which, window, cx);
                         }
                     }))
                     .child(icon(
@@ -2617,59 +2617,7 @@ impl Dent {
         let d = self.defaults.clone();
         let act = |f: Box<ActFn>| -> Option<Act> { Some(Rc::from(f)) };
         match which {
-            Menu::Project => {
-                // Every project, newest first; the menu scrolls.
-                let scratch = crate::scratch_dir().display().to_string();
-                let mut v: Vec<Entry> = self
-                    .projects
-                    .iter()
-                    // The scratch folder is "No project", below.
-                    .filter(|p| p.path != scratch)
-                    .map(|p| {
-                        let path = p.path.clone();
-                        let on = d.project.as_deref() == Some(p.path.as_str());
-                        let note = if on && !d.project_picked {
-                            "Guessed from what you typed".to_string()
-                        } else {
-                            // One line: a long path keeps its start and end.
-                            crate::viewer::middle_ellipsis(&p.path.replacen(&home(), "~", 1), 38)
-                        };
-                        Entry::row(
-                            format!("m-{}", p.name),
-                            &p.name,
-                            Some(note),
-                            on,
-                            act(Box::new(move |this, _, _| {
-                                this.defaults.project = Some(path.clone());
-                                this.defaults.project_picked = true;
-                            })),
-                        )
-                    })
-                    .collect();
-                // Mac menu order: the choices, then the action that opens a panel.
-                if !v.is_empty() {
-                    v.push(Entry::separator());
-                }
-                v.push(Entry::row(
-                    "m-none".into(),
-                    "No project",
-                    Some("A scratch folder, ~/dent/scratch".into()),
-                    d.project.is_none(),
-                    act(Box::new(|this, _, _| {
-                        this.defaults.project = None;
-                        this.defaults.project_picked = true;
-                    })),
-                ));
-                v.push(Entry::separator());
-                v.push(Entry::row(
-                    "m-choose".into(),
-                    "Choose a folder…",
-                    None,
-                    false,
-                    act(Box::new(|this, _, cx| this.choose_project_folder(cx))),
-                ));
-                v
-            }
+            Menu::Project => self.project_entries(cx),
             Menu::Model | Menu::SessionModel => {
                 let current = self.menu_model(which, cx);
                 let all = self.models_or_default();
@@ -2721,11 +2669,6 @@ impl Dent {
                 if !older.is_empty() {
                     let at = v.len();
                     v.push(Entry {
-                        key: "m-older".into(),
-                        name: format!("Older versions · {}", older.len()),
-                        note: None,
-                        on: false,
-                        kind: EntryKind::Fold(open),
                         act: act(Box::new(move |this, _, _| {
                             this.older_models = !this.older_models;
                             // What opened comes into view.
@@ -2733,6 +2676,11 @@ impl Dent {
                                 this.menu_scroll.scroll_to_top_of_item(at);
                             }
                         })),
+                        ..Entry::of(
+                            "m-older".into(),
+                            &format!("Older versions · {}", older.len()),
+                            EntryKind::Fold(open),
+                        )
                     });
                     if open {
                         v.extend(older.iter().map(row));
@@ -2821,7 +2769,7 @@ impl Dent {
     /// Run a menu entry: a row closes the menu; a fold stays open.
     pub fn choose_entry(&mut self, e: &Entry, window: &mut Window, cx: &mut Context<Self>) {
         let Some(act) = e.act.clone() else { return };
-        if !matches!(e.kind, EntryKind::Fold(_)) {
+        if !matches!(e.kind, EntryKind::Fold(_)) && !e.keep {
             self.menu = None;
         }
         act(self, window, cx);
@@ -2837,22 +2785,22 @@ impl Dent {
         let t = self.t;
         let entries = self.menu_entries(which, cx);
         let hi = self.menu_ix;
-        let rows: Vec<AnyElement> = entries
-            .into_iter()
-            .enumerate()
-            .map(|(i, e)| {
-                let lit = hi == Some(i);
-                match &e.kind {
-                    EntryKind::Note => menu_note_owned(e.name.clone(), &t),
-                    EntryKind::Separator => div()
-                        .flex_none()
-                        .my(px(space::S1))
-                        .mx(px(space::S2))
-                        .h(px(1.))
-                        .bg(t.hairline)
-                        .into_any_element(),
-                    EntryKind::Fold(open) => {
-                        div()
+        let rows: Vec<AnyElement> =
+            entries
+                .into_iter()
+                .enumerate()
+                .map(|(i, e)| {
+                    let lit = hi == Some(i);
+                    match &e.kind {
+                        EntryKind::Note => menu_note_owned(e.name.clone(), &t),
+                        EntryKind::Separator => div()
+                            .flex_none()
+                            .my(px(space::S1))
+                            .mx(px(space::S2))
+                            .h(px(1.))
+                            .bg(t.hairline)
+                            .into_any_element(),
+                        EntryKind::Fold(open) => div()
                             .id(SharedString::from(e.key.clone()))
                             .flex_none()
                             .relative()
@@ -2890,30 +2838,62 @@ impl Dent {
                             .on_press(cx.listener(move |this, _, window, cx| {
                                 this.choose_entry(&e, window, cx)
                             }))
-                            .into_any_element()
+                            .into_any_element(),
+                        EntryKind::Row => menu_row(
+                            &self.probes,
+                            e.key.clone(),
+                            &e.name,
+                            e.note.clone(),
+                            e.on,
+                            &t,
+                        )
+                        .when(lit, |d| d.bg(t.hover()))
+                        // Its shortcut as plain text, as a Mac menu shows one,
+                        // then a slot that holds the remove button on the lit
+                        // row: the same width on every row, so nothing shifts.
+                        .when_some(e.keycap.clone(), |d, k| {
+                            d.child(div().flex_none().ty(UI).text_color(t.quiet).child(k))
+                        })
+                        .when_some(e.remove.clone(), |d, (tip_text, remove)| {
+                            d.child(div().size(px(size::CONTROL_SM + 2.)).flex_none().when(
+                                lit,
+                                |d| {
+                                    d.child(
+                                        div()
+                                            .id(SharedString::from(format!("{}-remove", e.key)))
+                                            .size(px(size::CONTROL_SM + 2.))
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(radius::SM))
+                                            .cursor_pointer()
+                                            .hover(|d| d.bg(t.press()))
+                                            .on_press(cx.listener(move |this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                remove(this, window, cx);
+                                            }))
+                                            .tooltip(tip(tip_text, Some("⌘ ⌫"), t))
+                                            .child(icon("x", 12., t.quiet)),
+                                    )
+                                },
+                            ))
+                        })
+                        .on_hover(cx.listener(move |this, h: &bool, _, cx| {
+                            if *h && this.menu_ix != Some(i) {
+                                this.menu_ix = Some(i);
+                                cx.notify();
+                            }
+                        }))
+                        .on_press(
+                            cx.listener(move |this, _, window, cx| {
+                                this.choose_entry(&e, window, cx)
+                            }),
+                        )
+                        .into_any_element(),
                     }
-                    EntryKind::Row => menu_row(
-                        &self.probes,
-                        e.key.clone(),
-                        &e.name,
-                        e.note.clone(),
-                        e.on,
-                        &t,
-                    )
-                    .when(lit, |d| d.bg(t.hover()))
-                    .on_hover(cx.listener(move |this, h: &bool, _, cx| {
-                        if *h && this.menu_ix != Some(i) {
-                            this.menu_ix = Some(i);
-                            cx.notify();
-                        }
-                    }))
-                    .on_press(
-                        cx.listener(move |this, _, window, cx| this.choose_entry(&e, window, cx)),
-                    )
-                    .into_any_element(),
-                }
-            })
-            .collect();
+                })
+                .collect();
         // A list that scrolls fades at an edge with more beyond it, so a
         // row cut by the edge reads as "there's more", not as a mistake.
         let (y, max_y) = (
@@ -2929,19 +2909,41 @@ impl Dent {
                 .map(|d| if top { d.top_0() } else { d.bottom_0() })
                 .bg(linear_gradient(
                     if top { 180. } else { 0. },
-                    linear_color_stop(t.raised, 0.),
-                    linear_color_stop(t.raised.opacity(0.), 1.),
+                    linear_color_stop(t.popover(), 0.),
+                    linear_color_stop(t.popover().opacity(0.), 1.),
                 ))
         };
+        // A menu that searches has its field on top, and room for paths.
+        let field = which.searches().then(|| {
+            div()
+                .px(px(space::S3))
+                .py(px(space::S2))
+                .flex()
+                .items_center()
+                .gap(px(space::S2))
+                .border_b_1()
+                .border_color(t.hairline)
+                .child(icon("search", 13., t.quiet))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .ty(UI)
+                        .text_color(t.ink)
+                        .child(Textarea::new(&self.menu_query)),
+                )
+        });
         floating(&t)
             .relative()
-            .w(px(280.))
+            .w(px(if which.searches() { 360. } else { 280. }))
             .overflow_hidden()
             .occlude()
+            .children(field)
             .child(
                 div()
                     .id("menu")
-                    .max_h(px(max_h))
+                    // The field above takes its share of the room.
+                    .max_h(px(if which.searches() { max_h - 40. } else { max_h }))
                     .overflow_y_scroll()
                     .track_scroll(&self.menu_scroll)
                     .py(px(space::S1))
@@ -2980,6 +2982,13 @@ pub struct Entry {
     pub on: bool,
     pub kind: EntryKind,
     pub act: Option<Act>,
+    /// The shortcut that chooses it, shown at its end (⌘1).
+    pub keycap: Option<String>,
+    /// Taking it off the list, from a button on the lit row or ⌘⌫, with
+    /// what the button says.
+    pub remove: Option<(&'static str, Act)>,
+    /// Choosing it leaves the menu open (it changes what the menu shows).
+    pub keep: bool,
 }
 
 #[derive(Clone)]
@@ -2994,35 +3003,44 @@ pub enum EntryKind {
 }
 
 impl Entry {
-    fn row(key: String, name: &str, note: Option<String>, on: bool, act: Option<Act>) -> Self {
+    fn of(key: String, name: &str, kind: EntryKind) -> Self {
         Self {
             key,
             name: name.to_string(),
+            note: None,
+            on: false,
+            kind,
+            act: None,
+            keycap: None,
+            remove: None,
+            keep: false,
+        }
+    }
+    pub fn row(key: String, name: &str, note: Option<String>, on: bool, act: Option<Act>) -> Self {
+        Self {
             note,
             on,
-            kind: EntryKind::Row,
             act,
+            ..Self::of(key, name, EntryKind::Row)
         }
     }
-    fn separator() -> Self {
+    pub fn separator() -> Self {
+        Self::of(String::new(), "", EntryKind::Separator)
+    }
+    pub fn note(text: &str) -> Self {
+        Self::of(String::new(), text, EntryKind::Note)
+    }
+    pub fn keycap(self, keycap: Option<String>) -> Self {
+        Self { keycap, ..self }
+    }
+    pub fn removable(self, tip: &'static str, act: Act) -> Self {
         Self {
-            key: String::new(),
-            name: String::new(),
-            note: None,
-            on: false,
-            kind: EntryKind::Separator,
-            act: None,
+            remove: Some((tip, act)),
+            ..self
         }
     }
-    fn note(text: &str) -> Self {
-        Self {
-            key: String::new(),
-            name: text.to_string(),
-            note: None,
-            on: false,
-            kind: EntryKind::Note,
-            act: None,
-        }
+    pub fn keeps_open(self) -> Self {
+        Self { keep: true, ..self }
     }
     /// Whether the keyboard can land on it.
     pub fn choosable(&self) -> bool {
@@ -3032,7 +3050,9 @@ impl Entry {
 
 fn menu_note_owned(text: String, t: &theme::Theme) -> AnyElement {
     div()
-        .px(px(space::S3))
+        // In line with the rows' names, past their check column.
+        .pl(px(space::S1 + space::S2 + 14. + space::S2))
+        .pr(px(space::S3))
         .py(px(space::S2))
         .ty(UI)
         .text_size(px(12.))
@@ -3060,10 +3080,6 @@ pub fn duration(secs: u64) -> String {
         60..3600 => format!("{}m {:02}s", secs / 60, secs % 60),
         _ => format!("{}h {:02}m", secs / 3600, secs % 3600 / 60),
     }
-}
-
-fn home() -> String {
-    std::env::var("HOME").unwrap_or_default()
 }
 
 /// How far the conversation fades out above the composer: enough that the

@@ -509,6 +509,33 @@ pub enum Request {
     FilesIn {
         dir: String,
     },
+    /// Folders matching a typed path (`~/code/de`): the folder it's in and
+    /// its subfolders starting with the last part. Hidden ones only when
+    /// that part starts with a dot.
+    Folders {
+        partial: String,
+    },
+    /// Keep a folder in the project list, making it first if `create`.
+    /// Replies with the list.
+    AddProject {
+        path: String,
+        create: bool,
+    },
+    /// Take a project off the list, or put it back; its files stay.
+    /// Replies with the list.
+    HideProject {
+        path: String,
+        hidden: bool,
+    },
+    /// A new project from a name: a folder under `~/dent/projects`, a Git
+    /// repository with a README and a first commit.
+    NewProject {
+        name: String,
+    },
+    /// Clone a Git URL into `~/dent/projects`.
+    CloneProject {
+        url: String,
+    },
     /// A file in the session's directory, for the viewer.
     ReadFile {
         session: SessionId,
@@ -568,6 +595,18 @@ pub enum Reply {
     },
     Projects {
         projects: Vec<Project>,
+    },
+    Folders {
+        /// The folder listed, as typed (`~` kept).
+        parent: String,
+        /// Subfolders, full paths as typed.
+        folders: Vec<String>,
+    },
+    /// A project made or cloned, and what went wrong short of failing (a
+    /// first commit with no Git identity).
+    ProjectMade {
+        path: String,
+        warning: Option<String>,
     },
     Models {
         models: Vec<Model>,

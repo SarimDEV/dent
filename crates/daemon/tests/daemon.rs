@@ -464,6 +464,119 @@ fn a_new_sessions_folder_lists_its_files() {
 }
 
 #[test]
+fn projects_are_made_added_taken_off_and_put_back() {
+    // Its own home: another test clears `dent-home-<pid>` while running.
+    let home = std::env::temp_dir().join(format!("dent-projects-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let h = home.display().to_string();
+    // A Git identity for the first commit, inside the test's own home.
+    std::fs::write(
+        home.join(".gitconfig"),
+        "[user]\n\tname = t\n\temail = t@t\n",
+    )
+    .unwrap();
+    let w = World::new(&[("HOME", h.as_str())]);
+    let mut c = w.client();
+    let paths = |out: Out| match out {
+        Out::Reply {
+            reply: dent_protocol::Reply::Projects { projects },
+        } => projects.into_iter().map(|p| p.path).collect::<Vec<_>>(),
+        o => panic!("{o:?}"),
+    };
+
+    // From a name: a repository with a first commit, on the list.
+    let made = match c
+        .call(Request::NewProject {
+            name: "My App".into(),
+        })
+        .unwrap()
+    {
+        Out::Reply {
+            reply: dent_protocol::Reply::ProjectMade { path, warning },
+        } => {
+            assert_eq!(warning, None, "{warning:?}");
+            path
+        }
+        o => panic!("{o:?}"),
+    };
+    assert_eq!(made, format!("{h}/dent/projects/my-app"));
+    assert!(Path::new(&made).join(".git").is_dir());
+    assert!(paths(c.call(Request::Projects).unwrap()).contains(&made));
+    // The same name again gets its own folder.
+    match c
+        .call(Request::NewProject {
+            name: "my app".into(),
+        })
+        .unwrap()
+    {
+        Out::Reply {
+            reply: dent_protocol::Reply::ProjectMade { path, .. },
+        } => assert_eq!(path, format!("{h}/dent/projects/my-app-2")),
+        o => panic!("{o:?}"),
+    }
+
+    // A typed folder, made on the way.
+    let typed = format!("{h}/code/new-thing");
+    let list = paths(
+        c.call(Request::AddProject {
+            path: typed.clone(),
+            create: true,
+        })
+        .unwrap(),
+    );
+    assert!(list.contains(&typed) && Path::new(&typed).is_dir());
+    assert!(
+        c.call(Request::AddProject {
+            path: format!("{h}/nope"),
+            create: false,
+        })
+        .is_err()
+    );
+
+    // Off the list and back; the folder stays.
+    let off = paths(
+        c.call(Request::HideProject {
+            path: typed.clone(),
+            hidden: true,
+        })
+        .unwrap(),
+    );
+    assert!(!off.contains(&typed) && Path::new(&typed).is_dir());
+    let back = paths(
+        c.call(Request::HideProject {
+            path: typed.clone(),
+            hidden: false,
+        })
+        .unwrap(),
+    );
+    assert!(back.contains(&typed));
+
+    // Folders for a typed path, `~` kept.
+    match c
+        .call(Request::Folders {
+            partial: "~/dent/projects/my".into(),
+        })
+        .unwrap()
+    {
+        Out::Reply {
+            reply: dent_protocol::Reply::Folders { parent, folders },
+        } => {
+            assert_eq!(parent, "~/dent/projects");
+            assert_eq!(
+                folders,
+                ["~/dent/projects/my-app", "~/dent/projects/my-app-2"]
+            );
+        }
+        o => panic!("{o:?}"),
+    }
+    // A clone of a local repository is refused: remote URLs only.
+    assert!(c.call(Request::CloneProject { url: w.cwd() }).is_err());
+    drop(w);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
 fn approvals_allow_deny_and_questions() {
     let w = World::new(&[]);
     let mut c = w.client();

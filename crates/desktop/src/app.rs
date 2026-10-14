@@ -187,8 +187,24 @@ pub fn put(
 ) {
     let text: SharedString = text.into();
     let end = text.len();
+    put_at(field, text, end, window, cx);
+}
+
+/// Set a field's text with the caret at `caret`. The field's own
+/// `set_value` tells no one, so this says it changed, as typing would:
+/// whatever follows the field (a menu, a search) never misses it.
+pub fn put_at(
+    field: &mut TextareaState,
+    text: impl Into<SharedString>,
+    caret: usize,
+    window: &mut Window,
+    cx: &mut Context<TextareaState>,
+) {
+    let text: SharedString = text.into();
+    let caret = caret.min(text.len());
     field.set_value(text, window, cx);
-    field.set_selected_range(end..end, cx);
+    field.set_selected_range(caret..caret, cx);
+    cx.emit(InputEvent::Change);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -240,6 +256,11 @@ pub enum Menu {
 }
 
 impl Menu {
+    /// Menus with a field to type in: the project picker.
+    pub fn searches(self) -> bool {
+        self == Menu::Project
+    }
+
     /// Menus under the composer open upward.
     pub fn upward(self) -> bool {
         matches!(
@@ -253,8 +274,17 @@ impl Menu {
 pub enum ToastAction {
     Undo(String),
     Resume(String),
+    /// Put a project taken off the list back on it.
+    UnhideProject(String),
     /// Just a message, like a request the daemon refused.
     Info,
+}
+
+impl ToastAction {
+    /// Its button undoes something, and so does ⌘Z while it shows.
+    pub fn undoes(&self) -> bool {
+        matches!(self, Self::Undo(_) | Self::UnhideProject(_))
+    }
 }
 
 #[derive(Clone)]
@@ -384,7 +414,7 @@ pub struct Completion {
 }
 
 /// What a request's reply is for.
-enum Waiting {
+pub enum Waiting {
     Models,
     Files(String),
     Recent,
@@ -393,6 +423,14 @@ enum Waiting {
     Projects,
     Changes(String),
     Create,
+    /// The folders for a typed path, as typed.
+    Folders(String),
+    ProjectMade,
+}
+
+/// The home folder, as a path string.
+pub fn home() -> String {
+    std::env::var("HOME").unwrap_or_default()
 }
 
 pub struct Dent {
@@ -433,6 +471,15 @@ pub struct Dent {
     pub menu_scroll: ScrollHandle,
     /// The menu row the keyboard is on.
     pub menu_ix: Option<usize>,
+    /// What's typed in a menu that searches (the project picker).
+    pub menu_query: Entity<TextareaState>,
+    pub project_mode: crate::picker::Mode,
+    /// A project being made or cloned, said in the picker meanwhile.
+    pub project_busy: Option<String>,
+    /// Why the last make or clone failed.
+    pub project_error: Option<String>,
+    /// The folders for the path last asked about, or why there are none.
+    pub folders: Option<(String, Result<Vec<String>, String>)>,
     pub toast: Option<Toast>,
     pub show_closed: bool,
     pub stopped: HashSet<String>,
@@ -698,6 +745,19 @@ impl Dent {
         )
         .detach();
         single_line(&rename_input, window, cx);
+        let menu_query = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 1)
+                .placeholder("Search projects, or type a path")
+                .submit_on_enter(true)
+        });
+        cx.subscribe_in(&menu_query, window, |this, _, ev: &InputEvent, _, cx| {
+            if let InputEvent::Change = ev {
+                this.project_query_changed(cx);
+            }
+        })
+        .detach();
+        single_line(&menu_query, window, cx);
         single_line(&search, window, cx);
         // Only edits redraw the window: watching the fields themselves would
         // redraw on every caret blink, even after they lose focus.
@@ -897,6 +957,11 @@ impl Dent {
             window_h: 800.,
             menu_scroll: ScrollHandle::new(),
             menu_ix: None,
+            menu_query,
+            project_mode: crate::picker::Mode::Pick,
+            project_busy: None,
+            project_error: None,
+            folders: None,
             closed_tabs: prefs
                 .closed_tabs
                 .iter()
@@ -1490,10 +1555,7 @@ impl Dent {
     pub fn toast(&mut self, action: ToastAction, text: String) {
         // A passing message doesn't push an Undo out of the way.
         if matches!(action, ToastAction::Info)
-            && self
-                .toast
-                .as_ref()
-                .is_some_and(|t| matches!(t.action, ToastAction::Undo(_)))
+            && self.toast.as_ref().is_some_and(|t| t.action.undoes())
         {
             return;
         }
@@ -1527,6 +1589,7 @@ impl Dent {
                 }
             }
             ToastAction::Resume(id) => self.resume(&id, cx),
+            ToastAction::UnhideProject(path) => self.hide_project(&path, false, cx),
             ToastAction::Info => {}
         }
     }
@@ -1690,6 +1753,44 @@ impl Dent {
                 self.projects = projects;
             }
             (
+                Waiting::Folders(asked),
+                Out::Reply {
+                    reply: Reply::Folders { folders, .. },
+                },
+            ) => {
+                // New rows for what's typed: the first one lit.
+                self.folders = Some((asked, Ok(folders)));
+                self.menu_ix = None;
+                self.relight_menu(cx);
+            }
+            // A path being typed often isn't one yet: said in the picker,
+            // never as a toast.
+            (Waiting::Folders(asked), Out::Error { message }) => {
+                self.folders = Some((asked, Err(message)));
+                self.relight_menu(cx);
+            }
+            (
+                Waiting::ProjectMade,
+                Out::Reply {
+                    reply: Reply::ProjectMade { path, warning },
+                },
+            ) => {
+                self.project_busy = None;
+                self.defaults.project = Some(path);
+                self.defaults.project_picked = true;
+                self.menu = None;
+                self.waiting
+                    .insert(self.live.send(Request::Projects), Waiting::Projects);
+                if let Some(w) = warning {
+                    self.toast(ToastAction::Info, w);
+                }
+            }
+            (Waiting::ProjectMade, Out::Error { message }) => {
+                self.project_busy = None;
+                self.project_error = Some(message);
+                self.relight_menu(cx);
+            }
+            (
                 Waiting::Changes(id),
                 Out::Reply {
                     reply: Reply::Changes { files },
@@ -1818,10 +1919,49 @@ impl Dent {
                 }
             }
         }
-        // An open menu: arrows move, Return or Space chooses.
+        // A menu that searches: Tab goes into the lit folder, ⌘1–⌘9 choose
+        // the rows showing them, ⌘⌫ takes the lit row off the list.
+        if let Some(which) = self.menu
+            && which.searches()
+        {
+            if plain && k.key == "tab" {
+                self.project_tab(window, cx);
+                cx.notify();
+                return true;
+            }
+            let cmd = k.modifiers.platform
+                && !k.modifiers.shift
+                && !k.modifiers.alt
+                && !k.modifiers.control;
+            if cmd && let Some(d) = k.key.parse::<usize>().ok().filter(|d| (1..=9).contains(d)) {
+                let cap = format!("⌘ {d}");
+                if let Some(e) = self
+                    .menu_entries(which, cx)
+                    .into_iter()
+                    .find(|e| e.keycap.as_deref() == Some(cap.as_str()))
+                {
+                    self.choose_entry(&e, window, cx);
+                }
+                return true;
+            }
+            if cmd
+                && k.key == "backspace"
+                && let Some(i) = self.menu_ix
+                && let Some((_, remove)) = self
+                    .menu_entries(which, cx)
+                    .get(i)
+                    .and_then(|e| e.remove.clone())
+            {
+                remove(self, window, cx);
+                return true;
+            }
+        }
+        // An open menu: arrows move, Return chooses, and Space too unless
+        // the menu has a field to type it in.
         if let Some(which) = self.menu
             && plain
             && matches!(k.key.as_str(), "up" | "down" | "enter" | "space")
+            && !(k.key == "space" && which.searches())
         {
             let entries = self.menu_entries(which, cx);
             let ok: Vec<usize> = (0..entries.len())
@@ -1949,10 +2089,7 @@ impl Dent {
         // Right after closing, ⌘Z brings the session back even from a
         // text field, as long as the field has nothing to undo.
         let undo = k.key == "z" && k.modifiers.platform && !k.modifiers.shift;
-        let closing = self
-            .toast
-            .as_ref()
-            .is_some_and(|t| matches!(t.action, ToastAction::Undo(_)));
+        let closing = self.toast.as_ref().is_some_and(|t| t.action.undoes());
         // Only from no field, or from an empty composer or new-session box:
         // anywhere else ⌘Z is the field's own undo.
         let typed = match field {
@@ -2225,9 +2362,8 @@ impl Dent {
         };
         let (value, caret) = complete::apply(&text, &c.token, &with, finished);
         field.update(cx, |f, cx| {
-            f.set_value(value.trim_start().to_string(), window, cx);
             let caret = caret.saturating_sub(value.len() - value.trim_start().len());
-            f.set_selected_range(caret..caret, cx);
+            put_at(f, value.trim_start().to_string(), caret, window, cx);
             f.focus(window, cx);
         });
         self.slash_ix = 0;
@@ -2242,8 +2378,8 @@ impl Dent {
         let session = self.current_rc();
         let which = |open, new| if session.is_some() { open } else { new };
         match name {
-            "model" => self.open_menu(which(Menu::SessionModel, Menu::Model), cx),
-            "effort" => self.open_menu(which(Menu::SessionEffort, Menu::Effort), cx),
+            "model" => self.open_menu(which(Menu::SessionModel, Menu::Model), window, cx),
+            "effort" => self.open_menu(which(Menu::SessionEffort, Menu::Effort), window, cx),
             "rename" => {
                 if let Some(s) = session {
                     if arg.is_empty() {
@@ -2290,12 +2426,39 @@ impl Dent {
         true
     }
 
-    /// Open a chip's menu, at its top with the current choice lit.
-    pub fn open_menu(&mut self, which: Menu, cx: &mut Context<Self>) {
+    /// Send a request, noting what its reply is for.
+    pub fn ask(&mut self, req: Request, w: Waiting) {
+        let n = self.live.send(req);
+        self.waiting.insert(n, w);
+    }
+
+    /// Open a chip's menu, at its top with the current choice lit; one
+    /// that searches with its field empty and the keyboard in it.
+    pub fn open_menu(&mut self, which: Menu, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_scroll = ScrollHandle::new();
+        if which.searches() {
+            self.open_project_picker(window, cx);
+        }
         self.menu_ix = self.menu_entries(which, cx).iter().position(|e| e.on);
         self.menu = Some(which);
         cx.notify();
+    }
+
+    /// After a menu's rows change under it: the current choice lit, or
+    /// the first that can be.
+    pub fn relight_menu(&mut self, cx: &mut Context<Self>) {
+        let Some(which) = self.menu else { return };
+        let entries = self.menu_entries(which, cx);
+        let lit = self
+            .menu_ix
+            .and_then(|i| entries.get(i))
+            .is_some_and(|e| e.choosable());
+        if !lit {
+            self.menu_ix = entries
+                .iter()
+                .position(|e| e.on && e.choosable())
+                .or_else(|| entries.iter().position(|e| e.choosable()));
+        }
     }
 
     /// Draw a session again from its timeline.
@@ -3189,21 +3352,8 @@ impl Dent {
             };
             let path = dir.display().to_string();
             let _ = this.update(cx, |this, cx| {
-                if !this.projects.iter().any(|p| p.path == path) {
-                    this.projects.insert(
-                        0,
-                        dent_protocol::Project {
-                            name: dir
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| path.clone()),
-                            path: path.clone(),
-                            last_used: 0,
-                        },
-                    );
-                }
-                this.defaults.project = Some(path);
-                this.defaults.project_picked = true;
+                // On the list from now on, as one typed or made here is.
+                this.use_project(&path, false);
                 cx.notify();
             });
         })
