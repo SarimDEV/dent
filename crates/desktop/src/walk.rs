@@ -826,7 +826,11 @@ fn checks() -> Vec<(f32, Act)> {
         (0.5, Key("escape")),
         (
             0.5,
-            Idle("with nothing moving, the window draws nothing", 3., 0.5),
+            Idle(
+                "idle, the window draws no more than a caret blink (2.5 a second)",
+                3.,
+                2.5,
+            ),
         ),
     ]);
     v

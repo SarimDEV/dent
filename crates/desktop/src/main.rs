@@ -95,6 +95,19 @@ pub fn style_input(input: &Entity<TextareaState>, t: &Theme, cx: &mut App) {
 impl Render for Dent {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.last_frame = Instant::now();
+        // DENT_COUNT_FRAMES prints how many frames each 5 s, to find idle redraws.
+        if std::env::var_os("DENT_COUNT_FRAMES").is_some() {
+            thread_local!(static T: std::cell::Cell<Option<(Instant, u64)>> = const { std::cell::Cell::new(None) });
+            T.with(|t| {
+                let (at, n) = t.get().unwrap_or((Instant::now(), self.frames));
+                if at.elapsed().as_secs() >= 5 {
+                    eprintln!("frames: {} in 5s", self.frames - n);
+                    t.set(Some((Instant::now(), self.frames)));
+                } else if t.get().is_none() {
+                    t.set(Some((at, n)));
+                }
+            });
+        }
         if self.walk.as_ref().is_some_and(|w| w.resting.is_some()) {
             eprintln!(
                 "      idle frame: active={} inbox={}",
