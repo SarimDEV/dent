@@ -1224,6 +1224,29 @@ fn checks() -> Vec<(f32, Act)> {
             ),
         ),
         (0.2, Shot("outside-page")),
+        (0.1, Call(|d, _, _| {
+            if let Some(p) = &d.preview {
+                p.borrow().take_focus();
+            }
+        })),
+        (
+            0.1,
+            Until(
+                "a click into the page gives it the keyboard",
+                |d, _| !cfg!(target_os = "macos") || d.preview.as_ref().is_some_and(|p| p.borrow().has_focus()),
+                2.,
+            ),
+        ),
+        (0.1, Press("composer", 0.5, 0.5)),
+        (0.05, Release),
+        (
+            0.1,
+            Until(
+                "and a click back in the chat takes it back",
+                |d, _| d.preview.as_ref().is_some_and(|p| !p.borrow().has_focus()),
+                2.,
+            ),
+        ),
         (
             0.2,
             Until(

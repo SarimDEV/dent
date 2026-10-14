@@ -285,6 +285,12 @@ impl Render for Dent {
         div()
             .id("root")
             .key_context("Dent")
+            // A click anywhere in dent takes the keyboard back from the page.
+            .capture_any_mouse_down(cx.listener(|this, _, _, _| {
+                if let Some(p) = &this.preview {
+                    p.borrow().release_focus();
+                }
+            }))
             .track_focus(&self.focus)
             .relative()
             .size_full()

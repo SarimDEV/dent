@@ -516,7 +516,41 @@ impl Preview {
             }
             return;
         }
+        if !on {
+            self.release_focus();
+        }
         let _ = self.web.set_visible(on);
+    }
+
+    /// Hand the keyboard back to dent. A click into the page makes it the
+    /// window's key target, and it stays that even after you click back
+    /// into dent or the page hides, so typing would land in the page.
+    pub fn release_focus(&self) {
+        let _ = self.web.focus_parent();
+    }
+
+    /// Give the page the keyboard, as a click into it does (walkthrough).
+    pub fn take_focus(&self) {
+        let _ = self.web.focus();
+    }
+
+    /// Whether keys typed now go to the page.
+    #[cfg(target_os = "macos")]
+    pub fn has_focus(&self) -> bool {
+        use wry::WebViewExtMacOS;
+        let view = self.web.webview();
+        let Some(window) = view.window() else {
+            return false;
+        };
+        window.firstResponder().is_some_and(|r| {
+            r.downcast_ref::<objc2_app_kit::NSView>()
+                .is_some_and(|v| v.isDescendantOf(&view))
+        })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn has_focus(&self) -> bool {
+        false
     }
 
     /// Bring a page's own window forward (Wayland).
