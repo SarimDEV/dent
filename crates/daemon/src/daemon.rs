@@ -338,6 +338,112 @@ impl Daemon {
         Ok(session)
     }
 
+    /// A new session that carries on from `parent`: its history up to just
+    /// before message `before` (or all of it) is copied over, and its agent
+    /// resumes that conversation as a new agent session.
+    pub async fn fork(self: &Arc<Self>, parent: &str, before: Option<&str>) -> Result<String> {
+        let row = self.store().session(parent)?.context("no such session")?;
+        let events = self.store().session_events(parent)?;
+        let cut = match before {
+            Some(b) => events
+                .iter()
+                .position(|e| matches!(&e.body, Body::User { id, .. } if id == b))
+                .context("no such message")?,
+            None => events.len(),
+        };
+        let kept = &events[..cut];
+        let title = events
+            .iter()
+            .rev()
+            .find_map(|e| match &e.body {
+                Body::Settings { title: Some(t), .. } => Some(t.clone()),
+                Body::Created { title, .. } => Some(title.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let session = new_id();
+        self.append(
+            &session,
+            Body::Created {
+                agent: "claude".into(),
+                cwd: row.cwd.clone(),
+                model: row.model.clone(),
+                permission: row.permission,
+                title: format!("Fork of {title}"),
+            },
+            None,
+        )?;
+        for e in kept {
+            let copy = match &e.body {
+                // What the conversation said, not the old session's state.
+                Body::User { queued: true, .. }
+                | Body::Created { .. }
+                | Body::Status { .. }
+                | Body::Closed
+                | Body::Reopened
+                | Body::Agent { .. }
+                | Body::Checkpoint { .. }
+                | Body::Delivered { .. }
+                | Body::Unqueued { .. }
+                | Body::Background { .. }
+                | Body::Limits { .. }
+                | Body::Forked { .. } => continue,
+                Body::Asked { id, .. } => {
+                    // Only questions that were answered.
+                    if !kept
+                        .iter()
+                        .any(|x| matches!(&x.body, Body::Answered { id: a, .. } if a == id))
+                    {
+                        continue;
+                    }
+                    e.body.clone()
+                }
+                Body::Settings { title: Some(_), .. } => continue,
+                b => b.clone(),
+            };
+            self.append(&session, copy, None)?;
+        }
+        let at = kept.iter().rev().find_map(|e| match &e.body {
+            Body::Assistant {
+                parent: None,
+                uuid: Some(u),
+                ..
+            } => Some(u.clone()),
+            _ => None,
+        });
+        if let Some(agent) = &row.agent_session {
+            self.append(
+                &session,
+                Body::Agent {
+                    agent_session: Some(agent.clone()),
+                    version: None,
+                },
+                None,
+            )?;
+        }
+        self.append(
+            &session,
+            Body::Forked {
+                from: parent.to_string(),
+                upto: at,
+            },
+            None,
+        )?;
+        self.append(
+            &session,
+            Body::Status {
+                status: dent_protocol::Status::Done,
+            },
+            None,
+        )?;
+        let row = self
+            .store()
+            .session(&session)?
+            .context("session row missing")?;
+        session::start(self.clone(), row, Vec::new());
+        Ok(session)
+    }
+
     /// Bring back every session after a start: reattach running agents and
     /// mark turns that died with the old daemon.
     pub async fn restore(self: &Arc<Self>) -> Result<()> {

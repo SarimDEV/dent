@@ -931,3 +931,62 @@ fn effort_reaches_the_agent_and_changing_it_starts_a_new_process() {
         "{last}"
     );
 }
+
+#[test]
+fn a_fork_copies_the_conversation_and_resumes_it_as_a_new_agent_session() {
+    let w = World::new(&[]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "hello there");
+    c.wait_turns(&s, 1);
+    c.say(&s, "two", "and a second thing", false);
+    c.wait_turns(&s, 2);
+    let parent_agent = c
+        .events(&s)
+        .iter()
+        .find_map(|b| match b {
+            Body::Agent {
+                agent_session: Some(a),
+                ..
+            } => Some(a.clone()),
+            _ => None,
+        })
+        .unwrap();
+
+    // Everything so far.
+    let f = match c.call(Request::Fork {
+        session: s.clone(),
+        before: None,
+    }) {
+        Ok(Out::Reply {
+            reply: dent_protocol::Reply::Created { session },
+        }) => session,
+        other => panic!("{other:?}"),
+    };
+    c.wait(&f, "the copy", |b| matches!(b, Body::Forked { .. }));
+    assert_eq!(c.count(&f, |b| matches!(b, Body::User { .. })), 2);
+    assert!(c.text(&f).contains("hello there"));
+    c.say(&f, "fa", "your args please", false);
+    c.wait_turns(&f, 3);
+    let args = c.text(&f);
+    let args = args.lines().last().unwrap_or_default();
+    assert!(
+        args.contains(&format!("--resume {parent_agent}")) && args.contains("--fork-session"),
+        "{args}"
+    );
+    // The original is untouched.
+    assert_eq!(c.count(&s, |b| matches!(b, Body::User { .. })), 2);
+
+    // Up to just before the second message.
+    let g = match c.call(Request::Fork {
+        session: s.clone(),
+        before: Some("two".into()),
+    }) {
+        Ok(Out::Reply {
+            reply: dent_protocol::Reply::Created { session },
+        }) => session,
+        other => panic!("{other:?}"),
+    };
+    c.wait(&g, "the shorter copy", |b| matches!(b, Body::Forked { .. }));
+    assert_eq!(c.count(&g, |b| matches!(b, Body::User { .. })), 1);
+}

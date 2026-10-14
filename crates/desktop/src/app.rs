@@ -1588,6 +1588,17 @@ impl Dent {
         cx.notify();
     }
 
+    /// A new session carrying on from this one: everything so far, or up to
+    /// just before message `before`. It opens when the daemon has made it.
+    pub fn fork(&mut self, session: &str, before: Option<String>, cx: &mut Context<Self>) {
+        let n = self.live.send(Request::Fork {
+            session: session.to_string(),
+            before,
+        });
+        self.waiting.insert(n, Waiting::Create);
+        cx.notify();
+    }
+
     /// A waiting message goes into the running turn now instead.
     pub fn steer_queued(&mut self, id: &str, msg: &str, text: &str, cx: &mut Context<Self>) {
         self.live.send(Request::Unqueue {

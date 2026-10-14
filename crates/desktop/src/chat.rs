@@ -42,6 +42,16 @@ impl Dent {
                     .on_click(cx.listener(move |this, _, _, cx| this.resume(&sid, cx))),
             );
         }
+        {
+            let sid = id.clone();
+            actions = actions.child(
+                ghost("fork", "Fork", &t)
+                    .relative()
+                    .on_click(cx.listener(move |this, _, _, cx| this.fork(&sid, None, cx)))
+                    .tooltip(tip("A new session that carries on from here", None, t))
+                    .child(probe(&self.probes, "fork")),
+            );
+        }
         if Self::can_close(s) {
             let sid = id.clone();
             actions = actions.child(
@@ -466,10 +476,25 @@ impl Dent {
                                     }),
                             )
                         } else {
+                            let (fsid, fmsg) = (s.id.clone(), msg.clone());
                             d.child(
                                 div()
+                                    .flex()
+                                    .gap(px(space::S1))
                                     .opacity(0.)
                                     .group_hover(group.clone(), |s| s.opacity(1.))
+                                    .child(
+                                        ghost(
+                                            SharedString::from(format!("fork-from-{ix}")),
+                                            "Fork from here",
+                                            &t,
+                                        )
+                                        .relative()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.fork(&fsid, Some(fmsg.clone()), cx)
+                                        }))
+                                        .child(probe(&self.probes, format!("fork-from-{ix}"))),
+                                    )
                                     .child(
                                         ghost(
                                             SharedString::from(format!("edit-from-{ix}")),

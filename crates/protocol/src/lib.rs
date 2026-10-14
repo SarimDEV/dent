@@ -99,6 +99,15 @@ pub enum Body {
         id: String,
         commit: String,
     },
+    /// This session began as a copy of another; its agent picks up that
+    /// conversation, up to the assistant message `upto`, as a new session.
+    /// (Body fields share the event's namespace: `at`, `seq` and `session`
+    /// are taken.)
+    Forked {
+        from: SessionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        upto: Option<String>,
+    },
     /// The session went back to just before message `to`: what came after
     /// is no longer part of the conversation, and with `files` the working
     /// tree is as it was then.
@@ -369,6 +378,13 @@ pub enum Request {
         to: String,
         files: bool,
     },
+    /// A new session carrying on from this one: everything so far, or up
+    /// to just before message `before`.
+    Fork {
+        session: SessionId,
+        #[serde(default)]
+        before: Option<String>,
+    },
     /// Take back a message that's still waiting.
     Unqueue {
         session: SessionId,
@@ -555,6 +571,18 @@ mod tests {
     #[test]
     fn requests_carry_their_id() {
         let line = encode(3, &Request::Subscribe { after: 9 });
+        // A body may not reuse the event's own field names.
+        let e = Event {
+            seq: 1,
+            session: "s".into(),
+            at: 5,
+            body: Body::Forked {
+                from: "p".into(),
+                upto: Some("u".into()),
+            },
+        };
+        let back: Event = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(back, e);
         let env: Envelope<Request> = serde_json::from_slice(&line).unwrap();
         assert_eq!(env.req, 3);
         assert_eq!(env.body, Request::Subscribe { after: 9 });

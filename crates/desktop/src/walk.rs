@@ -460,6 +460,21 @@ fn checks() -> Vec<(f32, Act)> {
                 5.,
             ),
         ),
+        (0.2, Click("fork")),
+        (
+            0.1,
+            Until(
+                "Fork opens a new session carrying the conversation",
+                |d, _| {
+                    current(d).is_some_and(|s| {
+                        s.title.starts_with("Fork of")
+                            && s.items.iter().any(|i| matches!(i, Item::User { .. }))
+                    })
+                },
+                5.,
+            ),
+        ),
+        (0.3, Shot("fork")),
     ]);
     v.extend(new_session("please run it"));
     v.extend([
@@ -845,6 +860,12 @@ fn real() -> Vec<(f32, Act)> {
         (0.2, Key("enter")),
         (0.1, Until("after rewinding, it has no memory of the picture", |d, _| done(d) && current(d).is_some_and(|s| matches!(s.items.iter().rev().find(|i| matches!(i, Item::Text(_))), Some(Item::Text(t)) if t.to_lowercase().contains("no"))), 90.)),
         (0.5, Shot("real-rewound")),
+        (0.2, Click("fork")),
+        (0.1, Until("a fork opens", |d, _| current(d).is_some_and(|s| s.title.starts_with("Fork of")), 10.)),
+        (0.2, Type(Field::Composer, "Which drink did I pick earlier in this conversation? One word.")),
+        (0.2, Key("enter")),
+        (0.1, Until("the fork remembers the conversation it came from", |d, _| done(d) && says(d, "Tea"), 90.)),
+        (0.5, Shot("real-fork")),
         (0.3, Key("cmd-n")),
         (0.6, Shot("real-new")),
     ]);

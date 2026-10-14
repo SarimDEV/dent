@@ -18,6 +18,7 @@ The desktop app is a GPUI client for macOS, Linux and Windows, built around a ch
 - **Jump to my messages:** Alt+Up and Alt+Down move between your own messages; a thin rail on the right edge marks each of them and is clickable; a popover lists them all with search.
 - Composer: multi-line, drafts saved per session as shared state, file and doc mentions with fuzzy completion, image paste, the agent's slash commands, and queued messages while the agent is working.
 - Interrupt, retry the last turn, fork a session from any message, and rename sessions (auto-titled by default).
+- **Fork:** the header's Fork, or Fork from here on any message you sent, opens a new session carrying the conversation so far; its agent resumes it as a new agent session, so the original goes on untouched.
 - **Edit from here:** hovering a message you sent offers it; you confirm in place whether to rewind the chat or the chat and files, and the message returns to the composer.
 - **Attachments:** files dropped on the window or pictures pasted with Cmd+V ride along as chips. Pictures reach the agent as images; every file is also named by its path.
 - **Notifications** when a session needs you or finishes, unless you're looking at it.

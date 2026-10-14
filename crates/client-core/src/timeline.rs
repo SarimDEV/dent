@@ -468,7 +468,7 @@ impl SessionView {
             }
             Body::Closed => self.closed = true,
             Body::Reopened => self.closed = false,
-            Body::Limits { .. } | Body::Agent { .. } => {}
+            Body::Limits { .. } | Body::Agent { .. } | Body::Forked { .. } => {}
         }
     }
 

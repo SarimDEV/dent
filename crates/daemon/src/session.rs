@@ -190,6 +190,7 @@ impl Session {
             return;
         };
         let mut rewound_to: Option<String> = None;
+        let mut forked_at: Option<Option<String>> = None;
         for e in events.iter().cloned() {
             match e.body {
                 Body::User {
@@ -227,9 +228,14 @@ impl Session {
                     self.in_turn = true;
                     self.agent_started = true;
                     rewound_to = None;
+                    forked_at = None;
                 }
                 Body::Rewound { to, .. } => {
                     rewound_to = Some(to);
+                    self.in_turn = false;
+                }
+                Body::Forked { upto, .. } => {
+                    forked_at = Some(upto);
                     self.in_turn = false;
                 }
                 Body::TurnEnded { outcome } => {
@@ -249,6 +255,10 @@ impl Session {
         }
         if matches!(self.status, Status::Working | Status::NeedsYou) {
             self.in_turn = true;
+        }
+        // A fork the agent hasn't picked up yet: it starts from the copy.
+        if let Some(at) = forked_at {
+            self.resume_at = Some(at);
         }
         // A rewind the agent hasn't picked up yet still applies.
         if let Some(to) = rewound_to

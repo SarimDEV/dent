@@ -167,6 +167,9 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             d.command(&session, Op::Rewind { to, files }).await?;
             Reply::Ok
         }
+        Request::Fork { session, before } => Reply::Created {
+            session: d.fork(&session, before.as_deref()).await?,
+        },
         Request::Unqueue { session, id } => {
             d.command(&session, Op::Unqueue { id }).await?;
             Reply::Ok
