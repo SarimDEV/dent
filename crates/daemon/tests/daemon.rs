@@ -818,6 +818,17 @@ fn agents_wind_down_when_no_daemon_comes_back() {
         !running(),
         "the agent should exit once the holder gives up on the daemon"
     );
+    // And the holder itself goes, with nothing left to hand over.
+    // SAFETY: kill with signal 0 only checks that the process exists.
+    let alive = |p: i32| unsafe { libc::kill(p, 0) } == 0;
+    let until = Instant::now() + Duration::from_secs(10);
+    while w.holder_pid().is_some_and(alive) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !w.holder_pid().is_some_and(alive),
+        "the holder should exit once its finished output has nobody to collect it"
+    );
 }
 
 #[test]

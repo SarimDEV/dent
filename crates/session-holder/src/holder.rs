@@ -172,6 +172,17 @@ impl Holder {
             let empty = lock(&self.procs).is_empty();
             let alone = lock(&self.current).1.is_none();
             let idle = lock(&self.idle_since).elapsed() >= self.o.idle;
+            // Finished processes wait for their daemon to collect their
+            // output; one that hasn't come back for the orphan period won't.
+            let all_done = lock(&self.procs)
+                .values()
+                .all(|p| lock(&p.state).finished());
+            if alone && !empty && all_done && lock(&self.idle_since).elapsed() >= self.o.orphan {
+                let _ = std::fs::remove_file(socket(&self.o.dir));
+                let _ = std::fs::remove_dir_all(self.o.dir.join("procs"));
+                eprintln!("holder: no daemon came back for finished output; exiting");
+                std::process::exit(0);
+            }
             if alone && !empty && lock(&self.idle_since).elapsed() >= self.o.orphan {
                 for p in lock(&self.procs).values() {
                     if lock(&p.stdin).take().is_some() {
