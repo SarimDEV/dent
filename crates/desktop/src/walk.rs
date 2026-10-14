@@ -47,6 +47,9 @@ pub enum Act {
     /// window drew at most `max_fps` frames a second meanwhile.
     Idle(&'static str, f32, f32),
     Shot(&'static str),
+    /// A trackpad swipe over a probe: one movement of `dy` points (negative
+    /// moves on through the content), then the gesture's zero-movement end.
+    Wheel(&'static str, f32),
     /// Open every session in turn, timing each, and report.
     Sweep,
 }
@@ -95,6 +98,7 @@ impl Walk {
             "stills" => stills(),
             "real" => real(),
             "sweep" => sweep(),
+            "markdown" => markdown(),
             _ => checks(),
         };
         Self {
@@ -188,6 +192,35 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
                 );
             }
         }
+        Wheel(name, dy) => match center(&me, name, cx) {
+            Some(at) => {
+                window.dispatch_event(
+                    PlatformInput::MouseMove(MouseMoveEvent {
+                        position: at,
+                        pressed_button: None,
+                        modifiers: Modifiers::default(),
+                    }),
+                    cx,
+                );
+                for (d, phase) in [(dy, TouchPhase::Started), (0., TouchPhase::Ended)] {
+                    window.dispatch_event(
+                        PlatformInput::ScrollWheel(ScrollWheelEvent {
+                            position: at,
+                            delta: ScrollDelta::Pixels(point(px(0.), px(d))),
+                            modifiers: Modifiers::default(),
+                            touch_phase: phase,
+                        }),
+                        cx,
+                    );
+                }
+            }
+            None => note(
+                &me,
+                cx,
+                leak(format!("wheel target “{name}” on screen")),
+                false,
+            ),
+        },
         Key(k) => {
             if let Ok(ks) = Keystroke::parse(k) {
                 window.dispatch_keystroke(ks, cx);
@@ -571,6 +604,65 @@ fn new_session(text: &'static str) -> Vec<(f32, Act)> {
             ),
         ),
     ]
+}
+
+/// Where the latest frame drew a probe.
+fn drawn(d: &Dent, name: &str) -> Option<Bounds<Pixels>> {
+    let fresh = crate::ui::PROBE_FRAME
+        .with(|f| f.borrow().get(name).copied())
+        .is_some_and(|at| at + 2 >= d.frames);
+    fresh
+        .then(|| d.probes.borrow().get(name).copied())
+        .flatten()
+}
+
+/// Scroll the conversation so its last reply starts at the top.
+fn to_reply(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
+    let at = current(d).and_then(|s| s.items.iter().rposition(|i| matches!(i, Item::Text(_))));
+    if let Some(ix) = at {
+        d.transcript.scroll_to(ListOffset {
+            item_ix: ix,
+            offset_in_item: px(0.),
+        });
+        cx.notify();
+    }
+}
+
+fn to_end(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
+    d.transcript.scroll_to_end();
+    cx.notify();
+}
+
+type Saved = (Option<ListOffset>, Option<Option<ClipboardItem>>);
+
+thread_local! {
+    /// The conversation's scroll position before a swipe, and the clipboard
+    /// before a copy, to compare against and put back.
+    static SAVED: std::cell::RefCell<Saved> = Default::default();
+}
+
+fn save_scroll(d: &mut Dent, _: &mut Window, _: &mut Context<Dent>) {
+    let top = d.transcript.logical_scroll_top();
+    SAVED.with(|s| s.borrow_mut().0 = Some(top));
+}
+
+fn chat_still(d: &Dent) -> bool {
+    let top = d.transcript.logical_scroll_top();
+    SAVED.with(|s| {
+        s.borrow().0.is_some_and(|was| {
+            was.item_ix == top.item_ix && (was.offset_in_item - top.offset_in_item).abs() < px(0.5)
+        })
+    })
+}
+
+fn table_top(d: &Dent) -> f32 {
+    d.mdv.table_scroll().map_or(0., |(top, _)| top)
+}
+
+fn clipboard_text(cx: &App) -> String {
+    cx.read_from_clipboard()
+        .and_then(|c| c.text())
+        .unwrap_or_default()
 }
 
 // ---- Scenes ----
@@ -1091,6 +1183,7 @@ fn checks() -> Vec<(f32, Act)> {
         }, 10.)),
         (0.2, Type(Field::Composer, "")),
     ]);
+    v.extend(rich_reply());
     v.extend(new_session("a long answer please"));
     v.extend([
         (
@@ -1122,6 +1215,147 @@ fn checks() -> Vec<(f32, Act)> {
             ),
         ),
     ]);
+    v
+}
+
+/// Maths, a diagram and a tall table in a reply: drawn, scrolled, copied.
+fn rich_reply() -> Vec<(f32, Act)> {
+    let mut v = new_session("show me some math, a diagram and a big table");
+    v.extend([
+        (
+            0.1,
+            Until(
+                "a reply with maths, a diagram and a big table finishes",
+                |d, _| done_saying(d, "all sixty"),
+                20.,
+            ),
+        ),
+        (0.3, Call(to_reply)),
+        (
+            0.1,
+            Until(
+                "display and inline maths are drawn",
+                |d, _| drawn(d, "md-math").is_some() && drawn(d, "md-inline-math").is_some(),
+                5.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "a diagram is drawn off the UI thread",
+                |d, _| drawn(d, "md-diagram").is_some_and(|b| b.size.width > px(100.)),
+                10.,
+            ),
+        ),
+        (0.4, Shot("maths")),
+        (0.2, Call(to_end)),
+        (
+            0.3,
+            Until(
+                "a tall table shows its header and 10½ rows",
+                |d, _| {
+                    drawn(d, "md-table-body").is_some_and(|b| {
+                        (b.size.height.as_f32() - 10.5 * crate::markdown::ROW_H).abs() < 1.
+                    }) && d.mdv.table_scroll().is_some_and(|(_, max)| max > 100.)
+                },
+                5.,
+            ),
+        ),
+        (0.3, Shot("table")),
+        (0.1, Call(save_scroll)),
+        (0.1, Wheel("md-table-body", -90.)),
+        (0.1, Wheel("md-table-body", -90.)),
+        (
+            0.2,
+            Until(
+                "the wheel scrolls the table, not the chat",
+                |d, _| table_top(d) > 100. && chat_still(d),
+                3.,
+            ),
+        ),
+        (0.1, Call(save_scroll)),
+        (0.1, Wheel("md-table-body", 60.)),
+        (
+            0.2,
+            Until(
+                "scrolling back up moves the table before the chat",
+                |d, _| (table_top(d) - 120.).abs() < 1. && chat_still(d),
+                3.,
+            ),
+        ),
+        (0.1, Wheel("md-table-body", 300.)),
+        (0.1, Call(save_scroll)),
+        (0.1, Wheel("md-table-body", 60.)),
+        (
+            0.2,
+            Until(
+                "at the table's top, the wheel carries on to the chat",
+                |d, _| table_top(d) < 0.5 && !chat_still(d),
+                3.,
+            ),
+        ),
+        (0.2, Call(to_end)),
+        (
+            0.3,
+            Call(|_, _, cx| {
+                let was = cx.read_from_clipboard();
+                SAVED.with(|s| s.borrow_mut().1 = Some(was));
+            }),
+        ),
+        (0.1, Click("md-copy-csv")),
+        (
+            0.1,
+            Until(
+                "Copy CSV puts the whole table on the clipboard as CSV",
+                |_, cx| {
+                    let t = clipboard_text(cx);
+                    t.starts_with("#,Event,Duration\n1,event number 1,1.1 ms\n")
+                        && t.lines().count() == 61
+                        && t.ends_with("60,event number 60,6.4 ms")
+                },
+                3.,
+            ),
+        ),
+        (0.2, Shot("table-copied")),
+        (0.1, Click("md-copy-md")),
+        (
+            0.1,
+            Until(
+                "Copy puts it on the clipboard as Markdown",
+                |_, cx| {
+                    let t = clipboard_text(cx);
+                    t.starts_with("| # | Event | Duration |\n| ---: | --- | ---: |\n| 1 |")
+                        && t.lines().count() == 62
+                },
+                3.,
+            ),
+        ),
+        (
+            0.1,
+            Call(|_, _, cx| {
+                // Put back whatever was on the clipboard before.
+                if let Some(was) = SAVED.with(|s| s.borrow_mut().1.take()) {
+                    cx.write_to_clipboard(
+                        was.unwrap_or_else(|| ClipboardItem::new_string(String::new())),
+                    );
+                }
+            }),
+        ),
+    ]);
+    v
+}
+
+/// Only the rich reply, for working on how Markdown renders.
+fn markdown() -> Vec<(f32, Act)> {
+    let mut v: Vec<(f32, Act)> = vec![(
+        0.,
+        Until(
+            "connects to the daemon, starting it",
+            |d, _| d.connection.is_ok(),
+            15.,
+        ),
+    )];
+    v.extend(rich_reply());
     v
 }
 
