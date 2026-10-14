@@ -57,9 +57,11 @@ pub fn shown_path(a: &crate::data::Artifact, cwd: &str) -> String {
 
 /// A picture's size in pixels, read from the file itself whatever its
 /// format; remembered per version, as an SVG has to be parsed for it.
+type Sizes = std::collections::HashMap<(&'static str, usize), (u32, u32)>;
+
 fn picture_size(id: &'static str, v: usize, bytes: &[u8]) -> (u32, u32) {
     thread_local! {
-        static SIZES: std::cell::RefCell<std::collections::HashMap<(&'static str, usize), (u32, u32)>> =
+        static SIZES: std::cell::RefCell<Sizes> =
             std::cell::RefCell::default();
     }
     if let Some(s) = SIZES.with(|m| m.borrow().get(&(id, v)).copied()) {
