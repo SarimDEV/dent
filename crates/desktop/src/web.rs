@@ -1,7 +1,7 @@
 //! The live preview: the system web view placed over a region of the GPUI
 //! window. Files an agent wrote load from memory through a `dent://` scheme
-//! with a policy that blocks the network, so they can't reach anything but
-//! themselves. A dev server loads from its forwarded port and talks to its
+//! and may use the network like any page: fonts, styles and scripts from the
+//! web, and requests out. A dev server loads from its forwarded port and talks to its
 //! own origin; links anywhere else open in your browser. A small script
 //! reports errors and element picks back.
 //!
@@ -43,15 +43,11 @@ pub enum PageEvent {
 /// What the web view shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
-    /// A file an agent wrote, at a version: offline, from memory.
+    /// A file an agent wrote, at a version, from memory.
     File { name: String, version: usize },
     /// A dev server on a forwarded port.
     Server(String),
 }
-
-/// Isolated and offline: own files, inline code and data URLs only.
-const POLICY: &str =
-    "default-src 'self' dent: data: blob: 'unsafe-inline'; connect-src 'none'; frame-src 'none'";
 
 const SCRIPT: &str = r#"
 (() => {
@@ -262,7 +258,6 @@ impl Preview {
                 Response::builder()
                     .status(status)
                     .header(CONTENT_TYPE, kind(&path))
-                    .header("Content-Security-Policy", POLICY)
                     .body(Cow::Owned(bytes))
                     .unwrap_or_else(|_| Response::new(Cow::Borrowed(&[][..])))
             })

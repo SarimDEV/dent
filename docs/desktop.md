@@ -46,7 +46,7 @@ Cmd/Ctrl+N opens an empty chat with the cursor in the composer: you start by typ
 
 The viewer shows, as tabs, everything the open session made or changed ([0037](decisions/0037-viewer-system-web-view.md)). Every viewable file an agent writes becomes a card in the chat that opens it here. Writing the same file again adds a version; nothing is replaced. A card for an older version says what replaced it.
 
-- **Pages** (HTML files, and forwarded dev servers) run live in the system web view, offline and isolated through a `dent://` scheme.
+- **Pages** (HTML files, and forwarded dev servers) run live in the system web view through a `dent://` scheme, with the network like any page.
   - **Versions:** a stepper (v3 of 4). An older version shows a "Back to v4" bar. A new version shows straight away when you're following the latest, with a brief "updated to v4" and the scroll position kept.
   - **Widths:** desktop, tablet (768) and phone (390), the narrow ones framed in the panel.
   - **Point:** click anything on the page, and the element (tag, text, selector) rides along with your next message as a chip you can remove.
