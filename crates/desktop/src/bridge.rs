@@ -207,7 +207,14 @@ pub fn session(
                     .filter(|c| {
                         !matches!(
                             c.name.as_str(),
-                            "TodoWrite" | "AskUserQuestion" | "ExitPlanMode"
+                            // The plan belongs with the composer; questions and
+                            // plans have their own cards; the rest is the
+                            // agent's housekeeping.
+                            "TodoWrite"
+                                | "AskUserQuestion"
+                                | "ExitPlanMode"
+                                | "EnterPlanMode"
+                                | "ToolSearch"
                         )
                     })
                     // While a card asks to run a call, the card says what it is.

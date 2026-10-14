@@ -915,6 +915,22 @@ fn real() -> Vec<(f32, Act)> {
         (0.2, Key("enter")),
         (0.1, Until("the fork remembers the conversation it came from", |d, _| done(d) && says(d, "Tea"), 90.)),
         (0.5, Shot("real-fork")),
+        // Plan mode: a plan to approve, then the work.
+        (0.3, Key("cmd-n")),
+        (0.2, Call(use_project)),
+        (0.1, Call(|d, _, cx| {
+            d.defaults.model = Some("haiku".into());
+            d.defaults.permission = dent_protocol::Permission::Plan;
+            cx.notify();
+        })),
+        (0.2, Type(Field::Starter, "Plan how to add a file plan.txt containing the word yes. Keep the plan to two short lines, then present it.")),
+        (0.2, Click("start")),
+        (0.1, Until("in plan mode it proposes a plan", |d, _| has(d, |i| matches!(i, Item::Plan { .. })), 90.)),
+        (0.5, Shot("real-plan")),
+        (0.2, Click("plan-go")),
+        (0.1, Until("approving the plan lets it work; it asks before writing", |d, _| has(d, |i| matches!(i, Item::Approval { .. })) || in_project("plan.txt").exists(), 90.)),
+        (0.2, ClickIfShown("allow")),
+        (0.1, Until("the planned file is written", |d, _| done(d) && in_project("plan.txt").exists(), 90.)),
         (0.3, Key("cmd-n")),
         (0.6, Shot("real-new")),
     ]);

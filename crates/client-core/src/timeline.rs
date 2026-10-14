@@ -520,7 +520,9 @@ impl SessionView {
             return;
         }
         let Some(path) = c.path() else { return };
-        if !viewable(&path) {
+        // The agent's own bookkeeping (plans it saves under ~/.claude) isn't
+        // something it made for you; the plan has its own card.
+        if !viewable(&path) || path.contains("/.claude/") {
             return;
         }
         let v = c.input();
