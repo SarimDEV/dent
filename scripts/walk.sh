@@ -25,9 +25,15 @@ cargo build -q -p dent-desktop -p dent-daemon -p dent-session-holder -p dent-fak
 bin=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug
 if [[ "$name" == "real" ]]; then
   # The real agent on its smallest model, signed in as you: your own home.
+  status=0
   DENT_STATE="$root/state" DENT_WALK_PROJECT="$root/proj" DENT_HOLDER_ORPHAN_MS=2000 \
-    "$bin/dent-desktop" --walk real "$@"
-  exit
+    "$bin/dent-desktop" --walk real "$@" || status=$?
+  # Leave no trace in your Claude Code history: only this run's scratch
+  # project's transcripts go.
+  sleep 3
+  mine="$HOME/.claude/projects/$(cd "$root/proj" && pwd -P | sed 's|[^A-Za-z0-9]|-|g')"
+  [[ "$mine" == *dent-walk* && -d "$mine" ]] && rm -rf "$mine"
+  exit $status
 fi
 HOME="$root/home" \
 DENT_STATE="$root/state" \
