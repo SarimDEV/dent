@@ -1240,7 +1240,15 @@ impl Dent {
                             .whitespace_nowrap()
                             .ty(CODE)
                             .text_color(if l.kind == Line::Hunk { t.quiet } else { t.ink })
-                            .child(l.text.clone()),
+                            .child(if l.kind == Line::Hunk || l.text.is_empty() {
+                                l.text.clone().into_any_element()
+                            } else {
+                                // Each line on its own: enough for keywords,
+                                // strings and comments, cached per line.
+                                let lang = file.path.rsplit('.').next().unwrap_or_default();
+                                let spans = crate::highlight::spans(lang, &l.text);
+                                crate::highlight::styled(&spans, &l.text, &t).into_any_element()
+                            }),
                     )
                     .into_any_element()
             }
