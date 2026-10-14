@@ -338,6 +338,15 @@ fn use_project(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
     cx.notify();
 }
 
+/// A small red picture in the project, attached as if dropped on the window.
+fn attach_red(d: &mut Dent, w: &mut Window, cx: &mut Context<Dent>) {
+    let dir = std::env::var("DENT_WALK_PROJECT").unwrap_or_else(|_| "/tmp".into());
+    let path = std::path::Path::new(&dir).join("red.png");
+    let img = image::RgbaImage::from_pixel(48, 48, image::Rgba([220, 30, 30, 255]));
+    let _ = img.save(&path);
+    d.attach_paths(&[path], w, cx);
+}
+
 /// Kill the daemon, as a crash or an upgrade would.
 fn kill_daemon(_: &mut Dent, _: &mut Window, _: &mut Context<Dent>) {
     let state = crate::live::default_state();
@@ -597,6 +606,15 @@ fn checks() -> Vec<(f32, Act)> {
             ),
         ),
     ]);
+    v.extend(new_session("hello again"));
+    v.extend([
+        (0.1, Until("ready for the next message", |d, _| status_is(d, Status::Done), 10.)),
+        (0.1, Call(attach_red)),
+        (0.3, Shot("attachment")),
+        (0.1, Type(Field::Composer, "what is in this picture")),
+        (0.1, Key("enter")),
+        (0.1, Until("a dropped picture goes with the message", |d, _| has(d, |i| matches!(i, Item::User(t) if t.contains("Attached") && t.contains("red.png"))) && status_is(d, Status::Done), 10.)),
+    ]);
     v.extend(new_session("a long answer please"));
     v.extend([
         (
@@ -666,6 +684,11 @@ fn real() -> Vec<(f32, Act)> {
         (0.2, Click("allow-session")),
         (0.1, Until("the page opens in the viewer", |d, _| done(d) && has(d, |i| matches!(i, Item::Made { .. })), 60.)),
         (1.2, Shot("real-page")),
+        (0.2, Call(attach_red)),
+        (0.2, Type(Field::Composer, "What colour is this image? Reply with one word.")),
+        (0.2, Key("enter")),
+        (0.1, Until("it sees the attached picture", |d, _| done(d) && says(d, "ed"), 60.)),
+        (0.5, Shot("real-image")),
         (0.3, Key("cmd-n")),
         (0.6, Shot("real-new")),
     ]);

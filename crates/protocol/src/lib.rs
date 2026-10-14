@@ -65,6 +65,9 @@ pub enum Body {
         /// Sent into the running turn rather than after it.
         #[serde(default)]
         steer: bool,
+        /// Files that went with it, as paths on the daemon's machine.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
     },
     /// A held message went to the agent.
     Delivered {
@@ -309,6 +312,8 @@ pub enum Request {
         /// The first message; its id, as for [`Request::Send`].
         id: String,
         text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
     },
     /// While the agent works, the message waits for the turn to end,
     /// unless `steer` sends it into the running turn.
@@ -318,6 +323,10 @@ pub enum Request {
         text: String,
         #[serde(default)]
         steer: bool,
+        /// Paths of files that go with it. Images reach the agent as
+        /// images; every file is also named by its path.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
     },
     /// Take back a message that's still waiting.
     Unqueue {

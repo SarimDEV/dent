@@ -276,10 +276,25 @@ fn output(content: &Value) -> String {
 
 /// A message from the person. `uuid` is fresh per message (the CLI ignores
 /// one it has seen). `steer` puts it into the running turn instead of after.
-pub fn user_message(text: &str, uuid: &str, steer: bool) -> Value {
+pub fn user_message(text: &str, uuid: &str, steer: bool, attachments: &[String]) -> Value {
+    let content = if attachments.is_empty() {
+        json!(text)
+    } else {
+        // Images go in as images, so the agent sees them straight away; every
+        // file is also named, so its tools can open it.
+        let mut blocks: Vec<Value> = attachments.iter().filter_map(|p| image_block(p)).collect();
+        let names: Vec<String> = attachments.iter().map(|p| format!("Attached: {p}")).collect();
+        let body = if text.is_empty() {
+            names.join("\n")
+        } else {
+            format!("{text}\n\n{}", names.join("\n"))
+        };
+        blocks.push(json!({ "type": "text", "text": body }));
+        Value::Array(blocks)
+    };
     let mut v = json!({
         "type": "user",
-        "message": { "role": "user", "content": text },
+        "message": { "role": "user", "content": content },
         "parent_tool_use_id": null,
         "session_id": "",
         "uuid": uuid,
@@ -293,6 +308,26 @@ pub fn user_message(text: &str, uuid: &str, steer: bool) -> Value {
 pub fn control_request(request_id: &str, subtype: &str, mut extra: Value) -> Value {
     extra["subtype"] = json!(subtype);
     json!({ "type": "control_request", "request_id": request_id, "request": extra })
+}
+
+/// Images the model reads directly, up to 5 MB.
+fn image_block(path: &str) -> Option<Value> {
+    let ext = path.rsplit('.').next()?.to_ascii_lowercase();
+    let media = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => return None,
+    };
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() > 5 * 1024 * 1024 {
+        return None;
+    }
+    Some(json!({
+        "type": "image",
+        "source": { "type": "base64", "media_type": media, "data": dent_protocol::b64::encode(&bytes) },
+    }))
 }
 
 /// Allow a tool call. With `always`, the agent's own suggestions (or a rule
@@ -383,6 +418,25 @@ mod tests {
             parse(br#"{"type":"brand_new"}"#).unwrap(),
             Inbound::Other
         ));
+    }
+
+    #[test]
+    fn attachments_become_image_blocks_and_names() {
+        let dir = std::env::temp_dir().join(format!("dent-att-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("shot.png");
+        std::fs::write(&png, [137, 80, 78, 71]).unwrap();
+        let txt = dir.join("notes.txt").display().to_string();
+        let png = png.display().to_string();
+        let v = user_message("look", "u", false, &[png.clone(), txt.clone()]);
+        let blocks = v["message"]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "image");
+        assert_eq!(blocks[0]["source"]["data"], "iVBORw==");
+        let text = blocks[1]["text"].as_str().unwrap();
+        assert!(text.starts_with("look") && text.contains(&png) && text.contains(&txt));
+        assert_eq!(user_message("plain", "u", true, &[])["message"]["content"], "plain");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

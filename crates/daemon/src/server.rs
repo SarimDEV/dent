@@ -119,16 +119,27 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             permission,
             id,
             text,
+            attachments,
         } => Reply::Created {
-            session: d.create(cwd, model, permission, id, text).await?,
+            session: d.create(cwd, model, permission, id, text, attachments).await?,
         },
         Request::Send {
             session,
             id,
             text,
             steer,
+            attachments,
         } => {
-            d.command(&session, Op::Send { id, text, steer }).await?;
+            d.command(
+                &session,
+                Op::Send {
+                    id,
+                    text,
+                    steer,
+                    attachments,
+                },
+            )
+            .await?;
             Reply::Ok
         }
         Request::Unqueue { session, id } => {

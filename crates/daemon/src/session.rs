@@ -47,6 +47,7 @@ pub enum Op {
         id: String,
         text: String,
         steer: bool,
+        attachments: Vec<String>,
     },
     Unqueue {
         id: String,
@@ -114,7 +115,7 @@ struct Session {
     /// The agent has run at least once, so its transcript exists to resume.
     agent_started: bool,
     /// Messages waiting for the turn to end.
-    held: VecDeque<(String, String)>,
+    held: VecDeque<(String, String, Vec<String>)>,
     /// A message was steered into the running turn; the abort the agent
     /// reports for it isn't the turn ending.
     steered: bool,
@@ -176,15 +177,19 @@ impl Session {
         for e in events {
             match e.body {
                 Body::User {
-                    id, text, queued, ..
+                    id,
+                    text,
+                    queued,
+                    attachments,
+                    ..
                 } => {
                     if queued {
-                        self.held.push_back((id.clone(), text));
+                        self.held.push_back((id.clone(), text, attachments));
                     }
                     self.seen.insert(id);
                 }
                 Body::Delivered { id } | Body::Unqueued { id } => {
-                    self.held.retain(|(h, _)| *h != id);
+                    self.held.retain(|(h, _, _)| *h != id);
                 }
                 Body::Asked {
                     id, tool, input, ..
@@ -278,10 +283,15 @@ impl Session {
 
     async fn op(&mut self, op: Op) -> Result<()> {
         match op {
-            Op::Send { id, text, steer } => self.send(id, text, steer).await,
+            Op::Send {
+                id,
+                text,
+                steer,
+                attachments,
+            } => self.send(id, text, steer, attachments).await,
             Op::Unqueue { id } => {
                 let before = self.held.len();
-                self.held.retain(|(h, _)| *h != id);
+                self.held.retain(|(h, _, _)| *h != id);
                 if self.held.len() == before {
                     bail!("that message has already gone to the agent");
                 }
@@ -400,7 +410,13 @@ impl Session {
         }
     }
 
-    async fn send(&mut self, id: String, text: String, steer: bool) -> Result<()> {
+    async fn send(
+        &mut self,
+        id: String,
+        text: String,
+        steer: bool,
+        attachments: Vec<String>,
+    ) -> Result<()> {
         if !self.seen.insert(id.clone()) {
             return Ok(());
         }
@@ -411,19 +427,20 @@ impl Session {
             text: text.clone(),
             queued,
             steer: working && steer,
+            attachments: attachments.clone(),
         });
         if queued {
-            self.held.push_back((id, text));
+            self.held.push_back((id, text, attachments));
             return Ok(());
         }
         if working {
             self.steered = true;
         }
-        self.deliver(&text, working).await
+        self.deliver(&text, working, &attachments).await
     }
 
     /// Write a message to the agent, starting it if it isn't running.
-    async fn deliver(&mut self, text: &str, steer: bool) -> Result<()> {
+    async fn deliver(&mut self, text: &str, steer: bool, attachments: &[String]) -> Result<()> {
         if let Err(e) = self.ensure_proc().await {
             self.log(Body::Notice {
                 text: format!("Couldn't start Claude Code: {e:#}"),
@@ -433,7 +450,12 @@ impl Session {
             });
             return Err(e);
         }
-        self.write(&wire::user_message(text, &crate::daemon::uuid(), steer))
+        self.write(&wire::user_message(
+            text,
+            &crate::daemon::uuid(),
+            steer,
+            attachments,
+        ))
             .await?;
         self.in_turn = true;
         self.idle_at = None;
@@ -442,11 +464,11 @@ impl Session {
 
     /// After a turn, the next held message goes.
     async fn deliver_held(&mut self) {
-        let Some((id, text)) = self.held.pop_front() else {
+        let Some((id, text, attachments)) = self.held.pop_front() else {
             return;
         };
         self.log(Body::Delivered { id });
-        let _ = self.deliver(&text, false).await;
+        let _ = self.deliver(&text, false, &attachments).await;
         self.update_status();
     }
 
@@ -516,7 +538,7 @@ impl Session {
             return Ok(());
         }
         // Stop means nothing more arrives: held messages come back.
-        for (id, _) in std::mem::take(&mut self.held) {
+        for (id, _, _) in std::mem::take(&mut self.held) {
             self.log(Body::Unqueued { id });
         }
         self.steered = false;

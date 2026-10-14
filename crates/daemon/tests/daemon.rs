@@ -267,6 +267,7 @@ impl Client {
             permission,
             id: format!("m-{text}"),
             text: text.into(),
+            attachments: Vec::new(),
         }) {
             Ok(Out::Reply {
                 reply: dent_protocol::Reply::Created { session },
@@ -281,6 +282,7 @@ impl Client {
             id: id.into(),
             text: text.into(),
             steer,
+            attachments: Vec::new(),
         })
         .unwrap();
     }

@@ -53,6 +53,8 @@ pub enum Entry {
         /// Waiting for the turn to end.
         queued: bool,
         steer: bool,
+        /// Paths of files that went with it.
+        attachments: Vec<String>,
     },
     Text {
         text: String,
@@ -304,6 +306,7 @@ impl SessionView {
                 text,
                 queued,
                 steer,
+                attachments,
             } => {
                 if !queued && self.working_since.is_none() {
                     self.working_since = Some(e.at);
@@ -313,6 +316,7 @@ impl SessionView {
                     text: text.clone(),
                     queued: *queued,
                     steer: *steer,
+                    attachments: attachments.clone(),
                 });
             }
             Body::Delivered { id } => {
@@ -679,6 +683,7 @@ mod tests {
             text: id.into(),
             queued,
             steer: false,
+            attachments: Vec::new(),
         };
         let s = feed(vec![
             user("a", false),

@@ -129,6 +129,7 @@ pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
                 id,
                 text,
                 queued: q,
+                attachments,
                 ..
             } => {
                 if *q {
@@ -136,8 +137,17 @@ pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
                         id: id.clone(),
                         text: text.clone(),
                     });
-                } else {
+                } else if attachments.is_empty() {
                     items.push(Item::User(text.clone()));
+                } else {
+                    let mut lines: Vec<String> = attachments
+                        .iter()
+                        .map(|p| format!("› Attached · {}", relative(cwd, p)))
+                        .collect();
+                    if !text.is_empty() {
+                        lines.push(text.clone());
+                    }
+                    items.push(Item::User(lines.join("\n")));
                 }
             }
             Entry::Text { text } => items.push(Item::Text(text.clone())),

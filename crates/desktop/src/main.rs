@@ -313,6 +313,15 @@ impl Render for Dent {
                     window.dispatch_action(Box::new(Escape), cx);
                     cx.stop_propagation();
                 }
+                // ⌘V with a picture or files on the clipboard attaches them.
+                if k.key == "v"
+                    && k.modifiers.platform
+                    && !k.modifiers.shift
+                    && this.palette.is_none()
+                    && this.paste_attachment(window, cx)
+                {
+                    cx.stop_propagation();
+                }
                 // Right after closing, ⌘Z brings the session back even from a
                 // text field, as long as the field has nothing to undo.
                 let undo = k.key == "z" && k.modifiers.platform && !k.modifiers.shift;
@@ -326,6 +335,9 @@ impl Render for Dent {
                     this.toast_action(window, cx);
                     cx.stop_propagation();
                 }
+            }))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.attach_paths(paths.paths(), window, cx)
             }))
             .on_action(cx.listener(|this, _: &Escape, window, cx| {
                 // Esc backs out one thing at a time; with nothing open it moves

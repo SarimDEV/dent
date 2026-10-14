@@ -245,6 +245,7 @@ impl Daemon {
         permission: Permission,
         id: String,
         text: String,
+        attachments: Vec<String>,
     ) -> Result<String> {
         if !std::path::Path::new(&cwd).is_dir() {
             bail!("{cwd} isn't a folder");
@@ -272,6 +273,7 @@ impl Daemon {
                 id,
                 text,
                 steer: false,
+                attachments,
             },
         )
         .await?;

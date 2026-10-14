@@ -137,6 +137,8 @@ pub enum Attachment {
     },
     /// An error from the preview's console.
     Error { file: String, message: String },
+    /// A file or picture, by its path.
+    File { path: String },
     /// A review comment on a changed line.
     Comment {
         file: String,
@@ -154,6 +156,7 @@ impl Attachment {
             Attachment::Comment { file, line, .. } => {
                 format!("{}:{line}", file.rsplit('/').next().unwrap_or(file))
             }
+            Attachment::File { path } => path.rsplit('/').next().unwrap_or(path).to_string(),
         }
     }
     pub fn icon(&self) -> &'static str {
@@ -161,6 +164,8 @@ impl Attachment {
             Attachment::Element { .. } => "square-dashed-mouse-pointer",
             Attachment::Error { .. } => "circle-alert",
             Attachment::Comment { .. } => "message-square",
+            Attachment::File { path } if crate::data::Kind::of(path) == Some(crate::data::Kind::Image) => "image",
+            Attachment::File { .. } => "paperclip",
         }
     }
 }
@@ -982,7 +987,16 @@ impl Dent {
         if text.is_empty() && self.attachments.is_empty() {
             return;
         }
-        let atts = std::mem::take(&mut self.attachments);
+        let mut atts = std::mem::take(&mut self.attachments);
+        // Files travel as attachments; the rest are lines in the message.
+        let files: Vec<String> = atts
+            .iter()
+            .filter_map(|a| match a {
+                Attachment::File { path } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        atts.retain(|a| !matches!(a, Attachment::File { .. }));
         let message = with_attachments(&text, &atts);
         self.composer
             .update(cx, |c, cx| c.set_value("", window, cx));
@@ -991,10 +1005,11 @@ impl Dent {
         // Typing while it asks a question answers it; while it asks to run
         // something, the text is the reason for denying; on a plan, it's
         // what to change.
-        if atts.is_empty() && self.answer_with_text(&id, &text, cx) {
+        if atts.is_empty() && files.is_empty() && self.answer_with_text(&id, &text, cx) {
             return;
         }
         if atts.is_empty()
+            && files.is_empty()
             && let Some(Item::Approval { id: ask, .. } | Item::Plan { id: ask, .. }) =
                 self.open_ask(&id)
         {
@@ -1006,6 +1021,7 @@ impl Dent {
             id: crate::message_id(),
             text: message,
             steer,
+            attachments: files,
         });
         self.follow();
         cx.notify();
@@ -1032,6 +1048,13 @@ impl Dent {
             permission: d.permission,
             id: crate::message_id(),
             text,
+            attachments: std::mem::take(&mut self.attachments)
+                .into_iter()
+                .filter_map(|a| match a {
+                    Attachment::File { path } => Some(path),
+                    _ => None,
+                })
+                .collect(),
         });
         self.waiting.insert(n, Waiting::Create);
         self.creating = true;
@@ -1059,6 +1082,7 @@ impl Dent {
             id: crate::message_id(),
             text: "Continue from where you stopped.".into(),
             steer: false,
+            attachments: Vec::new(),
         });
         if self
             .toast
@@ -1183,8 +1207,64 @@ impl Dent {
             id: crate::message_id(),
             text: text.to_string(),
             steer: true,
+            attachments: Vec::new(),
         });
         cx.notify();
+    }
+
+    /// Files dropped on the window or pasted ride along with the next message.
+    pub fn attach_paths(&mut self, paths: &[std::path::PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+        for p in paths {
+            let path = p.display().to_string();
+            if !self
+                .attachments
+                .iter()
+                .any(|a| matches!(a, Attachment::File { path: x } if *x == path))
+            {
+                self.attachments.push(Attachment::File { path });
+            }
+        }
+        match &self.selected {
+            Some(_) => self.composer.update(cx, |c, cx| c.focus(window, cx)),
+            None => self.starter.update(cx, |c, cx| c.focus(window, cx)),
+        }
+        cx.notify();
+    }
+
+    /// A pasted picture is saved where the agent can read it, then attached.
+    /// Returns whether the clipboard held something to attach.
+    pub fn paste_attachment(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(item) = cx.read_from_clipboard() else {
+            return false;
+        };
+        let mut paths = Vec::new();
+        let mut has_text = false;
+        for entry in item.entries() {
+            match entry {
+                ClipboardEntry::String(_) => has_text = true,
+                ClipboardEntry::ExternalPaths(p) => paths.extend(p.paths().iter().cloned()),
+                ClipboardEntry::Image(img) => {
+                    let ext = match img.format() {
+                        ImageFormat::Jpeg => "jpg",
+                        ImageFormat::Gif => "gif",
+                        ImageFormat::Webp => "webp",
+                        ImageFormat::Svg => "svg",
+                        _ => "png",
+                    };
+                    let dir = crate::scratch_dir().with_file_name("attachments");
+                    let path = dir.join(format!("pasted-{}.{ext}", crate::message_id()));
+                    if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&path, img.bytes()).is_ok() {
+                        paths.push(path);
+                    }
+                }
+            }
+        }
+        // Text pastes as text; only pictures and files attach.
+        if paths.is_empty() || (has_text && !item.entries().iter().any(|e| matches!(e, ClipboardEntry::Image(_)))) {
+            return false;
+        }
+        self.attach_paths(&paths, window, cx);
+        true
     }
 
     pub fn set_model(&mut self, model: String, cx: &mut Context<Self>) {
@@ -1746,6 +1826,7 @@ fn with_attachments(text: &str, atts: &[Attachment]) -> String {
             } => format!("› {file} · {tag} “{text}” ({selector})"),
             Attachment::Error { file, message } => format!("› {file} · {message}"),
             Attachment::Comment { file, line, text } => format!("› {file}:{line} · {text}"),
+            Attachment::File { path } => format!("› Attached · {path}"),
         })
         .collect();
     if !text.is_empty() {
