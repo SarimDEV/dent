@@ -589,15 +589,16 @@ fn branch(calls: &[Call], parent: Option<&str>, depth: usize, cwd: &Path, out: &
                 .iter()
                 .filter(|x| x.parent.as_deref() == Some(c.id.as_str()))
                 .count();
+            // Finished is the usual case and says nothing; the others do.
             let state = match &c.result {
-                None => "working",
-                Some((true, _)) => "failed",
-                Some((false, _)) => "done",
+                None => " · working",
+                Some((true, _)) => " · failed",
+                Some((false, _)) => "",
             };
             text = match steps {
-                0 => format!("{text} · {state}"),
-                1 => format!("{text} · {state} · 1 step"),
-                n => format!("{text} · {state} · {n} steps"),
+                0 => format!("{text}{state}"),
+                1 => format!("{text}{state} · 1 step"),
+                n => format!("{text}{state} · {n} steps"),
             };
         }
         out.push(ToolLine {

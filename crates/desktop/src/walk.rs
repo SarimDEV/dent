@@ -703,7 +703,7 @@ fn checks() -> Vec<(f32, Act)> {
             ),
         ),
         (0.3, Shot("model-menu")),
-        (0.1, Click("m-older")),
+        (0.8, Click("m-older")),
         (
             0.1,
             Until(
@@ -713,7 +713,7 @@ fn checks() -> Vec<(f32, Act)> {
             ),
         ),
         (0.3, Shot("model-menu-older")),
-        (0.1, Click("m-claude-opus-4-6")),
+        (0.8, Click("m-claude-opus-4-6")),
         (0.2, Click("chip-effort")),
         (
             0.1,
@@ -728,7 +728,7 @@ fn checks() -> Vec<(f32, Act)> {
             ),
         ),
         (0.3, Shot("effort-menu")),
-        (0.1, Click("m-effort-default")),
+        (0.8, Click("m-effort-default")),
         (0.2, Click("chip-model")),
         (0.2, Click("m-default")),
         (
@@ -1181,7 +1181,7 @@ fn checks() -> Vec<(f32, Act)> {
         0.1,
         Until("a subagent shows how far it got", |d, _| {
             status_is(d, Status::Done)
-                && has(d, |i| matches!(i, Item::Tools { summary, lines } if summary.contains("Subagent:") && summary.contains("done · 3 steps") && !lines.iter().any(|l| l.text.contains("Survey the tests"))))
+                && has(d, |i| matches!(i, Item::Tools { summary, lines } if summary.contains("Subagent:") && summary.contains("Survey the tests · 3 steps") && !lines.iter().any(|l| l.text.contains("Survey the tests"))))
         }, 10.),
     ), (
         0.1,

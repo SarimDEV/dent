@@ -32,6 +32,9 @@ impl Dent {
         let t = self.t;
         let id = s.id.clone();
         let has_viewer = self.shows_panel(s);
+        // Short of room the title keeps its space: the project and machine
+        // go first, then Fork and Close become icons that say what they do.
+        let tight = self.chat_w < 600.;
         // Buttons here must not start a window drag.
         let mut actions = div()
             .flex()
@@ -47,20 +50,35 @@ impl Dent {
         }
         {
             let sid = id.clone();
+            let fork = if tight {
+                icon_button("fork", "git-fork", &t).tooltip(tip(
+                    "Fork: a new session that carries on from here",
+                    None,
+                    t,
+                ))
+            } else {
+                button("fork", "Fork", false, &t).tooltip(tip(
+                    "A new session that carries on from here",
+                    None,
+                    t,
+                ))
+            };
             actions = actions.child(
-                button("fork", "Fork", false, &t)
-                    .relative()
+                fork.relative()
                     .on_click(cx.listener(move |this, _, _, cx| this.fork(&sid, None, cx)))
-                    .tooltip(tip("A new session that carries on from here", None, t))
                     .child(probe(&self.probes, "fork")),
             );
         }
         if Self::can_close(s) {
             let sid = id.clone();
+            let close = if tight {
+                icon_button("close", "archive", &t).tooltip(tip("Close", Some("⌘W"), t))
+            } else {
+                button("close", "Close", false, &t).child(kbd("⌘W", &t))
+            };
             actions = actions.child(
-                button("close", "Close", false, &t)
+                close
                     .relative()
-                    .child(kbd("⌘W", &t))
                     .on_click(cx.listener(move |this, _, window, cx| this.close(&sid, window, cx)))
                     .child(probe(&self.probes, "close")),
             );
@@ -199,7 +217,7 @@ impl Dent {
                                     )
                                     .child(s.title.clone()),
                             )
-                            .child(meta)
+                            .when(!tight, |d| d.child(meta))
                         }
                     }),
             )
@@ -600,14 +618,15 @@ impl Dent {
                                     }),
                                 )
                             })
-                            .child(
-                                div()
-                                    .w(px(space::S4))
-                                    .flex_none()
-                                    .flex()
-                                    .justify_center()
-                                    .when(more, |d| {
-                                        d.child(icon(
+                            // A lone call sits flush with the text above.
+                            .when(more, |d| {
+                                d.child(
+                                    div()
+                                        .w(px(space::S4))
+                                        .flex_none()
+                                        .flex()
+                                        .justify_center()
+                                        .child(icon(
                                             if open {
                                                 "chevron-down"
                                             } else {
@@ -615,9 +634,9 @@ impl Dent {
                                             },
                                             12.,
                                             t.quiet.opacity(0.7),
-                                        ))
-                                    }),
-                            )
+                                        )),
+                                )
+                            })
                             .child(
                                 div()
                                     .flex_1()
@@ -636,22 +655,46 @@ impl Dent {
                             .map(|(i, l)| {
                                 // Each level gets a column: a rule while that
                                 // level carries on below, then this row's branch.
-                                let mut row =
-                                    div().flex().items_start().ty(CODE).text_color(t.quiet);
+                                // The rails are drawn, so they join from row to
+                                // row whatever each row's height.
+                                let mut row = div().flex().ty(CODE).text_color(t.quiet);
+                                let rail = t.quiet.opacity(0.35);
                                 for k in 0..=l.depth {
                                     let more = continues(&depths, i, k);
-                                    let mark = match (k == l.depth, more) {
-                                        (true, true) => "├",
-                                        (true, false) => "└",
-                                        (false, true) => "│",
-                                        (false, false) => "",
-                                    };
+                                    let own = k == l.depth;
                                     row = row.child(
                                         div()
                                             .w(px(space::S4))
                                             .flex_none()
-                                            .text_color(t.quiet.opacity(0.6))
-                                            .child(mark),
+                                            .relative()
+                                            .when(more || own, |d| {
+                                                d.child(
+                                                    div()
+                                                        .absolute()
+                                                        .left(px(5.))
+                                                        .top_0()
+                                                        .w(px(1.))
+                                                        .bg(rail)
+                                                        .map(|d| {
+                                                            if more {
+                                                                d.bottom_0()
+                                                            } else {
+                                                                d.h(px(size::LINE / 2.))
+                                                            }
+                                                        }),
+                                                )
+                                            })
+                                            .when(own, |d| {
+                                                d.child(
+                                                    div()
+                                                        .absolute()
+                                                        .left(px(5.))
+                                                        .top(px(size::LINE / 2.))
+                                                        .w(px(7.))
+                                                        .h(px(1.))
+                                                        .bg(rail),
+                                                )
+                                            }),
                                     );
                                 }
                                 match &l.report {
@@ -1326,8 +1369,14 @@ impl Dent {
                             .child(self.chip(
                                 Menu::SessionEffort,
                                 "gauge",
-                                if self.chat_w >= 620. {
+                                if self.chat_w >= 760. {
                                     effort_label(s.effort.as_deref())
+                                } else if self.chat_w >= 540. {
+                                    // The gauge says "effort"; "Default" alone wouldn't.
+                                    match s.effort.as_deref() {
+                                        None => "Effort",
+                                        e => effort_name(e),
+                                    }
                                 } else {
                                     ""
                                 },
@@ -1648,9 +1697,12 @@ impl Dent {
             ready,
             &t,
             move |d, fg| {
+                // The key shows only when pressing it would do something.
                 d.text_color(fg)
                     .child(label)
-                    .child(div().ty(LABEL).opacity(0.7).child("↩"))
+                    .when(ready == Ready::Yes, |d| {
+                        d.child(div().ty(LABEL).opacity(0.7).child("↩"))
+                    })
             },
         );
         div()
@@ -1788,17 +1840,13 @@ impl Dent {
                             ),
                     )
                     .child(if open {
+                        // A status square and its word, as status shows everywhere.
                         div()
                             .flex_none()
-                            .h(px(size::CONTROL_SM))
-                            .px(px(space::S2))
                             .flex()
                             .items_center()
                             .gap(px(space::S1H))
-                            .rounded(px(radius::SM))
-                            .border_1()
-                            .border_color(t.hairline)
-                            .child(div().size(px(6.)).bg(t.working.0))
+                            .child(div().size(px(8.)).bg(t.working.0))
                             .child(div().ty(LABEL).text_color(t.quiet).child("In use"))
                     } else {
                         div()
@@ -1936,7 +1984,13 @@ impl Dent {
                 } else {
                     below < 320. && above > below
                 };
-                let fit = ((if up { above } else { below }) - space::S8).clamp(160., 440.);
+                // Below, the status bar is in the way too.
+                let fit = (if up {
+                    above - space::S8
+                } else {
+                    below - space::S8 - size::STATUS
+                })
+                .clamp(160., 440.);
                 let list = self.menu_list(which, fit, cx);
                 let placed = if up {
                     anchored()
@@ -2013,18 +2067,31 @@ impl Dent {
             }
             Menu::Model | Menu::SessionModel => {
                 let current = self.menu_model(which, cx);
-                let models = self.models_or_default();
+                let all = self.models_or_default();
                 // Aliases follow the newest version; pinned versions are
-                // full model ids, and wait behind "Older versions".
-                let (latest, older): (Vec<dent_protocol::Model>, Vec<dent_protocol::Model>) =
-                    models
-                        .into_iter()
+                // full model ids, and wait behind "Older versions", in the
+                // same family order as the list above.
+                let (latest, mut older): (Vec<dent_protocol::Model>, Vec<dent_protocol::Model>) =
+                    all.iter()
+                        .cloned()
                         .partition(|m| !m.id.starts_with("claude-"));
+                let family = |m: &dent_protocol::Model| {
+                    let f = m.name.split(' ').next().unwrap_or_default().to_lowercase();
+                    latest.iter().position(|l| l.id == f).unwrap_or(usize::MAX)
+                };
+                older.sort_by_key(|m| family(m));
                 let open = self.older_models || older.iter().any(|m| m.id == current);
                 let row = |this: &mut Self, m: &dent_protocol::Model, cx: &mut Context<Self>| {
                     let id = m.id.clone();
+                    // Each model is described once: the default names what it
+                    // runs, older versions are only their names.
                     let (name, note) = if m.id == "default" {
-                        ("Default".to_string(), m.description.clone())
+                        (
+                            "Default".to_string(),
+                            crate::bridge::runs(&all, m).unwrap_or_default().to_string(),
+                        )
+                    } else if m.id.starts_with("claude-") {
+                        (m.name.clone(), String::new())
                     } else {
                         (m.name.clone(), m.description.clone())
                     };
@@ -2170,7 +2237,7 @@ impl Dent {
                         menu_row(
                             &self.probes,
                             format!("m-effort-{}", value.unwrap_or("default")),
-                            effort_label(*value),
+                            effort_name(*value),
                             Some(note.to_string()),
                             current.as_deref() == *value,
                             &t,
@@ -2189,17 +2256,43 @@ impl Dent {
                     .collect()
             }
         };
+        // A list that scrolls fades at an edge with more beyond it, so a
+        // row cut by the edge reads as "there's more", not as a mistake.
+        let (y, max_y) = (
+            self.menu_scroll.offset().y.as_f32(),
+            self.menu_scroll.max_offset().y.as_f32(),
+        );
+        let fade = |top: bool| {
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .h(px(space::S6))
+                .map(|d| if top { d.top_0() } else { d.bottom_0() })
+                .bg(linear_gradient(
+                    if top { 180. } else { 0. },
+                    linear_color_stop(t.raised, 0.),
+                    linear_color_stop(t.raised.opacity(0.), 1.),
+                ))
+        };
         floating(&t)
-            .id("menu")
+            .relative()
             .w(px(280.))
-            .max_h(px(max_h))
-            .overflow_y_scroll()
-            .track_scroll(&self.menu_scroll)
-            .py(px(space::S1))
-            .flex()
-            .flex_col()
+            .overflow_hidden()
             .occlude()
-            .children(rows)
+            .child(
+                div()
+                    .id("menu")
+                    .max_h(px(max_h))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.menu_scroll)
+                    .py(px(space::S1))
+                    .flex()
+                    .flex_col()
+                    .children(rows),
+            )
+            .when(y < -1., |d| d.child(fade(true)))
+            .when(max_y > 1. && y > -max_y + 1., |d| d.child(fade(false)))
     }
 
     /// The model a model menu is choosing for: the new session's, or the
@@ -2241,14 +2334,28 @@ fn home() -> String {
 
 /// Effort levels, with what each is for.
 const EFFORTS: [(Option<&str>, &str); 6] = [
-    (None, "The model's own default"),
+    (None, "Whatever Claude Code picks for the model"),
     (Some("low"), "Fastest; for quick questions"),
     (Some("medium"), "Balanced"),
     (Some("high"), "Thinks harder before acting"),
     (Some("xhigh"), "For tricky problems"),
-    (Some("max"), "Thinks longest; uses the most"),
+    (Some("max"), "Thinks longest; uses the most of your limit"),
 ];
 
+/// An effort level as a menu names it.
+pub fn effort_name(e: Option<&str>) -> &'static str {
+    match e {
+        None => "Default",
+        Some("low") => "Low",
+        Some("medium") => "Medium",
+        Some("high") => "High",
+        Some("xhigh") => "Extra high",
+        Some("max") => "Max",
+        Some(_) => "Custom",
+    }
+}
+
+/// An effort level on its own, where the word "effort" has to say what it is.
 pub fn effort_label(e: Option<&str>) -> &'static str {
     match e {
         None => "Default effort",
@@ -2354,9 +2461,7 @@ impl Dent {
             .flex_1()
             .min_w_0()
             .my(px(space::S1))
-            .pl(px(space::S3))
-            .border_l_1()
-            .border_color(t.hairline)
+            .pl(px(space::S1))
             .flex()
             .flex_col()
             .gap(px(space::S1))

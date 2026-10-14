@@ -1136,11 +1136,20 @@ impl Dent {
                                             })
                                             .tooltip(tip("Open in its app", None, t))
                                     })
-                                    .child(div().ty(LABEL).text_color(t.faint).child(if compact {
-                                        format!("{} of {count} · {}", selected + 1, counts(file))
-                                    } else {
-                                        counts(file)
-                                    })),
+                                    .child(div().ty(LABEL).text_color(t.faint).child(
+                                        match (compact, file.lines.is_empty()) {
+                                            (true, _) => {
+                                                format!(
+                                                    "{} of {count} · {}",
+                                                    selected + 1,
+                                                    counts(file)
+                                                )
+                                            }
+                                            // The pane below says what it is.
+                                            (false, true) => String::new(),
+                                            (false, false) => counts(file),
+                                        },
+                                    )),
                             )
                             .child(
                                 div()
@@ -1180,13 +1189,19 @@ impl Dent {
                                                         ),
                                                 )
                                             })
-                                            .child(div().ty(UI).text_color(t.quiet).child(
-                                                if picture {
-                                                    "A picture; there are no lines to compare"
-                                                } else {
-                                                    "Not a text file; there are no lines to compare"
-                                                },
-                                            ))
+                                            // What it is and how big; the
+                                            // list beside says it changed.
+                                            .child(div().ty(UI).text_color(t.quiet).child({
+                                                let size = std::fs::metadata(&full)
+                                                    .map(|m| bytes(m.len()))
+                                                    .ok();
+                                                let what =
+                                                    if picture { "Picture" } else { "Binary file" };
+                                                match size {
+                                                    Some(b) => format!("{what} · {b}"),
+                                                    None => what.to_string(),
+                                                }
+                                            }))
                                             .into_any_element()
                                     } else {
                                         div()
@@ -1683,5 +1698,14 @@ fn counts(f: &crate::data::FileDiff) -> String {
         }
     } else {
         format!("+{} −{}", f.added, f.removed)
+    }
+}
+
+/// A file size in words people use: "812 bytes", "2.4 KB", "3.1 MB".
+fn bytes(n: u64) -> String {
+    match n {
+        0..1024 => format!("{n} bytes"),
+        1024..1_048_576 => format!("{:.1} KB", n as f64 / 1024.),
+        _ => format!("{:.1} MB", n as f64 / 1_048_576.),
     }
 }

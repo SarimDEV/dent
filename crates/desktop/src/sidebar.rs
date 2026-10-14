@@ -423,9 +423,15 @@ impl Dent {
             (None, Some(b)) => format!("Claude usage. The week resets in {b}."),
             (None, None) => "Claude usage across every way you use your account".to_string(),
         };
-        let link = match &self.connection {
-            Ok(()) => self.machine.clone(),
-            Err(why) => why.clone(),
+        let (link, link_tip) = match &self.connection {
+            Ok(()) => (
+                format!("on {}", self.machine),
+                format!(
+                    "Sessions run on {}, and keep going when dent closes",
+                    self.machine
+                ),
+            ),
+            Err(why) => (why.clone(), "dent's service isn't answering".to_string()),
         };
         let down = self.connection.is_err();
         div()
@@ -460,10 +466,12 @@ impl Dent {
             .child(div().flex_1())
             .child(
                 div()
+                    .id("machine")
                     .flex()
                     .items_center()
                     .gap(px(space::S1H))
                     .when(down, |d| d.text_color(t.ink))
+                    .tooltip(crate::ui::tip_owned(link_tip, t))
                     .child(link),
             )
             .when(needs > 0, |d| {
