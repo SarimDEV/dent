@@ -174,4 +174,4 @@ With the system's reduce-motion setting on, every motion resolves instantly, the
 
 ## Code
 
-Code blocks are highlighted (arborium, [0016](decisions/0016-highlighting-arborium.md)) within the palette: keywords in ink at medium weight; strings, functions, types and numbers are the ink mixed about halfway toward the done, working, waiting and needs hues; comments quiet and italic. Nothing is louder than the prose around it.
+Code blocks are highlighted (arborium, [0016](decisions/0016-highlighting-arborium.md)) within the palette: keywords in ink, bold (the code face has no medium); strings, functions, types and numbers are the ink mixed part way toward the done, working, waiting and idle hues (never needs, which is kept for what needs you); comments quiet and italic. Nothing is louder than the prose around it.

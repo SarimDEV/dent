@@ -431,6 +431,13 @@ impl Daemon {
         )?;
         self.append(
             &session,
+            Body::Notice {
+                text: format!("Forked from {title}"),
+            },
+            None,
+        )?;
+        self.append(
+            &session,
             Body::Status {
                 status: dent_protocol::Status::Done,
             },

@@ -59,12 +59,55 @@ impl Dent {
                                         .text_color(t.ink)
                                         .child(s.title.clone()),
                                 )
-                                .child(div().truncate().ty(UI).text_color(t.quiet).child(
-                                    match self.search_snippet(&s, cx) {
-                                        Some(found) => format!("{} · {found}", s.project),
-                                        None => format!("{} · {}", s.project, s.detail),
-                                    },
-                                )),
+                                .child(
+                                    div().truncate().ty(UI).text_color(t.quiet).child(
+                                        match self.search_snippet(&s, cx) {
+                                            Some(found) => {
+                                                // The word found, in ink, where it was found.
+                                                let line = format!("{} · {found}", s.project);
+                                                let q = self.search.read(cx).value().to_lowercase();
+                                                let w =
+                                                    q.split_whitespace().next().unwrap_or_default();
+                                                let lower = line.to_lowercase();
+                                                let start = s.project.len() + 3;
+                                                match lower[start..].find(w).map(|i| i + start) {
+                                                    Some(at)
+                                                        if !w.is_empty()
+                                                            && line.is_char_boundary(at)
+                                                            && line
+                                                                .is_char_boundary(at + w.len()) =>
+                                                    {
+                                                        let base = font(crate::theme::sans());
+                                                        let mut hit = base.clone();
+                                                        hit.weight = FontWeight::MEDIUM;
+                                                        let run = |len, f: Font, c| TextRun {
+                                                            len,
+                                                            font: f,
+                                                            color: c,
+                                                            background_color: None,
+                                                            underline: None,
+                                                            strikethrough: None,
+                                                        };
+                                                        StyledText::new(line.clone())
+                                                            .with_runs(vec![
+                                                                run(at, base.clone(), t.quiet),
+                                                                run(w.len(), hit, t.ink),
+                                                                run(
+                                                                    line.len() - at - w.len(),
+                                                                    base,
+                                                                    t.quiet,
+                                                                ),
+                                                            ])
+                                                            .into_any_element()
+                                                    }
+                                                    _ => line.into_any_element(),
+                                                }
+                                            }
+                                            None => format!("{} · {}", s.project, s.detail)
+                                                .into_any_element(),
+                                        },
+                                    ),
+                                ),
                         )
                         .when(s.closed, |d| {
                             d.child(
@@ -89,7 +132,12 @@ impl Dent {
             .top_0()
             .left_0()
             .size_full()
-            .bg(t.ink.opacity(if t.dark { 0.3 } else { 0.08 }))
+            .bg(if t.dark {
+                // Darker, not lighter: the ink is light in Carbon.
+                gpui_kit::black().opacity(0.45)
+            } else {
+                t.ink.opacity(0.08)
+            })
             .flex()
             .justify_center()
             // Sized by its results, not stretched to the window.

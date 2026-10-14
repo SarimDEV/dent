@@ -435,7 +435,7 @@ pub fn render(blocks: &[Block], t: &Theme, doc: bool) -> Div {
                                                 .map(|(len, tag)| {
                                                     let mut f = font(theme::mono());
                                                     if tag == Some(crate::highlight::Tag::Keyword) {
-                                                        f.weight = FontWeight::MEDIUM;
+                                                        f.weight = FontWeight::BOLD;
                                                     }
                                                     if tag == Some(crate::highlight::Tag::Comment) {
                                                         f.style = FontStyle::Italic;

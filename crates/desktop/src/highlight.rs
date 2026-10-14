@@ -45,11 +45,12 @@ impl Tag {
         let toward = |h: Hsla, k: f32| crate::theme::mix_pub(t.ink, h, k);
         match self {
             Tag::Keyword => t.ink,
-            Tag::String => toward(t.done.0, 0.55),
+            Tag::String => toward(t.done.0, 0.45),
             Tag::Comment => t.quiet,
             Tag::Function => toward(t.working.0, 0.5),
             Tag::Type => toward(t.waiting.0, 0.5),
-            Tag::Number => toward(t.needs.0, 0.45),
+            // Never toward "needs you": that hue is for what needs you.
+            Tag::Number => toward(t.idle.0, 0.55),
         }
     }
 }
@@ -162,8 +163,9 @@ pub fn styled(spans: &[(Range<usize>, Tag)], line: &str, t: &Theme) -> StyledTex
         .into_iter()
         .map(|(len, tag)| {
             let mut f = font(crate::theme::mono());
+            // The code face comes in regular and bold only.
             if tag == Some(Tag::Keyword) {
-                f.weight = FontWeight::MEDIUM;
+                f.weight = FontWeight::BOLD;
             }
             if tag == Some(Tag::Comment) {
                 f.style = FontStyle::Italic;

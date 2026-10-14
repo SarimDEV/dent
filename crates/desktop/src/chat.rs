@@ -45,7 +45,7 @@ impl Dent {
         {
             let sid = id.clone();
             actions = actions.child(
-                ghost("fork", "Fork", &t)
+                button("fork", "Fork", false, &t)
                     .relative()
                     .on_click(cx.listener(move |this, _, _, cx| this.fork(&sid, None, cx)))
                     .tooltip(tip("A new session that carries on from here", None, t))
@@ -926,7 +926,11 @@ impl Dent {
                 .into_any_element();
         }
         let note = if a.kind == Kind::Server {
-            format!("{} · on {}", a.path, s.machine)
+            format!(
+                "{} · running on {}",
+                a.title.trim_start_matches("Dev server · "),
+                s.machine
+            )
         } else {
             format!("{} · v{version}", a.path)
         };
@@ -1570,6 +1574,8 @@ impl Dent {
         Some(
             div()
                 .pt(px(space::S6))
+                // Rows line up with the choices above; their hover reaches out.
+                .ml(px(-space::S3))
                 .flex()
                 .flex_col()
                 .gap(px(space::S1))

@@ -34,7 +34,12 @@ impl Dent {
         if clear {
             // Nothing at all yet reads differently from nothing to do.
             let fresh = self.sessions.is_empty();
-            let (head, line) = if fresh {
+            let (head, line) = if fresh && !self.recent.is_empty() {
+                (
+                    "Nothing in dent yet",
+                    "Start a task, or pick up one from the terminal.",
+                )
+            } else if fresh {
                 ("No sessions yet", "Type a task to start one.")
             } else {
                 ("All caught up", "Everything is working or closed.")

@@ -149,6 +149,7 @@ impl Dent {
             .relative()
             .w(px(self.panel_w))
             .flex_none()
+            .overflow_hidden()
             .h_full()
             .flex()
             .flex_col()
@@ -342,7 +343,10 @@ impl Dent {
                     .ty(LABEL)
                     .text_color(t.quiet)
                     .child(if server {
-                        format!("{} · on {machine}", a.path)
+                        format!(
+                            "{} · on {machine}",
+                            a.title.trim_start_matches("Dev server · ")
+                        )
                     } else {
                         a.path.to_string()
                     }),
