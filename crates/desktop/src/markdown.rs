@@ -1362,18 +1362,23 @@ fn code_frame(lang: &str, body: &str, t: &Theme, key: &str, dim: bool, r: &R) ->
                 .ty(CODE)
                 .text_color(t.ink)
                 .children({
-                    // Highlighted once per block, then cached.
-                    let spans = crate::highlight::spans(lang, body);
-                    let mut at = 0;
+                    // Highlighted once per block, line by line, then cached.
+                    let lines = crate::highlight::block_lines(lang, body);
                     body.split('\n')
                         .enumerate()
                         .map(|(n, l)| {
-                            let start = at;
-                            at += l.len() + 1;
+                            // A blank line still selects, so a copy keeps it.
                             if l.is_empty() {
-                                return div().child(" ".to_string());
+                                return div().child(crate::select::text(
+                                    SharedString::from(format!("code-{key}-{n}")),
+                                    " ",
+                                    t,
+                                ));
                             }
-                            let runs: Vec<TextRun> = crate::highlight::line_runs(&spans, start, l)
+                            let runs: Vec<TextRun> = lines
+                                .get(n)
+                                .cloned()
+                                .unwrap_or_default()
                                 .into_iter()
                                 .map(|(len, tag)| {
                                     let mut f = font(theme::mono());

@@ -402,6 +402,14 @@ impl Dent {
         }
         let v = self.version(a);
         let id = a.id;
+        // Only versions it has the text of: a file that was only ever edited
+        // has its latest whole, not what came before.
+        let has = |k: usize| a.versions.get(k - 1).is_some_and(|b| !b.is_empty());
+        let prev = (1..v).rev().find(|k| has(*k));
+        let next = (v + 1..=latest).find(|k| has(*k));
+        if prev.is_none() && next.is_none() {
+            return None;
+        }
         let step = |label: &'static str,
                     name: &'static str,
                     to: Option<usize>,
@@ -446,7 +454,7 @@ impl Dent {
                 .child(step(
                     "prev-version",
                     "chevron-left",
-                    (v > 1).then(|| v - 1),
+                    prev,
                     "Earlier version",
                     cx,
                 ))
@@ -461,7 +469,7 @@ impl Dent {
                 .child(step(
                     "next-version",
                     "chevron-right",
-                    (v < latest).then(|| v + 1),
+                    next,
                     "Later version",
                     cx,
                 )),

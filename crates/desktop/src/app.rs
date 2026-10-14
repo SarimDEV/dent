@@ -2878,8 +2878,18 @@ impl Dent {
         {
             self.save_prefs();
         }
+        // A version whose text wasn't captured (only edited) shows the latest.
+        let captured = |a: &Artifact, v: usize| {
+            a.versions
+                .get(v.wrapping_sub(1))
+                .is_some_and(|b| !b.is_empty())
+        };
         match version {
-            Some(v) if self.art(art).is_some_and(|a| v < a.versions.len()) => {
+            Some(v)
+                if self
+                    .art(art)
+                    .is_some_and(|a| v < a.versions.len() && captured(a, v)) =>
+            {
                 self.viewing.insert(art, v);
             }
             _ => {

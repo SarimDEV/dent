@@ -538,11 +538,14 @@ impl Dent {
         let footer: AnyElement = if s.closed {
             let id = s.id.clone();
             div()
+                .relative()
                 .w_full()
                 .max_w(px(size::COLUMN + space::S8 * 2.))
                 .mx_auto()
                 .px(px(space::S8))
                 .pb(px(space::S4))
+                // Reading back in a closed session gets the way down too.
+                .children(latest)
                 .child(
                     div()
                         .px(px(space::S4))

@@ -87,6 +87,52 @@ type Spans = Rc<Vec<(Range<usize>, Tag)>>;
 thread_local! {
     static HL: RefCell<Option<arborium::Highlighter>> = const { RefCell::new(None) };
     static CACHE: RefCell<HashMap<u64, Spans>> = RefCell::new(HashMap::new());
+    static LINES: RefCell<HashMap<u64, Lines>> = RefCell::new(HashMap::new());
+}
+
+/// Each line's runs of (length, tag), for a whole block.
+pub type Lines = Rc<Vec<Vec<(usize, Option<Tag>)>>>;
+
+/// A block's lines in runs, worked out in one pass and remembered: a long
+/// block isn't rescanned for every line, every frame.
+pub fn block_lines(lang: &str, code: &str) -> Lines {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (lang, code).hash(&mut h);
+    let key = h.finish();
+    if let Some(l) = LINES.with(|c| c.borrow().get(&key).cloned()) {
+        return l;
+    }
+    let spans = spans(lang, code);
+    let mut tags: Vec<Option<Tag>> = vec![None; code.len()];
+    for (r, tag) in spans.iter() {
+        for t in &mut tags[r.start.min(code.len())..r.end.min(code.len())] {
+            *t = Some(*tag);
+        }
+    }
+    let mut out = Vec::new();
+    let mut at = 0;
+    for line in code.split('\n') {
+        let mut runs: Vec<(usize, Option<Tag>)> = Vec::new();
+        for (ix, ch) in line.char_indices() {
+            let (tag, w) = (tags[at + ix], ch.len_utf8());
+            match runs.last_mut() {
+                Some((len, t)) if *t == tag => *len += w,
+                _ => runs.push((w, tag)),
+            }
+        }
+        out.push(runs);
+        at += line.len() + 1;
+    }
+    let out = Rc::new(out);
+    LINES.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() > 256 {
+            c.clear();
+        }
+        c.insert(key, out.clone());
+    });
+    out
 }
 
 /// Token ranges for `code` in `lang`, innermost last. Empty for languages
