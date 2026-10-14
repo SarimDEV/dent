@@ -347,6 +347,18 @@ fn attach_red(d: &mut Dent, w: &mut Window, cx: &mut Context<Dent>) {
     d.attach_paths(&[path], w, cx);
 }
 
+/// The last message you sent in the open session.
+fn last_sent(d: &Dent) -> Option<String> {
+    current(d)?.items.iter().rev().find_map(|i| match i {
+        Item::User { id, .. } => Some(id.clone()),
+        _ => None,
+    })
+}
+
+fn in_project(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(&std::env::var("DENT_WALK_PROJECT").unwrap_or_default()).join(name)
+}
+
 /// Kill the daemon, as a crash or an upgrade would.
 fn kill_daemon(_: &mut Dent, _: &mut Window, _: &mut Context<Dent>) {
     let state = crate::live::default_state();
@@ -613,7 +625,38 @@ fn checks() -> Vec<(f32, Act)> {
         (0.3, Shot("attachment")),
         (0.1, Type(Field::Composer, "what is in this picture")),
         (0.1, Key("enter")),
-        (0.1, Until("a dropped picture goes with the message", |d, _| has(d, |i| matches!(i, Item::User(t) if t.contains("Attached") && t.contains("red.png"))) && status_is(d, Status::Done), 10.)),
+        (0.1, Until("a dropped picture goes with the message", |d, _| has(d, |i| matches!(i, Item::User { text: t, .. } if t.contains("Attached") && t.contains("red.png"))) && status_is(d, Status::Done), 10.)),
+    ]);
+    v.extend(new_session("write first.md please"));
+    v.extend([
+        (0.1, Until("asks to write", |d, _| has(d, |i| matches!(i, Item::Approval { .. })), 10.)),
+        (0.2, Click("allow-session")),
+        (0.1, Until("the first file is written", |d, _| status_is(d, Status::Done) && in_project("first.md").exists(), 10.)),
+        (0.2, Type(Field::Composer, "write second.md please")),
+        (0.1, Key("enter")),
+        // The fake agent asks again; the real one remembers the session rule.
+        (0.1, Until("asks again or writes", |d, _| has(d, |i| matches!(i, Item::Approval { .. })) || in_project("second.md").exists(), 10.)),
+        (0.2, ClickIfShown("allow")),
+        (0.1, Until("the second file is written", |d, _| status_is(d, Status::Done) && in_project("second.md").exists(), 10.)),
+        (0.2, Call(|d, _, cx| {
+            if let (Some(s), Some(m)) = (d.selected.clone(), last_sent(d)) {
+                d.rewinding = Some((s, m));
+            }
+            cx.notify();
+        })),
+        (0.4, Shot("rewind-confirm")),
+        (0.1, Call(|d, w, cx| {
+            if let Some(m) = last_sent(d) {
+                d.rewind(&m, true, w, cx);
+            }
+        })),
+        (0.1, Until("Edit from here takes the chat and the files back, and the message returns to the box", |d, cx| {
+            !in_project("second.md").exists()
+                && in_project("first.md").exists()
+                && d.composer.read(cx).value().contains("second.md")
+                && !has(d, |i| matches!(i, Item::User { text, .. } if text.contains("second.md")))
+        }, 10.)),
+        (0.2, Type(Field::Composer, "")),
     ]);
     v.extend(new_session("a long answer please"));
     v.extend([
@@ -689,6 +732,17 @@ fn real() -> Vec<(f32, Act)> {
         (0.2, Key("enter")),
         (0.1, Until("it sees the attached picture", |d, _| done(d) && says(d, "ed"), 60.)),
         (0.5, Shot("real-image")),
+        // Back to before the picture: the agent shouldn't know it saw one.
+        (0.2, Call(|d, w, cx| {
+            if let Some(m) = last_sent(d) {
+                d.rewind(&m, false, w, cx);
+            }
+        })),
+        (0.1, Until("the chat goes back", |d, _| !has(d, |i| matches!(i, Item::User { text, .. } if text.contains("red.png"))), 10.)),
+        (0.2, Type(Field::Composer, "Did I send you an image in this conversation? Reply yes or no.")),
+        (0.2, Key("enter")),
+        (0.1, Until("after rewinding, it has no memory of the picture", |d, _| done(d) && current(d).is_some_and(|s| matches!(s.items.iter().rev().find(|i| matches!(i, Item::Text(_))), Some(Item::Text(t)) if t.to_lowercase().contains("no"))), 90.)),
+        (0.5, Shot("real-rewound")),
         (0.3, Key("cmd-n")),
         (0.6, Shot("real-new")),
     ]);

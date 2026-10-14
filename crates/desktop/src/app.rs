@@ -164,7 +164,11 @@ impl Attachment {
             Attachment::Element { .. } => "square-dashed-mouse-pointer",
             Attachment::Error { .. } => "circle-alert",
             Attachment::Comment { .. } => "message-square",
-            Attachment::File { path } if crate::data::Kind::of(path) == Some(crate::data::Kind::Image) => "image",
+            Attachment::File { path }
+                if crate::data::Kind::of(path) == Some(crate::data::Kind::Image) =>
+            {
+                "image"
+            }
             Attachment::File { .. } => "paperclip",
         }
     }
@@ -233,6 +237,8 @@ pub struct Dent {
     pub changes: HashMap<String, Rc<Vec<FileDiff>>>,
     /// Choices made so far on a question, by question id.
     pub picks: HashMap<String, Vec<Option<String>>>,
+    /// The message whose "Edit from here" is asking to confirm.
+    pub rewinding: Option<(String, String)>,
     /// A new session is on its way.
     pub creating: bool,
     /// Length of the streaming reply last drawn, by session.
@@ -471,6 +477,7 @@ impl Dent {
             changes: HashMap::new(),
             picks: HashMap::new(),
             creating: false,
+            rewinding: None,
             partial_len: HashMap::new(),
             just_sent: None,
             panel_open: true,
@@ -1196,6 +1203,35 @@ impl Dent {
         cx.notify();
     }
 
+    /// Go back to just before message `msg`: the chat, and with `files` the
+    /// working tree. The message returns to the composer to edit.
+    pub fn rewind(&mut self, msg: &str, files: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.selected.clone() else {
+            return;
+        };
+        let text = self.session(&id).and_then(|s| {
+            s.items.iter().find_map(|i| match i {
+                Item::User { id: m, text } if m == msg => Some(text.clone()),
+                _ => None,
+            })
+        });
+        self.live.send(Request::Rewind {
+            session: id,
+            to: msg.to_string(),
+            files,
+        });
+        self.rewinding = None;
+        if let Some(text) = text {
+            // Attachment lines stay behind; the words come back.
+            let words: Vec<&str> = text.lines().filter(|l| !l.starts_with("› ")).collect();
+            self.composer.update(cx, |c, cx| {
+                c.set_value(words.join("\n"), window, cx);
+                c.focus(window, cx);
+            });
+        }
+        cx.notify();
+    }
+
     /// A waiting message goes into the running turn now instead.
     pub fn steer_queued(&mut self, id: &str, msg: &str, text: &str, cx: &mut Context<Self>) {
         self.live.send(Request::Unqueue {
@@ -1213,7 +1249,12 @@ impl Dent {
     }
 
     /// Files dropped on the window or pasted ride along with the next message.
-    pub fn attach_paths(&mut self, paths: &[std::path::PathBuf], window: &mut Window, cx: &mut Context<Self>) {
+    pub fn attach_paths(
+        &mut self,
+        paths: &[std::path::PathBuf],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         for p in paths {
             let path = p.display().to_string();
             if !self
@@ -1253,14 +1294,22 @@ impl Dent {
                     };
                     let dir = crate::scratch_dir().with_file_name("attachments");
                     let path = dir.join(format!("pasted-{}.{ext}", crate::message_id()));
-                    if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&path, img.bytes()).is_ok() {
+                    if std::fs::create_dir_all(&dir).is_ok()
+                        && std::fs::write(&path, img.bytes()).is_ok()
+                    {
                         paths.push(path);
                     }
                 }
             }
         }
         // Text pastes as text; only pictures and files attach.
-        if paths.is_empty() || (has_text && !item.entries().iter().any(|e| matches!(e, ClipboardEntry::Image(_)))) {
+        if paths.is_empty()
+            || (has_text
+                && !item
+                    .entries()
+                    .iter()
+                    .any(|e| matches!(e, ClipboardEntry::Image(_))))
+        {
             return false;
         }
         self.attach_paths(&paths, window, cx);
@@ -1484,7 +1533,10 @@ impl Dent {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         std::mem::discriminant(item).hash(&mut h);
         match item {
-            Item::User(t) | Item::Text(t) | Item::Queued { text: t, .. } => t.hash(&mut h),
+            Item::User { text: t, id } => {
+                (t, self.rewinding.as_ref().is_some_and(|(_, m)| m == id)).hash(&mut h)
+            }
+            Item::Text(t) | Item::Queued { text: t, .. } => t.hash(&mut h),
             Item::Tools {
                 lines,
                 open,

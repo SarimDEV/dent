@@ -84,6 +84,23 @@ pub enum Body {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent: Option<String>,
         blocks: Vec<Block>,
+        /// The agent's id for the message, to rewind the conversation to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        uuid: Option<String>,
+    },
+    /// The working tree as it was just before a message went to the agent,
+    /// kept as a hidden commit.
+    Checkpoint {
+        /// The message it was taken for.
+        id: String,
+        commit: String,
+    },
+    /// The session went back to just before message `to`: what came after
+    /// is no longer part of the conversation, and with `files` the working
+    /// tree is as it was then.
+    Rewound {
+        to: String,
+        files: bool,
     },
     ToolResult {
         tool: String,
@@ -327,6 +344,13 @@ pub enum Request {
         /// images; every file is also named by its path.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<String>,
+    },
+    /// Go back to just before one of your messages. With `files`, the
+    /// working tree goes back too.
+    Rewind {
+        session: SessionId,
+        to: String,
+        files: bool,
     },
     /// Take back a message that's still waiting.
     Unqueue {

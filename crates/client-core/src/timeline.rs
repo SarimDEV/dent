@@ -39,6 +39,9 @@ pub struct SessionView {
     pub background: Vec<Task>,
     /// Files the agent wrote that can be shown, with every version.
     pub made: Vec<Made>,
+    /// Messages with a snapshot of the files from just before them, so
+    /// rewinding can bring the files back too.
+    pub checkpoints: std::collections::HashSet<String>,
     /// The first entry that changed since [`SessionView::take_changes`].
     changed_from: Option<usize>,
     /// Where each tool call lives: entry index and position in it.
@@ -337,7 +340,7 @@ impl SessionView {
                     self.reindex(ix);
                 }
             }
-            Body::Assistant { parent, blocks } => {
+            Body::Assistant { parent, blocks, .. } => {
                 for b in blocks {
                     match (b, parent) {
                         (Block::Text { text }, None) if !text.trim().is_empty() => {
@@ -440,6 +443,23 @@ impl SessionView {
                 note: Note::Info,
                 text: text.clone(),
             }),
+            Body::Checkpoint { id, .. } => {
+                self.checkpoints.insert(id.clone());
+            }
+            // Everything from that message on leaves the conversation.
+            Body::Rewound { to, .. } => {
+                if let Some(ix) = self.user_ix(to) {
+                    self.entries.truncate(ix);
+                    self.reindex(ix);
+                    self.made.retain(|m| {
+                        self.entries
+                            .iter()
+                            .any(|e| matches!(e, Entry::Made { path, .. } if *path == m.path))
+                    });
+                }
+                self.partial.clear();
+                self.working_since = None;
+            }
             Body::Closed => self.closed = true,
             Body::Reopened => self.closed = false,
             Body::Limits { .. } | Body::Agent { .. } => {}
@@ -582,6 +602,7 @@ mod tests {
                 name: name.into(),
                 input: input.into(),
             }],
+            uuid: None,
         }
     }
 
@@ -617,6 +638,7 @@ mod tests {
                 blocks: vec![Block::Text {
                     text: "Done.".into(),
                 }],
+                uuid: None,
             },
             tool("c", "Bash", r#"{"command":"cargo test\nmore"}"#, None),
         ]);
@@ -694,6 +716,7 @@ mod tests {
                 blocks: vec![Block::Text {
                     text: "reply".into(),
                 }],
+                uuid: None,
             },
             Body::Unqueued { id: "c".into() },
             Body::Delivered { id: "b".into() },
@@ -718,6 +741,7 @@ mod tests {
             Body::Assistant {
                 parent: None,
                 blocks: vec![Block::Text { text: "t".into() }],
+                uuid: None,
             },
         ]);
         assert_eq!(s.list.get_mut("s").unwrap().take_changes(), Some(0));

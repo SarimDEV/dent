@@ -34,6 +34,7 @@ pub enum Inbound {
     /// A complete assistant message.
     Assistant {
         parent: Option<String>,
+        uuid: Option<String>,
         blocks: Vec<AssistantBlock>,
         /// Input plus cache tokens: how full the context is.
         context: Option<u64>,
@@ -171,6 +172,7 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
             });
             Inbound::Assistant {
                 parent: parent(&v),
+                uuid: v["uuid"].as_str().map(str::to_owned),
                 blocks,
                 context,
             }

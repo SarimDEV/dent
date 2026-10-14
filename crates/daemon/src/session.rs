@@ -52,6 +52,10 @@ pub enum Op {
     Unqueue {
         id: String,
     },
+    Rewind {
+        to: String,
+        files: bool,
+    },
     Interrupt,
     Answer {
         id: String,
@@ -114,6 +118,9 @@ struct Session {
     in_turn: bool,
     /// The agent has run at least once, so its transcript exists to resume.
     agent_started: bool,
+    /// After a rewind, the next agent process picks up the conversation at
+    /// this assistant message (or starts afresh with `Some(None)`).
+    resume_at: Option<Option<String>>,
     /// Messages waiting for the turn to end.
     held: VecDeque<(String, String, Vec<String>)>,
     /// A message was steered into the running turn; the abort the agent
@@ -148,6 +155,7 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
         settled: row.status,
         in_turn: false,
         agent_started: false,
+        resume_at: None,
         held: VecDeque::new(),
         steered: false,
         background: Vec::new(),
@@ -174,7 +182,8 @@ impl Session {
         let Ok(events) = self.d.store().session_events(&self.id) else {
             return;
         };
-        for e in events {
+        let mut rewound_to: Option<String> = None;
+        for e in events.iter().cloned() {
             match e.body {
                 Body::User {
                     id,
@@ -210,6 +219,11 @@ impl Session {
                 Body::TurnStarted => {
                     self.in_turn = true;
                     self.agent_started = true;
+                    rewound_to = None;
+                }
+                Body::Rewound { to, .. } => {
+                    rewound_to = Some(to);
+                    self.in_turn = false;
                 }
                 Body::TurnEnded { outcome } => {
                     self.in_turn = false;
@@ -225,6 +239,14 @@ impl Session {
         }
         if matches!(self.status, Status::Working | Status::NeedsYou) {
             self.in_turn = true;
+        }
+        // A rewind the agent hasn't picked up yet still applies.
+        if let Some(to) = rewound_to
+            && let Some(at) = events
+                .iter()
+                .position(|e| matches!(&e.body, Body::User { id, .. } if *id == to))
+        {
+            self.resume_at = Some(resume_point(&events[..at]));
         }
     }
 
@@ -289,6 +311,7 @@ impl Session {
                 steer,
                 attachments,
             } => self.send(id, text, steer, attachments).await,
+            Op::Rewind { to, files } => self.rewind(to, files).await,
             Op::Unqueue { id } => {
                 let before = self.held.len();
                 self.held.retain(|(h, _, _)| *h != id);
@@ -436,11 +459,18 @@ impl Session {
         if working {
             self.steered = true;
         }
-        self.deliver(&text, working, &attachments).await
+        self.deliver(&id, &text, working, &attachments).await
     }
 
     /// Write a message to the agent, starting it if it isn't running.
-    async fn deliver(&mut self, text: &str, steer: bool, attachments: &[String]) -> Result<()> {
+    async fn deliver(
+        &mut self,
+        id: &str,
+        text: &str,
+        steer: bool,
+        attachments: &[String],
+    ) -> Result<()> {
+        self.checkpoint(id).await;
         if let Err(e) = self.ensure_proc().await {
             self.log(Body::Notice {
                 text: format!("Couldn't start Claude Code: {e:#}"),
@@ -467,9 +497,73 @@ impl Session {
         let Some((id, text, attachments)) = self.held.pop_front() else {
             return;
         };
-        self.log(Body::Delivered { id });
-        let _ = self.deliver(&text, false, &attachments).await;
+        self.log(Body::Delivered { id: id.clone() });
+        let _ = self.deliver(&id, &text, false, &attachments).await;
         self.update_status();
+    }
+
+    /// Snapshot the working tree before message `id` goes, so the session
+    /// can go back to it.
+    async fn checkpoint(&mut self, id: &str) {
+        let (cwd, name) = (self.cwd.clone(), format!("{}/{}", self.id, safe_ref(id)));
+        let commit = tokio::task::spawn_blocking(move || {
+            crate::git::checkpoint(std::path::Path::new(&cwd), &name)
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(commit) = commit {
+            self.log(Body::Checkpoint {
+                id: id.to_string(),
+                commit,
+            });
+        }
+    }
+
+    /// Go back to just before message `to`: the conversation, and with
+    /// `files` the working tree too.
+    async fn rewind(&mut self, to: String, files: bool) -> Result<()> {
+        if self.in_turn {
+            bail!("stop the current turn first");
+        }
+        let events = self.d.store().session_events(&self.id)?;
+        let Some(at) = events
+            .iter()
+            .position(|e| matches!(&e.body, Body::User { id, .. } if *id == to))
+        else {
+            bail!("no such message");
+        };
+        if files {
+            let commit = events.iter().find_map(|e| match &e.body {
+                Body::Checkpoint { id, commit } if *id == to => Some(commit.clone()),
+                _ => None,
+            });
+            let Some(commit) = commit else {
+                bail!("there's no snapshot of the files from then (is the folder a git repository?)");
+            };
+            let cwd = self.cwd.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::git::restore(std::path::Path::new(&cwd), &commit)
+            })
+            .await?
+            .map_err(|e| anyhow::anyhow!(e))?;
+        }
+        self.resume_at = Some(resume_point(&events[..at]));
+        // The running process holds the whole conversation; the next message
+        // starts one that picks up at the rewind.
+        if let Some(p) = self.proc.take() {
+            let _ = self.d.store().clear_proc(&self.id);
+            if let Ok(h) = self.d.holder().await {
+                let _ = h.stop(&p.id, Duration::from_secs(1)).await;
+            }
+        }
+        self.idle_at = None;
+        for (id, _, _) in std::mem::take(&mut self.held) {
+            self.log(Body::Unqueued { id });
+        }
+        self.settled = Status::Done;
+        self.log(Body::Rewound { to, files });
+        Ok(())
     }
 
     async fn ensure_proc(&mut self) -> Result<()> {
@@ -491,14 +585,31 @@ impl Session {
                 a
             }
         };
+        let start = match self.resume_at.take() {
+            Some(Some(at)) => claude::Start::ResumeAt {
+                id: agent_session,
+                at,
+            },
+            // Rewound to before anything was said: a new conversation.
+            Some(None) => {
+                let a = crate::daemon::uuid();
+                self.agent_session = Some(a.clone());
+                self.log(Body::Agent {
+                    agent_session: Some(a.clone()),
+                    version: None,
+                });
+                claude::Start::Fresh(a)
+            }
+            None if self.agent_started => claude::Start::Resume(agent_session),
+            None => claude::Start::Fresh(agent_session),
+        };
         let proc = self.d.store().next_proc(&self.id)?;
         let argv = claude::argv(
             &self.d.env.claude,
             &self.d.env.path,
             self.model.as_deref(),
             self.permission,
-            &agent_session,
-            self.agent_started,
+            &start,
         );
         h.spawn(&proc, argv, Some(self.cwd.clone().into()), Vec::new())
             .await?;
@@ -680,6 +791,7 @@ impl Session {
             Inbound::TextDelta { parent: None, text } => self.d.delta(&self.id, &text, false),
             Inbound::Assistant {
                 parent,
+                uuid,
                 blocks,
                 context,
             } => {
@@ -690,7 +802,14 @@ impl Session {
                 }
                 let blocks = claude::blocks(blocks);
                 if !blocks.is_empty() {
-                    self.log_from(Body::Assistant { parent, blocks }, end);
+                    self.log_from(
+                        Body::Assistant {
+                            parent,
+                            blocks,
+                            uuid,
+                        },
+                        end,
+                    );
                 }
             }
             Inbound::ToolResults { parent, results } => {
@@ -845,6 +964,10 @@ impl Session {
 
     async fn exited(&mut self, proc: &str, code: Option<i32>, signal: Option<i32>) {
         let Some(p) = self.proc.take_if(|p| p.id == proc) else {
+            // A process left behind by a rewind: let the holder forget it.
+            if let Ok(h) = self.d.holder().await {
+                let _ = h.release(proc).await;
+            }
             return;
         };
         let _ = self.d.store().clear_proc(&self.id);
@@ -877,6 +1000,26 @@ impl Session {
             });
         }
     }
+}
+
+/// The last thing the agent said before `events` end: where a rewound
+/// conversation picks up. `None` when it hadn't said anything yet.
+fn resume_point(events: &[dent_protocol::Event]) -> Option<String> {
+    events.iter().rev().find_map(|e| match &e.body {
+        Body::Assistant {
+            parent: None,
+            uuid: Some(u),
+            ..
+        } => Some(u.clone()),
+        _ => None,
+    })
+}
+
+/// A message id as part of a ref name.
+fn safe_ref(id: &str) -> String {
+    id.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .collect()
 }
 
 fn settled(outcome: &Outcome) -> Status {

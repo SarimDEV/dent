@@ -85,7 +85,11 @@ pub struct Question {
 
 #[derive(Clone)]
 pub enum Item {
-    User(String),
+    /// Something you sent: its id, for rewinding to it, and its text.
+    User {
+        id: String,
+        text: String,
+    },
     /// A reply, in Markdown.
     Text(String),
     /// Tool calls folded to one line, expandable.
@@ -148,6 +152,8 @@ pub struct Session {
     pub arts: Vec<&'static str>,
     pub diff: Rc<Vec<FileDiff>>,
     pub terminal: Vec<(Tone, String)>,
+    /// Messages with a snapshot of the files from just before them.
+    pub checkpoints: std::collections::HashSet<String>,
     /// Tokens in context, and the window's size when known.
     pub context: Option<(u64, Option<u64>)>,
 }

@@ -346,6 +346,7 @@ impl Client {
                 Body::Assistant {
                     parent: None,
                     blocks,
+                    ..
                 } => Some(
                     blocks
                         .iter()
@@ -807,4 +808,63 @@ fn agents_wind_down_when_no_daemon_comes_back() {
         !running(),
         "the agent should exit once the holder gives up on the daemon"
     );
+}
+
+#[test]
+fn rewinding_restores_files_and_picks_the_conversation_up_there() {
+    let w = World::new(&[]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Edits, "write notes.md please");
+    c.wait_turns(&s, 1);
+    c.say(&s, "second", "write other.md please", false);
+    c.wait_turns(&s, 2);
+    let proj = std::path::Path::new(&w.cwd()).to_path_buf();
+    assert!(proj.join("other.md").exists());
+    assert_eq!(c.count(&s, |b| matches!(b, Body::Checkpoint { .. })), 2);
+
+    // Going back while it works is refused.
+    c.say(&s, "long", "a long answer please", false);
+    c.wait(&s, "the long turn", |b| matches!(b, Body::User { id, .. } if id == "long"));
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        c.call(Request::Rewind {
+            session: s.clone(),
+            to: "second".into(),
+            files: true,
+        })
+        .is_err()
+    );
+    c.call(Request::Interrupt { session: s.clone() }).unwrap();
+    c.wait(&s, "stopped", |b| matches!(b, Body::TurnEnded { outcome: Outcome::Interrupted { .. } }));
+    c.pump(Duration::from_millis(200));
+
+    c.call(Request::Rewind {
+        session: s.clone(),
+        to: "second".into(),
+        files: true,
+    })
+    .unwrap();
+    c.wait(&s, "the rewind", |b| matches!(b, Body::Rewound { .. }));
+    assert!(proj.join("notes.md").exists(), "files from before stay");
+    assert!(!proj.join("other.md").exists(), "files made after go");
+
+    // The next process picks the conversation up at the reply before it.
+    c.say(&s, "args", "tell me your args", false);
+    c.wait_turns(&s, 3);
+    let t = c.text(&s);
+    assert!(t.contains("--resume-session-at") && t.contains("--fork-session"), "{t}");
+
+    // Back to the very first message: a fresh conversation.
+    c.call(Request::Rewind {
+        session: s.clone(),
+        to: "m-write notes.md please".into(),
+        files: false,
+    })
+    .unwrap();
+    c.say(&s, "args2", "tell me your args again", false);
+    c.wait_turns(&s, 4);
+    let last = c.text(&s);
+    let last = last.lines().last().unwrap_or_default();
+    assert!(last.contains("--session-id") && !last.contains("--resume"), "{last}");
 }

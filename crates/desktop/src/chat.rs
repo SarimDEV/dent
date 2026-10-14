@@ -280,12 +280,23 @@ impl Dent {
     ) -> AnyElement {
         let t = self.t;
         match item {
-            Item::User(text) => {
+            Item::User { id: msg, text } => {
                 let (atts, body): (Vec<&str>, Vec<&str>) =
                     text.lines().partition(|l| l.starts_with("› "));
+                let asking = self
+                    .rewinding
+                    .as_ref()
+                    .is_some_and(|(sid, m)| *sid == s.id && m == msg);
+                let busy = matches!(s.status, Status::Working | Status::Needs);
+                let has_files = s.checkpoints.contains(msg);
+                let group = SharedString::from(format!("user-{ix}"));
+                let (m1, m2, m3, sid) = (msg.clone(), msg.clone(), msg.clone(), s.id.clone());
                 div()
+                    .group(group.clone())
                     .flex()
-                    .justify_end()
+                    .flex_col()
+                    .items_end()
+                    .gap(px(space::S1))
                     .child(
                         div()
                             .max_w(relative(0.85))
@@ -306,6 +317,97 @@ impl Dent {
                                 d.child(div().ty(READING).text_color(t.ink).child(body.join("\n")))
                             }),
                     )
+                    .map(|d| {
+                        if asking {
+                            // Going back asks once, in place.
+                            d.child(div().ty(UI).text_color(t.quiet).child(if busy {
+                                "Stop it first, then go back"
+                            } else {
+                                "Go back to before this message? It returns to the box."
+                            }))
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_end()
+                                    .items_center()
+                                    .gap(px(space::S2))
+                                    .child(
+                                        ghost(
+                                            SharedString::from(format!("rewind-cancel-{ix}")),
+                                            "Cancel",
+                                            &t,
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.rewinding = None;
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    )
+                                    .when(!busy, |d| {
+                                        d.child(
+                                            button(
+                                                SharedString::from(format!("rewind-chat-{ix}")),
+                                                "Rewind chat",
+                                                !has_files,
+                                                &t,
+                                            )
+                                            .relative()
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.rewind(&m1, false, window, cx)
+                                            }))
+                                            .child(
+                                                probe(&self.probes, format!("rewind-chat-{ix}")),
+                                            ),
+                                        )
+                                        .when(
+                                            has_files,
+                                            |d| {
+                                                d.child(
+                                                    button(
+                                                        SharedString::from(format!(
+                                                            "rewind-files-{ix}"
+                                                        )),
+                                                        "Rewind chat and files",
+                                                        true,
+                                                        &t,
+                                                    )
+                                                    .relative()
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            this.rewind(&m2, true, window, cx)
+                                                        },
+                                                    ))
+                                                    .child(probe(
+                                                        &self.probes,
+                                                        format!("rewind-files-{ix}"),
+                                                    )),
+                                                )
+                                            },
+                                        )
+                                    }),
+                            )
+                        } else {
+                            d.child(
+                                div()
+                                    .opacity(0.)
+                                    .group_hover(group.clone(), |s| s.opacity(1.))
+                                    .child(
+                                        ghost(
+                                            SharedString::from(format!("edit-from-{ix}")),
+                                            "Edit from here",
+                                            &t,
+                                        )
+                                        .relative()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.rewinding = Some((sid.clone(), m3.clone()));
+                                            cx.notify();
+                                        }))
+                                        .child(probe(&self.probes, format!("edit-from-{ix}"))),
+                                    ),
+                            )
+                        }
+                    })
                     .into_any_element()
             }
             Item::Text(src) => {

@@ -138,7 +138,10 @@ pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
                         text: text.clone(),
                     });
                 } else if attachments.is_empty() {
-                    items.push(Item::User(text.clone()));
+                    items.push(Item::User {
+                        id: id.clone(),
+                        text: text.clone(),
+                    });
                 } else {
                     let mut lines: Vec<String> = attachments
                         .iter()
@@ -147,7 +150,10 @@ pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
                     if !text.is_empty() {
                         lines.push(text.clone());
                     }
-                    items.push(Item::User(lines.join("\n")));
+                    items.push(Item::User {
+                        id: id.clone(),
+                        text: lines.join("\n"),
+                    });
                 }
             }
             Entry::Text { text } => items.push(Item::Text(text.clone())),
@@ -289,6 +295,7 @@ pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
         diff: cx.diff.unwrap_or_default(),
         terminal,
         context: v.context,
+        checkpoints: v.checkpoints.clone(),
     }
 }
 

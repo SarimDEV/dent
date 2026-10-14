@@ -141,3 +141,108 @@ mod tests {
         assert_eq!((f[1].path.as_str(), f[1].added, f[1].removed), ("y", 0, 1));
     }
 }
+
+/// Snapshot the working tree as a commit under `refs/dent/`, without
+/// touching the person's index: a copy of it takes the changes, so files
+/// git already knows aren't hashed again. Untracked files that aren't
+/// ignored are included. Returns the commit.
+pub fn checkpoint(dir: &Path, name: &str) -> Option<String> {
+    let commit = snapshot(dir)?;
+    git(dir, &["update-ref", &format!("refs/dent/{name}"), &commit])?;
+    Some(commit)
+}
+
+/// The working tree as a commit, kept by nothing.
+fn snapshot(dir: &Path) -> Option<String> {
+    git(dir, &["rev-parse", "--is-inside-work-tree"])?;
+    let index = temp_index(dir)?;
+    let real = git(dir, &["rev-parse", "--git-path", "index"])?;
+    let real = dir.join(real.trim());
+    if real.exists() {
+        std::fs::copy(&real, &index).ok()?;
+    }
+    let with = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_INDEX_FILE", &index)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let tree = with(&["add", "-A", "--", "."]).and_then(|_| with(&["write-tree"]));
+    let _ = std::fs::remove_file(&index);
+    let tree = tree?;
+    let head = git(dir, &["rev-parse", "--verify", "-q", "HEAD"]).map(|h| h.trim().to_string());
+    let mut args = vec!["-c", "user.name=dent", "-c", "user.email=dent@localhost", "commit-tree", &tree, "-m", "dent checkpoint"];
+    if let Some(h) = &head {
+        args.extend(["-p", h]);
+    }
+    git(dir, &args).map(|c| c.trim().to_string())
+}
+
+fn temp_index(dir: &Path) -> Option<std::path::PathBuf> {
+    let p = git(dir, &["rev-parse", "--git-path", &format!("dent-index-{}", std::process::id())])?;
+    Some(dir.join(p.trim()))
+}
+
+/// Put the working tree back as it was at `commit`: files changed since
+/// are restored and files created since are removed. Ignored files and the
+/// person's index are left alone.
+pub fn restore(dir: &Path, commit: &str) -> Result<(), String> {
+    let now = snapshot(dir).ok_or("couldn't read the working tree")?;
+    let added = git(dir, &["diff-tree", "-r", "--name-only", "--diff-filter=A", "--no-renames", commit, &now])
+        .ok_or("couldn't compare with the checkpoint")?;
+    for f in added.lines().filter(|l| !l.is_empty()) {
+        let _ = std::fs::remove_file(dir.join(f));
+    }
+    let index = temp_index(dir).ok_or("not a git repository")?;
+    let run = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_INDEX_FILE", &index)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    let ok = run(&["read-tree", commit]) && run(&["checkout-index", "-a", "-f"]);
+    let _ = std::fs::remove_file(&index);
+    if ok { Ok(()) } else { Err("couldn't write the checkpoint's files".into()) }
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+
+    #[test]
+    fn restore_brings_back_changed_and_removes_new_files() {
+        let dir = std::env::temp_dir().join(format!("dent-cp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let g = |a: &[&str]| {
+            Command::new("git").arg("-C").arg(&dir).args(a).output().unwrap();
+        };
+        g(&["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        g(&["add", "."]);
+        g(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]);
+        std::fs::write(dir.join("wip.txt"), "draft\n").unwrap();
+        let before_index = std::fs::read(dir.join(".git/index")).unwrap();
+        let c = checkpoint(&dir, "s/1").expect("checkpoint");
+        assert_eq!(std::fs::read(dir.join(".git/index")).unwrap(), before_index, "index untouched");
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "agent made this\n").unwrap();
+        std::fs::remove_file(dir.join("wip.txt")).unwrap();
+        restore(&dir, &c).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one\n");
+        assert_eq!(std::fs::read_to_string(dir.join("wip.txt")).unwrap(), "draft\n");
+        assert!(!dir.join("new.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

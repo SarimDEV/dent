@@ -18,8 +18,7 @@ pub fn argv(
     path: &str,
     model: Option<&str>,
     permission: Permission,
-    agent_session: &str,
-    resume: bool,
+    start: &Start,
 ) -> Vec<String> {
     let mut v: Vec<String> = [
         "/usr/bin/env",
@@ -57,9 +56,29 @@ pub fn argv(
     if let Some(m) = model {
         v.extend(["--model".into(), m.into()]);
     }
-    let flag = if resume { "--resume" } else { "--session-id" };
-    v.extend([flag.into(), agent_session.into()]);
+    match start {
+        Start::Fresh(id) => v.extend(["--session-id".into(), id.clone()]),
+        Start::Resume(id) => v.extend(["--resume".into(), id.clone()]),
+        // A rewind: the conversation as it was at that message, as a new
+        // session so the old one stays whole.
+        Start::ResumeAt { id, at } => v.extend([
+            "--resume".into(),
+            id.clone(),
+            "--resume-session-at".into(),
+            at.clone(),
+            "--fork-session".into(),
+        ]),
+    }
     v
+}
+
+/// How an agent process picks up its conversation.
+pub enum Start {
+    /// A new conversation, under an id dent chose.
+    Fresh(String),
+    Resume(String),
+    /// Resume up to the assistant message `at`, as a new session.
+    ResumeAt { id: String, at: String },
 }
 
 /// Claude Code's name for a permission mode. `None` is its default.

@@ -142,6 +142,10 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             .await?;
             Reply::Ok
         }
+        Request::Rewind { session, to, files } => {
+            d.command(&session, Op::Rewind { to, files }).await?;
+            Reply::Ok
+        }
         Request::Unqueue { session, id } => {
             d.command(&session, Op::Unqueue { id }).await?;
             Reply::Ok

@@ -13,6 +13,7 @@
 //! - `long`: a long reply, for stopping halfway
 //! - `fail`: the turn errors
 //! - `crash`: the process exits mid-turn
+//! - `your args`: replies with its command line
 //! - anything else: a short Markdown reply
 //!
 //! `FAKE_CLAUDE_SPEED` scales every pause (0 makes it instant).
@@ -68,9 +69,14 @@ fn main() {
     });
     let mut a = Agent {
         rx,
-        session: arg("--resume")
-            .or_else(|| arg("--session-id"))
-            .unwrap_or_else(new_id),
+        // A fork keeps the conversation under a new id.
+        session: if args.iter().any(|a| a == "--fork-session") {
+            new_id()
+        } else {
+            arg("--resume")
+                .or_else(|| arg("--session-id"))
+                .unwrap_or_else(new_id)
+        },
         model: arg("--model").unwrap_or_else(|| "sonnet".into()),
         mode: arg("--permission-mode").unwrap_or_else(|| "default".into()),
         speed: std::env::var("FAKE_CLAUDE_SPEED")
@@ -413,6 +419,13 @@ impl Agent {
         if lower.contains("crash") {
             self.say("Starting on that now, ", None)?;
             std::process::exit(3);
+        }
+        if lower.contains("your args") {
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            let text = args.join(" ");
+            self.say(&text, None)?;
+            self.end(&text, false);
+            return Ok(());
         }
         if lower.contains("fail") {
             self.say("Looking into it.", None)?;

@@ -72,7 +72,7 @@ The daemon serves file reads, directory listings and a watch stream, scoped to p
 
 Before every turn the daemon snapshots each workspace's working tree using a temporary index, write-tree and commit-tree, kept under hidden refs/dent/ refs. Untracked files over a size cap are skipped, and the user's own index is never touched. Claude Code's own checkpoints miss edits made through Bash and subagents ([docs](https://code.claude.com/docs/en/checkpointing)), so the daemon's snapshot is the reliable one.
 
-- Rewind code, conversation, or both to any of your messages.
+- Rewind the conversation, or the conversation and files, to just before any of your messages ("Edit from here"). The working tree comes back from the snapshot taken before that message; files made since are removed. The conversation picks up at the agent's last reply before it, as a new agent session (`--resume … --resume-session-at <message> --fork-session`), so the old transcript stays whole. Rewinding while a turn runs is refused.
 - "Summarize from here" asks the agent to compact older context, freeing room without starting over.
 - Snapshots are pruned with the session, and never pushed.
 
