@@ -96,7 +96,6 @@ pub enum Item {
     Tools {
         summary: String,
         lines: Vec<String>,
-        open: bool,
     },
     /// The agent wrote a viewable file: a card that opens it.
     Made {
@@ -149,16 +148,49 @@ pub struct Session {
     pub working_since: Option<Instant>,
     pub closed: bool,
     pub stopped: bool,
-    pub items: Vec<Item>,
+    /// Shared with the bridge, which extends it in place.
+    pub items: Rc<Vec<Item>>,
     pub arts: Vec<&'static str>,
     pub diff: Rc<Vec<FileDiff>>,
     pub terminal: Vec<(Tone, String)>,
+    /// Changes whenever a file it wrote gets a new version.
+    pub made_sig: usize,
     /// The agent's plan, as its latest todo list: (state, what, doing-form).
     pub todos: Vec<(String, String, String)>,
     /// Messages with a snapshot of the files from just before them.
     pub checkpoints: std::collections::HashSet<String>,
     /// Tokens in context, and the window's size when known.
     pub context: Option<(u64, Option<u64>)>,
+}
+
+impl Session {
+    /// Stands in for a session while it's being rebuilt.
+    pub fn placeholder(id: &str) -> Self {
+        Session {
+            id: id.to_string(),
+            title: String::new(),
+            project: String::new(),
+            machine: String::new(),
+            agent: String::new(),
+            model: None,
+            permission: Permission::Ask,
+            effort: None,
+            status: Status::Working,
+            detail: String::new(),
+            updated: 0,
+            working_since: None,
+            closed: false,
+            stopped: false,
+            items: Rc::default(),
+            arts: Vec::new(),
+            diff: Rc::default(),
+            terminal: Vec::new(),
+            context: None,
+            checkpoints: Default::default(),
+            made_sig: 0,
+            todos: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

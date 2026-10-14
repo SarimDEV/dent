@@ -249,6 +249,10 @@ pub struct Dent {
     pub commands: HashMap<String, Vec<Command>>,
     /// What was last written to the prefs file.
     saved_prefs: Option<crate::prefs::Prefs>,
+    /// Tool groups the person unfolded, by session and item.
+    pub open_tools: HashSet<(String, usize)>,
+    /// What the bridge built per session, to extend rather than rebuild.
+    built: HashMap<String, crate::bridge::Built>,
     /// The plan above the composer is open.
     pub plan_open: bool,
     /// Long messages you've unfolded.
@@ -543,6 +547,8 @@ impl Dent {
             slash_ix: 0,
             expanded: HashSet::new(),
             plan_open: false,
+            open_tools: HashSet::new(),
+            built: HashMap::new(),
             saved_prefs: None,
             partial_len: HashMap::new(),
             just_sent: None,
@@ -1065,25 +1071,44 @@ impl Dent {
         let Some(v) = self.core.list.get_mut(id) else {
             return;
         };
-        let _ = v.take_changes();
-        let v = v.clone();
+        let from = v.take_changes();
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let prev = self.sessions.iter().position(|s| s.id == id);
+        // Drop the old drawing's hold on the items so they extend in place.
+        let old = prev.map(|i| {
+            let old = &self.sessions[i];
+            (old.status, old.items.len(), old.made_sig)
+        });
+        if let Some(i) = prev {
+            self.sessions[i] = Rc::new(Session::placeholder(id));
+        }
+        let first = !self.built.contains_key(id);
+        let built = self.built.entry(id.to_string()).or_default();
+        let v = &self.core.list[id];
         let s = crate::bridge::session(
-            &v,
+            v,
             crate::bridge::Context {
                 machine: &self.machine,
                 models: &self.models,
                 diff: self.changes.get(id).cloned(),
-                prev: prev.map(|i| &*self.sessions[i]),
                 now_ms,
             },
+            built,
+            if first { Some(0) } else { from },
         );
+        let made_changed = old.is_none_or(|(_, _, sig)| sig != s.made_sig);
+        let partial_len = v.partial.len();
+        let partial_now = v.partial.clone();
+        let arts = if made_changed {
+            crate::bridge::artifacts(v)
+        } else {
+            Vec::new()
+        };
         // New versions of what it made show straight away when followed.
-        for a in crate::bridge::artifacts(&v) {
+        for a in arts {
             match self.arts.iter_mut().find(|x| x.id == a.id) {
                 Some(old) if old.versions.len() != a.versions.len() => {
                     self.viewing.remove(a.id);
@@ -1096,7 +1121,7 @@ impl Dent {
             }
         }
         // A reply streaming in fades in word by word.
-        let len = v.partial.len();
+        let len = partial_len;
         let was = self.partial_len.insert(id.to_string(), len).unwrap_or(0);
         if len > was && len > 0 {
             let ix = s
@@ -1112,14 +1137,14 @@ impl Dent {
                 *entry = (ix, Vec::new());
             }
             let now = Instant::now();
-            let words = v.partial[was.min(len)..].matches(' ').count().max(1);
+            let words = partial_now[was.min(len)..].matches(' ').count().max(1);
             for _ in 0..words {
                 entry.1.push((len, now));
             }
         } else if len == 0 {
             self.births.remove(id);
         }
-        let old_status = prev.map(|i| self.sessions[i].status);
+        let old_status = old.map(|o| o.0);
         // Tell the person when something needs them or is done, unless
         // they're already looking at it.
         let looking = self.window_active && self.selected.as_deref() == Some(id);
@@ -1767,7 +1792,8 @@ impl Dent {
         let sigs: Vec<u64> = s
             .items
             .iter()
-            .map(|i| self.item_sig(i))
+            .enumerate()
+            .map(|(ix, i)| self.item_sig(&s.id, ix, i))
             .chain((s.status == Status::Working).then_some(u64::MAX))
             .collect();
         let (id, old) = &self.transcript_sigs;
@@ -1787,23 +1813,35 @@ impl Dent {
     }
 
     /// Anything about an item that changes its height.
-    fn item_sig(&self, item: &Item) -> u64 {
+    fn item_sig(&self, sid: &str, ix: usize, item: &Item) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         std::mem::discriminant(item).hash(&mut h);
+        // Text is fingerprinted, not hashed whole: a long session would
+        // otherwise hash megabytes each frame. Streaming only ever appends,
+        // which changes the length.
+        let fp = |t: &str, h: &mut std::collections::hash_map::DefaultHasher| {
+            t.len().hash(h);
+            let b = t.as_bytes();
+            b[..b.len().min(32)].hash(h);
+            b[b.len().saturating_sub(32)..].hash(h);
+        };
         match item {
-            Item::User { text: t, id } => (
-                t,
-                self.rewinding.as_ref().is_some_and(|(_, m)| m == id),
-                self.expanded.contains(id),
-            )
-                .hash(&mut h),
-            Item::Text(t) | Item::Queued { text: t, .. } => t.hash(&mut h),
-            Item::Tools {
-                lines,
-                open,
-                summary,
-            } => (lines.len(), open, summary).hash(&mut h),
+            Item::User { text: t, id } => {
+                fp(t, &mut h);
+                (
+                    self.rewinding.as_ref().is_some_and(|(_, m)| m == id),
+                    self.expanded.contains(id),
+                )
+                    .hash(&mut h)
+            }
+            Item::Text(t) | Item::Queued { text: t, .. } => fp(t, &mut h),
+            Item::Tools { lines, summary } => {
+                (lines.len(), summary).hash(&mut h);
+                self.open_tools
+                    .contains(&(sid.to_string(), ix))
+                    .hash(&mut h);
+            }
             Item::Made { art, version } => {
                 // Older versions fold to one line.
                 let latest = self.art(art).map(|a| a.versions.len()).unwrap_or(0);
@@ -1812,7 +1850,10 @@ impl Dent {
             Item::Approval {
                 id, command, why, ..
             } => (id, command, why).hash(&mut h),
-            Item::Plan { id, plan } => (id, plan).hash(&mut h),
+            Item::Plan { id, plan } => {
+                id.hash(&mut h);
+                fp(plan, &mut h);
+            }
             Item::Question { id, questions } => {
                 (id, questions.len()).hash(&mut h);
                 self.picks
@@ -1820,7 +1861,7 @@ impl Dent {
                     .map(|p| p.iter().flatten().count())
                     .hash(&mut h);
             }
-            Item::Note { text, .. } => text.hash(&mut h),
+            Item::Note { text, .. } => fp(text, &mut h),
         }
         h.finish()
     }

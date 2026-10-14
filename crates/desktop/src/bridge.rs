@@ -16,8 +16,6 @@ pub struct Context<'a> {
     pub machine: &'a str,
     pub models: &'a [Model],
     pub diff: Option<Rc<Vec<FileDiff>>>,
-    /// The previous build, to keep what the person opened or folded.
-    pub prev: Option<&'a Session>,
     pub now_ms: u64,
 }
 
@@ -104,7 +102,26 @@ fn relative(cwd: &Path, path: &str) -> String {
     }
 }
 
-pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
+/// What the bridge built for a session last time, so the next build only
+/// redoes the entries that changed: usually just the reply streaming in.
+#[derive(Default)]
+pub struct Built {
+    items: Rc<Vec<Item>>,
+    /// The item index each entry's items start at.
+    starts: Vec<usize>,
+    /// Items that come from entries; the streaming reply and waiting
+    /// messages follow them.
+    body: usize,
+}
+
+/// Turn a timeline into what the window draws. `from` is the first entry
+/// that changed since `built` was made (`None`: no entry changed).
+pub fn session(
+    v: &SessionView,
+    cx: Context<'_>,
+    built: &mut Built,
+    from: Option<usize>,
+) -> Session {
     let cwd = Path::new(&v.cwd);
     let open_asks: Vec<(String, String)> = v
         .entries
@@ -119,11 +136,18 @@ pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
             _ => None,
         })
         .collect();
-    let mut items: Vec<Item> = Vec::with_capacity(v.entries.len() + 2);
-    let mut queued: Vec<Item> = Vec::new();
-    let mut arts: Vec<&'static str> = Vec::new();
-    let mut terminal: Vec<(Tone, String)> = Vec::new();
-    for e in &v.entries {
+    // Back off two entries: an answer's note slots in before the entry
+    // ahead of it.
+    let start = from
+        .unwrap_or(v.entries.len())
+        .min(built.starts.len())
+        .saturating_sub(2);
+    let items = Rc::make_mut(&mut built.items);
+    let keep = built.starts.get(start).copied().unwrap_or(built.body);
+    items.truncate(keep);
+    built.starts.truncate(start);
+    for e in &v.entries[start..] {
+        built.starts.push(items.len());
         match e {
             Entry::User {
                 id,
@@ -133,10 +157,7 @@ pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
                 ..
             } => {
                 if *q {
-                    queued.push(Item::Queued {
-                        id: id.clone(),
-                        text: text.clone(),
-                    });
+                    // Waiting messages go last, below everything.
                 } else if attachments.is_empty() {
                     items.push(Item::User {
                         id: id.clone(),
@@ -159,22 +180,6 @@ pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
             Entry::Text { text } => items.push(Item::Text(text.clone())),
             Entry::Thinking { .. } => {}
             Entry::Tools { calls } => {
-                for c in calls
-                    .iter()
-                    .filter(|c| c.name == "Bash" && c.result.is_some())
-                {
-                    let cmd = c.input()["command"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string();
-                    terminal.push((Tone::Command, format!("$ {cmd}")));
-                    if let Some((err, out)) = &c.result {
-                        let tone = if *err { Tone::Quiet } else { Tone::Good };
-                        for l in out.lines().take(40) {
-                            terminal.push((tone, l.to_string()));
-                        }
-                    }
-                }
                 // The plan belongs with the composer, and questions and plans
                 // have their own cards.
                 let calls: Vec<Call> = calls
@@ -185,18 +190,12 @@ pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
                             "TodoWrite" | "AskUserQuestion" | "ExitPlanMode"
                         )
                     })
-                    .map(|c| {
-                        let mut c = c.clone();
-                        if c.result.is_none()
-                            && open_asks.contains(&(c.name.clone(), c.input.clone()))
-                        {
-                            // Not running yet: it's waiting for you.
-                            c.name = format!("waiting:{}", c.name);
-                        }
-                        c
+                    // While a card asks to run a call, the card says what it is.
+                    .filter(|c| {
+                        c.result.is_some()
+                            || !open_asks.contains(&(c.name.clone(), c.input.clone()))
                     })
-                    // While the card asks, the card says what it is.
-                    .filter(|c| !c.name.starts_with("waiting:"))
+                    .cloned()
                     .collect();
                 if calls.is_empty() {
                     continue;
@@ -210,15 +209,9 @@ pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
                 if carded {
                     continue;
                 }
-                let calls = &calls;
-                let open = match cx.prev.and_then(|p| p.items.get(items.len())) {
-                    Some(Item::Tools { open, .. }) => *open,
-                    _ => false,
-                };
                 items.push(Item::Tools {
-                    summary: summary(calls, cwd),
+                    summary: summary(&calls, cwd),
                     lines: calls.iter().map(|c| line(c, cwd)).collect(),
-                    open,
                 });
             }
             Entry::Ask {
@@ -235,22 +228,18 @@ pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
                     Some(a) => {
                         let note = answered(tool, &input, a, cwd);
                         match items.last() {
-                            Some(Item::Tools { .. }) => items.insert(items.len() - 1, note),
+                            Some(Item::Tools { .. }) if items.len() > keep => {
+                                items.insert(items.len() - 1, note)
+                            }
                             _ => items.push(note),
                         }
                     }
                 }
             }
-            Entry::Made { path, version } => {
-                let art = art_id(&v.id, path);
-                if !arts.contains(&art) {
-                    arts.push(art);
-                }
-                items.push(Item::Made {
-                    art,
-                    version: *version,
-                });
-            }
+            Entry::Made { path, version } => items.push(Item::Made {
+                art: art_id(&v.id, path),
+                version: *version,
+            }),
             Entry::Note { note, text } => items.push(Item::Note {
                 icon: match note {
                     Note::Stopped => "square",
@@ -261,12 +250,32 @@ pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
             }),
         }
     }
+    built.body = items.len();
     if !v.partial.is_empty() {
         items.push(Item::Text(v.partial.clone()));
     }
-    items.extend(queued);
-    let tail = terminal.len().saturating_sub(400);
-    terminal.drain(..tail);
+    for e in &v.entries {
+        if let Entry::User {
+            id,
+            text,
+            queued: true,
+            ..
+        } = e
+        {
+            items.push(Item::Queued {
+                id: id.clone(),
+                text: text.clone(),
+            });
+        }
+    }
+    let mut arts: Vec<&'static str> = Vec::new();
+    for i in items.iter() {
+        if let Item::Made { art, .. } = i
+            && !arts.contains(art)
+        {
+            arts.push(art);
+        }
+    }
     let status = status(v.status);
     let working_since = v.working_since.map(|ms| {
         Instant::now()
@@ -291,14 +300,45 @@ pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
         working_since,
         closed: v.closed,
         stopped: v.status == Wire::Interrupted,
-        items,
+        items: built.items.clone(),
         arts,
         diff: cx.diff.unwrap_or_default(),
-        terminal,
+        terminal: terminal(v),
         context: v.context,
         checkpoints: v.checkpoints.clone(),
+        made_sig: v.made.iter().map(|m| m.versions.len()).sum::<usize>() + v.made.len() * 1000,
         todos: todos(v),
     }
+}
+
+/// The last commands it ran and what they printed, newest last, capped.
+fn terminal(v: &SessionView) -> Vec<(Tone, String)> {
+    let mut blocks: Vec<Vec<(Tone, String)>> = Vec::new();
+    let mut lines = 0;
+    'scan: for e in v.entries.iter().rev() {
+        let Entry::Tools { calls } = e else { continue };
+        for c in calls.iter().rev() {
+            let (c, Some((err, out))) = (c, &c.result) else {
+                continue;
+            };
+            if c.name != "Bash" {
+                continue;
+            }
+            let cmd = c.input()["command"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let tone = if *err { Tone::Quiet } else { Tone::Good };
+            let mut b = vec![(Tone::Command, format!("$ {cmd}"))];
+            b.extend(out.lines().take(40).map(|l| (tone, l.to_string())));
+            lines += b.len();
+            blocks.push(b);
+            if lines >= 400 {
+                break 'scan;
+            }
+        }
+    }
+    blocks.into_iter().rev().flatten().collect()
 }
 
 /// The agent's latest plan, from its last todo list.
@@ -650,5 +690,130 @@ mod tests {
         }
         assert_eq!(relative(&dir, "/elsewhere/x"), "/elsewhere/x");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use dent_protocol::{Block, Body, Event, Out};
+
+    /// A long real-looking session: 600 turns of reads, edits and replies.
+    fn big() -> dent_client_core::Sessions {
+        let mut s = dent_client_core::Sessions::default();
+        let mut events = Vec::new();
+        let mut seq = 0;
+        let mut push = |events: &mut Vec<Event>, body: Body| {
+            seq += 1;
+            events.push(Event {
+                seq,
+                session: "s".into(),
+                at: seq,
+                body,
+            });
+        };
+        for t in 0..600 {
+            push(
+                &mut events,
+                Body::User {
+                    id: format!("u{t}"),
+                    text: "Please fix the failing test in the parser and explain why".into(),
+                    queued: false,
+                    steer: false,
+                    attachments: vec![],
+                },
+            );
+            for c in 0..4 {
+                let id = format!("t{t}-{c}");
+                push(
+                    &mut events,
+                    Body::Assistant {
+                        parent: None,
+                        uuid: None,
+                        blocks: vec![Block::Tool {
+                            id: id.clone(),
+                            name: "Read".into(),
+                            input: format!(r#"{{"file_path":"/w/src/mod{c}.rs"}}"#),
+                        }],
+                    },
+                );
+                push(
+                    &mut events,
+                    Body::ToolResult {
+                        tool: id,
+                        error: false,
+                        output: "x".repeat(4000),
+                        parent: None,
+                    },
+                );
+            }
+            push(&mut events, Body::Assistant { parent: None, uuid: None, blocks: vec![Block::Text { text: "The parser dropped the last token when the input ended without a newline. ".repeat(6) }] });
+        }
+        s.apply(&Out::Events { events });
+        s
+    }
+
+    #[test]
+    #[ignore]
+    fn rebuild_cost() {
+        let s = big();
+        let v = &s.list["s"];
+        let t = std::time::Instant::now();
+        let n = 50;
+        for _ in 0..n {
+            let c = v.clone();
+            std::hint::black_box(&c);
+        }
+        let clone = t.elapsed() / n;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            let mut b = super::Built::default();
+            let out = super::session(
+                v,
+                super::Context {
+                    machine: "m",
+                    models: &[],
+                    diff: None,
+                    now_ms: 0,
+                },
+                &mut b,
+                Some(0),
+            );
+            std::hint::black_box(&out);
+        }
+        let build = t.elapsed() / n;
+        // Streaming: only the reply changes.
+        let mut b = super::Built::default();
+        let _ = super::session(
+            v,
+            super::Context {
+                machine: "m",
+                models: &[],
+                diff: None,
+                now_ms: 0,
+            },
+            &mut b,
+            Some(0),
+        );
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            let out = super::session(
+                v,
+                super::Context {
+                    machine: "m",
+                    models: &[],
+                    diff: None,
+                    now_ms: 0,
+                },
+                &mut b,
+                None,
+            );
+            std::hint::black_box(&out);
+        }
+        let stream = t.elapsed() / n;
+        eprintln!("streaming rebuild {stream:?}");
+        eprintln!(
+            "entries {} · clone {clone:?} · build {build:?}",
+            v.entries.len()
+        );
     }
 }

@@ -474,12 +474,9 @@ impl Dent {
                     _ => markdown::render(blocks.as_slice(), &t, false).into_any_element(),
                 }
             }
-            Item::Tools {
-                summary,
-                lines,
-                open,
-            } => {
-                let (sid, open) = (s.id.clone(), *open);
+            Item::Tools { summary, lines } => {
+                let key = (s.id.clone(), ix);
+                let open = self.open_tools.contains(&key);
                 div()
                     .flex()
                     .flex_col()
@@ -494,14 +491,8 @@ impl Dent {
                             .cursor_pointer()
                             .hover(|d| d.text_color(t.ink))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(Item::Tools { open, .. }) = this
-                                    .sessions
-                                    .iter_mut()
-                                    .find(|x| x.id == sid)
-                                    .map(std::rc::Rc::make_mut)
-                                    .and_then(|x| x.items.get_mut(ix))
-                                {
-                                    *open = !*open;
+                                if !this.open_tools.remove(&key) {
+                                    this.open_tools.insert(key.clone());
                                 }
                                 cx.notify();
                             }))
