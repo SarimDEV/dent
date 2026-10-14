@@ -1656,7 +1656,14 @@ impl Dent {
             .enumerate()
             .map(|(i, r)| {
                 let id = r.agent_session.clone();
-                let detail = if r.last.is_empty() || r.last == r.title {
+                let open = r.open;
+                let detail = if open {
+                    // Picking it up now would run it twice.
+                    format!(
+                        "{} · Open in a terminal right now",
+                        Self::project_name(&r.cwd)
+                    )
+                } else if r.last.is_empty() || r.last == r.title {
                     Self::project_name(&r.cwd)
                 } else {
                     format!("{} · Last: “{}”", Self::project_name(&r.cwd), r.last)
@@ -1667,9 +1674,14 @@ impl Dent {
                     .px(px(space::S3))
                     .py(px(space::S2))
                     .rounded(px(radius::MD))
-                    .cursor_pointer()
-                    .hover(|d| d.bg(t.hover()))
-                    .on_click(cx.listener(move |this, _, _, cx| this.adopt(&id, cx)))
+                    .when(!open, |d| {
+                        d.cursor_pointer()
+                            .hover(|d| d.bg(t.hover()))
+                            .on_click(cx.listener(move |this, _, _, cx| this.adopt(&id, cx)))
+                    })
+                    .when(open, |d| {
+                        d.tooltip(tip("Close it in the terminal to pick it up here", None, t))
+                    })
                     .flex()
                     .items_center()
                     .gap(px(space::S3))
@@ -1692,7 +1704,11 @@ impl Dent {
                             .flex_none()
                             .ty(LABEL)
                             .text_color(t.faint)
-                            .child(crate::data::ago(r.updated)),
+                            .child(if open {
+                                "now".into()
+                            } else {
+                                crate::data::ago(r.updated)
+                            }),
                     )
                     .child(probe(&self.probes, format!("adopt-{i}")))
                     .into_any_element()

@@ -15,8 +15,13 @@ fn store() -> PathBuf {
     crate::paths::home().join(".claude/projects")
 }
 
-/// Recent interactive sessions, newest first, leaving out `owned` (dent's
-/// own) and any touched in the last minute (likely still open).
+/// How recently a transcript must have changed for its session to count as
+/// still open in a terminal.
+const OPEN_MS: u64 = 60_000;
+
+/// Recent interactive sessions, newest first by the last thing said in
+/// them, leaving out `owned` (dent's own). One still being written is
+/// listed, marked open.
 pub fn recent(owned: &HashSet<String>, limit: usize) -> Vec<RecentSession> {
     let mut files: Vec<(PathBuf, u64)> = std::fs::read_dir(store())
         .into_iter()
@@ -30,15 +35,14 @@ pub fn recent(owned: &HashSet<String>, limit: usize) -> Vec<RecentSession> {
             Some((f.path(), ms))
         })
         .collect();
+    // Claude Code also writes bookkeeping into quiet transcripts, so the
+    // file's time only narrows the search; the last message orders it.
     files.sort_by_key(|(_, t)| std::cmp::Reverse(*t));
     let now = crate::daemon::now_ms();
     let mut out = Vec::new();
-    for (path, updated) in files {
-        if out.len() >= limit {
+    for (path, changed) in files {
+        if out.len() >= limit * 3 {
             break;
-        }
-        if now.saturating_sub(updated) < 60_000 {
-            continue;
         }
         let Some(id) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
             continue;
@@ -46,11 +50,50 @@ pub fn recent(owned: &HashSet<String>, limit: usize) -> Vec<RecentSession> {
         if owned.contains(&id) {
             continue;
         }
-        if let Some(r) = summary(&path, &id, updated) {
+        if let Some(mut r) = summary(&path, &id, changed) {
+            r.open = now.saturating_sub(changed) < OPEN_MS;
             out.push(r);
         }
     }
+    out.sort_by_key(|r| std::cmp::Reverse(r.updated));
+    out.truncate(limit);
     out
+}
+
+/// Whether a terminal session looks open right now.
+pub fn is_open(agent_session: &str) -> bool {
+    find(agent_session)
+        .and_then(|p| p.metadata().ok()?.modified().ok())
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age.as_millis() < u128::from(OPEN_MS))
+}
+
+/// Unix milliseconds from a transcript timestamp like
+/// `2026-10-13T23:56:30.647Z`.
+fn timestamp_ms(s: &str) -> Option<u64> {
+    let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
+    let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    let (h, mi, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
+    let ms = s
+        .get(19..)
+        .and_then(|r| r.strip_prefix('.'))
+        .map(|r| {
+            r.chars()
+                .take_while(char::is_ascii_digit)
+                .take(3)
+                .collect::<String>()
+        })
+        .and_then(|r| format!("{r:0<3}").parse::<i64>().ok())
+        .unwrap_or(0);
+    // Days from 1970-01-01 to the date, in the proleptic Gregorian calendar.
+    let y2 = if mo <= 2 { y - 1 } else { y };
+    let era = y2.div_euclid(400);
+    let yoe = y2 - era * 400;
+    let doy = (153 * (mo + if mo > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let total = ((days * 24 + h) * 60 + mi) * 60 + sec;
+    u64::try_from(total * 1000 + ms).ok()
 }
 
 /// The first prompt, the last one, and where it ran: from the head of the
@@ -93,6 +136,7 @@ fn summary(path: &Path, id: &str, updated: u64) -> Option<RecentSession> {
     let mut tail = String::new();
     let _ = f.take(128 * 1024).read_to_string(&mut tail);
     let mut last = None;
+    let mut said_at = None;
     for line in tail.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -102,6 +146,13 @@ fn summary(path: &Path, id: &str, updated: u64) -> Option<RecentSession> {
         }
         if let Some(t) = v["customTitle"].as_str() {
             custom_title = Some(t.to_string());
+        }
+        // When something was last said, by either side.
+        if matches!(v["type"].as_str(), Some("user" | "assistant"))
+            && v["isMeta"] != true
+            && let Some(at) = v["timestamp"].as_str().and_then(timestamp_ms)
+        {
+            said_at = Some(at);
         }
         if let Some(p) = prompt(&v) {
             last = Some(p);
@@ -130,7 +181,8 @@ fn summary(path: &Path, id: &str, updated: u64) -> Option<RecentSession> {
         cwd,
         title,
         last,
-        updated,
+        updated: said_at.unwrap_or(updated),
+        open: false,
     })
 }
 
@@ -494,6 +546,17 @@ mod tests {
 {"type":"assistant","uuid":"side","isSidechain":true,"message":{"content":[{"type":"text","text":"subagent"}]}}
 {"type":"ai-title","aiTitle":"Footer fixes"}
 "#;
+
+    #[test]
+    fn transcript_times_read_as_unix_milliseconds() {
+        assert_eq!(timestamp_ms("1970-01-01T00:00:00.000Z"), Some(0));
+        assert_eq!(
+            timestamp_ms("2026-10-13T23:56:30.647Z"),
+            Some(1_791_935_790_647)
+        );
+        assert_eq!(timestamp_ms("2000-02-29T12:00:00Z"), Some(951_825_600_000));
+        assert_eq!(timestamp_ms("nope"), None);
+    }
 
     #[test]
     fn a_transcript_imports_as_it_happened() {

@@ -330,8 +330,12 @@ pub struct RecentSession {
     /// The latest thing asked.
     #[serde(default)]
     pub last: String,
-    /// Unix milliseconds of its last change.
+    /// Unix milliseconds of the last thing said in it.
     pub updated: u64,
+    /// Its transcript is still being written: most likely it's open in a
+    /// terminal, and picking it up would run it twice.
+    #[serde(default)]
+    pub open: bool,
 }
 
 /// A directory sessions run in.

@@ -605,6 +605,9 @@ impl Daemon {
         {
             bail!("that session is already in dent");
         }
+        if crate::terminal::is_open(agent_session) {
+            bail!("it's still open in a terminal; close it there first, so it doesn't run twice");
+        }
         let session = new_id();
         let id = agent_session.to_string();
         let media = self.paths.state.join("attachments").join(&session);
