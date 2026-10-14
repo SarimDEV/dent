@@ -12,11 +12,60 @@ use std::rc::Rc;
 
 use gpui_kit::base::{
     TextSelection, TextSelectionHandle, TextSelectionRegistration, TextSelectionRun,
+    TextSelectionScopeId,
 };
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use crate::theme::Theme;
+
+/// The chat and the viewer each select on their own: a drag in one never
+/// reaches into the other. The viewer's subtree is marked with its scope.
+#[derive(Clone, Copy, PartialEq)]
+enum Area {
+    Chat,
+    Viewer,
+}
+
+thread_local! {
+    pub static VIEWER_SCOPE: TextSelectionScopeId = TextSelectionScopeId::new();
+    static ACTIVE: Cell<Area> = const { Cell::new(Area::Chat) };
+    /// (frame, next): text is numbered in the order it's laid out each frame,
+    /// top to bottom, so a copy comes out in reading order.
+    static ORDER: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+}
+
+pub fn viewer_scope() -> TextSelectionScopeId {
+    VIEWER_SCOPE.with(|s| *s)
+}
+
+/// The area under the pointer selects: the viewer's text or the chat's. It
+/// switches as the pointer moves between them, but never while something is
+/// selected, so a selection can't be lost on the way to ⌘C; a press in the
+/// other area switches then.
+pub fn hover(viewer: bool, pressed: bool, window: &mut Window, cx: &mut App) {
+    let area = if viewer { Area::Viewer } else { Area::Chat };
+    if ACTIVE.with(Cell::get) == area || (!pressed && TextSelection::has_selection(window, cx)) {
+        return;
+    }
+    ACTIVE.with(|a| a.set(area));
+    let scope = if viewer {
+        viewer_scope()
+    } else {
+        TextSelectionScopeId::default()
+    };
+    TextSelection::activate_scope(scope, window, cx);
+}
+
+fn next_order() -> u64 {
+    let frame = crate::ui::FRAME.load(std::sync::atomic::Ordering::Relaxed);
+    ORDER.with(|o| {
+        let (f, n) = o.get();
+        let n = if f == frame { n + 1 } else { 0 };
+        o.set((frame, n));
+        n
+    })
+}
 
 pub struct Text {
     id: ElementId,
@@ -135,6 +184,7 @@ impl Element for Text {
             .prepaint(id, inspector, bounds, &mut (), window, cx);
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         let registration = TextSelectionRegistration::new(hitbox.clone(), bounds)
+            .with_document_order(next_order())
             .with_text_bounds(vec![bounds])
             .with_rendered_element(&kept.handle, window, cx);
         kept.handle.register(registration, window, cx);

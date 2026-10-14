@@ -38,6 +38,8 @@ pub enum PageEvent {
     External(String),
     /// Text a check read off the page.
     Probe(String),
+    /// Text you copied in the page, for the clipboard.
+    Copy(String),
 }
 
 /// What the web view shows.
@@ -65,6 +67,20 @@ const SCRIPT: &str = r#"
   let settle = 0;
   const settled = () => { clearTimeout(settle); settle = setTimeout(() => send({ t: 'settled' }), 220); };
   for (const ev of ['scroll', 'click', 'input', 'keyup', 'resize']) addEventListener(ev, settled, { passive: true, capture: true });
+  // ⌘C and ⌘X reach dent first: it asks the page for what's selected.
+  window.__dentCopy = (cut) => {
+    const a = document.activeElement;
+    let text = '';
+    if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA') && a.selectionStart != null) {
+      text = a.value.substring(a.selectionStart, a.selectionEnd);
+    } else {
+      text = String(getSelection());
+    }
+    if (text) send({ t: 'copy', text });
+    if (cut && text) document.execCommand('delete');
+  };
+  // A press inside the page: it may keep the keyboard.
+  addEventListener('pointerdown', () => send({ t: 'down' }), { passive: true, capture: true });
   addEventListener('DOMContentLoaded', () => {
     const y = +sessionStorage.getItem('dent-y') || 0;
     if (y) scrollTo(0, y);
@@ -134,6 +150,9 @@ pub struct Preview {
     pending: Arc<AtomicBool>,
     /// The page changed since its last snapshot.
     settled: Arc<AtomicBool>,
+    /// You pressed inside the page since dent last had the keyboard: only
+    /// then may the page keep it.
+    pressed: Arc<AtomicBool>,
     /// The dev server origin pages may navigate within.
     origin: Shared<Option<String>>,
     snapshot: Shared<Option<Snapshot>>,
@@ -230,6 +249,8 @@ impl Preview {
         let pd = page_dir.clone();
         let settled = Arc::new(AtomicBool::new(false));
         let ipc_settled = settled.clone();
+        let pressed = Arc::new(AtomicBool::new(false));
+        let ipc_pressed = pressed.clone();
         let (nav_origin, nav_push, win_push, ipc_push) =
             (origin.clone(), push.clone(), push.clone(), push.clone());
         let builder = WebViewBuilder::new()
@@ -305,9 +326,14 @@ impl Preview {
                     },
                     "pick-cancel" => PageEvent::PickCancel,
                     "probe" => PageEvent::Probe(s("msg")),
+                    "copy" => PageEvent::Copy(s("text")),
                     // Settling only makes the snapshot stale; it wakes nothing.
                     "settled" => {
                         ipc_settled.store(true, Ordering::Release);
+                        return;
+                    }
+                    "down" => {
+                        ipc_pressed.store(true, Ordering::Release);
                         return;
                     }
                     _ => return,
@@ -380,6 +406,7 @@ impl Preview {
             events,
             pending,
             settled,
+            pressed,
             origin,
             snapshot,
             retired: Arc::default(),
@@ -526,11 +553,49 @@ impl Preview {
     /// window's key target, and it stays that even after you click back
     /// into dent or the page hides, so typing would land in the page.
     pub fn release_focus(&self) {
+        self.pressed.store(false, Ordering::Release);
         let _ = self.web.focus_parent();
+    }
+
+    /// The editing keys, done in the page while it has the keyboard: dent
+    /// sees them first. Returns whether the page took the key.
+    pub fn edit(&self, key: &str, shift: bool, clipboard: Option<String>) -> bool {
+        if !self.has_focus() {
+            return false;
+        }
+        let js = match (key, shift) {
+            ("c", false) => "window.__dentCopy && window.__dentCopy(false)".to_string(),
+            ("x", false) => "window.__dentCopy && window.__dentCopy(true)".to_string(),
+            ("a", false) => "document.execCommand('selectAll')".to_string(),
+            ("z", false) => "document.execCommand('undo')".to_string(),
+            ("z", true) => "document.execCommand('redo')".to_string(),
+            ("v", false) => match clipboard {
+                Some(text) => format!(
+                    "document.execCommand('insertText', false, {})",
+                    serde_json::to_string(&text).unwrap_or_default()
+                ),
+                None => return true,
+            },
+            _ => return false,
+        };
+        let _ = self.web.evaluate_script(&js);
+        true
+    }
+
+    /// The page took the keyboard without being pressed (it does on load):
+    /// give it back.
+    pub fn keep_keys_unless_pressed(&self, pointer: Point<Pixels>) {
+        // The pointer over the page may be a press the page hasn't told us
+        // about yet: leave it be.
+        let over = self.visible && self.bounds.is_some_and(|b| b.contains(&pointer));
+        if !over && !self.pressed.load(Ordering::Acquire) && self.has_focus() {
+            let _ = self.web.focus_parent();
+        }
     }
 
     /// Give the page the keyboard, as a click into it does (walkthrough).
     pub fn take_focus(&self) {
+        self.pressed.store(true, Ordering::Release);
         let _ = self.web.focus();
     }
 

@@ -125,15 +125,21 @@ impl Render for Dent {
         ui::FRAME.store(self.frames, std::sync::atomic::Ordering::Relaxed);
         self.drain_page(window, cx);
         // A clicked notification opens its session.
-        if let Some(id) = notify::take_clicked() {
+        let clicked = notify::take_clicked();
+        if let Some(id) = clicked.clone() {
             self.pending_select = Some(id);
         }
-        // A session just created opens once the daemon has told us about it.
+        // A session just created opens once the daemon has told us about it,
+        // unless you've already started typing the next task.
         if let Some(id) = self.pending_select.clone()
             && self.session(&id).is_some()
         {
             self.pending_select = None;
-            self.select(Some(id), window, cx);
+            let typing_next =
+                self.selected.is_none() && !self.starter.read(cx).value().trim().is_empty();
+            if clicked.is_some() || !typing_next {
+                self.select(Some(id), window, cx);
+            }
         }
         if self
             .toast
@@ -193,6 +199,7 @@ impl Render for Dent {
         let visible = self.preview_visible();
         if let Some(p) = &self.preview {
             p.borrow_mut().set_visible(visible);
+            p.borrow().keep_keys_unless_pressed(window.mouse_position());
         }
         let t = self.t;
         // Lay out from the window: the chat keeps its minimum, the viewer
@@ -225,6 +232,10 @@ impl Render for Dent {
             .current_rc()
             .filter(|s| self.panel_open && self.shows_panel(s))
             .map(|s| self.panel(&s, window, cx));
+        // Where the viewer starts, for telling which side a press is on.
+        self.panel_left = panel
+            .as_ref()
+            .map(|_| window.viewport_size().width.as_f32() - self.panel_w);
         let toast =
             self.toast.clone().map(|toast| {
                 let label = match toast.action {
@@ -287,11 +298,34 @@ impl Render for Dent {
             .id("root")
             .key_context("Dent")
             // A click anywhere in dent takes the keyboard back from the page.
-            .capture_any_mouse_down(cx.listener(|this, _, _, _| {
+            .capture_any_mouse_down(cx.listener(|this, e: &MouseDownEvent, window, cx| {
                 if let Some(p) = &this.preview {
                     p.borrow().release_focus();
                 }
+                // A press outside the viewer: the chat's text selects.
+                let in_viewer = this.panel_left.is_some_and(|x| e.position.x.as_f32() >= x);
+                select::hover(in_viewer, true, window, cx);
             }))
+            // Clicking a button, a chip or the chat keeps the keyboard in
+            // the text field you were typing in, as on the Mac. Only another
+            // field, or the inbox, takes it.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    // A rename or search ends when you click away, though.
+                    if matches!(
+                        this.field_focused(window, cx),
+                        Some(
+                            app::Field::Composer
+                                | app::Field::Starter
+                                | app::Field::Aside
+                                | app::Field::Comment
+                        )
+                    ) {
+                        window.prevent_default();
+                    }
+                }),
+            )
             .track_focus(&self.focus)
             .relative()
             .size_full()
@@ -306,8 +340,9 @@ impl Render for Dent {
             .on_action(cx.listener(|this, _: &CloseSession, window, cx| {
                 // After closing you're in the inbox, like mail: arrows move,
                 // Enter opens, and ⌘Z undoes without a text field taking it.
-                if let Some(id) = this.selected.clone() {
-                    this.close(&id, window, cx);
+                if let Some(id) = this.selected.clone()
+                    && this.close(&id, window, cx)
+                {
                     this.focus_inbox(window, cx);
                 }
             }))
@@ -337,9 +372,14 @@ impl Render for Dent {
             .on_action(
                 cx.listener(|this, _: &ShowTerminal, window, cx| this.open_shell(window, cx)),
             )
-            .on_action(
-                cx.listener(|this, _: &SteerSend, window, cx| this.send_with(true, window, cx)),
-            )
+            // ⌘↩ steers from the reply box only; other boxes submit themselves.
+            .on_action(cx.listener(|this, _: &SteerSend, window, cx| {
+                if this.field_focused(window, cx) == Some(app::Field::Composer) {
+                    this.send_with(true, window, cx)
+                } else {
+                    cx.propagate();
+                }
+            }))
             .on_action(
                 cx.listener(|this, _: &SideChat, window, cx| this.open_side_chat(window, cx)),
             )
@@ -361,24 +401,33 @@ impl Render for Dent {
             }))
             .on_action(cx.listener(|this, _: &Escape, window, cx| {
                 // Esc backs out one thing at a time; with nothing open it moves
-                // to the inbox, where arrows, Enter and E work.
+                // to the inbox, where arrows move and Enter opens.
                 if this.context.take().is_some() {
-                } else if gpui_kit::base::TextSelection::has_selection(window, cx) {
-                    gpui_kit::base::TextSelection::clear(window, cx);
                 } else if this.palette.is_some() {
                     this.close_palette(window, cx);
                 } else if this.menu.take().is_some() {
+                } else if gpui_kit::base::TextSelection::has_selection(window, cx) {
+                    gpui_kit::base::TextSelection::clear(window, cx);
                 } else if this.picking {
                     this.toggle_pick(cx);
                 } else if this.renaming.is_some() || this.commenting.is_some() {
+                    // Esc cancels a rename or comment; typing goes back to
+                    // the reply box.
                     this.renaming = None;
                     this.commenting = None;
+                    this.composer.update(cx, |c, cx| c.focus(window, cx));
+                } else if this.field_focused(window, cx) == Some(app::Field::Composer)
+                    && !this.composer.read(cx).value().trim().is_empty()
+                {
+                    // A draft keeps the keyboard: Esc doesn't throw you out of it.
                 } else {
                     this.focus_inbox(window, cx);
                 }
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Search, window, cx| this.open_palette(window, cx)))
+            .on_action(|_: &app::Minimize, window, _| window.minimize_window())
+            .on_action(|_: &app::Zoom, window, _| window.zoom_window())
             .on_action(cx.listener(|this, _: &SelectPrev, window, cx| {
                 this.step_selection(-1, false, window, cx)
             }))
@@ -392,15 +441,24 @@ impl Render for Dent {
                 this.step_selection(1, true, window, cx)
             }))
             .on_action(cx.listener(|this, _: &InboxOpen, window, cx| {
-                this.composer.update(cx, |c, cx| c.focus(window, cx))
+                if this.selected.is_some() {
+                    this.composer.update(cx, |c, cx| c.focus(window, cx))
+                } else {
+                    this.starter.update(cx, |c, cx| c.focus(window, cx))
+                }
             }))
             .on_action(cx.listener(|this, _: &InboxClose, window, cx| {
-                if let Some(id) = this.selected.clone() {
-                    this.close(&id, window, cx);
+                if let Some(id) = this.selected.clone()
+                    && this.close(&id, window, cx)
+                {
                     this.focus_inbox(window, cx);
                 }
             }))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, cx| {
+                if e.pressed_button.is_none() {
+                    let in_viewer = this.panel_left.is_some_and(|x| e.position.x.as_f32() >= x);
+                    select::hover(in_viewer, false, window, cx);
+                }
                 if this.dragging {
                     let w = window.viewport_size().width.as_f32();
                     let side = if this.sidebar_hidden {
@@ -462,7 +520,7 @@ impl Render for Dent {
                 )
             })
             .when(self.dragging, |d| d.cursor_col_resize())
-            .children(self.palette.map(|at| self.palette_view(at, cx)))
+            .children(self.palette.map(|at| self.palette_view(at, window, cx)))
             .children(self.context_view(window, cx))
     }
 }
@@ -565,6 +623,7 @@ fn main() {
         load_fonts(cx);
         math::load_fonts(cx);
         app::bind_keys(cx);
+        app::set_menus(cx);
         let (x, y, w, h) = window_rect();
         let background = o.background || o.walk.is_some();
         BACKGROUND.store(background, Ordering::Relaxed);

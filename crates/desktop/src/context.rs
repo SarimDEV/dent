@@ -59,7 +59,9 @@ impl Dent {
                 self.start_rename(&id, &title, window, cx);
             }
             Do::Fork(id) => self.fork(&id, None, cx),
-            Do::CloseSession(id) => self.close(&id, window, cx),
+            Do::CloseSession(id) => {
+                self.close(&id, window, cx);
+            }
             Do::Reopen(id) => self.reopen(&id, cx),
         }
         cx.notify();

@@ -44,11 +44,86 @@ actions!(
         InboxOpen,
         InboxClose,
         SideChat,
+        Quit,
+        Hide,
+        HideOthers,
+        ShowAll,
+        Minimize,
+        Zoom,
     ]
 );
 
+/// The menu bar: the app menu, Edit for text fields, and Window.
+pub fn set_menus(cx: &mut App) {
+    use gpui_kit::base::input;
+    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &Hide, cx| cx.hide());
+    cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+    cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+    cx.set_menus([
+        gpui_kit::Menu {
+            name: "dent".into(),
+            items: vec![
+                MenuItem::action("Hide dent", Hide),
+                MenuItem::action("Hide Others", HideOthers),
+                MenuItem::action("Show All", ShowAll),
+                MenuItem::separator(),
+                MenuItem::action("Quit dent", Quit),
+            ],
+            disabled: false,
+        },
+        gpui_kit::Menu {
+            name: "File".into(),
+            items: vec![
+                MenuItem::action("New Session", NewSession),
+                MenuItem::action("Search Sessions…", Search),
+                MenuItem::separator(),
+                MenuItem::action("Close Session", CloseSession),
+            ],
+            disabled: false,
+        },
+        gpui_kit::Menu {
+            name: "Edit".into(),
+            items: vec![
+                // Tied to the system's own edit actions too, so a page in
+                // the viewer copies and pastes like any web view.
+                MenuItem::os_action("Undo", input::Undo, OsAction::Undo),
+                MenuItem::os_action("Redo", input::Redo, OsAction::Redo),
+                MenuItem::separator(),
+                MenuItem::os_action("Cut", input::Cut, OsAction::Cut),
+                MenuItem::os_action("Copy", input::Copy, OsAction::Copy),
+                MenuItem::os_action("Paste", input::Paste, OsAction::Paste),
+                MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
+            ],
+            disabled: false,
+        },
+        gpui_kit::Menu {
+            name: "View".into(),
+            items: vec![
+                MenuItem::action("Show or Hide Viewer", TogglePanel),
+                MenuItem::action("Changes", ShowChanges),
+                MenuItem::action("Terminal", ShowTerminal),
+                MenuItem::action("Side Chat", SideChat),
+            ],
+            disabled: false,
+        },
+        gpui_kit::Menu {
+            name: "Window".into(),
+            items: vec![
+                MenuItem::action("Minimize", Minimize),
+                MenuItem::action("Zoom", Zoom),
+            ],
+            disabled: false,
+        },
+    ]);
+}
+
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
+        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-h", Hide, None),
+        KeyBinding::new("alt-cmd-h", HideOthers, None),
+        KeyBinding::new("cmd-m", Minimize, None),
         KeyBinding::new("cmd-n", NewSession, None),
         KeyBinding::new("cmd-w", CloseSession, None),
         KeyBinding::new("cmd-z", UndoClose, Some("Dent")),
@@ -78,9 +153,30 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("up", InboxUp, Some("Inbox")),
         KeyBinding::new("down", InboxDown, Some("Inbox")),
         KeyBinding::new("enter", InboxOpen, Some("Inbox")),
-        KeyBinding::new("e", InboxClose, Some("Inbox")),
-        KeyBinding::new("backspace", InboxClose, Some("Inbox")),
     ]);
+}
+
+/// Put text in a field with the caret after it, as typing would leave it.
+pub fn put(
+    field: &mut TextareaState,
+    text: impl Into<SharedString>,
+    window: &mut Window,
+    cx: &mut Context<TextareaState>,
+) {
+    let text: SharedString = text.into();
+    let end = text.len();
+    field.set_value(text, window, cx);
+    field.set_selected_range(end..end, cx);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Field {
+    Composer,
+    Starter,
+    Aside,
+    Comment,
+    Search,
+    Rename,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -362,6 +458,13 @@ pub struct Dent {
     pub revealed_tab: Option<(Tab, usize, u32)>,
     pub reveal_pending: bool,
     pub reveal_tries: u8,
+    /// Esc put the slash or @ menu away; typing brings it back.
+    pub slash_dismissed: bool,
+    pub palette_scroll: ScrollHandle,
+    /// The viewer's left edge in the window, while it shows.
+    pub panel_left: Option<f32>,
+    /// The palette row last scrolled to.
+    pub palette_shown: Option<usize>,
     pub preview: Option<Rc<RefCell<Preview>>>,
     pub viewing: HashMap<&'static str, usize>,
     pub viewport: Viewport,
@@ -474,19 +577,19 @@ impl Dent {
             &rename_input,
             window,
             |this, input, ev: &InputEvent, window, cx| match ev {
-                InputEvent::PressEnter { shift: false, .. } => {
-                    let title = input.read(cx).value().trim().to_string();
-                    if let Some(id) = this.renaming.take()
-                        && !title.is_empty()
-                    {
-                        this.live.send(Request::Rename { session: id, title });
-                    }
+                // Return saves, and so does clicking away, as in Finder.
+                InputEvent::PressEnter { .. } => {
+                    this.commit_rename(window, cx);
                     this.composer.update(cx, |c, cx| c.focus(window, cx));
-                    cx.notify();
                 }
-                InputEvent::Blur => {
-                    this.renaming = None;
-                    cx.notify();
+                InputEvent::Blur => this.commit_rename(window, cx),
+                // One line: a pasted or typed line break becomes a space.
+                InputEvent::Change => {
+                    let v = input.read(cx).value().to_string();
+                    if v.contains('\n') {
+                        let one = v.replace('\n', " ");
+                        input.update(cx, |i, cx| put(i, one, window, cx));
+                    }
                 }
                 _ => {}
             },
@@ -501,11 +604,14 @@ impl Dent {
         cx.subscribe_in(
             &search,
             window,
-            |this, _, ev: &InputEvent, window, cx| match ev {
-                InputEvent::PressEnter { shift: false, .. } => {
-                    this.palette_open_selected(window, cx)
-                }
+            |this, input, ev: &InputEvent, window, cx| match ev {
+                InputEvent::PressEnter { .. } => this.palette_open_selected(window, cx),
                 InputEvent::Change if this.palette.is_some() => {
+                    let v = input.read(cx).value().to_string();
+                    if v.contains('\n') {
+                        let one = v.replace('\n', " ");
+                        input.update(cx, |i, cx| put(i, one, window, cx));
+                    }
                     this.palette = Some(0);
                     cx.notify();
                 }
@@ -530,7 +636,11 @@ impl Dent {
             window,
             |this, _, ev: &InputEvent, window, cx| match ev {
                 InputEvent::PressEnter { shift: false, .. } => this.send(window, cx),
-                InputEvent::Change => cx.notify(),
+                InputEvent::Change => {
+                    this.slash_ix = 0;
+                    this.slash_dismissed = false;
+                    cx.notify()
+                }
                 _ => {}
             },
         )
@@ -601,6 +711,7 @@ impl Dent {
                         &this.comment_input,
                         &this.aside_input,
                         &this.search,
+                        &this.rename_input,
                     ] {
                         crate::style_input(input, &this.t, cx);
                     }
@@ -726,6 +837,10 @@ impl Dent {
             revealed_tab: None,
             reveal_pending: false,
             reveal_tries: 0,
+            slash_dismissed: false,
+            palette_scroll: ScrollHandle::new(),
+            panel_left: None,
+            palette_shown: None,
             toast: None,
             show_closed: false,
             stopped: HashSet::new(),
@@ -976,8 +1091,7 @@ impl Dent {
             .and_then(|i| self.drafts.get(i))
             .cloned()
             .unwrap_or_default();
-        self.composer
-            .update(cx, |c, cx| c.set_value(draft, window, cx));
+        self.composer.update(cx, |c, cx| put(c, draft, window, cx));
         if let Some(new) = id.clone()
             && !self.commands.contains_key(&new)
         {
@@ -1014,6 +1128,18 @@ impl Dent {
     }
 
     /// Closing archives: it can always be reopened. The next thing to clear opens.
+    /// Save the name being typed, unless it's empty, and close the field.
+    pub fn commit_rename(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let title = self.rename_input.read(cx).value().trim().to_string();
+        if let Some(id) = self.renaming.take()
+            && !title.is_empty()
+            && self.session(&id).is_some_and(|s| s.title != title)
+        {
+            self.live.send(Request::Rename { session: id, title });
+        }
+        cx.notify();
+    }
+
     pub fn start_rename(
         &mut self,
         id: &str,
@@ -1024,16 +1150,26 @@ impl Dent {
         self.renaming = Some(id.to_string());
         let title = title.to_string();
         self.rename_input.update(cx, |i, cx| {
-            i.set_value(title, window, cx);
+            put(i, title, window, cx);
             i.focus(window, cx);
+            i.select_all(window, cx);
         });
         cx.notify();
     }
 
-    pub fn close(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(s) = self.session(id) else { return };
+    /// Close a session; returns whether it could be (one still working
+    /// can't).
+    pub fn close(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(s) = self.session(id) else {
+            return false;
+        };
         if !Self::can_close(s) {
-            return;
+            self.toast(
+                ToastAction::Info,
+                "Stop it first: a session can be closed once it's done".into(),
+            );
+            cx.notify();
+            return false;
         }
         let order = self.to_clear();
         let at = order.iter().position(|x| x == id).unwrap_or(0);
@@ -1054,6 +1190,7 @@ impl Dent {
             self.select(next, window, cx);
         }
         cx.notify();
+        true
     }
 
     pub fn reopen(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -1290,11 +1427,100 @@ impl Dent {
         if self.shell_key(k, window, cx) {
             return true;
         }
-        // The slash menu: arrows move, Tab or Return completes.
-        if !k.modifiers.modified()
-            && matches!(k.key.as_str(), "up" | "down" | "tab" | "enter")
-            && self.composer.read(cx).focus_handle(cx).is_focused(window)
+        let plain = !k.modifiers.modified();
+        let field = self.field_focused(window, cx);
+        let in_composer = field == Some(Field::Composer);
+        // The ⌘K palette: arrows move through the results, and Tab stays put
+        // rather than leaving for the composer behind it.
+        if self.palette.is_some() && plain && matches!(k.key.as_str(), "up" | "down" | "tab") {
+            let n = self.palette_len(cx);
+            let at = self.palette.unwrap_or(0);
+            self.palette = Some(match k.key.as_str() {
+                "up" => at.saturating_sub(1),
+                "down" => (at + 1).min(n.saturating_sub(1)),
+                _ => at,
+            });
+            cx.notify();
+            return true;
+        }
+        // A page in the viewer with the keyboard does its own editing keys.
+        if k.modifiers.platform
+            && !k.modifiers.alt
+            && !k.modifiers.control
+            && matches!(k.key.as_str(), "c" | "x" | "v" | "a" | "z")
+            && let Some(p) = &self.preview
         {
+            let clip = (k.key == "v")
+                .then(|| cx.read_from_clipboard().and_then(|c| c.text()))
+                .flatten();
+            if p.borrow().edit(&k.key, k.modifiers.shift, clip) {
+                return true;
+            }
+        }
+        // ⌘C copies text selected in the chat or viewer, even while a text
+        // field keeps the keyboard, unless the field has a selection itself.
+        if k.key == "c"
+            && k.modifiers.platform
+            && !k.modifiers.shift
+            && !k.modifiers.alt
+            && gpui_kit::base::TextSelection::has_selection(window, cx)
+        {
+            let own = match field {
+                Some(f) => !self.field_entity(f).read(cx).selected_range().is_empty(),
+                None => false,
+            };
+            if !own {
+                let text = gpui_kit::base::TextSelection::selected_text(window, cx);
+                if !text.is_empty() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    return true;
+                }
+            }
+        }
+        // ⌥⌘↑ and ⌥⌘↓ step between sessions, from a text field too.
+        if k.modifiers.alt
+            && k.modifiers.platform
+            && !k.modifiers.shift
+            && !k.modifiers.control
+            && matches!(k.key.as_str(), "up" | "down")
+        {
+            self.step_selection(if k.key == "up" { -1 } else { 1 }, false, window, cx);
+            return true;
+        }
+        // Esc puts away the slash or @ menu before anything else.
+        if plain
+            && k.key == "escape"
+            && in_composer
+            && !self.slash_dismissed
+            && !self.completions(cx).1.is_empty()
+        {
+            self.slash_dismissed = true;
+            cx.notify();
+            return true;
+        }
+        // A question's options answer to their number keys while the
+        // composer is empty.
+        if plain
+            && in_composer
+            && k.key.len() == 1
+            && self.composer.read(cx).value().is_empty()
+            && let Some(d) = k.key.chars().next().and_then(|c| c.to_digit(10))
+            && d > 0
+            && let Some(id) = self.selected.clone()
+            && let Some(Item::Question { id: ask, questions }) = self.open_ask(&id)
+        {
+            let picks = self.picks.get(&ask).cloned().unwrap_or_default();
+            let q = (0..questions.len())
+                .find(|q| picks.get(*q).is_none_or(Option::is_none))
+                .unwrap_or(0);
+            if let Some((label, _)) = questions.get(q).and_then(|q| q.options.get(d as usize - 1)) {
+                let label = label.clone();
+                self.answer(&id, q, label, cx);
+                return true;
+            }
+        }
+        // The slash menu: arrows move, Tab or Return completes.
+        if plain && matches!(k.key.as_str(), "up" | "down" | "tab" | "enter") && in_composer {
             let (mention, hits) = self.completions(cx);
             let typed = self.composer.read(cx).value().to_string();
             let exact = !mention && hits.iter().any(|c| typed == format!("/{}", c.name));
@@ -1321,6 +1547,7 @@ impl Dent {
             && !k.modifiers.platform
             && !k.modifiers.shift
             && matches!(k.key.as_str(), "up" | "down")
+            && (in_composer || field.is_none())
             && self.composer.read(cx).value().is_empty()
             && self.jump_to_mine(k.key == "up", cx)
         {
@@ -1331,6 +1558,7 @@ impl Dent {
             && k.modifiers.platform
             && !k.modifiers.shift
             && self.palette.is_none()
+            && matches!(field, None | Some(Field::Composer | Field::Starter))
             && self.paste_attachment(window, cx)
         {
             return true;
@@ -1342,13 +1570,57 @@ impl Dent {
             .toast
             .as_ref()
             .is_some_and(|t| matches!(t.action, ToastAction::Undo(_)));
-        let typed =
-            !self.composer.read(cx).value().is_empty() || !self.starter.read(cx).value().is_empty();
+        // Only from no field, or from an empty composer or new-session box:
+        // anywhere else ⌘Z is the field's own undo.
+        let typed = match field {
+            None => false,
+            Some(Field::Composer) => !self.composer.read(cx).value().is_empty(),
+            Some(Field::Starter) => !self.starter.read(cx).value().is_empty(),
+            Some(_) => true,
+        };
         if undo && closing && !typed {
             self.toast_action(window, cx);
             return true;
         }
         false
+    }
+
+    /// Which of dent's text fields has the keyboard, if any.
+    pub fn field_focused(&self, window: &Window, cx: &App) -> Option<Field> {
+        let on = |e: &Entity<TextareaState>| e.read(cx).focus_handle(cx).is_focused(window);
+        if on(&self.composer) {
+            Some(Field::Composer)
+        } else if on(&self.starter) {
+            Some(Field::Starter)
+        } else if on(&self.aside_input) {
+            Some(Field::Aside)
+        } else if on(&self.comment_input) {
+            Some(Field::Comment)
+        } else if on(&self.search) {
+            Some(Field::Search)
+        } else if on(&self.rename_input) {
+            Some(Field::Rename)
+        } else {
+            None
+        }
+    }
+
+    pub fn field_entity(&self, f: Field) -> &Entity<TextareaState> {
+        match f {
+            Field::Composer => &self.composer,
+            Field::Starter => &self.starter,
+            Field::Aside => &self.aside_input,
+            Field::Comment => &self.comment_input,
+            Field::Search => &self.search,
+            Field::Rename => &self.rename_input,
+        }
+    }
+
+    /// Rows in the ⌘K palette: the matches, then "Start a session" when
+    /// something is typed.
+    pub fn palette_len(&self, cx: &App) -> usize {
+        let typed = !self.search.read(cx).value().trim().is_empty();
+        self.palette_results(cx).len() + usize::from(typed)
     }
 
     /// Scroll to your previous or next message. Returns whether there was one.
@@ -1461,6 +1733,9 @@ impl Dent {
     /// What the composer could complete: an `@file` being typed at its end,
     /// or a lone `/command`. True for mentions.
     pub fn completions(&self, cx: &App) -> (bool, Vec<Command>) {
+        if self.slash_dismissed {
+            return (false, Vec::new());
+        }
         let slash = self.slash_matches(cx);
         if !slash.is_empty() {
             return (false, slash);
@@ -1517,8 +1792,7 @@ impl Dent {
         let text = self.composer.read(cx).value().to_string();
         let cut = text.rfind('@').unwrap_or(text.len());
         let value = format!("{}@{path} ", &text[..cut]);
-        self.composer
-            .update(cx, |c, cx| c.set_value(value, window, cx));
+        self.composer.update(cx, |c, cx| put(c, value, window, cx));
         self.slash_ix = 0;
         cx.notify();
     }
@@ -1526,7 +1800,7 @@ impl Dent {
     /// Put the chosen command in the composer, ready for its arguments.
     pub fn complete_slash(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.composer
-            .update(cx, |c, cx| c.set_value(format!("/{name} "), window, cx));
+            .update(cx, |c, cx| put(c, format!("/{name} "), window, cx));
         self.slash_ix = 0;
         cx.notify();
     }
@@ -1756,8 +2030,7 @@ impl Dent {
             .collect();
         atts.retain(|a| !matches!(a, Attachment::File { .. }));
         let message = with_attachments(&text, &atts);
-        self.composer
-            .update(cx, |c, cx| c.set_value("", window, cx));
+        self.composer.update(cx, |c, cx| put(c, "", window, cx));
         self.drafts.remove(&id);
         self.just_sent = Some(Instant::now());
         // Send wakes up again when the pause ends, whatever else happens.
@@ -1823,7 +2096,7 @@ impl Dent {
         });
         self.waiting.insert(n, Waiting::Create);
         self.creating = true;
-        self.starter.update(cx, |c, cx| c.set_value("", window, cx));
+        self.starter.update(cx, |c, cx| put(c, "", window, cx));
         self.defaults.project_picked = false;
         cx.notify();
     }
@@ -1843,10 +2116,13 @@ impl Dent {
                 _ => None,
             })
             .collect();
-        if !waiting.is_empty() && self.composer.read(cx).value().trim().is_empty() {
-            let text = waiting.join("\n\n");
-            self.composer
-                .update(cx, |c, cx| c.set_value(text, window, cx));
+        if !waiting.is_empty() {
+            let draft = self.composer.read(cx).value().trim().to_string();
+            let mut text = waiting.join("\n\n");
+            if !draft.is_empty() {
+                text = format!("{draft}\n\n{text}");
+            }
+            self.composer.update(cx, |c, cx| put(c, text, window, cx));
             // It's yours again to send: no double-press pause on it.
             self.just_sent = None;
         }
@@ -1913,8 +2189,7 @@ impl Dent {
         if let Some(Item::Approval { id: ask, .. } | Item::Plan { id: ask, .. }) = self.open_ask(id)
         {
             if !reason.is_empty() {
-                self.composer
-                    .update(cx, |c, cx| c.set_value("", window, cx));
+                self.composer.update(cx, |c, cx| put(c, "", window, cx));
             }
             self.reply_to_ask(id, ask, Answer::Deny { message: reason }, cx);
         }
@@ -1971,10 +2246,14 @@ impl Dent {
             session: id.to_string(),
             id: msg.to_string(),
         });
-        if self.composer.read(cx).value().trim().is_empty() {
-            self.composer
-                .update(cx, |c, cx| c.set_value(text.to_string(), window, cx));
-        }
+        // Back in the composer, after anything already typed there.
+        let draft = self.composer.read(cx).value().trim().to_string();
+        let text = if draft.is_empty() {
+            text.to_string()
+        } else {
+            format!("{draft}\n\n{text}")
+        };
+        self.composer.update(cx, |c, cx| put(c, text, window, cx));
         cx.notify();
     }
 
@@ -2000,7 +2279,7 @@ impl Dent {
             // Attachment lines stay behind; the words come back.
             let words: Vec<&str> = text.lines().filter(|l| !l.starts_with("› ")).collect();
             self.composer.update(cx, |c, cx| {
-                c.set_value(words.join("\n"), window, cx);
+                put(c, words.join("\n"), window, cx);
                 c.focus(window, cx);
             });
         }
@@ -2087,10 +2366,9 @@ impl Dent {
             return false;
         };
         let mut paths = Vec::new();
-        let mut has_text = false;
         for entry in item.entries() {
             match entry {
-                ClipboardEntry::String(_) => has_text = true,
+                ClipboardEntry::String(_) => {}
                 ClipboardEntry::ExternalPaths(p) => paths.extend(p.paths().iter().cloned()),
                 ClipboardEntry::Image(img) => {
                     let ext = match img.format() {
@@ -2110,14 +2388,9 @@ impl Dent {
                 }
             }
         }
-        // Text pastes as text; only pictures and files attach.
-        if paths.is_empty()
-            || (has_text
-                && !item
-                    .entries()
-                    .iter()
-                    .any(|e| matches!(e, ClipboardEntry::Image(_))))
-        {
+        // Text pastes as text; pictures and files attach. Files copied in
+        // Finder come with their names as text too: they still attach.
+        if paths.is_empty() {
             return false;
         }
         self.attach_paths(&paths, window, cx);
@@ -2182,8 +2455,7 @@ impl Dent {
             id: crate::message_id(),
             text,
         });
-        self.aside_input
-            .update(cx, |i, cx| i.set_value("", window, cx));
+        self.aside_input.update(cx, |i, cx| put(i, "", window, cx));
         cx.notify();
     }
 
@@ -2319,6 +2591,7 @@ impl Dent {
                 }
                 PageEvent::PickCancel => self.picking = false,
                 PageEvent::Probe(text) => self.page_probe = Some(text),
+                PageEvent::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
                 PageEvent::External(url) => cx.open_url(&url),
             }
         }
@@ -2520,7 +2793,7 @@ impl Dent {
         self.attachments
             .push(Attachment::Error { file, message: msg });
         self.composer
-            .update(cx, |c, cx| c.set_value("Fix this error.", window, cx));
+            .update(cx, |c, cx| put(c, "Fix this error.", window, cx));
         self.send(window, cx);
     }
 
@@ -2533,7 +2806,7 @@ impl Dent {
     ) {
         self.commenting = Some((file, line));
         self.comment_input.update(cx, |c, cx| {
-            c.set_value("", window, cx);
+            put(c, "", window, cx);
             c.focus(window, cx);
         });
         cx.notify();
@@ -2548,7 +2821,8 @@ impl Dent {
             self.review.push(Attachment::Comment { file, line, text });
         }
         self.comment_input
-            .update(cx, |c, cx| c.set_value("", window, cx));
+            .update(cx, |c, cx| put(c, "", window, cx));
+        self.composer.update(cx, |c, cx| c.focus(window, cx));
         cx.notify();
     }
 
@@ -2559,7 +2833,8 @@ impl Dent {
         let n = self.review.len();
         self.attachments.extend(std::mem::take(&mut self.review));
         self.composer.update(cx, |c, cx| {
-            c.set_value(
+            put(
+                c,
                 if n == 1 {
                     "Please address this comment."
                 } else {
@@ -2624,7 +2899,7 @@ impl Dent {
         self.menu = None;
         self.palette = Some(0);
         self.search.update(cx, |s, cx| {
-            s.set_value("", window, cx);
+            put(s, "", window, cx);
             s.focus(window, cx);
         });
         cx.notify();
@@ -2696,7 +2971,7 @@ impl Dent {
             })
             .collect();
         hits.sort_by_key(|h| std::cmp::Reverse(h.0));
-        hits.into_iter().take(8).map(|(_, id)| id).collect()
+        hits.into_iter().take(40).map(|(_, id)| id).collect()
     }
 
     /// Where in a session the query was found, when it isn't in the title.
@@ -2742,15 +3017,14 @@ impl Dent {
         let query = self.search.read(cx).value().trim().to_string();
         self.palette = None;
         if let Some(id) = results.get(at).cloned() {
-            if self.session(&id).is_some_and(|s| s.closed) {
-                self.reopen(&id, cx);
-            }
+            // A closed session opens to read, as from the sidebar; Reopen
+            // is in its footer.
             self.select(Some(id), window, cx);
         } else if !query.is_empty() {
-            // Nothing matched: start a session with what was typed.
+            // The last row: start a session with what was typed.
             self.select(None, window, cx);
             self.starter.update(cx, |s, cx| {
-                s.set_value(query.clone(), window, cx);
+                put(s, query.clone(), window, cx);
                 s.focus(window, cx);
             });
             if !self.defaults.project_picked {

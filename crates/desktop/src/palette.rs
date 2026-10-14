@@ -11,12 +11,30 @@ use crate::theme::status_square;
 use crate::ui::{floating, icon, kbd, probe};
 
 impl Dent {
-    pub fn palette_view(&mut self, at: usize, cx: &mut Context<Self>) -> AnyElement {
+    pub fn palette_view(
+        &mut self,
+        at: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = self.t;
         let results = self.palette_results(cx);
         let query = self.search.read(cx).value().trim().to_string();
-        let at = at.min(results.len().saturating_sub(1));
         let n = results.len();
+        let at = at.min(if query.is_empty() {
+            n.saturating_sub(1)
+        } else {
+            n
+        });
+        let vw = window.viewport_size();
+        let width = (vw.width.as_f32() - 2. * space::S8).min(560.);
+        let top = (vw.height.as_f32() * 0.12).clamp(space::S4, 96.);
+        let max_h = (vw.height.as_f32() - top - space::S8).min(480.);
+        // The highlighted row stays in view as the arrows move it.
+        if self.palette_shown != Some(at) {
+            self.palette_shown = Some(at);
+            self.palette_scroll.scroll_to_item(at);
+        }
         let rows: Vec<AnyElement> = results
             .iter()
             .enumerate()
@@ -149,30 +167,14 @@ impl Dent {
             .child(
                 floating(&t)
                     .id("palette")
-                    .mt(px(96.))
-                    .w(px(560.))
-                    .max_h(px(480.))
+                    // Fits the window, short or narrow ones too.
+                    .mt(px(top))
+                    .w(px(width))
+                    .max_h(px(max_h))
                     .flex()
                     .flex_col()
                     .overflow_hidden()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    // Arrows move through results before the text field sees them.
-                    .capture_key_down(cx.listener(move |this, e: &KeyDownEvent, _, cx| {
-                        match e.keystroke.key.as_str() {
-                            "down" => {
-                                this.palette =
-                                    Some((this.palette.unwrap_or(0) + 1).min(n.saturating_sub(1)));
-                                cx.stop_propagation();
-                                cx.notify();
-                            }
-                            "up" => {
-                                this.palette = Some(this.palette.unwrap_or(0).saturating_sub(1));
-                                cx.stop_propagation();
-                                cx.notify();
-                            }
-                            _ => {}
-                        }
-                    }))
                     .child(
                         div()
                             .px(px(space::S4))
@@ -195,18 +197,29 @@ impl Dent {
                     .child(
                         div()
                             .id("results")
-                            .max_h(px(400.))
+                            .flex_1()
+                            .min_h_0()
                             .overflow_y_scroll()
+                            .track_scroll(&self.palette_scroll)
                             .py(px(space::S1))
                             .children(rows)
-                            .when(empty, |d| {
+                            // What you typed can always start a session, matches or not.
+                            .when(empty || !query.is_empty(), |d| {
+                                let on = at >= n;
                                 d.child(
                                     div()
+                                        .id("palette-start")
                                         .mx(px(space::S1))
                                         .px(px(space::S3))
                                         .h(px(size::ROW + 8.))
                                         .rounded(px(radius::MD))
-                                        .bg(t.selected())
+                                        .cursor_pointer()
+                                        .when(on, |d| d.bg(t.selected()))
+                                        .when(!on, |d| d.hover(|d| d.bg(t.hover())))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.palette = Some(n);
+                                            this.palette_open_selected(window, cx);
+                                        }))
                                         .flex()
                                         .items_center()
                                         .gap(px(space::S2))

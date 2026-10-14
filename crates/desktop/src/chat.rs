@@ -82,7 +82,9 @@ impl Dent {
             actions = actions.child(
                 close
                     .relative()
-                    .on_click(cx.listener(move |this, _, window, cx| this.close(&sid, window, cx)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.close(&sid, window, cx);
+                    }))
                     .child(probe(&self.probes, "close")),
             );
         }
@@ -1568,8 +1570,11 @@ impl Dent {
                                     if s.status == Status::Needs {
                                         match s.items.iter().rev().find_map(|i| match i {
                                             Item::Question { .. } => Some("↩ answer"),
-                                            Item::Approval { .. } | Item::Plan { .. } => {
-                                                Some("↩ queue · Deny sends what’s typed")
+                                            Item::Approval { .. } => {
+                                                Some("↩ deny, with what’s typed as the reason")
+                                            }
+                                            Item::Plan { .. } => {
+                                                Some("↩ ask for changes to the plan")
                                             }
                                             _ => None,
                                         }) {

@@ -3,6 +3,7 @@
 
 use std::rc::Rc;
 
+use gpui_kit::base::ElementExt;
 use gpui_kit::base::input::Textarea;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -313,7 +314,9 @@ impl Dent {
                     .border_l_1()
                     .border_color(t.hairline)
                     .child(header)
-                    .child(body),
+                    .child(body)
+                    // The viewer's text selects apart from the chat's.
+                    .text_selection_scope(crate::select::viewer_scope()),
             )
             // The left edge resizes the panel. A page stays clear of the
             // grip's inner half: a native web view would take the press.
