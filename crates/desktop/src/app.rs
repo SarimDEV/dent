@@ -470,6 +470,8 @@ pub struct Dent {
     pub menu_scroll: ScrollHandle,
     /// The menu row the keyboard is on.
     pub menu_ix: Option<usize>,
+    /// A picture open large.
+    pub lightbox: Option<crate::lightbox::Lightbox>,
     /// What's typed in a menu that searches (the project picker).
     pub menu_query: Entity<TextareaState>,
     pub project_mode: crate::picker::Mode,
@@ -938,6 +940,7 @@ impl Dent {
             menu_scroll: ScrollHandle::new(),
             menu_ix: None,
             menu_query,
+            lightbox: None,
             project_mode: crate::picker::Mode::Pick,
             project_busy: None,
             project_error: None,
@@ -1832,6 +1835,14 @@ impl Dent {
             return true;
         }
         let plain = !k.modifiers.modified();
+        // A picture open large: Space closes it (Esc is the Escape action's),
+        // and plain keys don't reach what's behind it.
+        if self.lightbox.is_some() && plain && k.key != "escape" {
+            if k.key == "space" {
+                self.close_lightbox(cx);
+            }
+            return true;
+        }
         let field = self.field_focused(window, cx);
         let in_composer = field == Some(Field::Composer);
         // The field a prompt is typed in, whichever page it's on.

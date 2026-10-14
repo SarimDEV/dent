@@ -157,6 +157,7 @@ Each motion has one name and one job.
 | **Confirm** | The done square pops from 60% on `spring.pop` | A tool, approval or turn finishing |
 | **Tick** | Changed digits roll in their own column, up or down with the value, `dur.slow`, rightmost first with `stagger` | Usage, event and blocked counts |
 | **Progress** | A hairline fill under a running tool line moves linearly towards 90% of its expected time and holds; a timer counts up | Running tools |
+| **Lift** | A picture zooms from where it sits to the middle of the window (`dur.slow` + 40 ms, `ease.out`) as the backdrop fades dark a little ahead of it; it zooms back in `dur.base`, the backdrop clearing first | Opening a picture large |
 | **Compact** | The serif title eases from 28 to 20 on `spring.snappy`; the live pill arrives with a 4 px slide | Reading history |
 | **Drift** | The working square's checker shifts one cell, stepped at `steps.pixel` | Working status |
 | **Press** | See States | Buttons, rows |

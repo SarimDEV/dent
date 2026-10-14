@@ -1024,18 +1024,21 @@ pub fn resolve(href: &str, base: Option<&std::path::Path>) -> String {
 fn image_block(src: &str, alt: &str, t: &Theme, key: &str, r: &mut R) -> AnyElement {
     let at = resolve(src, r.base.as_deref());
     if at.starts_with('/') && std::path::Path::new(&at).is_file() {
+        let path = std::path::PathBuf::from(&at);
         div()
             .id(SharedString::from(format!("{key}/img")))
             .flex()
             .flex_col()
             .gap(px(space::S1))
-            .child(
-                img(std::path::PathBuf::from(&at))
+            .child(crate::lightbox::picture(
+                SharedString::from(format!("{key}/pic")),
+                &path,
+                img(path.clone())
                     .max_w_full()
                     .max_h(px(520.))
                     .object_fit(ObjectFit::Contain)
                     .rounded(px(radius::MD)),
-            )
+            ))
             .when(!alt.is_empty(), |d| {
                 d.child(div().ty(LABEL).text_color(t.quiet).child(alt.to_string()))
             })

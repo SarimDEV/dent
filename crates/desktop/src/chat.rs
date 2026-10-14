@@ -1996,20 +1996,25 @@ impl Dent {
                     .bg(t.selected())
                     // A picture shows itself, small.
                     .child(match &a {
+                        // A picture shows itself, small, and opens large.
                         crate::app::Attachment::File { path }
                             if Kind::of(path) == Some(Kind::Image) =>
                         {
-                            div()
-                                .size(px(16.))
-                                .flex_none()
-                                .rounded(px(3.))
-                                .overflow_hidden()
-                                .child(
-                                    img(std::path::PathBuf::from(path))
-                                        .size_full()
-                                        .object_fit(ObjectFit::Cover),
-                                )
-                                .into_any_element()
+                            let at = std::path::PathBuf::from(path);
+                            crate::lightbox::picture(
+                                SharedString::from(format!("att-pic-{i}")),
+                                &at,
+                                div()
+                                    .size(px(16.))
+                                    .flex_none()
+                                    .rounded(px(3.))
+                                    .overflow_hidden()
+                                    .child(
+                                        img(at.clone()).size_full().object_fit(ObjectFit::Cover),
+                                    ),
+                            )
+                            .flex_none()
+                            .into_any_element()
                         }
                         _ => icon(a.icon(), 12., t.quiet).into_any_element(),
                     })
@@ -3292,7 +3297,9 @@ fn sent_attachment(line: &str, cwd: &str, t: &theme::Theme) -> Div {
             .flex_col()
             .items_start()
             .gap(px(space::S1))
-            .child(
+            .child(crate::lightbox::picture(
+                SharedString::from(format!("pic-{}", path.display())),
+                &path,
                 div()
                     .max_w(px(320.))
                     .max_h(px(220.))
@@ -3301,12 +3308,12 @@ fn sent_attachment(line: &str, cwd: &str, t: &theme::Theme) -> Div {
                     .border_color(t.hairline)
                     .overflow_hidden()
                     .child(
-                        img(path)
+                        img(path.clone())
                             .max_w(px(320.))
                             .max_h(px(220.))
                             .object_fit(ObjectFit::Contain),
                     ),
-            )
+            ))
             .child(div().ty(LABEL).text_color(t.quiet).child(name));
     }
     div()

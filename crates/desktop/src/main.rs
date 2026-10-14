@@ -15,6 +15,7 @@ mod data;
 mod diagram;
 mod ds;
 mod highlight;
+mod lightbox;
 mod live;
 mod markdown;
 mod math;
@@ -241,6 +242,7 @@ impl Render for Dent {
             .max(viewer::MIN_WIDTH);
         self.chat_w = w - side - if wants_panel { self.panel_w } else { 0. };
         self.sidebar_hovered = self.over_sidebar(window.mouse_position(), window);
+        self.take_lightbox_request(window);
         // A menu's field gives the keyboard back to the prompt however the
         // menu closed: a choice, Esc, a click away.
         if self.menu.is_none() && self.menu_query.read(cx).focus_handle(cx).is_focused(window) {
@@ -437,7 +439,7 @@ impl Render for Dent {
             .on_action(cx.listener(|this, _: &Escape, window, cx| {
                 // Esc backs out one thing at a time; with nothing open it moves
                 // to the inbox, where arrows move and Enter opens.
-                if this.context.take().is_some() {
+                if this.close_lightbox(cx) || this.context.take().is_some() {
                 } else if this.palette.is_some() {
                     this.close_palette(window, cx);
                 } else if this.project_back(window, cx)
@@ -583,6 +585,11 @@ impl Render for Dent {
             })
             .children(self.palette.map(|at| self.palette_view(at, window, cx)))
             .children(self.context_view(window, cx))
+            // Over everything, menus painted late included.
+            .children(
+                self.lightbox_view(window, cx)
+                    .map(|l| deferred(l).with_priority(2)),
+            )
     }
 }
 
