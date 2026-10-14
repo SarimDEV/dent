@@ -28,4 +28,4 @@ DENT_HOLDER_ORPHAN_MS=2000 \
 DENT_CLAUDE="$bin/dent-fake-claude" \
 DENT_WALK_PROJECT="$root/proj" \
 FAKE_CLAUDE_SPEED="${FAKE_CLAUDE_SPEED:-0.3}" \
-  "$bin/dent-desktop" --walk "$name" "$@"
+  "$bin/dent-desktop" --walk "$name" $([[ " $* " == *" --dark "* ]] || echo --light) "$@"

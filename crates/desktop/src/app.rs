@@ -217,6 +217,9 @@ pub struct Dent {
     pub composer: Entity<TextareaState>,
     pub starter: Entity<TextareaState>,
     pub comment_input: Entity<TextareaState>,
+    pub rename_input: Entity<TextareaState>,
+    /// The session whose name is being edited in the header.
+    pub renaming: Option<String>,
     pub drafts: HashMap<String, String>,
     pub defaults: Defaults,
     pub menu: Option<Menu>,
@@ -332,13 +335,13 @@ pub struct Dent {
 }
 
 impl Dent {
-    pub fn new(dark: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(dark: Option<bool>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Follows the Mac's appearance unless --dark asks for Carbon.
         let system_dark = matches!(
             window.appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         );
-        let t = if dark || system_dark {
+        let t = if dark.unwrap_or(system_dark) {
             Theme::carbon()
         } else {
             Theme::paper()
@@ -361,6 +364,34 @@ impl Dent {
                 .placeholder("Comment on this line")
                 .submit_on_enter(true)
         });
+        let rename_input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 1)
+                .placeholder("Session name")
+                .submit_on_enter(true)
+        });
+        cx.subscribe_in(
+            &rename_input,
+            window,
+            |this, input, ev: &InputEvent, window, cx| match ev {
+                InputEvent::PressEnter { .. } => {
+                    let title = input.read(cx).value().trim().to_string();
+                    if let Some(id) = this.renaming.take()
+                        && !title.is_empty()
+                    {
+                        this.live.send(Request::Rename { session: id, title });
+                    }
+                    this.composer.update(cx, |c, cx| c.focus(window, cx));
+                    cx.notify();
+                }
+                InputEvent::Blur => {
+                    this.renaming = None;
+                    cx.notify();
+                }
+                _ => {}
+            },
+        )
+        .detach();
         let search = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 1)
@@ -382,7 +413,7 @@ impl Dent {
         .detach();
         // Only edits redraw the window: watching the fields themselves would
         // redraw on every caret blink, even after they lose focus.
-        for input in [&composer, &starter, &comment_input, &search] {
+        for input in [&composer, &starter, &comment_input, &search, &rename_input] {
             crate::style_input(input, &t, cx);
         }
         cx.subscribe_in(
@@ -443,7 +474,7 @@ impl Dent {
             }
         })
         .detach();
-        if !dark {
+        if dark.is_none() {
             cx.observe_window_appearance(window, |this, window, cx| {
                 let dark = matches!(
                     window.appearance(),
@@ -529,6 +560,8 @@ impl Dent {
             composer,
             starter,
             comment_input,
+            rename_input: rename_input.clone(),
+            renaming: None,
             drafts: HashMap::new(),
             defaults: Defaults {
                 project: prefs.project.clone(),

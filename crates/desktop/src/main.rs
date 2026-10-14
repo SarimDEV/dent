@@ -329,7 +329,9 @@ impl Render for Dent {
                 } else if this.menu.take().is_some() {
                 } else if this.picking {
                     this.toggle_pick(cx);
-                } else if this.commenting.take().is_some() {
+                } else if this.renaming.is_some() || this.commenting.is_some() {
+                    this.renaming = None;
+                    this.commenting = None;
                 } else {
                     window.focus(&this.inbox_focus, cx);
                 }
@@ -451,7 +453,8 @@ struct Opts {
     background: bool,
     walk: Option<String>,
     shots: Option<PathBuf>,
-    dark: bool,
+    /// Forced theme; `None` follows the system.
+    dark: Option<bool>,
     size: (f32, f32),
 }
 
@@ -460,13 +463,14 @@ fn opts() -> Opts {
         background: false,
         walk: None,
         shots: None,
-        dark: false,
+        dark: None,
         size: (1440., 860.),
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--dark" => o.dark = true,
+            "--dark" => o.dark = Some(true),
+            "--light" => o.dark = Some(false),
             "--reduce-motion" => REDUCE_MOTION.store(true, Ordering::Relaxed),
             // Open behind whatever you're using, without taking focus.
             "--background" => o.background = true,

@@ -35,6 +35,13 @@ pub fn model_name(models: &[Model], id: Option<&str>) -> String {
         .iter()
         .find(|m| m.id == id)
         .map(|m| m.name.trim_end_matches(" (recommended)").to_string())
+        .map(|n| {
+            if n == "Default" {
+                "Default model".to_string()
+            } else {
+                n
+            }
+        })
         .unwrap_or_else(|| id.to_string())
 }
 

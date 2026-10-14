@@ -136,16 +136,49 @@ impl Dent {
                     .items_center()
                     .gap(px(space::S3))
                     // The title wins the space; the metadata gives way first.
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .max_w(relative(0.7))
-                            .truncate()
-                            .ty(DISPLAY_COMPACT)
-                            .text_color(t.ink)
-                            .child(s.title.clone()),
-                    )
-                    .child(meta),
+                    .map(|d| {
+                        if self.renaming.as_deref() == Some(s.id.as_str()) {
+                            d.child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .ty(DISPLAY_COMPACT)
+                                    .text_color(t.ink)
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .child(Textarea::new(&self.rename_input)),
+                            )
+                        } else {
+                            let (sid, title) = (s.id.clone(), s.title.clone());
+                            d.child(
+                                div()
+                                    .id("title")
+                                    .flex_shrink_0()
+                                    .max_w(relative(0.7))
+                                    .truncate()
+                                    .ty(DISPLAY_COMPACT)
+                                    .text_color(t.ink)
+                                    // Double-click to rename; a single press still moves the window.
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                                            if e.click_count == 2 {
+                                                cx.stop_propagation();
+                                                this.renaming = Some(sid.clone());
+                                                this.rename_input.update(cx, |i, cx| {
+                                                    i.set_value(title.clone(), window, cx);
+                                                    i.focus(window, cx);
+                                                });
+                                                cx.notify();
+                                            }
+                                        }),
+                                    )
+                                    .child(s.title.clone()),
+                            )
+                            .child(meta)
+                        }
+                    }),
             )
             .child(actions)
     }
@@ -164,6 +197,19 @@ impl Dent {
                 let body = match s.items.get(ix) {
                     Some(item) => this.item(&s, ix, item, window, cx),
                     None => this.working_line(&s),
+                };
+                // While "Edit from here" asks, what would go fades.
+                let going = this.rewinding.as_ref().and_then(|(sid, msg)| {
+                    (*sid == s.id).then(|| {
+                        s.items
+                            .iter()
+                            .position(|i| matches!(i, Item::User { id, .. } if id == msg))
+                    })?
+                });
+                let body = if going.is_some_and(|at| ix > at) {
+                    div().opacity(0.35).child(body).into_any_element()
+                } else {
+                    body
                 };
                 // The list sizes each row to its full width, so the column is
                 // centred inside it, in line with the composer.
@@ -360,7 +406,7 @@ impl Dent {
                             d.child(div().ty(UI).text_color(t.quiet).child(if busy {
                                 "Stop it first, then go back"
                             } else {
-                                "Go back to before this message? It returns to the box."
+                                "Go back to before this message? It goes back into the reply box."
                             }))
                             .child(
                                 div()
@@ -385,8 +431,8 @@ impl Dent {
                                         d.child(
                                             button(
                                                 SharedString::from(format!("rewind-chat-{ix}")),
-                                                "Rewind chat",
-                                                !has_files,
+                                                "Go back",
+                                                true,
                                                 &t,
                                             )
                                             .relative()
@@ -405,8 +451,8 @@ impl Dent {
                                                         SharedString::from(format!(
                                                             "rewind-files-{ix}"
                                                         )),
-                                                        "Rewind chat and files",
-                                                        true,
+                                                        "Go back and undo file changes",
+                                                        false,
                                                         &t,
                                                     )
                                                     .relative()
@@ -1048,15 +1094,18 @@ impl Dent {
                                 false,
                                 cx,
                             ))
-                            .when(self.chat_w >= 620., |d| {
-                                d.child(self.chip(
-                                    Menu::SessionEffort,
-                                    "gauge",
-                                    effort_label(s.effort.as_deref()),
-                                    s.effort.is_none(),
-                                    cx,
-                                ))
-                            })
+                            // Short of room, the chip keeps its icon.
+                            .child(self.chip(
+                                Menu::SessionEffort,
+                                "gauge",
+                                if self.chat_w >= 620. {
+                                    effort_label(s.effort.as_deref())
+                                } else {
+                                    ""
+                                },
+                                false,
+                                cx,
+                            ))
                             .child(div().flex_1())
                             .when_some(
                                 s.context.filter(|_| self.chat_w >= 680.),
@@ -1149,13 +1198,14 @@ impl Dent {
                             cx.notify();
                         }))
                         .child(icon("list-checks", 13., t.quiet))
-                        .child(
-                            div()
-                                .ty(LABEL)
-                                .text_color(t.quiet)
-                                .child(format!("Plan {done} of {}", s.todos.len())),
-                        )
-                        .when_some(now, |d, now| {
+                        .child(div().ty(LABEL).text_color(t.quiet).child({
+                            let total = s.todos.len();
+                            match s.todos.iter().position(|(st, ..)| st == "in_progress") {
+                                Some(i) if !open => format!("Step {} of {total}", i + 1),
+                                _ => format!("Plan · {done} of {total} done"),
+                            }
+                        }))
+                        .when_some(now.filter(|_| !open), |d, now| {
                             d.child(
                                 div()
                                     .flex_1()
@@ -1174,17 +1224,42 @@ impl Dent {
                 )
                 .when(open, |d| {
                     d.children(s.todos.iter().map(|(st, what, _)| {
-                        let (mark, ink) = match st.as_str() {
-                            "completed" => ("✓", t.faint),
-                            "in_progress" => ("▸", t.ink),
-                            _ => ("○", t.quiet),
+                        let ink = match st.as_str() {
+                            "completed" => t.faint,
+                            "in_progress" => t.ink,
+                            _ => t.quiet,
+                        };
+                        // Done is a check; the current step a filled dot; the
+                        // rest an outline.
+                        let mark = match st.as_str() {
+                            "completed" => icon("check", 12., t.faint).into_any_element(),
+                            "in_progress" => div()
+                                .size(px(7.))
+                                .rounded_full()
+                                .bg(t.ink)
+                                .into_any_element(),
+                            _ => div()
+                                .size(px(7.))
+                                .rounded_full()
+                                .border_1()
+                                .border_color(t.quiet)
+                                .into_any_element(),
                         };
                         div()
                             .flex()
                             .gap(px(space::S2))
                             .ty(UI)
                             .text_color(ink)
-                            .child(div().w(px(14.)).flex_none().child(mark))
+                            .child(
+                                div()
+                                    .w(px(14.))
+                                    .h(px(20.))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(mark),
+                            )
                             .child(div().flex_1().min_w_0().child(what.clone()))
                     }))
                 })
@@ -1234,7 +1309,7 @@ impl Dent {
                                 .flex_none()
                                 .ty(CODE)
                                 .text_color(t.faint)
-                                .child(c.hint.clone()),
+                                .child(c.hint.trim_matches(['<', '>', '[', ']']).to_string()),
                         )
                     })
                     .child(
@@ -1302,7 +1377,7 @@ impl Dent {
                 Menu::Effort,
                 "gauge",
                 effort_label(d.effort.as_deref()),
-                d.effort.is_none(),
+                false,
                 cx,
             ));
         let start = div()

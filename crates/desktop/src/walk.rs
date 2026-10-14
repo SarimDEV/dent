@@ -438,6 +438,28 @@ fn checks() -> Vec<(f32, Act)> {
             ),
         ),
         (0.1, Type(Field::Composer, "")),
+        (
+            0.1,
+            Call(|d, w, cx| {
+                d.renaming = d.selected.clone();
+                d.rename_input.update(cx, |i, cx| {
+                    i.set_value("Greeting test", w, cx);
+                    i.focus(w, cx);
+                });
+                cx.notify();
+            }),
+        ),
+        (0.2, Key("enter")),
+        (
+            0.1,
+            Until(
+                "renaming a session sticks",
+                |d, _| {
+                    current(d).is_some_and(|s| s.title == "Greeting test") && d.renaming.is_none()
+                },
+                5.,
+            ),
+        ),
     ]);
     v.extend(new_session("please run it"));
     v.extend([
