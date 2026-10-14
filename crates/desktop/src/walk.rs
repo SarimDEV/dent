@@ -128,6 +128,14 @@ impl Walk {
             "real" => real(),
             "sweep" => sweep(),
             "markdown" => markdown(),
+            "typing" => {
+                let mut v = vec![(
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                )];
+                v.extend(typing());
+                v
+            }
             _ => checks(),
         };
         Self {
@@ -764,6 +772,7 @@ fn checks() -> Vec<(f32, Act)> {
             15.,
         ),
     )];
+    v.extend(typing());
     v.extend([
         (0.3, Key("cmd-n")),
         (
@@ -1719,6 +1728,46 @@ fn rich_reply() -> Vec<(f32, Act)> {
 }
 
 /// Only the rich reply, for working on how Markdown renders.
+/// The text box's own keys, quick to run alone.
+fn typing() -> Vec<(f32, Act)> {
+    vec![
+        (
+            0.2,
+            Call(|d, w, cx| {
+                d.starter.update(cx, |s, cx| {
+                    s.set_value("", w, cx);
+                    s.focus(w, cx);
+                })
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "the new-session box has the keyboard",
+                |d, cx| d.starter.read(cx).value().is_empty(),
+                1.,
+            ),
+        ),
+        (0.1, Keys("a")),
+        (0.1, Key("alt-enter")),
+        (0.1, Keys("b")),
+        (0.1, Key("shift-enter")),
+        (0.1, Keys("c")),
+        (
+            0.1,
+            Until(
+                "⌥ Return and Shift-Return start a new line, not a session",
+                |d, cx| d.starter.read(cx).value() == "a\nb\nc",
+                1.,
+            ),
+        ),
+        (
+            0.1,
+            Call(|d, w, cx| d.starter.update(cx, |s, cx| s.set_value("", w, cx))),
+        ),
+    ]
+}
+
 fn markdown() -> Vec<(f32, Act)> {
     let mut v: Vec<(f32, Act)> = vec![(
         0.,

@@ -65,6 +65,15 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-;", SideChat, None),
         KeyBinding::new("alt-cmd-up", SelectPrev, None),
         KeyBinding::new("alt-cmd-down", SelectNext, None),
+        // A new line in any text box: ⌥ Return as well as Shift-Return.
+        KeyBinding::new(
+            "alt-enter",
+            gpui_kit::base::input::Enter {
+                secondary: false,
+                shift: true,
+            },
+            Some("Input"),
+        ),
         // With the inbox focused (Esc from an empty composer), it works like mail.
         KeyBinding::new("up", InboxUp, Some("Inbox")),
         KeyBinding::new("down", InboxDown, Some("Inbox")),
@@ -439,7 +448,7 @@ impl Dent {
             &aside_input,
             window,
             |this, _, ev: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = ev {
+                if let InputEvent::PressEnter { shift: false, .. } = ev {
                     this.ask_aside(window, cx);
                 }
             },
@@ -455,7 +464,7 @@ impl Dent {
             &rename_input,
             window,
             |this, input, ev: &InputEvent, window, cx| match ev {
-                InputEvent::PressEnter { .. } => {
+                InputEvent::PressEnter { shift: false, .. } => {
                     let title = input.read(cx).value().trim().to_string();
                     if let Some(id) = this.renaming.take()
                         && !title.is_empty()
@@ -483,7 +492,9 @@ impl Dent {
             &search,
             window,
             |this, _, ev: &InputEvent, window, cx| match ev {
-                InputEvent::PressEnter { .. } => this.palette_open_selected(window, cx),
+                InputEvent::PressEnter { shift: false, .. } => {
+                    this.palette_open_selected(window, cx)
+                }
                 InputEvent::Change if this.palette.is_some() => {
                     this.palette = Some(0);
                     cx.notify();
@@ -508,7 +519,7 @@ impl Dent {
             &composer,
             window,
             |this, _, ev: &InputEvent, window, cx| match ev {
-                InputEvent::PressEnter { .. } => this.send(window, cx),
+                InputEvent::PressEnter { shift: false, .. } => this.send(window, cx),
                 InputEvent::Change => cx.notify(),
                 _ => {}
             },
@@ -518,7 +529,7 @@ impl Dent {
             &starter,
             window,
             |this, s, ev: &InputEvent, window, cx| match ev {
-                InputEvent::PressEnter { .. } => this.start(window, cx),
+                InputEvent::PressEnter { shift: false, .. } => this.start(window, cx),
                 InputEvent::Change => {
                     cx.notify();
                     // The project follows what you type, a beat behind, until you pick one.
@@ -546,7 +557,7 @@ impl Dent {
             &comment_input,
             window,
             |this, _, ev: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = ev {
+                if let InputEvent::PressEnter { shift: false, .. } = ev {
                     this.add_comment(window, cx);
                 }
             },
