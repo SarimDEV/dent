@@ -8,6 +8,8 @@ use std::time::Duration;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use crate::ui::Press;
+
 use crate::app::Dent;
 use crate::data::Kind;
 use crate::ds::{LABEL, Typed, UI, radius, size, space};
@@ -213,7 +215,7 @@ impl Render for PopOut {
                             .cursor_pointer()
                             .when(picking, |d| d.bg(t.ink).text_color(t.surface))
                             .when(!picking, |d| d.text_color(t.ink).hover(|d| d.bg(t.hover())))
-                            .on_click(cx.listener(|this, _, _, cx| {
+                            .on_press(cx.listener(|this, _, _, cx| {
                                 this.picking = !this.picking;
                                 if let Some(p) = &this.preview {
                                     p.borrow().pick(this.picking);
@@ -228,7 +230,7 @@ impl Render for PopOut {
                             .child(div().ty(UI).child("Point")),
                     )
                     .child(
-                        icon_button("pop-reload", "rotate-cw", &t).on_click(cx.listener(
+                        icon_button("pop-reload", "rotate-cw", &t).on_press(cx.listener(
                             |this, _, _, cx| {
                                 if let Some(p) = &this.preview {
                                     p.borrow_mut().reload();
@@ -238,7 +240,7 @@ impl Render for PopOut {
                         )),
                     )
                     .child(
-                        button("pop-back", "Back to the viewer", false, &t).on_click(cx.listener(
+                        button("pop-back", "Back to the viewer", false, &t).on_press(cx.listener(
                             move |this, _, _, cx| {
                                 this.dent.update(cx, |d, cx| d.bring_back(art, cx));
                             },

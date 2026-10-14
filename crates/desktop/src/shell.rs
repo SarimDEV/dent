@@ -28,6 +28,8 @@ use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use crate::ui::Press;
+
 use crate::app::Dent;
 use crate::ds::{CODE, Typed, UI, size, space};
 use crate::theme::{self, Theme};
@@ -513,7 +515,7 @@ impl Dent {
                 .child("Your own shell, in this session's folder. The agent never sees it.")
                 .child(
                     button("shell-start", "Open terminal", true, &t)
-                        .on_click(cx.listener(|this, _, window, cx| this.open_shell(window, cx))),
+                        .on_press(cx.listener(|this, _, window, cx| this.open_shell(window, cx))),
                 )
                 .into_any_element();
         };
@@ -742,7 +744,7 @@ impl Dent {
                                 .flex_1()
                                 .child("The shell ended. Return starts a new one."),
                         )
-                        .child(button("shell-restart", "New shell", false, &t).on_click(
+                        .child(button("shell-restart", "New shell", false, &t).on_press(
                             cx.listener(|this, _, window, cx| this.open_shell(window, cx)),
                         )),
                 )

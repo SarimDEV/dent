@@ -4,6 +4,8 @@
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use crate::ui::Press;
+
 use crate::app::Dent;
 use crate::ds::{Typed, radius, size, space};
 use crate::theme::Theme;
@@ -102,6 +104,8 @@ impl Dent {
         Some(
             div()
                 .id("context-scrim")
+                // Takes the press that dismisses it: nothing under it is clicked.
+                .occlude()
                 .absolute()
                 .top_0()
                 .left_0()
@@ -152,7 +156,7 @@ impl Dent {
                                         .text_color(t.ink)
                                         .hover(|d| d.bg(t.hover()))
                                         .active(|d| d.bg(t.press()))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                        .on_press(cx.listener(move |this, _, window, cx| {
                                             this.run_context(what.clone(), window, cx)
                                         }))
                                         .child(label)

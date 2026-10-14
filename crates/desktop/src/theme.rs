@@ -136,9 +136,12 @@ impl Theme {
     pub fn selected(&self) -> Hsla {
         self.ink.opacity(self.a(0.10, 0.12))
     }
-    /// Selected text, in replies and in inputs alike.
+    /// Selected text, in replies and in inputs alike: a calm blue, as the
+    /// Mac tints a selection in the window in use (a grey one reads as a
+    /// window in the background), light enough that grey text stays legible
+    /// on it.
     pub fn selection(&self) -> Hsla {
-        self.ink.opacity(self.a(0.16, 0.28))
+        hsla(212. / 360., 0.62, 0.56, self.a(0.22, 0.30))
     }
     pub fn wash(&self, signal: Hsla) -> Hsla {
         signal.opacity(self.a(0.07, 0.12))

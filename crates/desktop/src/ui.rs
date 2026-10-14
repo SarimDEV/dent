@@ -35,6 +35,23 @@ pub trait Control: InteractiveElement + Sized {
 }
 impl<T: InteractiveElement> Control for T {}
 
+/// What a click does, it does once per click: the second click of a
+/// double-click is ignored, because by then what was under the pointer may
+/// have changed (an answered card gives way to the next one, Stop becomes
+/// Send, a closed session's header to the next session's). Every control
+/// uses this; only steppers, meant to be clicked again and again, keep
+/// `on_click`.
+pub trait Press: StatefulInteractiveElement + Sized {
+    fn on_press(self, f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click(move |e, window, cx| {
+            if e.click_count() <= 1 {
+                f(e, window, cx)
+            }
+        })
+    }
+}
+impl<T: StatefulInteractiveElement> Press for T {}
+
 pub fn icon(name: &str, px_size: f32, color: Hsla) -> Svg {
     svg()
         .path(format!("icons/{name}.svg"))

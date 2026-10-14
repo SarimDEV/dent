@@ -4,6 +4,8 @@
 use gpui_kit::base::input::Textarea;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+
+use crate::ui::Press;
 use std::rc::Rc;
 
 use crate::ui::RevealOnHover;
@@ -51,7 +53,7 @@ impl Dent {
             let sid = id.clone();
             actions = actions.child(
                 button("resume", "Resume", false, &t)
-                    .on_click(cx.listener(move |this, _, _, cx| this.resume(&sid, cx))),
+                    .on_press(cx.listener(move |this, _, _, cx| this.resume(&sid, cx))),
             );
         }
         {
@@ -71,7 +73,7 @@ impl Dent {
             };
             actions = actions.child(
                 fork.relative()
-                    .on_click(cx.listener(move |this, _, _, cx| this.fork(&sid, None, cx)))
+                    .on_press(cx.listener(move |this, _, _, cx| this.fork(&sid, None, cx)))
                     .child(probe(&self.probes, "fork")),
             );
         }
@@ -87,7 +89,7 @@ impl Dent {
             let close = if Self::can_close(s) {
                 close
                     .tooltip(tip("Close", Some("⌘ W"), t))
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .on_press(cx.listener(move |this, _, window, cx| {
                         this.close(&sid, window, cx);
                     }))
             } else {
@@ -104,7 +106,7 @@ impl Dent {
             actions = actions.child(
                 icon_button("terminal", "square-terminal", &t)
                     .relative()
-                    .on_click(cx.listener(|this, _, window, cx| this.open_shell(window, cx)))
+                    .on_press(cx.listener(|this, _, window, cx| this.open_shell(window, cx)))
                     .tooltip(tip("Your terminal", Some("⌘ 3"), t))
                     .child(probe(&self.probes, "terminal")),
             );
@@ -113,7 +115,7 @@ impl Dent {
             actions = actions.child(
                 icon_button("side-chat", "message-circle-question-mark", &t)
                     .relative()
-                    .on_click(cx.listener(|this, _, window, cx| this.open_side_chat(window, cx)))
+                    .on_press(cx.listener(|this, _, window, cx| this.open_side_chat(window, cx)))
                     .tooltip(tip("Ask on the side", Some("⌘ ;"), t))
                     .child(probe(&self.probes, "side-chat")),
             );
@@ -154,7 +156,7 @@ impl Dent {
                 d.pl(px(80.)).child(
                     icon_button("show-sidebar", "panel-left-open", &t)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(|this, _, _, cx| {
+                        .on_press(cx.listener(|this, _, _, cx| {
                             this.sidebar_forced = true;
                             this.panel_open = false;
                             cx.notify();
@@ -240,26 +242,20 @@ impl Dent {
     pub fn panel_toggle(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = self.t;
         let open = self.panel_open;
-        icon_button(
-            "panel",
-            if open {
-                "panel-right-close"
-            } else {
-                "panel-right-open"
-            },
-            &t,
-        )
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.panel_open = !this.panel_open;
-            this.end_pick();
-            cx.notify();
-        }))
-        .tooltip(tip(
-            if open { "Hide viewer" } else { "Show viewer" },
-            Some("⌘ \\"),
-            t,
-        ))
+        // One glyph; shown, it reads as pressed, as the Mac's do.
+        icon_button("panel", "panel-right", &t)
+            .when(open, |d| d.bg(t.selected()))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_press(cx.listener(|this, _, _, cx| {
+                this.panel_open = !this.panel_open;
+                this.end_pick();
+                cx.notify();
+            }))
+            .tooltip(tip(
+                if open { "Hide viewer" } else { "Show viewer" },
+                Some("⌘ \\"),
+                t,
+            ))
     }
 
     /// A tool call opened up: the command or edit, what came back, and the
@@ -353,7 +349,7 @@ impl Dent {
                                 "Open file",
                                 &t,
                             )
-                            .on_click(cx.listener(move |this, _, _, cx| this.open_file(&p, cx))),
+                            .on_press(cx.listener(move |this, _, _, cx| this.open_file(&p, cx))),
                         )
                     })
                     .when_some(in_diff.filter(|_| d.edits), |c, rel| {
@@ -363,7 +359,7 @@ impl Dent {
                                 "Review changes",
                                 &t,
                             )
-                            .on_click(
+                            .on_press(
                                 cx.listener(move |this, _, _, cx| this.review(&sid, &rel, cx)),
                             ),
                         )
@@ -424,6 +420,7 @@ impl Dent {
                             .hover(|d| d.bg(t.hover()))
                             .active(|d| d.bg(t.press()))
                             .tooltip(tip(label, Some(keys), t))
+                            // A stepper: each click of a quick run steps.
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.jump_to_mine(up, cx);
                             }))
@@ -458,7 +455,8 @@ impl Dent {
                 };
                 // Each message keeps its place in the chat's selection,
                 // drawn or not.
-                let _place = crate::select::item(crate::select::area(&format!("chat/{}", s.id)), ix);
+                let _place =
+                    crate::select::item(crate::select::area(&format!("chat/{}", s.id)), ix);
                 let body = match s.items.get(ix) {
                     Some(item) => this.item(&s, ix, item, window, cx),
                     None => this.working_line(&s),
@@ -562,7 +560,7 @@ impl Dent {
                         .cursor_pointer()
                         .hover(|d| d.text_color(t.ink))
                         .active(|d| d.opacity(0.82))
-                        .on_click(cx.listener(|this, _, _, cx| {
+                        .on_press(cx.listener(|this, _, _, cx| {
                             this.transcript.set_follow_mode(FollowMode::Tail);
                             this.transcript.scroll_to_end();
                             cx.notify();
@@ -595,7 +593,7 @@ impl Dent {
                         .gap(px(space::S3))
                         .child(icon("archive", 15., t.quiet))
                         .child(div().flex_1().ty(UI).text_color(t.quiet).child("Closed. It stays searchable, and reopening puts it back in your inbox."))
-                        .child(button("reopen", "Reopen", true, &t).on_click(cx.listener(move |this, _, window, cx| {
+                        .child(button("reopen", "Reopen", true, &t).on_press(cx.listener(move |this, _, window, cx| {
                             this.reopen(&id, cx);
                             this.composer.update(cx, |c, cx| c.focus(window, cx));
                         }))),
@@ -740,7 +738,7 @@ impl Dent {
                                             .text_color(t.quiet)
                                             .cursor_pointer()
                                             .hover(|d| d.text_color(t.ink))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                            .on_press(cx.listener(move |this, _, _, cx| {
                                                 if !this.expanded.remove(&key) {
                                                     this.expanded.insert(key.clone());
                                                 }
@@ -780,7 +778,7 @@ impl Dent {
                                                 &t,
                                             )
                                             .relative()
-                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                            .on_press(cx.listener(move |this, _, window, cx| {
                                                 this.rewind(&m2, true, window, cx)
                                             }))
                                             .child(
@@ -795,7 +793,7 @@ impl Dent {
                                             "Cancel",
                                             &t,
                                         )
-                                        .on_click(
+                                        .on_press(
                                             cx.listener(|this, _, _, cx| {
                                                 this.rewinding = None;
                                                 cx.notify();
@@ -811,7 +809,7 @@ impl Dent {
                                                 &t,
                                             )
                                             .relative()
-                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                            .on_press(cx.listener(move |this, _, window, cx| {
                                                 this.rewind(&m1, false, window, cx)
                                             }))
                                             .child(
@@ -837,7 +835,7 @@ impl Dent {
                                             div()
                                                 .px(px(space::S2))
                                                 .ty(LABEL)
-                                                .text_color(t.faint)
+                                                .text_color(t.quiet)
                                                 .child(crate::data::clock(*at)),
                                         )
                                     })
@@ -848,7 +846,7 @@ impl Dent {
                                             &t,
                                         )
                                         .relative()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                        .on_press(cx.listener(move |this, _, _, cx| {
                                             this.fork(&fsid, Some(fmsg.clone()), cx)
                                         }))
                                         .child(probe(&self.probes, format!("fork-from-{ix}"))),
@@ -860,7 +858,7 @@ impl Dent {
                                             &t,
                                         )
                                         .relative()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                        .on_press(cx.listener(move |this, _, _, cx| {
                                             this.rewinding = Some((sid.clone(), m3.clone()));
                                             cx.notify();
                                         }))
@@ -949,7 +947,7 @@ impl Dent {
                             .ty(CODE)
                             .text_color(t.quiet)
                             .when(more, |d| {
-                                d.cursor_pointer().hover(|d| d.text_color(t.ink)).on_click(
+                                d.cursor_pointer().hover(|d| d.text_color(t.ink)).on_press(
                                     cx.listener(move |this, _, _, cx| {
                                         let set = if lone {
                                             &mut this.open_calls
@@ -1064,7 +1062,7 @@ impl Dent {
                                             .when(l.detail.is_some(), |d| {
                                                 d.cursor_pointer()
                                                     .hover(|d| d.text_color(t.ink))
-                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                    .on_press(cx.listener(move |this, _, _, cx| {
                                                         if !this.open_calls.remove(&call) {
                                                             this.open_calls.insert(call.clone());
                                                         }
@@ -1121,7 +1119,7 @@ impl Dent {
                             .text_color(t.quiet)
                             .cursor_pointer()
                             .hover(|d| d.text_color(t.ink))
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_press(cx.listener(move |this, _, _, cx| {
                                 if !this.open_calls.remove(&key) {
                                     this.open_calls.insert(key.clone());
                                 }
@@ -1215,7 +1213,7 @@ impl Dent {
                             .child(
                                 button("allow", "Allow once", true, &t)
                                     .relative()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                    .on_press(cx.listener(move |this, _, _, cx| {
                                         this.allow(&a, Some(&k1), false, cx)
                                     }))
                                     .child(probe(&self.probes, "allow")),
@@ -1223,7 +1221,7 @@ impl Dent {
                             .child(
                                 button("allow-session", "Allow for this session", false, &t)
                                     .relative()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                    .on_press(cx.listener(move |this, _, _, cx| {
                                         this.allow(&a2, Some(&k2), true, cx)
                                     }))
                                     .child(probe(&self.probes, "allow-session")),
@@ -1231,7 +1229,7 @@ impl Dent {
                             .child(
                                 button("deny", "Deny", false, &t)
                                     .relative()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                    .on_press(cx.listener(move |this, _, window, cx| {
                                         this.deny(&d, Some(&k3), window, cx)
                                     }))
                                     .child(probe(&self.probes, "deny")),
@@ -1274,7 +1272,7 @@ impl Dent {
                             .child(
                                 button("plan-go", "Start building", true, &t)
                                     .relative()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                    .on_press(cx.listener(move |this, _, _, cx| {
                                         this.allow(&a, Some(&k1), false, cx)
                                     }))
                                     .child(probe(&self.probes, "plan-go")),
@@ -1282,7 +1280,7 @@ impl Dent {
                             .child(
                                 button("plan-keep", "Keep planning", false, &t)
                                     .relative()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                    .on_press(cx.listener(move |this, _, window, cx| {
                                         this.deny(&d, Some(&k3), window, cx)
                                     }))
                                     .child(probe(&self.probes, "plan-keep")),
@@ -1340,7 +1338,7 @@ impl Dent {
                                         .bg(if on { t.selected() } else { t.raised })
                                         .cursor_pointer()
                                         .hover(|d| d.border_color(t.ink.opacity(0.3)))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                        .on_press(cx.listener(move |this, _, _, cx| {
                                             this.answer(&sid, Some(&k), qi, o2.clone(), cx)
                                         }))
                                         .flex()
@@ -1414,7 +1412,7 @@ impl Dent {
                         d.child(
                             ghost(SharedString::from(format!("retry-{ix}")), "Try again", &t)
                                 .relative()
-                                .on_click(cx.listener(move |this, _, _, cx| this.retry(&sid, cx)))
+                                .on_press(cx.listener(move |this, _, _, cx| this.retry(&sid, cx)))
                                 .child(probe(&self.probes, format!("retry-{ix}"))),
                         )
                     },
@@ -1435,7 +1433,7 @@ impl Dent {
                     .cursor_pointer()
                     .hover(|d| d.text_color(t.ink))
                     // Opens Changes at the file this turn changed.
-                    .on_click(cx.listener(move |this, _, _, cx| this.review(&sid, &first, cx)))
+                    .on_press(cx.listener(move |this, _, _, cx| this.review(&sid, &first, cx)))
                     .child(icon("git-compare", 13., t.quiet))
                     // The files are named just above, by the steps
                     // that changed them; this sums the turn up.
@@ -1490,7 +1488,7 @@ impl Dent {
                             .child(
                                 ghost(SharedString::from(format!("unqueue-{ix}")), "Edit", &t)
                                     .relative()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                    .on_press(cx.listener(move |this, _, window, cx| {
                                         this.unqueue(&sid, &msg, &back, window, cx)
                                     }))
                                     .child(probe(&self.probes, format!("unqueue-{ix}"))),
@@ -1498,7 +1496,7 @@ impl Dent {
                             .child(
                                 ghost(SharedString::from(format!("steer-{ix}")), "Send now", &t)
                                     .relative()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                    .on_press(cx.listener(move |this, _, _, cx| {
                                         this.steer_queued(&sid2, &msg2, &now, cx)
                                     }))
                                     .child(probe(&self.probes, format!("steer-{ix}"))),
@@ -1538,13 +1536,17 @@ impl Dent {
             .filter(|(a, r)| a + r > 0);
         let review_button = review.map(|p| {
             let (sid, path) = (s.id.clone(), p.to_string());
-            ghost(SharedString::from(format!("review-{art}-{version}")), "Review", &t)
-                .relative()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.review(&sid, &path, cx);
-                }))
-                .child(probe(&self.probes, format!("review-{art}-{version}")))
+            ghost(
+                SharedString::from(format!("review-{art}-{version}")),
+                "Review",
+                &t,
+            )
+            .relative()
+            .on_press(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.review(&sid, &path, cx);
+            }))
+            .child(probe(&self.probes, format!("review-{art}-{version}")))
         });
         if old {
             // Older versions fold to one line; the latest keeps the card.
@@ -1558,7 +1560,7 @@ impl Dent {
                 .text_color(t.quiet)
                 .cursor_pointer()
                 .hover(|d| d.text_color(t.ink))
-                .on_click(cx.listener(move |this, _, _, cx| this.open_art(art, Some(version), cx)))
+                .on_press(cx.listener(move |this, _, _, cx| this.open_art(art, Some(version), cx)))
                 .child(div().text_color(t.faint).child("├"))
                 .child(format!("Wrote {file} v{version}"))
                 .child(
@@ -1605,7 +1607,7 @@ impl Dent {
             .bg(t.raised)
             .cursor_pointer()
             .hover(|d| d.border_color(t.ink.opacity(0.3)))
-            .on_click(cx.listener(move |this, _, _, cx| this.open_art(art, Some(version), cx)))
+            .on_press(cx.listener(move |this, _, _, cx| this.open_art(art, Some(version), cx)))
             .child(
                 div()
                     .size(px(40.))
@@ -1703,7 +1705,7 @@ impl Dent {
                         .active(|d| d.bg(t.press()))
                 })
                 .cursor_pointer()
-                .on_click(cx.listener(move |this, _, window, cx| this.stop(&id, window, cx)))
+                .on_press(cx.listener(move |this, _, window, cx| this.stop(&id, window, cx)))
                 .tooltip(tip("Stop", Some("⌘ ."), t))
                 .child(
                     div()
@@ -1732,7 +1734,7 @@ impl Dent {
                     .items_center()
                     .justify_center()
                     .when(ready == Ready::Yes, |d| {
-                        d.on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
+                        d.on_press(cx.listener(|this, _, window, cx| this.send(window, cx)))
                             .tooltip(tip("Send", Some("↩"), t))
                     }),
                 ready,
@@ -1845,7 +1847,7 @@ impl Dent {
                             .rounded(px(3.))
                             .cursor_pointer()
                             .hover(|d| d.bg(t.press()))
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_press(cx.listener(move |this, _, _, cx| {
                                 if i < this.attachments.len() {
                                     this.attachments.remove(i);
                                 }
@@ -1968,7 +1970,7 @@ impl Dent {
                         .items_center()
                         .gap(px(space::S2))
                         .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| {
+                        .on_press(cx.listener(|this, _, _, cx| {
                             this.plan_open = !this.plan_open;
                             cx.notify();
                         }))
@@ -2067,7 +2069,7 @@ impl Dent {
                     .cursor_pointer()
                     .when(i == at, |d| d.bg(t.selected()))
                     .hover(|d| d.bg(t.hover()))
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .on_press(cx.listener(move |this, _, window, cx| {
                         if mention {
                             this.complete_mention(&name, window, cx);
                         } else {
@@ -2163,14 +2165,14 @@ impl Dent {
                 false,
                 cx,
             ));
-        let ready = if self.creating {
+        let ready = if self.creating() {
             Ready::No("Starting the session…")
         } else if empty {
             Ready::No("Describe a task first")
         } else {
             Ready::Yes
         };
-        let label = if self.creating {
+        let label = if self.creating() {
             "Starting…"
         } else {
             "Start"
@@ -2190,7 +2192,7 @@ impl Dent {
                 .ty(UI)
                 .font_weight(FontWeight::MEDIUM)
                 .when(ready == Ready::Yes, |d| {
-                    d.on_click(cx.listener(|this, _, window, cx| this.start(window, cx)))
+                    d.on_press(cx.listener(|this, _, window, cx| this.start(window, cx)))
                 }),
             ready,
             &t,
@@ -2303,7 +2305,7 @@ impl Dent {
                         d.cursor_pointer()
                             .hover(|d| d.bg(t.hover()))
                             .active(|d| d.bg(t.press()))
-                            .on_click(cx.listener(move |this, _, _, cx| this.adopt(&id, cx)))
+                            .on_press(cx.listener(move |this, _, _, cx| this.adopt(&id, cx)))
                     })
                     // Running in a terminal: shown, so you know where it
                     // went, but it can't be picked up until it's closed there.
@@ -2413,7 +2415,7 @@ impl Dent {
                     .when(open, |d| d.bg(t.selected()))
                     .hover(|d| d.bg(t.hover()))
                     .active(|d| d.bg(t.press()))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_press(cx.listener(move |this, _, _, cx| {
                         this.menu = if this.menu == Some(which) {
                             None
                         } else {
@@ -2796,7 +2798,7 @@ impl Dent {
                                     .text_color(t.quiet)
                                     .child(e.name.clone()),
                             )
-                            .on_click(cx.listener(move |this, _, window, cx| {
+                            .on_press(cx.listener(move |this, _, window, cx| {
                                 this.choose_entry(&e, window, cx)
                             }))
                             .into_any_element()
@@ -2816,7 +2818,7 @@ impl Dent {
                             cx.notify();
                         }
                     }))
-                    .on_click(
+                    .on_press(
                         cx.listener(move |this, _, window, cx| this.choose_entry(&e, window, cx)),
                     )
                     .into_any_element(),
@@ -3129,7 +3131,7 @@ impl Dent {
                         .text_color(t.quiet)
                         .cursor_pointer()
                         .hover(|d| d.text_color(t.ink))
-                        .on_click(fold)
+                        .on_press(fold)
                         .child(if open {
                             "Show less"
                         } else {
@@ -3245,7 +3247,9 @@ pub fn code_lines(id: String, text: String, diff: bool, ink: Hsla, t: &crate::th
 fn turn_counts(s: &Session, ix: usize, paths: &[String]) -> (usize, usize) {
     let later = s.items[ix + 1..].iter().any(|i| match i {
         Item::Changed { paths: p } => p.iter().any(|x| paths.contains(x)),
-        Item::Made { review: Some(p), .. } => paths.contains(p),
+        Item::Made {
+            review: Some(p), ..
+        } => paths.contains(p),
         _ => false,
     });
     if later {

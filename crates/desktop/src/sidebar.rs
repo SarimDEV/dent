@@ -4,6 +4,8 @@
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use crate::ui::Press;
+
 use crate::ui::RevealOnHover;
 
 use crate::anim;
@@ -128,7 +130,7 @@ impl Dent {
                     .child(
                         icon_button("search", "search", &t)
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(
+                            .on_press(
                                 cx.listener(|this, _, window, cx| this.open_palette(window, cx)),
                             )
                             .tooltip(tip("Search sessions", Some("⌘ K"), t)),
@@ -138,7 +140,7 @@ impl Dent {
                             .relative()
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .when(new_selected, |d| d.bg(t.selected()))
-                            .on_click(
+                            .on_press(
                                 cx.listener(|this, _, window, cx| this.select(None, window, cx)),
                             )
                             .tooltip(tip("New session", Some("⌘ N"), t))
@@ -229,7 +231,7 @@ impl Dent {
                     .cursor_pointer()
                     .hover(|s| s.bg(t.hover()))
                     .active(|s| s.bg(t.press()))
-                    .on_click(cx.listener(|this, _, _, cx| {
+                    .on_press(cx.listener(|this, _, _, cx| {
                         this.show_closed = !this.show_closed;
                         cx.notify();
                     }))
@@ -364,7 +366,7 @@ impl Dent {
                     .cursor_pointer()
                     .hover(|d| d.bg(t.hover()))
                     .active(|d| d.bg(t.press()))
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .on_press(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.close(&close_id, window, cx);
                     }))
@@ -384,7 +386,7 @@ impl Dent {
                     .cursor_pointer()
                     .hover(|d| d.bg(t.hover()))
                     .active(|d| d.bg(t.press()))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_press(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.reopen(&reopen_id, cx);
                     }))
@@ -442,7 +444,7 @@ impl Dent {
             .when(!selected, |d| {
                 d.hover(|d| d.bg(t.hover())).active(|d| d.bg(t.press()))
             })
-            .on_click(
+            .on_press(
                 cx.listener(move |this, _, window, cx| this.select(Some(id.clone()), window, cx)),
             )
             .on_mouse_down(MouseButton::Right, {
@@ -595,7 +597,7 @@ impl Dent {
                         .rounded(px(radius::SM))
                         .cursor_pointer()
                         .hover(|d| d.bg(t.hover()))
-                        .on_click(
+                        .on_press(
                             cx.listener(|this, _, window, cx| this.next_needs_you(window, cx)),
                         )
                         .child(status_square_at(Status::Needs, &t, 1.))

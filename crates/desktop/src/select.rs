@@ -127,6 +127,7 @@ struct Region {
     area: Area,
     win: WindowId,
     bounds: Bounds<Pixels>,
+    hitbox: Hitbox,
     scroll: Rc<dyn Fn(f32)>,
 }
 
@@ -323,7 +324,12 @@ pub fn layer() -> impl IntoElement {
             });
             window.on_mouse_event(|e: &MouseMoveEvent, phase, window, cx| {
                 if phase.bubble() {
-                    drag_to(e.position, e.pressed_button == Some(MouseButton::Left), window, cx);
+                    drag_to(
+                        e.position,
+                        e.pressed_button == Some(MouseButton::Left),
+                        window,
+                        cx,
+                    );
                 }
             });
             window.on_mouse_event(|e: &MouseUpEvent, phase, window, cx| {
@@ -344,11 +350,13 @@ pub fn region(area: Area, scroll: impl Fn(f32) + 'static) -> impl IntoElement {
     canvas(
         move |bounds, window, _| {
             let win = window.window_handle().window_id();
+            let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
             with(|s| {
                 s.regions.push(Region {
                     area,
                     win,
                     bounds,
+                    hitbox,
                     scroll: scroll.clone(),
                 })
             });
@@ -398,12 +406,13 @@ fn hit(p: Point<Pixels>, win: WindowId, window: &Window) -> Option<(Spot, Option
 }
 
 /// The area whose bounds hold `p`.
-fn region_at(p: Point<Pixels>, win: WindowId) -> Option<Area> {
+fn region_at(p: Point<Pixels>, win: WindowId, window: &Window) -> Option<Area> {
     with(|s| {
         s.regions
             .iter()
             .rev()
-            .find(|r| r.win == win && r.bounds.contains(&p))
+            // Not under a menu or anything else that covers it.
+            .find(|r| r.win == win && r.bounds.contains(&p) && r.hitbox.is_hovered(window))
             .map(|r| r.area)
     })
 }
@@ -423,9 +432,8 @@ fn nearest(area: Area, p: Point<Pixels>, win: WindowId) -> Option<Spot> {
             None => p,
         };
         let mine = || s.placed.iter().filter(|x| x.area_is(area, win));
-        let at = |x: &Placed, q: Point<Pixels>| {
-            x.layout.index_for_position(q).unwrap_or_else(|c| c)
-        };
+        let at =
+            |x: &Placed, q: Point<Pixels>| x.layout.index_for_position(q).unwrap_or_else(|c| c);
         // Pieces across whose height `p` falls: the nearest across.
         let level = mine()
             .filter(|x| x.bounds.top() <= p.y && p.y < x.bounds.bottom())
@@ -442,10 +450,7 @@ fn nearest(area: Area, p: Point<Pixels>, win: WindowId) -> Option<Spot> {
                 d(a).partial_cmp(&d(b)).unwrap_or(std::cmp::Ordering::Equal)
             });
         if let Some(x) = level {
-            let q = point(
-                p.x.clamp(x.bounds.left(), x.bounds.right()),
-                p.y,
-            );
+            let q = point(p.x.clamp(x.bounds.left(), x.bounds.right()), p.y);
             return Some(Spot {
                 key: x.key.clone(),
                 at: at(x, q),
@@ -524,7 +529,7 @@ fn press(e: &MouseDownEvent, window: &mut Window, _cx: &mut App) {
     let (spot, link) = match target {
         Some(t) => t,
         None => {
-            let Some(area) = region_at(e.position, win) else {
+            let Some(area) = region_at(e.position, win, window) else {
                 return;
             };
             let Some(spot) = nearest(area, e.position, win) else {
@@ -568,7 +573,9 @@ fn press(e: &MouseDownEvent, window: &mut Window, _cx: &mut App) {
             win,
             down: e.position,
             at: e.position,
-            link: link.filter(|_| e.click_count == 1).map(|l| (spot.key.clone(), l)),
+            link: link
+                .filter(|_| e.click_count == 1)
+                .map(|l| (spot.key.clone(), l)),
             moved: e.click_count > 1,
             ticking: false,
         });
@@ -697,7 +704,10 @@ fn tick(window: &mut Window) {
         window.on_next_frame(|window, _| {
             let go = with(|s| {
                 let d = s.drag.as_ref()?;
-                let r = s.regions.iter().find(|r| r.area == d.area && r.win == d.win)?;
+                let r = s
+                    .regions
+                    .iter()
+                    .find(|r| r.area == d.area && r.win == d.win)?;
                 let over = if d.at.y < r.bounds.top() {
                     (d.at.y - r.bounds.top()).as_f32()
                 } else if d.at.y >= r.bounds.bottom() {
@@ -814,8 +824,7 @@ fn live(s: &State, area: Area, path: &[u32]) -> bool {
     match (path.first(), path.get(1)) {
         (Some(ix), Some(n)) => {
             s.counts.get(&(area, *ix)).is_none_or(|c| n < c)
-                && (path.len() <= 2
-                    || s.slots.get(&(area, *ix)).is_some_and(|v| v.contains(n)))
+                && (path.len() <= 2 || s.slots.get(&(area, *ix)).is_some_and(|v| v.contains(n)))
         }
         _ => true,
     }
@@ -851,8 +860,14 @@ pub fn copied() -> String {
             let first = start.key.path.first().copied().unwrap_or(0);
             let last = end.key.path.first().copied().unwrap_or(0);
             for ix in first..=last.min((*len as u32).saturating_sub(1)) {
-                let inside = Key { area, path: vec![ix] } >= start.key
-                    && Key { area, path: vec![ix + 1] } <= end.key;
+                let inside = Key {
+                    area,
+                    path: vec![ix],
+                } >= start.key
+                    && Key {
+                        area,
+                        path: vec![ix + 1],
+                    } <= end.key;
                 let partly_drawn = !s.counts.contains_key(&(area, ix))
                     || s.slots.get(&(area, ix)).is_some_and(|v| !v.is_empty());
                 if inside
@@ -865,7 +880,12 @@ pub fn copied() -> String {
             }
         }
         out.sort_by(|a, b| a.0.cmp(&b.0));
-        Some(out.into_iter().map(|(_, t)| t).collect::<Vec<_>>().join("\n"))
+        Some(
+            out.into_iter()
+                .map(|(_, t)| t)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
     });
     joined.map(|j| shape(&j)).unwrap_or_default()
 }

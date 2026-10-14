@@ -477,6 +477,9 @@ pub struct Dent {
     pub rewinding: Option<(String, String)>,
     /// A new session is on its way.
     pub creating: bool,
+    /// When the session being made was asked for: a daemon that never
+    /// answers doesn't hold Start, Fork and the rest off for good.
+    pub creating_at: Instant,
     /// Length of the streaming reply last drawn, by session.
     partial_len: HashMap<String, usize>,
     /// Send is inert for a moment after sending, so a double press can't stop.
@@ -930,6 +933,7 @@ impl Dent {
             changes: HashMap::new(),
             picks: HashMap::new(),
             creating: false,
+            creating_at: Instant::now(),
             rewinding: None,
             commands: HashMap::new(),
             files: HashMap::new(),
@@ -1335,7 +1339,14 @@ impl Dent {
         {
             self.fetch_commands(&new);
         }
-        if let Some(new) = id.clone() {
+        if let Some(new) = id.clone()
+            // Stepping through sessions quickly asks once per session, not
+            // once per visit while the last answer is still on its way.
+            && !self
+                .waiting
+                .values()
+                .any(|w| matches!(w, Waiting::Files(f) if *f == new))
+        {
             // Files change as the agent works: look again on each visit.
             let n = self.live.send(Request::Files {
                 session: new.clone(),
@@ -1428,7 +1439,9 @@ impl Dent {
         {
             self.undo_closes.clear();
         }
-        self.undo_closes.push(id.to_string());
+        if !self.undo_closes.iter().any(|c| c == id) {
+            self.undo_closes.push(id.to_string());
+        }
         let n = self.undo_closes.len();
         self.toast = Some(Toast {
             text: if n == 1 {
@@ -2010,7 +2023,7 @@ impl Dent {
     /// Carry on a terminal session here; it opens once it's in.
     /// The row says "Opening…" until it's in, and stays if it fails.
     pub fn adopt(&mut self, agent_session: &str, cx: &mut Context<Self>) {
-        if self.creating {
+        if self.creating() {
             return;
         }
         let n = self.live.send(Request::Adopt {
@@ -2018,6 +2031,7 @@ impl Dent {
         });
         self.waiting.insert(n, Waiting::Create);
         self.creating = true;
+        self.creating_at = Instant::now();
         self.adopting = Some(agent_session.to_string());
         cx.notify();
     }
@@ -2444,7 +2458,7 @@ impl Dent {
     /// Start a new session from the starter box with the chosen defaults.
     pub fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.starter.read(cx).value().trim().to_string();
-        if text.is_empty() || self.creating {
+        if text.is_empty() || self.creating() {
             return;
         }
         let d = self.defaults.clone();
@@ -2473,6 +2487,7 @@ impl Dent {
         });
         self.waiting.insert(n, Waiting::Create);
         self.creating = true;
+        self.creating_at = Instant::now();
         self.starter.update(cx, |c, cx| put(c, "", window, cx));
         self.defaults.project_picked = false;
         cx.notify();
@@ -2483,6 +2498,11 @@ impl Dent {
         if !matches!(s.status, Status::Working | Status::Needs) {
             return;
         }
+        // Twice before it has stopped would bring the queued text back twice.
+        if self.pressed_again(format!("stop/{id}")) {
+            return;
+        }
+        let Some(s) = self.session(id) else { return };
         // Stopping drops messages still waiting their turn: their text comes
         // back to the composer rather than vanishing.
         let waiting: Vec<String> = s
@@ -2513,6 +2533,11 @@ impl Dent {
     /// After a stop: carry on from where it was.
     /// For actions that send something: true when `key` was pressed in the
     /// last few seconds, so a double-click doesn't do it twice.
+    /// A new session is on its way (asked for in the last 30 seconds).
+    pub fn creating(&self) -> bool {
+        self.creating && self.creating_at.elapsed() < Duration::from_secs(30)
+    }
+
     pub fn pressed_again(&mut self, key: String) -> bool {
         let again = self
             .pressed
@@ -2564,6 +2589,10 @@ impl Dent {
     }
 
     fn reply_to_ask(&mut self, session: &str, ask: String, answer: Answer, cx: &mut Context<Self>) {
+        // One answer per ask: the card stays until the agent hears it.
+        if self.pressed_again(format!("ask/{ask}")) {
+            return;
+        }
         self.live.send(Request::Answer {
             session: session.to_string(),
             id: ask,
@@ -2610,6 +2639,9 @@ impl Dent {
         if let Some(Item::Approval { id: ask, .. } | Item::Plan { id: ask, .. }) =
             self.ask_for(id, ask)
         {
+            if self.pressed.contains_key(&format!("ask/{ask}")) {
+                return;
+            }
             if !reason.is_empty() {
                 self.composer.update(cx, |c, cx| put(c, "", window, cx));
             }
@@ -2671,6 +2703,9 @@ impl Dent {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.pressed_again(format!("queued/{msg}")) {
+            return;
+        }
         self.live.send(Request::Unqueue {
             session: id.to_string(),
             id: msg.to_string(),
@@ -2692,6 +2727,9 @@ impl Dent {
         let Some(id) = self.selected.clone() else {
             return;
         };
+        if self.pressed_again(format!("rewind/{msg}")) {
+            return;
+        }
         let text = self.session(&id).and_then(|s| {
             s.items.iter().find_map(|i| match i {
                 Item::User { id: m, text, .. } if m == msg => Some(text.clone()),
@@ -2714,10 +2752,14 @@ impl Dent {
                 } else {
                     std::path::Path::new(&cwd).join(p)
                 };
-                if full.exists() {
-                    self.attachments.push(Attachment::File {
-                        path: full.display().to_string(),
-                    });
+                let path = full.display().to_string();
+                if full.exists()
+                    && !self
+                        .attachments
+                        .iter()
+                        .any(|a| matches!(a, Attachment::File { path: p } if *p == path))
+                {
+                    self.attachments.push(Attachment::File { path });
                 }
             }
             let words: Vec<&str> = text.lines().filter(|l| !l.starts_with("› ")).collect();
@@ -2733,10 +2775,11 @@ impl Dent {
     /// just before message `before`. It opens when the daemon has made it.
     pub fn fork(&mut self, session: &str, before: Option<String>, cx: &mut Context<Self>) {
         // One fork per press, however fast the presses come.
-        if self.creating {
+        if self.creating() {
             return;
         }
         self.creating = true;
+        self.creating_at = Instant::now();
         let n = self.live.send(Request::Fork {
             session: session.to_string(),
             before,
@@ -2790,6 +2833,9 @@ impl Dent {
 
     /// A waiting message goes into the running turn now instead.
     pub fn steer_queued(&mut self, id: &str, msg: &str, text: &str, cx: &mut Context<Self>) {
+        if self.pressed_again(format!("queued/{msg}")) {
+            return;
+        }
         self.live.send(Request::Unqueue {
             session: id.to_string(),
             id: msg.to_string(),
@@ -2930,6 +2976,12 @@ impl Dent {
 
     /// A side question and its answer become a session of their own.
     pub fn promote_aside(&mut self, session: &str, id: &str, cx: &mut Context<Self>) {
+        // One new session at a time, like Start and Fork.
+        if self.creating() {
+            return;
+        }
+        self.creating = true;
+        self.creating_at = Instant::now();
         let n = self.live.send(Request::PromoteAside {
             session: session.to_string(),
             id: id.to_string(),
@@ -3378,6 +3430,9 @@ impl Dent {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.pressed_again(format!("fix/{art}/{v}")) {
+            return;
+        }
         let Some(msg) = self.errors.get(&(art, v)).and_then(|e| e.first()).cloned() else {
             return;
         };
@@ -3611,6 +3666,14 @@ impl Dent {
             }
         }
         None
+    }
+
+    /// Open session `id` from the palette: the one clicked, wherever the
+    /// results have moved since.
+    pub fn palette_open(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        self.select(Some(id), window, cx);
+        cx.notify();
     }
 
     pub fn palette_open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {

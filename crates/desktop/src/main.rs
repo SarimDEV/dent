@@ -39,6 +39,8 @@ use gpui_kit::base::input::{InputEditorStyle, TextareaState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use crate::ui::Press;
+
 use app::{
     CloseSession, Dent, Escape, InboxClose, InboxDown, InboxOpen, InboxUp, NewSession,
     NextNeedsYou, Search, SelectNext, SelectPrev, ShowChanges, ShowFirst, ShowTerminal, SideChat,
@@ -263,6 +265,9 @@ impl Render for Dent {
                     })
                     .child(
                         ui::floating(&t)
+                            .id("toast")
+                            // Over the sidebar: a press here is the toast's alone.
+                            .occlude()
                             .rounded(px(radius::LG))
                             .pl(px(space::S3))
                             .pr(px(space::S1))
@@ -302,7 +307,7 @@ impl Render for Dent {
                                 ui::button("toast-action", label, false, &t)
                                     .relative()
                                     .border_0()
-                                    .on_click(cx.listener(|this, _, window, cx| {
+                                    .on_press(cx.listener(|this, _, window, cx| {
                                         this.toast_action(window, cx)
                                     }))
                                     .child(ui::probe(&self.probes, "toast-action")),
@@ -402,8 +407,22 @@ impl Render for Dent {
                 }
             }))
             // Esc reaches the app before a text field swallows it.
-            .capture_key_down(cx.listener(|_, e: &KeyDownEvent, window, cx| {
+            .capture_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
                 let k = &e.keystroke;
+                // A held shortcut acts once: holding ⌘W doesn't close every
+                // session. Moving and deleting still repeat, and so does
+                // ⌘Z in a text field.
+                if e.is_held
+                    && (k.modifiers.platform || k.modifiers.control)
+                    && !matches!(
+                        k.key.as_str(),
+                        "left" | "right" | "up" | "down" | "backspace" | "delete"
+                    )
+                    && !(k.key == "z" && this.field_focused(window, cx).is_some())
+                {
+                    cx.stop_propagation();
+                    return;
+                }
                 if k.key == "escape" && !k.modifiers.modified() {
                     window.dispatch_action(Box::new(Escape), cx);
                     cx.stop_propagation();
@@ -534,6 +553,8 @@ impl Render for Dent {
                 d.child(
                     div()
                         .id("menu-scrim")
+                        // Takes the press that dismisses it: nothing under it is clicked.
+                        .occlude()
                         .absolute()
                         .top_0()
                         .left_0()

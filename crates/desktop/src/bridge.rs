@@ -330,13 +330,10 @@ pub fn session(
                 let mut rest = Vec::new();
                 for p in paths {
                     let id = art_id(&v.id, p);
-                    let card = items[turn..]
-                        .iter_mut()
-                        .rev()
-                        .find_map(|i| match i {
-                            Item::Made { art, review, .. } if *art == id => Some(review),
-                            _ => None,
-                        });
+                    let card = items[turn..].iter_mut().rev().find_map(|i| match i {
+                        Item::Made { art, review, .. } if *art == id => Some(review),
+                        _ => None,
+                    });
                     match card {
                         Some(review) => *review = Some(relative(cwd, p)),
                         None => rest.push(relative(cwd, p)),

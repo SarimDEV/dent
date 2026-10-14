@@ -5,6 +5,8 @@ use gpui_kit::base::input::Textarea;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use crate::ui::Press;
+
 use crate::app::Dent;
 use crate::ds::{DISPLAY_COMPACT, LABEL, Typed, UI, radius, size, space};
 use crate::theme::status_square;
@@ -57,10 +59,8 @@ impl Dent {
                         .when(!on, |d| {
                             d.hover(|d| d.bg(t.hover())).active(|d| d.bg(t.press()))
                         })
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.palette = Some(i);
-                            let _ = &id;
-                            this.palette_open_selected(window, cx);
+                        .on_press(cx.listener(move |this, _, window, cx| {
+                            this.palette_open(id.clone(), window, cx);
                         }))
                         .child(div().h(px(20.)).flex().items_center().child(if s.closed {
                             icon("archive", 12., t.faint).into_any_element()
@@ -152,6 +152,8 @@ impl Dent {
         let empty = rows.is_empty();
         div()
             .id("palette-scrim")
+            // Takes the press that dismisses it: nothing under it is clicked.
+            .occlude()
             .absolute()
             .top_0()
             .left_0()
@@ -224,7 +226,7 @@ impl Dent {
                                         .cursor_pointer()
                                         .when(on, |d| d.bg(t.selected()))
                                         .when(!on, |d| d.hover(|d| d.bg(t.hover())))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                        .on_press(cx.listener(move |this, _, window, cx| {
                                             this.palette = Some(n);
                                             this.palette_open_selected(window, cx);
                                         }))

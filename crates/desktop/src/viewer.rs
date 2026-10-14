@@ -7,6 +7,8 @@ use gpui_kit::base::input::Textarea;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use crate::ui::Press;
+
 use crate::ui::RevealOnHover;
 
 use crate::app::{Dent, Tab, Viewport};
@@ -292,7 +294,7 @@ impl Dent {
                                     .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                         cx.stop_propagation()
                                     })
-                                    .on_click(
+                                    .on_press(
                                         cx.listener(move |this, _, _, cx| this.show_tab(which, cx)),
                                     )
                                     .when_some(path, |d, p| d.tooltip(crate::ui::tip_owned(p, t)))
@@ -328,7 +330,7 @@ impl Dent {
                                                 .on_mouse_down(MouseButton::Left, |_, _, cx| {
                                                     cx.stop_propagation()
                                                 })
-                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                .on_press(cx.listener(move |this, _, _, cx| {
                                                     cx.stop_propagation();
                                                     this.close_tab(a, cx);
                                                 }))
@@ -477,7 +479,7 @@ impl Dent {
                 })
                 .when(!enabled, |d| d.cursor_not_allowed())
                 .when_some(to, |d, to| {
-                    d.on_click(cx.listener(move |this, _, _, cx| {
+                    d.on_press(cx.listener(move |this, _, _, cx| {
                         this.open_art(id, Some(to), cx);
                     }))
                 })
@@ -615,7 +617,7 @@ impl Dent {
                     }
                 })
                 .when(ok, |d| {
-                    d.on_click(cx.listener(move |this, _, _, cx| {
+                    d.on_press(cx.listener(move |this, _, _, cx| {
                         this.viewport = vp;
                         cx.notify();
                     }))
@@ -734,7 +736,7 @@ impl Dent {
                         if down {
                             crate::ui::off(d.text_color(t.ink), "The dev server stopped", &t)
                         } else {
-                            d.on_click(cx.listener(|this, _, _, cx| this.toggle_pick(cx)))
+                            d.on_press(cx.listener(|this, _, _, cx| this.toggle_pick(cx)))
                         }
                     })
                     .child(icon(
@@ -748,7 +750,7 @@ impl Dent {
             .child(
                 icon_button("reload", "rotate-cw", &t)
                     .on_hover(Self::hint("Reload", cx))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_press(cx.listener(move |this, _, _, cx| {
                         // A stopped server is checked again rather than
                         // loaded into an error page.
                         if down {
@@ -767,7 +769,7 @@ impl Dent {
                     icon_button("pop-out", "picture-in-picture-2", &t)
                         .relative()
                         .on_hover(Self::hint("Open in its own window", cx))
-                        .on_click(
+                        .on_press(
                             cx.listener(move |this, _, window, cx| this.pop_out(id, window, cx)),
                         )
                         .child(probe(&self.probes, "pop-out")),
@@ -789,7 +791,7 @@ impl Dent {
                 });
                 icon_button("external", "external-link", &t)
                     .on_hover(Self::hint("Open in your browser", cx))
-                    .on_click(move |_, _, cx| match (&on_disk, &file) {
+                    .on_press(move |_, _, cx| match (&on_disk, &file) {
                         (Some(path), _) => cx.open_url(&format!("file://{}", path.display())),
                         (None, Some((bytes, name))) => {
                             let path =
@@ -895,7 +897,7 @@ impl Dent {
                 .child(
                     ghost("latest", format!("Back to v{latest}"), &t)
                         .relative()
-                        .on_click(cx.listener(move |this, _, _, cx| this.open_art(id, None, cx)))
+                        .on_press(cx.listener(move |this, _, _, cx| this.open_art(id, None, cx)))
                         .child(probe(&self.probes, "latest")),
                 )
         });
@@ -955,7 +957,7 @@ impl Dent {
                 .child(
                     button("fix", "Ask to fix", true, &t)
                         .relative()
-                        .on_click(cx.listener(move |this, _, window, cx| {
+                        .on_press(cx.listener(move |this, _, window, cx| {
                             this.ask_to_fix(id, v, window, cx)
                         }))
                         .child(probe(&self.probes, "fix")),
@@ -1079,7 +1081,7 @@ impl Dent {
             .child(
                 button("server-retry", "Check again", false, &t)
                     .relative()
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_press(cx.listener(move |this, _, _, cx| {
                         let up = crate::app::server_answers(url);
                         this.server_seen(id, up, cx);
                     }))
@@ -1132,7 +1134,7 @@ impl Dent {
                         div()
                             .flex()
                             .gap(px(space::S2))
-                            .child(ghost("show-popout", "Show window", &t).on_click(
+                            .child(ghost("show-popout", "Show window", &t).on_press(
                                 cx.listener(move |this, _, window, cx| {
                                     this.pop_out(id, window, cx)
                                 }),
@@ -1140,7 +1142,7 @@ impl Dent {
                             .child(
                                 button("bring-back", "Bring it back", false, &t)
                                     .relative()
-                                    .on_click(
+                                    .on_press(
                                         cx.listener(move |this, _, _, cx| this.bring_back(id, cx)),
                                     )
                                     .child(probe(&self.probes, "bring-back")),
@@ -1170,7 +1172,7 @@ impl Dent {
                     .child("The page opens in its own window here."),
             )
             .child(
-                ghost("raise-page", "Show the page", &t).on_click(cx.listener(|this, _, _, _| {
+                ghost("raise-page", "Show the page", &t).on_press(cx.listener(|this, _, _, _| {
                     if let Some(p) = &this.preview {
                         p.borrow().raise();
                     }
@@ -1202,11 +1204,7 @@ impl Dent {
             let _place = crate::select::item(area, 0);
             markdown::render(blocks.as_slice(), &t, true, &mut r)
         };
-        let scroll = self
-            .doc_scrolls
-            .entry(id)
-            .or_default()
-            .clone();
+        let scroll = self.doc_scrolls.entry(id).or_default().clone();
         let by = scroll.clone();
         div()
             .flex_1()
@@ -1234,7 +1232,7 @@ impl Dent {
                         let bytes = a.versions[v - 1].clone();
                         ghost("copy-doc", if copied { "Copied" } else { "Copy text" }, &t)
                             .tooltip(tip("Copy the file's text", None, t))
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_press(cx.listener(move |this, _, _, cx| {
                                 let src = String::from_utf8_lossy(&bytes).into_owned();
                                 cx.write_to_clipboard(ClipboardItem::new_string(src));
                                 this.copied_at = Some(std::time::Instant::now());
@@ -1244,7 +1242,7 @@ impl Dent {
                     .when_some(art_file(&a), |d, full| {
                         d.child(
                             ghost("open-doc", "Open", &t)
-                                .on_click(move |_, _, cx| {
+                                .on_press(move |_, _, cx| {
                                     cx.open_url(&format!("file://{}", full.display()))
                                 })
                                 .tooltip(tip("Open in its app", None, t)),
@@ -1293,7 +1291,7 @@ impl Dent {
                    cx: &mut Context<Self>| {
             ghost(key, label, &t)
                 .when(on, |d| d.bg(t.selected()).text_color(t.ink))
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_press(cx.listener(move |this, _, _, cx| {
                     this.image_actual = value;
                     cx.notify();
                 }))
@@ -1410,7 +1408,7 @@ impl Dent {
                     .cursor_pointer()
                     .when(i == selected, |d| d.bg(t.selected()))
                     .when(i != selected, |d| d.hover(|d| d.bg(t.hover())))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_press(cx.listener(move |this, _, _, cx| {
                         this.diff_file.insert(sid.clone(), i);
                         this.commenting = None;
                         cx.notify();
@@ -1540,7 +1538,7 @@ impl Dent {
                 .child(
                     button("send-review", "Send to agent", true, &t)
                         .relative()
-                        .on_click(cx.listener(|this, _, window, cx| this.send_review(window, cx)))
+                        .on_press(cx.listener(|this, _, window, cx| this.send_review(window, cx)))
                         .child(probe(&self.probes, "send-review")),
                 )
         });
@@ -1576,7 +1574,7 @@ impl Dent {
                                         d.ml(px(-space::S2))
                                             .child(
                                                 icon_button("prev-file", "chevron-left", &t)
-                                                    .on_click(cx.listener(
+                                                    .on_press(cx.listener(
                                                         move |this, _, _, cx| {
                                                             this.diff_file.insert(
                                                                 a.clone(),
@@ -1588,7 +1586,7 @@ impl Dent {
                                             )
                                             .child(
                                                 icon_button("next-file", "chevron-right", &t)
-                                                    .on_click(cx.listener(
+                                                    .on_press(cx.listener(
                                                         move |this, _, _, cx| {
                                                             this.diff_file.insert(
                                                                 b.clone(),
@@ -1611,7 +1609,7 @@ impl Dent {
                                     .child({
                                         let full = std::path::Path::new(&s.cwd).join(&file.path);
                                         ghost("open-file", "Open", &t)
-                                            .on_click(move |_, _, cx| {
+                                            .on_press(move |_, _, cx| {
                                                 cx.open_url(&format!("file://{}", full.display()))
                                             })
                                             .tooltip(tip("Open in its app", None, t))
@@ -1791,7 +1789,7 @@ impl Dent {
                             .text_color(t.faint)
                             .when(commentable, |d| {
                                 d.cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                    .on_press(cx.listener(move |this, _, window, cx| {
                                         this.start_comment(path.clone(), n, window, cx)
                                     }))
                                     .child(
@@ -1903,7 +1901,7 @@ impl Dent {
                                             .text_color(t.faint)
                                             .child("comments collect into one review"),
                                     )
-                                    .child(ghost("cancel-comment", "Cancel", &t).on_click(
+                                    .child(ghost("cancel-comment", "Cancel", &t).on_press(
                                         cx.listener(|this, _, _, cx| {
                                             this.commenting = None;
                                             cx.notify();
@@ -1912,7 +1910,7 @@ impl Dent {
                                     .child(
                                         button("add-comment", "Add comment", true, &t)
                                             .relative()
-                                            .on_click(cx.listener(|this, _, window, cx| {
+                                            .on_press(cx.listener(|this, _, window, cx| {
                                                 this.add_comment(window, cx)
                                             }))
                                             .child(probe(&self.probes, "add-comment")),
@@ -2042,7 +2040,7 @@ impl Dent {
                                         None,
                                         t,
                                     ))
-                                    .on_click(promote)
+                                    .on_press(promote)
                                     .child(probe(&self.probes, format!("promote-{i}"))),
                                 ),
                             )
@@ -2101,7 +2099,7 @@ impl Dent {
                                     .justify_center()
                                     .rounded(px(radius::MD))
                                     .when(ready == Ready::Yes, |d| {
-                                        d.on_click(cx.listener(|this, _, window, cx| {
+                                        d.on_press(cx.listener(|this, _, window, cx| {
                                             this.ask_aside(window, cx)
                                         }))
                                         .tooltip(tip(

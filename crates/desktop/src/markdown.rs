@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use crate::ui::Press;
+
 use crate::ui::RevealOnHover;
 use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
 use ratex_types::display_item::DisplayList;
@@ -1304,7 +1306,7 @@ fn copy_button(
         .hover(|d| d.bg(t.hover()).text_color(t.ink))
         .child(if copied { "Copied" } else { label })
         .child(crate::ui::probe(&probes, key.clone()))
-        .on_click(move |_, _, cx| {
+        .on_press(move |_, _, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(text()));
             md.0.borrow_mut().copied = Some((key.clone(), Instant::now()));
             cx.notify(owner);
