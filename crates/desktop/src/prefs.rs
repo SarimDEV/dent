@@ -12,6 +12,7 @@ pub struct Prefs {
     pub permission: Permission,
     pub effort: Option<String>,
     pub panel_width: Option<f32>,
+    pub sidebar_width: Option<f32>,
     pub dark: Option<bool>,
     /// Viewer tabs you closed, per session: file and its versions then.
     pub closed_tabs: std::collections::BTreeMap<String, std::collections::BTreeMap<String, usize>>,

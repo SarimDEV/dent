@@ -12,6 +12,8 @@ use crate::theme::{Status, status_square_at};
 use crate::ui::{icon, icon_button, kbd, probe, section_label, tip};
 
 pub const WIDTH: f32 = 288.;
+pub const MIN_WIDTH: f32 = 220.;
+pub const MAX_WIDTH: f32 = 440.;
 
 impl Dent {
     pub fn sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -26,6 +28,14 @@ impl Dent {
         // Only the rows on screen are laid out, however many sessions there are.
         let rows = self.inbox_rows(&needs, &done, &working, &closed, clear);
         self.sync_inbox(&rows);
+        // A selection moved by the keyboard stays in view.
+        if let Some(id) = self.reveal_row.take()
+            && let Some(ix) = rows
+                .iter()
+                .position(|r| matches!(r, InboxRow::Session(s, _) if s.id == id))
+        {
+            self.inbox_list.scroll_to_reveal_item(ix);
+        }
         let rows = std::rc::Rc::new(rows);
         let body = list(
             self.inbox_list.clone(),
@@ -47,10 +57,38 @@ impl Dent {
         .min_h_0()
         .pb(px(space::S4));
 
+        let t2 = self.t;
         div()
-            .w(px(WIDTH))
+            .w(px(self.sidebar_w))
             .flex_none()
             .h_full()
+            .relative()
+            // Its right edge resizes it, as the viewer's left edge does.
+            .child(
+                div()
+                    .id("sidebar-resize")
+                    .absolute()
+                    .right_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(6.))
+                    .cursor_col_resize()
+                    .hover(|d| d.bg(t2.hairline))
+                    .when(self.dragging_sidebar, |d| d.bg(t2.hairline))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            if e.click_count == 2 {
+                                // Double-click puts it back to its usual width.
+                                this.sidebar_w = WIDTH;
+                            } else {
+                                this.dragging_sidebar = true;
+                            }
+                            cx.notify();
+                        }),
+                    ),
+            )
             .key_context("Inbox")
             .track_focus(&self.inbox_focus)
             .flex()
@@ -178,6 +216,7 @@ impl Dent {
                     .gap(px(space::S2))
                     .cursor_pointer()
                     .hover(|s| s.bg(t.hover()))
+                    .active(|s| s.bg(t.press()))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.show_closed = !this.show_closed;
                         cx.notify();
@@ -203,15 +242,22 @@ impl Dent {
     fn inbox_empty(&self) -> AnyElement {
         let t = self.t;
         let fresh = self.sessions.is_empty();
-        let (head, line) = if fresh && !self.recent.is_empty() {
+        // Nothing yet may only mean nothing has arrived yet.
+        let down = self.connection.as_ref().err().cloned();
+        let starting = down.as_deref() == Some("Starting dent…");
+        let (head, line): (&str, String) = if fresh && down.is_some() && !starting {
+            ("Can't reach dent's service", down.unwrap_or_default())
+        } else if fresh && (down.is_some() || !self.core.live) {
+            ("Loading sessions…", String::new())
+        } else if fresh && !self.recent.is_empty() {
             (
                 "Nothing in dent yet",
-                "Start a task, or pick up one from the terminal.",
+                "Start a task, or pick up one from the terminal.".into(),
             )
         } else if fresh {
-            ("No sessions yet", "Type a task to start one.")
+            ("No sessions yet", "Type a task to start one.".into())
         } else {
-            ("All caught up", "Everything is working or closed.")
+            ("All caught up", "Everything is working or closed.".into())
         };
         div()
             .mx(px(space::S2))
@@ -242,7 +288,9 @@ impl Dent {
                             .text_color(t.ink)
                             .child(head),
                     )
-                    .child(div().ty(UI).text_color(t.quiet).child(line)),
+                    .when(!line.is_empty(), |d| {
+                        d.child(div().ty(UI).text_color(t.quiet).child(line))
+                    }),
             )
             .into_any_element()
     }
@@ -250,7 +298,6 @@ impl Dent {
     fn row(&mut self, s: &Session, quiet: bool, cx: &mut Context<Self>) -> AnyElement {
         let t = self.t;
         let selected = self.selected.as_deref() == Some(s.id.as_str());
-        let hovered = self.hovered_row.as_deref() == Some(s.id.as_str());
         let closable = Self::can_close(s);
         // A row that just finished pops its square once; a row that just
         // arrived rises into place.
@@ -272,7 +319,6 @@ impl Dent {
             .unwrap_or(1.);
         let id = s.id.clone();
         let (close_id, reopen_id) = (s.id.clone(), s.id.clone());
-        let hover_id = s.id.clone();
         let mark: AnyElement = if s.closed {
             icon("archive", 12., t.faint).into_any_element()
         } else {
@@ -284,55 +330,88 @@ impl Dent {
         } else {
             format!("{} · {}", s.project, s.detail)
         };
-        let trailing: AnyElement = if hovered && closable {
-            div()
-                .id(SharedString::from(format!("close-{id}")))
-                .size(px(size::CONTROL_SM))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(radius::SM))
-                .cursor_pointer()
-                .hover(|d| d.bg(t.press()))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.close(&close_id, window, cx);
-                }))
-                .tooltip(tip("Close", Some("⌘ W"), t))
-                .child(icon("archive", 13., t.quiet))
-                .into_any_element()
-        } else if hovered && s.closed {
-            div()
-                .id(SharedString::from(format!("reopen-{id}")))
-                .size(px(size::CONTROL_SM))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(radius::SM))
-                .cursor_pointer()
-                .hover(|d| d.bg(t.press()))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.reopen(&reopen_id, cx);
-                }))
-                .tooltip(tip("Reopen", None, t))
-                .child(icon("archive-restore", 13., t.quiet))
-                .into_any_element()
-        } else {
-            let age = match self.working_since.get(&s.id) {
-                Some(since) if s.status == Status::Working => {
-                    crate::chat::duration(since.elapsed().as_secs())
-                }
-                _ => crate::data::ago(s.updated),
-            };
-            div()
-                .ty(LABEL)
-                .text_color(t.faint)
-                .child(age)
-                .into_any_element()
+        // The close (or reopen) button shows on whichever row is under the
+        // pointer right now: after a close, the next row slides in with its
+        // own button rather than opening on the next click.
+        let group = SharedString::from(format!("row-g-{}", s.id));
+        let age = match self.working_since.get(&s.id) {
+            Some(since) if s.status == Status::Working => {
+                crate::chat::duration(since.elapsed().as_secs())
+            }
+            _ => crate::data::ago(s.updated),
         };
+        let button: Option<AnyElement> = if closable {
+            Some(
+                div()
+                    .id(SharedString::from(format!("close-{id}")))
+                    .size(px(size::CONTROL_SM + 2.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(radius::SM))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(t.hover()))
+                    .active(|d| d.bg(t.press()))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.close(&close_id, window, cx);
+                    }))
+                    .tooltip(tip("Close", None, t))
+                    .child(icon("archive", 13., t.quiet))
+                    .into_any_element(),
+            )
+        } else if s.closed {
+            Some(
+                div()
+                    .id(SharedString::from(format!("reopen-{id}")))
+                    .size(px(size::CONTROL_SM + 2.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(radius::SM))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(t.hover()))
+                    .active(|d| d.bg(t.press()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.reopen(&reopen_id, cx);
+                    }))
+                    .tooltip(tip("Reopen", None, t))
+                    .child(icon("archive-restore", 13., t.quiet))
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
+        let has_button = button.is_some();
+        let trailing: AnyElement = div()
+            .relative()
+            .h(px(20.))
+            .flex()
+            .items_center()
+            .justify_end()
+            .child(
+                div()
+                    .ty(LABEL)
+                    .text_color(t.faint)
+                    .when(has_button, |d| {
+                        d.group_hover(group.clone(), |s| s.opacity(0.))
+                    })
+                    .child(age),
+            )
+            .children(button.map(|b| {
+                div()
+                    .absolute()
+                    .right(px(-4.))
+                    .top(px(-2.))
+                    .invisible()
+                    .group_hover(group.clone(), |s| s.visible())
+                    .child(b)
+            }))
+            .into_any_element();
         div()
             .id(SharedString::from(format!("row-{}", s.id)))
+            .group(group)
             .relative()
             .mx(px(space::S2))
             .px(px(space::S2))
@@ -351,15 +430,9 @@ impl Dent {
             .opacity(arrive * if quiet && !selected { 0.72 } else { 1. })
             .top(px((1. - arrive) * motion::RISE))
             .when(selected, |d| d.bg(t.selected()))
-            .when(!selected, |d| d.hover(|d| d.bg(t.hover())))
-            .on_hover(cx.listener(move |this, on: &bool, _, cx| {
-                if *on {
-                    this.hovered_row = Some(hover_id.clone());
-                } else if this.hovered_row.as_deref() == Some(hover_id.as_str()) {
-                    this.hovered_row = None;
-                }
-                cx.notify();
-            }))
+            .when(!selected, |d| {
+                d.hover(|d| d.bg(t.hover())).active(|d| d.bg(t.press()))
+            })
             .on_click(
                 cx.listener(move |this, _, window, cx| this.select(Some(id.clone()), window, cx)),
             )
@@ -398,12 +471,17 @@ impl Dent {
                             .gap(px(space::S2))
                             .child(
                                 div()
+                                    .id(SharedString::from(format!("row-title-{}", s.id)))
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
                                     .ty(UI)
                                     .text_color(title_ink)
                                     .when(!quiet, |d| d.font_weight(FontWeight::MEDIUM))
+                                    // A title too long for the row reads in full on hover.
+                                    .when(s.title.chars().count() > 30, |d| {
+                                        d.tooltip(crate::ui::tip_owned(s.title.clone(), t))
+                                    })
                                     .child(s.title.clone()),
                             )
                             .child(div().h(px(20.)).flex().items_center().child(trailing)),
@@ -425,6 +503,7 @@ impl Dent {
                 .map(|w| format!("{:.0}%", w.used * 100.))
         };
         let (five, week) = (window("five_hour"), window("seven_day"));
+        let both = five.is_some() && week.is_some();
         // When each window starts over, for the tooltip.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -477,7 +556,7 @@ impl Dent {
                         .when_some(five, |d, v| {
                             d.child("5h").child(div().text_color(t.ink).child(v))
                         })
-                        .child(div().text_color(t.faint).child("·"))
+                        .when(both, |d| d.child(div().text_color(t.faint).child("·")))
                         .when_some(week, |d, v| {
                             d.child("week").child(div().text_color(t.ink).child(v))
                         }),

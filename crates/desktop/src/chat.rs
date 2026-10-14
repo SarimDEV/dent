@@ -126,7 +126,7 @@ impl Dent {
                 .when(open, |d| d.bg(t.selected()))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.panel_open = !this.panel_open;
-                    this.picking = false;
+                    this.end_pick();
                     cx.notify();
                 }))
                 .tooltip(tip(
@@ -214,14 +214,17 @@ impl Dent {
                                 div()
                                     .id("title")
                                     // With its details gone, the title takes all the room there is.
+                                    // The title takes what it needs, up to all of it;
+                                    // the project and machine get what's left.
                                     .map(|d| {
                                         if tight {
                                             d.flex_1().min_w_0()
                                         } else {
-                                            d.flex_shrink_0().max_w(relative(0.7))
+                                            d.flex_initial().min_w_0()
                                         }
                                     })
                                     .truncate()
+                                    .tooltip(tip_owned(s.title.clone(), t))
                                     .ty(DISPLAY_COMPACT)
                                     .text_color(t.ink)
                                     // Double-click to rename; a single press still moves the window.
@@ -256,6 +259,13 @@ impl Dent {
             .fold((false, false), |(p, n), (ix, _)| {
                 (p || ix < top, n || ix > top)
             });
+        // At the end there's nowhere further down; reading back, down
+        // always leads on, to your next message or the end.
+        let next = if self.transcript.is_following_tail() {
+            false
+        } else {
+            next || !s.items.is_empty()
+        };
         let half = |id: &'static str, up: bool, on: bool, cx: &mut Context<Self>| {
             let (name, label, off, keys) = if up {
                 (
@@ -1943,7 +1953,10 @@ impl Dent {
             .map(|(i, r)| {
                 let id = r.agent_session.clone();
                 let open = r.open;
-                let detail = if open {
+                let opening = self.adopting.as_deref() == Some(r.agent_session.as_str());
+                let detail = if opening {
+                    format!("{} · Opening…", Self::project_name(&r.cwd))
+                } else if open {
                     // Picking it up now would run it twice.
                     format!(
                         "{} · Close it in the terminal to pick it up here",
@@ -1960,9 +1973,10 @@ impl Dent {
                     .px(px(space::S3))
                     .py(px(space::S2))
                     .rounded(px(radius::MD))
-                    .when(!open, |d| {
+                    .when(!open && !opening, |d| {
                         d.cursor_pointer()
                             .hover(|d| d.bg(t.hover()))
+                            .active(|d| d.bg(t.press()))
                             .on_click(cx.listener(move |this, _, _, cx| this.adopt(&id, cx)))
                     })
                     // Running in a terminal: shown, so you know where it
@@ -2072,6 +2086,7 @@ impl Dent {
                     .cursor_pointer()
                     .when(open, |d| d.bg(t.selected()))
                     .hover(|d| d.bg(t.hover()))
+                    .active(|d| d.bg(t.press()))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.menu = if this.menu == Some(which) {
                             None
@@ -2187,17 +2202,21 @@ impl Dent {
         let d = self.defaults.clone();
         let rows: Vec<AnyElement> = match which {
             Menu::Project => {
+                // Every project, newest first; the menu scrolls.
+                let scratch = crate::scratch_dir().display().to_string();
                 let mut v: Vec<AnyElement> = self
                     .projects
                     .iter()
-                    .take(12)
+                    // The scratch folder is "No project", below.
+                    .filter(|p| p.path != scratch)
                     .map(|p| {
                         let path = p.path.clone();
                         let on = d.project.as_deref() == Some(p.path.as_str());
                         let note = if on && !d.project_picked {
                             "Guessed from what you typed".to_string()
                         } else {
-                            p.path.replacen(&home(), "~", 1)
+                            // One line: a long path keeps its start and end.
+                            crate::viewer::middle_ellipsis(&p.path.replacen(&home(), "~", 1), 38)
                         };
                         menu_row(
                             &self.probes,
@@ -2216,6 +2235,21 @@ impl Dent {
                         .into_any_element()
                     })
                     .collect();
+                v.push(
+                    menu_row(
+                        &self.probes,
+                        "m-choose",
+                        "Choose a folder…",
+                        Some("Any folder on this Mac".into()),
+                        false,
+                        &t,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.menu = None;
+                        this.choose_project_folder(cx);
+                    }))
+                    .into_any_element(),
+                );
                 v.push(
                     menu_row(
                         &self.probes,

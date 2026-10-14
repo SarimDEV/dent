@@ -447,6 +447,8 @@ pub struct Dent {
     /// The person opened the sidebar over a narrow window.
     pub sidebar_forced: bool,
     pub dragging: bool,
+    pub dragging_sidebar: bool,
+    pub sidebar_w: f32,
     pub tabs: HashMap<String, Tab>,
     /// Files you closed in each session's viewer, with how many versions
     /// each had then: a new version brings the tab back.
@@ -463,6 +465,15 @@ pub struct Dent {
     pub palette_scroll: ScrollHandle,
     /// The viewer's left edge in the window, while it shows.
     pub panel_left: Option<f32>,
+    /// Where you were reading each session, and whether you were at the end.
+    pub read_at: HashMap<String, (ListOffset, bool)>,
+    /// Sessions closed while the Undo has been showing, oldest first.
+    pub undo_closes: Vec<String>,
+    /// The terminal session being picked up.
+    pub adopting: Option<String>,
+    /// A row to scroll into view in the sidebar on its next draw.
+    pub reveal_row: Option<String>,
+    pub resumed_at: HashMap<String, Instant>,
     /// The palette row last scrolled to.
     pub palette_shown: Option<usize>,
     pub preview: Option<Rc<RefCell<Preview>>>,
@@ -507,7 +518,6 @@ pub struct Dent {
     /// The second the timers last showed.
     pub last_second: u64,
     pub probes: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
-    pub hovered_row: Option<String>,
     pub placeholder: &'static str,
     /// What the hovered preview control does, shown in the toolbar: tooltips
     /// would fall behind the live page.
@@ -840,6 +850,11 @@ impl Dent {
             slash_dismissed: false,
             palette_scroll: ScrollHandle::new(),
             panel_left: None,
+            read_at: HashMap::new(),
+            undo_closes: Vec::new(),
+            adopting: None,
+            reveal_row: None,
+            resumed_at: HashMap::new(),
             palette_shown: None,
             toast: None,
             show_closed: false,
@@ -876,6 +891,11 @@ impl Dent {
             just_sent: None,
             panel_open: true,
             panel_width: prefs.panel_width.unwrap_or(600.),
+            sidebar_w: prefs
+                .sidebar_width
+                .unwrap_or(crate::sidebar::WIDTH)
+                .clamp(crate::sidebar::MIN_WIDTH, crate::sidebar::MAX_WIDTH),
+            dragging_sidebar: false,
             panel_w: 600.,
             chat_w: 800.,
             sidebar_hidden: false,
@@ -909,7 +929,6 @@ impl Dent {
             code_em: 0.,
             last_second: 0,
             probes: Rc::default(),
-            hovered_row: None,
             placeholder: "",
             toolbar_hint: None,
             image_actual: false,
@@ -963,11 +982,16 @@ impl Dent {
             .cloned()
             .collect()
     }
+    /// Working sessions stay where they are while they stream: in the order
+    /// they started working, newest first, not by their latest output.
     pub fn working(&self) -> Vec<Rc<Session>> {
-        self.open()
+        let mut v: Vec<Rc<Session>> = self
+            .open()
             .filter(|s| matches!(s.status, Status::Working | Status::Waiting))
             .cloned()
-            .collect()
+            .collect();
+        v.sort_by_key(|s| std::cmp::Reverse(s.working_since));
+        v
     }
     pub fn closed(&self) -> Vec<Rc<Session>> {
         self.sessions.iter().filter(|s| s.closed).cloned().collect()
@@ -1081,6 +1105,14 @@ impl Dent {
     // ---- Selecting and closing ----
 
     pub fn select(&mut self, id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        // Choosing the session already open only puts you in its reply box:
+        // attachments, draft and place stay as they are.
+        if id.is_some() && id == self.selected {
+            self.menu = None;
+            self.composer.update(cx, |c, cx| c.focus(window, cx));
+            cx.notify();
+            return;
+        }
         // Each session keeps its own draft.
         let text = self.composer.read(cx).value().to_string();
         if let Some(old) = &self.selected {
@@ -1113,13 +1145,12 @@ impl Dent {
         if id.is_none() && self.connection.is_ok() {
             self.fetch_recent();
         }
+        self.reveal_row = id.clone();
         self.selected = id;
         self.menu = None;
-        self.picking = false;
+        self.end_pick();
         self.attachments.clear();
         self.commenting = None;
-        self.transcript.set_follow_mode(FollowMode::Tail);
-        self.transcript.scroll_to_end();
         match &self.selected {
             Some(_) => self.composer.update(cx, |c, cx| c.focus(window, cx)),
             None => self.starter.update(cx, |c, cx| c.focus(window, cx)),
@@ -1183,7 +1214,25 @@ impl Dent {
             session: id.to_string(),
         });
         self.stopped.remove(id);
-        self.toast(ToastAction::Undo(id.to_string()), "Session closed".into());
+        // Closes in a row can all be undone, newest first.
+        if !self
+            .toast
+            .as_ref()
+            .is_some_and(|t| matches!(t.action, ToastAction::Undo(_)))
+        {
+            self.undo_closes.clear();
+        }
+        self.undo_closes.push(id.to_string());
+        let n = self.undo_closes.len();
+        self.toast = Some(Toast {
+            text: if n == 1 {
+                "Session closed".into()
+            } else {
+                format!("{n} sessions closed")
+            },
+            action: ToastAction::Undo(id.to_string()),
+            at: Instant::now(),
+        });
         if self.selected.as_deref() == Some(id) {
             let rest: Vec<String> = order.into_iter().filter(|x| x != id).collect();
             let next = rest.get(at.min(rest.len().saturating_sub(1))).cloned();
@@ -1205,6 +1254,15 @@ impl Dent {
     }
 
     pub fn toast(&mut self, action: ToastAction, text: String) {
+        // A passing message doesn't push an Undo out of the way.
+        if matches!(action, ToastAction::Info)
+            && self
+                .toast
+                .as_ref()
+                .is_some_and(|t| matches!(t.action, ToastAction::Undo(_)))
+        {
+            return;
+        }
         self.toast = Some(Toast {
             text,
             action,
@@ -1212,12 +1270,27 @@ impl Dent {
         });
     }
 
+    /// Undo the latest close; each Undo (or ⌘Z) steps one further back.
     pub fn toast_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(t) = self.toast.take() else { return };
         match t.action {
-            ToastAction::Undo(id) => {
-                self.reopen(&id, cx);
-                self.select(Some(id), window, cx);
+            ToastAction::Undo(_) => {
+                if let Some(id) = self.undo_closes.pop() {
+                    self.reopen(&id, cx);
+                    self.select(Some(id), window, cx);
+                }
+                if let Some(next) = self.undo_closes.last().cloned() {
+                    let n = self.undo_closes.len();
+                    self.toast = Some(Toast {
+                        text: if n == 1 {
+                            "Session closed".into()
+                        } else {
+                            format!("{n} sessions closed")
+                        },
+                        action: ToastAction::Undo(next),
+                        at: Instant::now(),
+                    });
+                }
             }
             ToastAction::Resume(id) => self.resume(&id, cx),
             ToastAction::Info => {}
@@ -1395,10 +1468,14 @@ impl Dent {
                 },
             ) => {
                 self.creating = false;
+                if let Some(agent) = self.adopting.take() {
+                    self.recent.retain(|r| r.agent_session != agent);
+                }
                 self.pending_select = Some(session);
             }
             (Waiting::Create, Out::Error { message }) => {
                 self.creating = false;
+                self.adopting = None;
                 self.toast(ToastAction::Info, message);
             }
             (_, Out::Error { message }) => self.toast(ToastAction::Info, message),
@@ -1636,15 +1713,26 @@ impl Dent {
             .map(|(ix, _)| ix)
             .collect();
         let top = self.transcript.logical_scroll_top().item_ix;
+        let at_end = self.transcript.is_following_tail();
         let to = if up {
             mine.iter().rev().find(|ix| **ix < top).copied()
+        } else if at_end {
+            None
         } else {
             mine.iter().find(|ix| **ix > top).copied()
         };
         let Some(ix) = to else {
+            // Down past your last message: on to the end, following again.
+            if !up && !at_end {
+                self.follow();
+                cx.notify();
+                return true;
+            }
             return false;
         };
-        self.transcript.set_follow_mode(FollowMode::Normal);
+        // Reading back pauses following; reaching the end picks it up again.
+        self.transcript.set_follow_mode(FollowMode::Tail);
+        self.transcript.pause_following_tail();
         self.transcript.scroll_to(ListOffset {
             item_ix: ix,
             offset_in_item: px(0.),
@@ -1660,12 +1748,17 @@ impl Dent {
     }
 
     /// Carry on a terminal session here; it opens once it's in.
+    /// The row says "Opening…" until it's in, and stays if it fails.
     pub fn adopt(&mut self, agent_session: &str, cx: &mut Context<Self>) {
+        if self.creating {
+            return;
+        }
         let n = self.live.send(Request::Adopt {
             agent_session: agent_session.to_string(),
         });
         self.waiting.insert(n, Waiting::Create);
-        self.recent.retain(|r| r.agent_session != agent_session);
+        self.creating = true;
+        self.adopting = Some(agent_session.to_string());
         cx.notify();
     }
 
@@ -1959,6 +2052,7 @@ impl Dent {
             permission: self.defaults.permission,
             effort: self.defaults.effort.clone(),
             panel_width: Some(self.panel_width),
+            sidebar_width: Some(self.sidebar_w),
             dark: Some(self.t.dark),
             closed_tabs: self
                 .closed_tabs
@@ -2135,6 +2229,15 @@ impl Dent {
 
     /// After a stop: carry on from where it was.
     pub fn resume(&mut self, id: &str, cx: &mut Context<Self>) {
+        // A second press before it's running again would send it twice.
+        if self
+            .resumed_at
+            .get(id)
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(3))
+        {
+            return;
+        }
+        self.resumed_at.insert(id.to_string(), Instant::now());
         self.live.send(Request::Send {
             session: id.to_string(),
             id: crate::message_id(),
@@ -2269,6 +2372,7 @@ impl Dent {
                 _ => None,
             })
         });
+        let cwd = self.session(&id).map(|s| s.cwd.clone()).unwrap_or_default();
         self.live.send(Request::Rewind {
             session: id,
             to: msg.to_string(),
@@ -2276,7 +2380,20 @@ impl Dent {
         });
         self.rewinding = None;
         if let Some(text) = text {
-            // Attachment lines stay behind; the words come back.
+            // The words come back to the box, and attached files come back
+            // attached; other attachment lines stay behind.
+            for p in text.lines().filter_map(|l| l.strip_prefix("› Attached · ")) {
+                let full = if p.starts_with('/') {
+                    std::path::PathBuf::from(p)
+                } else {
+                    std::path::Path::new(&cwd).join(p)
+                };
+                if full.exists() {
+                    self.attachments.push(Attachment::File {
+                        path: full.display().to_string(),
+                    });
+                }
+            }
             let words: Vec<&str> = text.lines().filter(|l| !l.starts_with("› ")).collect();
             self.composer.update(cx, |c, cx| {
                 put(c, words.join("\n"), window, cx);
@@ -2289,6 +2406,11 @@ impl Dent {
     /// A new session carrying on from this one: everything so far, or up to
     /// just before message `before`. It opens when the daemon has made it.
     pub fn fork(&mut self, session: &str, before: Option<String>, cx: &mut Context<Self>) {
+        // One fork per press, however fast the presses come.
+        if self.creating {
+            return;
+        }
+        self.creating = true;
         let n = self.live.send(Request::Fork {
             session: session.to_string(),
             before,
@@ -2299,6 +2421,14 @@ impl Dent {
 
     /// Send the last message again, after a turn that failed.
     pub fn retry(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self
+            .resumed_at
+            .get(id)
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(3))
+        {
+            return;
+        }
+        self.resumed_at.insert(id.to_string(), Instant::now());
         let last = self.session(id).and_then(|s| {
             s.items.iter().rev().find_map(|i| match i {
                 Item::User { text, .. } => Some(text.clone()),
@@ -2306,14 +2436,32 @@ impl Dent {
             })
         });
         if let Some(text) = last {
-            // Attachment lines were shown, not sent as text.
-            let words: Vec<&str> = text.lines().filter(|l| !l.starts_with("› ")).collect();
+            // The same message again: attached files go as attachments,
+            // and comments or picked elements stay in its text, as sent.
+            let cwd = self.session(id).map(|s| s.cwd.clone()).unwrap_or_default();
+            let mut files = Vec::new();
+            let mut words = Vec::new();
+            for l in text.lines() {
+                match l.strip_prefix("› Attached · ") {
+                    Some(p) => {
+                        let full = if p.starts_with('/') {
+                            std::path::PathBuf::from(p)
+                        } else {
+                            std::path::Path::new(&cwd).join(p)
+                        };
+                        if full.exists() {
+                            files.push(full.display().to_string());
+                        }
+                    }
+                    None => words.push(l),
+                }
+            }
             self.live.send(Request::Send {
                 session: id.to_string(),
                 id: crate::message_id(),
                 text: words.join("\n"),
                 steer: false,
-                attachments: Vec::new(),
+                attachments: files,
             });
             cx.notify();
         }
@@ -2474,7 +2622,7 @@ impl Dent {
             self.tabs.insert(id, tab);
         }
         self.panel_open = true;
-        self.picking = false;
+        self.end_pick();
         cx.notify();
     }
 
@@ -2494,6 +2642,55 @@ impl Dent {
             }
         }
         self.show_tab(Tab::Art(art), cx);
+    }
+
+    /// Pick any folder as the new session's project, with the system's
+    /// folder picker.
+    pub fn choose_project_folder(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Use as project".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else {
+                return;
+            };
+            let Some(dir) = paths.into_iter().next() else {
+                return;
+            };
+            let path = dir.display().to_string();
+            let _ = this.update(cx, |this, cx| {
+                if !this.projects.iter().any(|p| p.path == path) {
+                    this.projects.insert(
+                        0,
+                        dent_protocol::Project {
+                            name: dir
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| path.clone()),
+                            path: path.clone(),
+                            last_used: 0,
+                        },
+                    );
+                }
+                this.defaults.project = Some(path);
+                this.defaults.project_picked = true;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Leave Point mode, telling the page too, so it doesn't stay armed.
+    pub fn end_pick(&mut self) {
+        if self.picking {
+            self.picking = false;
+            if let Some(p) = &self.preview {
+                p.borrow().pick(false);
+            }
+        }
     }
 
     pub fn toggle_pick(&mut self, cx: &mut Context<Self>) {
@@ -2650,9 +2847,25 @@ impl Dent {
             .collect();
         let (id, old) = &self.transcript_sigs;
         if id.as_deref() != Some(s.id.as_str()) {
+            // Leaving a session remembers where you were reading it.
+            if let Some(prev) = id.clone() {
+                let at = self.transcript.logical_scroll_top();
+                let following = self.transcript.is_following_tail();
+                self.read_at.insert(prev, (at, following));
+            }
             self.transcript.reset(sigs.len());
-            self.transcript.set_follow_mode(FollowMode::Tail);
-            self.transcript.scroll_to_end();
+            match self.read_at.get(&s.id).copied() {
+                // Back where you left it, unless you were at the end.
+                Some((at, false)) if at.item_ix < sigs.len() => {
+                    self.transcript.set_follow_mode(FollowMode::Tail);
+                    self.transcript.pause_following_tail();
+                    self.transcript.scroll_to(at);
+                }
+                _ => {
+                    self.transcript.set_follow_mode(FollowMode::Tail);
+                    self.transcript.scroll_to_end();
+                }
+            }
         } else if *old != sigs {
             let first = old
                 .iter()
@@ -2732,7 +2945,7 @@ impl Dent {
             }
             return;
         }
-        self.picking = false;
+        self.end_pick();
         let me = cx.entity();
         let at = window.bounds();
         let opts = WindowOptions {
@@ -2850,11 +3063,18 @@ impl Dent {
     // ---- Keyboard and search ----
 
     /// Every open session in inbox order, then what's working.
+    /// The sidebar's sessions top to bottom, closed ones too while shown.
     pub fn order(&self) -> Vec<String> {
+        let closed = if self.show_closed {
+            self.closed()
+        } else {
+            Vec::new()
+        };
         self.needs()
             .into_iter()
             .chain(self.done())
             .chain(self.working())
+            .chain(closed)
             .map(|s| s.id.clone())
             .collect()
     }
@@ -3077,11 +3297,14 @@ impl Dent {
             .as_ref()
             .and_then(|d| d.resting)
             .is_some_and(|(until, ..)| Instant::now() >= until);
+        // Once a minute, so "now" and "5m" in the sidebar stay true.
+        let new_minute = new_second && second % 60 == 0;
         let due = page
             || toast_expired
             || copied
             || squares
             || (working_shown && new_second)
+            || new_minute
             || rest_over;
         if due && self.walk.as_ref().is_some_and(|w| w.resting.is_some()) {
             eprintln!(

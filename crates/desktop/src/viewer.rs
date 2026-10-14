@@ -32,7 +32,7 @@ pub fn art_file(a: &crate::data::Artifact) -> Option<std::path::PathBuf> {
 }
 
 /// A long name cut in the middle, so its start and its extension both show.
-fn middle_ellipsis(s: &str, max: usize) -> String {
+pub fn middle_ellipsis(s: &str, max: usize) -> String {
     let n = s.chars().count();
     if n <= max {
         return s.to_string();

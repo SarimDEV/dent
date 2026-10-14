@@ -454,12 +454,14 @@ fn todos(v: &SessionView) -> Vec<(String, String, String)> {
 fn detail(v: &SessionView) -> String {
     match v.status {
         Wire::NeedsYou => match v.open_ask() {
-            Some(Entry::Ask { tool, .. }) => match tool.as_str() {
+            Some(Entry::Ask { tool, input, .. }) => match tool.as_str() {
                 "AskUserQuestion" => "Asked you a question".into(),
                 "ExitPlanMode" => "Plan ready for review".into(),
-                "Bash" => "Wants to run a command".into(),
-                "Write" | "Edit" | "MultiEdit" => "Wants to edit a file".into(),
-                t => format!("Wants to use {t}"),
+                // Worded as the approval card words it.
+                t => {
+                    let input = serde_json::from_str(input).unwrap_or(Value::Null);
+                    what(t, &input, Path::new(&v.cwd)).0
+                }
             },
             _ => "Needs you".into(),
         },

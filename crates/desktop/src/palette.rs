@@ -54,7 +54,9 @@ impl Dent {
                         .gap(px(space::S3))
                         .cursor_pointer()
                         .when(on, |d| d.bg(t.selected()))
-                        .when(!on, |d| d.hover(|d| d.bg(t.hover())))
+                        .when(!on, |d| {
+                            d.hover(|d| d.bg(t.hover())).active(|d| d.bg(t.press()))
+                        })
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.palette = Some(i);
                             let _ = &id;

@@ -193,7 +193,7 @@ impl Render for Dent {
                 .update(cx, |c, cx| c.set_placeholder(want, window, cx));
         }
         self.inbox_focused = self.inbox_focus.is_focused(window);
-        if self.menu.is_none() && !self.dragging && self.walk.is_none() {
+        if self.menu.is_none() && !self.dragging && !self.dragging_sidebar && self.walk.is_none() {
             self.save_prefs();
         }
         let visible = self.preview_visible();
@@ -210,7 +210,7 @@ impl Render for Dent {
         if !wants_panel {
             self.sidebar_forced = false;
         }
-        let room = w - sidebar::WIDTH - viewer::CHAT_MIN;
+        let room = w - self.sidebar_w - viewer::CHAT_MIN;
         self.sidebar_hidden = wants_panel && room < viewer::MIN_WIDTH && !self.sidebar_forced;
         // Folding away takes keyboard focus with it, to the window.
         if self.sidebar_hidden && self.inbox_focus.is_focused(window) {
@@ -219,7 +219,7 @@ impl Render for Dent {
         let side = if self.sidebar_hidden {
             0.
         } else {
-            sidebar::WIDTH
+            self.sidebar_w
         };
         self.panel_w = self
             .panel_width
@@ -246,7 +246,7 @@ impl Render for Dent {
                 div()
                     .absolute()
                     .bottom(px(size::STATUS + space::S2))
-                    .w(px(sidebar::WIDTH - space::S4))
+                    .w(px(self.sidebar_w - space::S4))
                     .map(|d| {
                         if self.sidebar_hidden {
                             d.left(px(space::S4))
@@ -259,7 +259,10 @@ impl Render for Dent {
                             .rounded(px(radius::LG))
                             .pl(px(space::S3))
                             .pr(px(space::S1))
-                            .h(px(40.))
+                            // A long message grows the toast to three lines,
+                            // then ends in an ellipsis; its tooltip has it all.
+                            .min_h(px(40.))
+                            .py(px(space::S1))
                             .flex()
                             .items_center()
                             .gap(px(space::S2))
@@ -274,9 +277,15 @@ impl Render for Dent {
                             ))
                             .child(
                                 div()
+                                    .id("toast-text")
                                     .flex_1()
+                                    .min_w_0()
                                     .ty(UI)
                                     .text_color(t.ink)
+                                    .line_clamp(3)
+                                    .when(toast.text.len() > 90, |d| {
+                                        d.tooltip(ui::tip_owned(toast.text.clone(), t))
+                                    })
                                     .child(toast.text.clone()),
                             )
                             .when(matches!(toast.action, ToastAction::Undo(_)), |d| {
@@ -360,7 +369,7 @@ impl Render for Dent {
             )
             .on_action(cx.listener(|this, _: &TogglePanel, _, cx| {
                 this.panel_open = !this.panel_open;
-                this.picking = false;
+                this.end_pick();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ShowFirst, _, cx| {
@@ -459,12 +468,23 @@ impl Render for Dent {
                     let in_viewer = this.panel_left.is_some_and(|x| e.position.x.as_f32() >= x);
                     select::hover(in_viewer, false, window, cx);
                 }
+                if this.dragging_sidebar {
+                    let w = window.viewport_size().width.as_f32();
+                    // The chat keeps its minimum beside it.
+                    let max = (w - viewer::CHAT_MIN).min(sidebar::MAX_WIDTH);
+                    this.sidebar_w = e
+                        .position
+                        .x
+                        .as_f32()
+                        .clamp(sidebar::MIN_WIDTH, max.max(sidebar::MIN_WIDTH));
+                    cx.notify();
+                }
                 if this.dragging {
                     let w = window.viewport_size().width.as_f32();
                     let side = if this.sidebar_hidden {
                         0.
                     } else {
-                        sidebar::WIDTH
+                        this.sidebar_w
                     };
                     let max = (w - side - viewer::CHAT_MIN).max(viewer::MIN_WIDTH);
                     this.panel_width = (w - e.position.x.as_f32()).clamp(viewer::MIN_WIDTH, max);
@@ -474,8 +494,9 @@ impl Render for Dent {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    if this.dragging {
+                    if this.dragging || this.dragging_sidebar {
                         this.dragging = false;
+                        this.dragging_sidebar = false;
                         cx.notify();
                     }
                 }),
@@ -484,8 +505,9 @@ impl Render for Dent {
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    if this.dragging {
+                    if this.dragging || this.dragging_sidebar {
                         this.dragging = false;
+                        this.dragging_sidebar = false;
                         cx.notify();
                     }
                 }),
@@ -519,7 +541,9 @@ impl Render for Dent {
                         ),
                 )
             })
-            .when(self.dragging, |d| d.cursor_col_resize())
+            .when(self.dragging || self.dragging_sidebar, |d| {
+                d.cursor_col_resize()
+            })
             .children(self.palette.map(|at| self.palette_view(at, window, cx)))
             .children(self.context_view(window, cx))
     }
@@ -637,6 +661,9 @@ fn main() {
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(16.), px(16.))),
             }),
+            // Narrower than the sidebar and the chat's minimum, and the chat
+            // would break; the sidebar folds away before this.
+            window_min_size: Some(size(px(720.), px(480.))),
             // Walkthroughs drive the window directly; they never need focus.
             focus: !background,
             ..Default::default()

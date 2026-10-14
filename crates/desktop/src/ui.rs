@@ -54,7 +54,10 @@ pub fn button(
         .font_weight(FontWeight::MEDIUM)
         .cursor_pointer()
         .when(primary, |d| {
-            d.bg(t.ink).text_color(t.surface).hover(|s| s.opacity(0.9))
+            d.bg(t.ink)
+                .text_color(t.surface)
+                .hover(|s| s.opacity(0.9))
+                .active(|s| s.opacity(0.8))
         })
         .when(!primary, |d| {
             d.border_1()
@@ -127,6 +130,7 @@ pub fn ghost(
         .text_color(t.quiet)
         .cursor_pointer()
         .hover(|s| s.bg(t.hover()).text_color(t.ink))
+        .active(|s| s.bg(t.press()).text_color(t.ink))
         .child(label.into())
 }
 
@@ -254,6 +258,7 @@ pub fn menu_row(
         .rounded(px(radius::MD))
         .cursor_pointer()
         .hover(|s| s.bg(t.hover()))
+        .active(|s| s.bg(t.press()))
         .child(
             div()
                 .w(px(14.))
@@ -293,7 +298,14 @@ impl Render for Tip {
                 .gap(px(space::S2))
                 .ty(UI)
                 .text_color(t.ink)
-                .child(self.text.clone())
+                // Long text, like a full title or path, wraps rather than
+                // being cut off in the very tooltip meant to show it.
+                .child(
+                    div()
+                        .max_w(px(360.))
+                        .whitespace_normal()
+                        .child(self.text.clone()),
+                )
                 .when_some(self.keys, |d, k| d.child(kbd(k, &t))),
         )
     }
