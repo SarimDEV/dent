@@ -1287,6 +1287,7 @@ fn checks() -> Vec<(f32, Act)> {
         (0.2, Press("reply", 0.01, 0.2)),
         (0.05, MoveBy(400., 0.)),
         (0.05, MoveBy(2000., 40.)),
+        (0.4, Shot("selecting")),
         (0.05, Release),
         (0.3, Shot("selected")),
         (0.1, Key("cmd-c")),

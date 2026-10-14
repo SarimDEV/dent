@@ -68,11 +68,13 @@ impl Text {
     }
 }
 
-/// Kept across frames: the selection handle, and the link a press began on.
+/// Kept across frames: the selection handle, the link a press began on, and
+/// the redraw that keeps the highlight under the pointer while it drags.
 #[derive(Clone)]
 pub struct Kept {
     handle: TextSelectionHandle,
     pressed: Rc<Cell<Option<usize>>>,
+    _redraw: Rc<Subscription>,
 }
 
 impl IntoElement for Text {
@@ -103,10 +105,15 @@ impl Element for Text {
     ) -> (LayoutId, Kept) {
         let kept = window.with_element_state(
             id.expect("selectable text has an id"),
-            |kept: Option<Kept>, _| {
-                let kept = kept.unwrap_or_else(|| Kept {
-                    handle: TextSelectionHandle::new(self.text.to_string(), cx),
-                    pressed: Rc::default(),
+            |kept: Option<Kept>, window| {
+                let kept = kept.unwrap_or_else(|| {
+                    let handle = TextSelectionHandle::new(self.text.to_string(), cx);
+                    let redraw = handle.refresh_window_on_change(window, cx);
+                    Kept {
+                        handle,
+                        pressed: Rc::default(),
+                        _redraw: Rc::new(redraw),
+                    }
                 });
                 (kept.clone(), kept)
             },

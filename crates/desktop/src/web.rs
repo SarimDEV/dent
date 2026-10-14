@@ -131,6 +131,8 @@ pub struct Preview {
     files: Shared<HashMap<String, Arc<[u8]>>>,
     /// The folder a page's own images, styles and scripts load from.
     root: Shared<Option<std::path::PathBuf>>,
+    /// The showing page's folder inside `root`, for links from the site's root.
+    page_dir: Shared<String>,
     events: Shared<Vec<PageEvent>>,
     /// Set from any thread when something arrives; the app checks it each tick.
     pending: Arc<AtomicBool>,
@@ -228,18 +230,31 @@ impl Preview {
         let f = files.clone();
         let root: Shared<Option<std::path::PathBuf>> = Arc::default();
         let r = root.clone();
+        let page_dir: Shared<String> = Arc::default();
+        let pd = page_dir.clone();
         let settled = Arc::new(AtomicBool::new(false));
         let ipc_settled = settled.clone();
         let (nav_origin, nav_push, win_push, ipc_push) =
             (origin.clone(), push.clone(), push.clone(), push.clone());
         let builder = WebViewBuilder::new()
             .with_custom_protocol("dent".into(), move |_, req| {
-                let path = req.uri().path().trim_start_matches('/').to_string();
-                let body = f
+                let mut path = req.uri().path().trim_start_matches('/').to_string();
+                let root = r.lock().ok().and_then(|r| r.clone());
+                let mut body = f
                     .lock()
                     .ok()
                     .and_then(|m| m.get(&path).cloned())
-                    .or_else(|| from_disk(r.lock().ok()?.as_deref()?, &path));
+                    .or_else(|| from_disk(root.as_deref()?, &path));
+                // A link from the site's root (`/styles.css`) skips the version
+                // in the address: find it from the page's folder upwards.
+                if body.is_none()
+                    && let Some(root) = &root
+                    && let Ok(dir) = pd.lock()
+                    && let Some((found, name)) = from_site_root(root, &dir, &path)
+                {
+                    body = Some(found);
+                    path = name;
+                }
                 let (status, bytes): (u16, Vec<u8>) = match body {
                     Some(b) => (200, b.to_vec()),
                     None => (404, b"Not found".to_vec()),
@@ -366,6 +381,7 @@ impl Preview {
             web,
             files,
             root,
+            page_dir,
             events,
             pending,
             settled,
@@ -404,6 +420,12 @@ impl Preview {
             Ok(mut r) => std::mem::replace(&mut *r, root.clone()) != root,
             Err(_) => false,
         };
+        if let Ok(mut d) = self.page_dir.lock() {
+            *d = name
+                .rsplit_once('/')
+                .map(|(d, _)| d.to_string())
+                .unwrap_or_default();
+        }
         let src = Source::File {
             name: name.to_string(),
             version: v,
@@ -753,6 +775,39 @@ fn split_root(name: &str, root: Option<&std::path::Path>) -> (String, Option<std
     (name.to_string(), root.map(|p| p.to_path_buf()))
 }
 
+/// A path from the site's root, found in the nearest folder from the page's
+/// own up to the project that has it, the way a static site is served from
+/// its public folder. A folder means its index.html. Gives the bytes and the
+/// name they were found under.
+fn from_site_root(root: &std::path::Path, dir: &str, path: &str) -> Option<(Arc<[u8]>, String)> {
+    let rel = percent_decode(path);
+    let rel = if rel.is_empty() || rel.ends_with('/') {
+        format!("{rel}index.html")
+    } else {
+        rel
+    };
+    let root = root.canonicalize().ok()?;
+    let mut at = root.join(dir);
+    loop {
+        if let Ok(full) = at.join(&rel).canonicalize()
+            && full.starts_with(&root)
+        {
+            let full = if full.is_dir() {
+                full.join("index.html")
+            } else {
+                full
+            };
+            if full.is_file() {
+                let name = full.file_name()?.to_string_lossy().into_owned();
+                return std::fs::read(&full).ok().map(|b| (b.into(), name));
+            }
+        }
+        if at == root || !at.pop() {
+            return None;
+        }
+    }
+}
+
 fn from_disk(root: &std::path::Path, path: &str) -> Option<Arc<[u8]>> {
     let rel = path.split_once('/')?.1;
     let rel = percent_decode(rel);
@@ -785,7 +840,7 @@ fn percent_decode(s: &str) -> String {
 
 #[cfg(test)]
 mod root_tests {
-    use super::{kind, split_root};
+    use super::{from_site_root, kind, split_root};
 
     #[test]
     fn pages_outside_the_project_load_from_their_own_folder() {
@@ -801,5 +856,26 @@ mod root_tests {
         assert_eq!(kind("a/Photo.JPG"), "image/jpeg");
         assert_eq!(kind("f.woff2"), "font/woff2");
         assert_eq!(kind("index.html"), "text/html; charset=utf-8");
+    }
+
+    #[test]
+    fn links_from_the_site_root_are_found_above_the_page() {
+        let dir = std::env::temp_dir().join(format!("dent-site-{}", std::process::id()));
+        let public = dir.join("web/public");
+        std::fs::create_dir_all(public.join("joined")).unwrap();
+        std::fs::create_dir_all(public.join("privacy")).unwrap();
+        std::fs::write(public.join("styles.css"), "h1{}").unwrap();
+        std::fs::write(public.join("privacy/index.html"), "<p>p</p>").unwrap();
+        let css = from_site_root(&dir, "web/public/joined", "styles.css").unwrap();
+        assert_eq!((&*css.0, css.1.as_str()), (&b"h1{}"[..], "styles.css"));
+        assert_eq!(
+            from_site_root(&dir, "web/public/joined", "privacy/")
+                .unwrap()
+                .1,
+            "index.html"
+        );
+        assert!(from_site_root(&dir, "web/public/joined", "../../etc/passwd").is_none());
+        assert!(from_site_root(&dir, "web/public/joined", "missing.css").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

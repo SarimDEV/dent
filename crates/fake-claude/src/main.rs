@@ -738,7 +738,7 @@ Every event, timed:
 
 fn file_body(path: &str, prompt: &str) -> String {
     if path.ends_with(".html") && prompt.contains("with assets") {
-        "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>Page</title>\n<link rel=\"stylesheet\" href=\"style.css\"></head>\n<body><h1>Styled</h1><img src=\"dot.gif\" alt=\"\"></body></html>\n".to_string()
+        "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>Page</title>\n<link rel=\"stylesheet\" href=\"style.css\"></head>\n<body><h1>Styled</h1><img src=\"/dot.gif\" alt=\"\"></body></html>\n".to_string()
     } else if path.ends_with(".html") {
         format!(
             "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>Page</title>\n<style>body{{font:16px system-ui;margin:40px}}h1{{font-size:28px}}</style></head>\n<body><h1>Hello</h1><p>{}</p></body></html>\n",
