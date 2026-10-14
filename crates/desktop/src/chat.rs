@@ -2378,7 +2378,7 @@ impl Dent {
     /// these, so a row does the same thing however it's chosen.
     pub fn menu_entries(&self, which: Menu, cx: &mut Context<Self>) -> Vec<Entry> {
         let d = self.defaults.clone();
-        let act = |f: Box<dyn Fn(&mut Dent, &mut Window, &mut Context<Dent>)>| Some(Rc::from(f));
+        let act = |f: Box<ActFn>| -> Option<Act> { Some(Rc::from(f)) };
         match which {
             Menu::Project => {
                 // Every project, newest first; the menu scrolls.
@@ -2717,6 +2717,10 @@ impl Dent {
 }
 
 /// A quiet line in a menu that isn't a choice.
+/// What a menu entry does when chosen.
+pub type ActFn = dyn Fn(&mut Dent, &mut Window, &mut Context<Dent>);
+pub type Act = Rc<ActFn>;
+
 /// One thing in a menu.
 #[derive(Clone)]
 pub struct Entry {
@@ -2726,7 +2730,7 @@ pub struct Entry {
     /// It's the current choice: a check beside it.
     pub on: bool,
     pub kind: EntryKind,
-    pub act: Option<Rc<dyn Fn(&mut Dent, &mut Window, &mut Context<Dent>)>>,
+    pub act: Option<Act>,
 }
 
 #[derive(Clone)]
@@ -2739,13 +2743,7 @@ pub enum EntryKind {
 }
 
 impl Entry {
-    fn row(
-        key: String,
-        name: &str,
-        note: Option<String>,
-        on: bool,
-        act: Option<Rc<dyn Fn(&mut Dent, &mut Window, &mut Context<Dent>)>>,
-    ) -> Self {
+    fn row(key: String, name: &str, note: Option<String>, on: bool, act: Option<Act>) -> Self {
         Self {
             key,
             name: name.to_string(),
