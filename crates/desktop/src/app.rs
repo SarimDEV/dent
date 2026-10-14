@@ -753,6 +753,12 @@ impl Dent {
         {
             self.fetch_commands(&new);
         }
+        if let Some(new) = id.clone()
+            && !self.changes.contains_key(&new)
+            && self.core.live
+        {
+            self.fetch_changes(&new);
+        }
         if id.is_none() && self.connection.is_ok() {
             self.fetch_recent();
         }
@@ -884,12 +890,13 @@ impl Dent {
                             changed.push(id);
                         }
                     }
-                    if first && self.core.live {
-                        // Caught up: every session's changes, once.
-                        let ids: Vec<String> = self.core.list.keys().cloned().collect();
-                        for id in ids {
-                            self.fetch_changes(&id);
-                        }
+                    if first
+                        && self.core.live
+                        && let Some(id) = self.selected.clone()
+                    {
+                        // Caught up: the open session's changes; others load
+                        // when opened.
+                        self.fetch_changes(&id);
                     }
                     if req != 0 {
                         self.reply(req, out, cx);
