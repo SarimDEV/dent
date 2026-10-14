@@ -15,6 +15,7 @@ mod markdown;
 mod notify;
 mod palette;
 mod popout;
+mod prefs;
 mod sidebar;
 mod theme;
 mod ui;
@@ -162,6 +163,9 @@ impl Render for Dent {
                 .update(cx, |c, cx| c.set_placeholder(want, window, cx));
         }
         self.inbox_focused = self.inbox_focus.is_focused(window);
+        if self.menu.is_none() && !self.dragging && self.walk.is_none() {
+            self.save_prefs();
+        }
         let visible = self.preview_visible();
         if let Some(p) = &self.preview {
             p.borrow_mut().set_visible(visible);

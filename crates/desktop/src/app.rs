@@ -247,6 +247,8 @@ pub struct Dent {
     pub picks: HashMap<String, Vec<Option<String>>>,
     /// Slash commands the agent offers, by session.
     pub commands: HashMap<String, Vec<Command>>,
+    /// What was last written to the prefs file.
+    saved_prefs: Option<crate::prefs::Prefs>,
     /// The plan above the composer is open.
     pub plan_open: bool,
     /// Long messages you've unfolded.
@@ -324,7 +326,12 @@ pub struct Dent {
 
 impl Dent {
     pub fn new(dark: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let t = if dark {
+        // Follows the Mac's appearance unless --dark asks for Carbon.
+        let system_dark = matches!(
+            window.appearance(),
+            WindowAppearance::Dark | WindowAppearance::VibrantDark
+        );
+        let t = if dark || system_dark {
             Theme::carbon()
         } else {
             Theme::paper()
@@ -429,6 +436,23 @@ impl Dent {
             }
         })
         .detach();
+        if !dark {
+            cx.observe_window_appearance(window, |this, window, cx| {
+                let dark = matches!(
+                    window.appearance(),
+                    WindowAppearance::Dark | WindowAppearance::VibrantDark
+                );
+                if dark != this.t.dark {
+                    this.t = if dark { Theme::carbon() } else { Theme::paper() };
+                    for input in [&this.composer, &this.starter, &this.comment_input, &this.search] {
+                        crate::style_input(input, &this.t, cx);
+                    }
+                    this.md.clear();
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
         cx.observe_window_activation(window, |this, window, _| {
             this.window_active = window.is_window_active();
         })
@@ -463,6 +487,7 @@ impl Dent {
             }
         })
         .detach();
+        let prefs = crate::prefs::load();
         let mut this = Self {
             t,
             sessions: Vec::new(),
@@ -478,11 +503,11 @@ impl Dent {
             comment_input,
             drafts: HashMap::new(),
             defaults: Defaults {
-                project: None,
-                project_picked: false,
-                model: None,
-                permission: Permission::Ask,
-                effort: None,
+                project: prefs.project.clone(),
+                project_picked: prefs.project.is_some(),
+                model: prefs.model.clone(),
+                permission: prefs.permission,
+                effort: prefs.effort.clone(),
             },
             menu: None,
             toast: None,
@@ -509,10 +534,11 @@ impl Dent {
             slash_ix: 0,
             expanded: HashSet::new(),
             plan_open: false,
+            saved_prefs: None,
             partial_len: HashMap::new(),
             just_sent: None,
             panel_open: true,
-            panel_width: 600.,
+            panel_width: prefs.panel_width.unwrap_or(600.),
             panel_w: 600.,
             chat_w: 800.,
             sidebar_hidden: false,
@@ -1086,6 +1112,26 @@ impl Dent {
         self.sessions.sort_by_key(|s| std::cmp::Reverse(s.updated));
         if following && self.transcript.is_following_tail() {
             self.follow();
+        }
+    }
+
+    /// Remember the current defaults and layout for next time, when they change.
+    pub fn save_prefs(&mut self) {
+        let p = crate::prefs::Prefs {
+            project: self
+                .defaults
+                .project
+                .clone()
+                .filter(|_| self.defaults.project_picked),
+            model: self.defaults.model.clone(),
+            permission: self.defaults.permission,
+            effort: self.defaults.effort.clone(),
+            panel_width: Some(self.panel_width),
+            dark: Some(self.t.dark),
+        };
+        if self.saved_prefs.as_ref() != Some(&p) {
+            crate::prefs::save(&p);
+            self.saved_prefs = Some(p);
         }
     }
 
