@@ -170,7 +170,6 @@ pub struct Session {
     pub items: Rc<Vec<Item>>,
     pub arts: Vec<&'static str>,
     pub diff: Rc<Vec<FileDiff>>,
-    pub terminal: Vec<(Tone, String)>,
     /// Changes whenever a file it wrote gets a new version.
     pub made_sig: usize,
     /// The agent's plan, as its latest todo list: (state, what, doing-form).
@@ -207,7 +206,6 @@ impl Session {
             items: Rc::default(),
             arts: Vec::new(),
             diff: Rc::default(),
-            terminal: Vec::new(),
             context: None,
             asides: Vec::new(),
             checkpoints: Default::default(),
@@ -216,13 +214,6 @@ impl Session {
             todos: Vec::new(),
         }
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Tone {
-    Quiet,
-    Good,
-    Command,
 }
 
 #[derive(Clone)]

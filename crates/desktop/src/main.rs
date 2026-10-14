@@ -21,6 +21,7 @@ mod palette;
 mod popout;
 mod prefs;
 mod select;
+mod shell;
 mod sidebar;
 mod theme;
 mod ui;
@@ -327,7 +328,7 @@ impl Render for Dent {
             }))
             .on_action(cx.listener(|this, _: &ShowChanges, _, cx| this.show_tab(Tab::Changes, cx)))
             .on_action(
-                cx.listener(|this, _: &ShowTerminal, _, cx| this.show_tab(Tab::Terminal, cx)),
+                cx.listener(|this, _: &ShowTerminal, window, cx| this.open_shell(window, cx)),
             )
             .on_action(
                 cx.listener(|this, _: &SteerSend, window, cx| this.send_with(true, window, cx)),
@@ -354,7 +355,9 @@ impl Render for Dent {
             .on_action(cx.listener(|this, _: &Escape, window, cx| {
                 // Esc backs out one thing at a time; with nothing open it moves
                 // to the inbox, where arrows, Enter and E work.
-                if this.palette.is_some() {
+                if gpui_kit::base::TextSelection::has_selection(window, cx) {
+                    gpui_kit::base::TextSelection::clear(window, cx);
+                } else if this.palette.is_some() {
                     this.close_palette(window, cx);
                 } else if this.menu.take().is_some() {
                 } else if this.picking {

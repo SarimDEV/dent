@@ -74,6 +74,8 @@ Five sizes, two weights, three inks. Line heights sit on the 4 px grid.
 
 - **Nested radius:** inner = outer − padding, never below `radius.sm`. A card at 8 with 12 padding holds buttons at 4.
 - Radius grows with surface size; small things are nearly square.
+- **Floating controls** over scrolling content (the chat's "Latest") are capsules at control height, at elevation 1, so they read as lifted off the page rather than part of it.
+- **Paired steppers** (up and down through your messages) are one joined pair with a hairline between the halves: outlined beside outlined text buttons, plain among icons.
 
 ## Colour
 

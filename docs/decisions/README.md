@@ -43,3 +43,4 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0039. Diagrams rasterise with resvg](0039-svg-raster-resvg.md)
 - [0040. KaTeX Size glyphs drawn from outlines with ttf-parser](0040-glyph-outlines-ttf-parser.md)
 - [0041. Diagram labels measured with rustybuzz](0041-label-shaping-rustybuzz.md)
+- [0042. Your terminal: your own shell, drawn by dent with alacritty_terminal](0042-terminal-alacritty.md)

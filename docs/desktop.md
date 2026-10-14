@@ -58,7 +58,7 @@ The viewer shows, as tabs, everything the open session made or changed ([0037](d
 - **Docs:** Markdown rendered as a page (see Markdown viewer), with copy and open in editor.
 - **Images:** screenshots and charts the agent made, fitted to the panel, with actual size.
 - **Changes:** the session's files with counts and the diff, virtualized so a lockfile of thousands of lines scrolls freely. Click a line number to comment; comments collect into one review that **Send to agent** delivers with file and line for each (see Review loop).
-- **Terminal:** the session's terminal (see Terminal).
+- **Terminal:** your own shell in the session's folder (see Terminal).
 - **Keys:** Cmd+1 is the first thing the session made, Cmd+2 changes, Cmd+3 the terminal.
 - The web view is a native layer, so nothing floating may overlap it: the preview hides while a menu is open, and toasts sit over the sidebar.
 
@@ -110,10 +110,10 @@ The goal is VS Code's Source Control flow, at native speed.
 
 ## Terminal
 
-- A panel toggled with Ctrl+\`, opening in the session's directory on the session's machine, with tabs and splits.
-- Rendered with `alacritty_terminal` for emulation drawn with GPUI.
-- Backed by the session holder's PTY, so it survives closing the app.
-- "Open in external terminal" launches the user's terminal app with an SSH session to the same machine and directory.
+- Your own login shell in the session's folder, in the viewer's Terminal tab, opened with Cmd+3, Ctrl+\` or the header's terminal button ([0042](decisions/0042-terminal-alacritty.md)). The agent never sees it or types into it.
+- Rendered with `alacritty_terminal` for emulation, drawn with GPUI in the code face.
+- Every key without Cmd goes to the shell while it has focus; Cmd+C and Cmd+V copy and paste.
+- Later: running on the session's machine through the session holder's PTY, so it survives closing the app; tabs and splits.
 
 ## Previews and ports
 

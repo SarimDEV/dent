@@ -8,7 +8,7 @@ use dent_client_core::{Call, Entry, Note, SessionView};
 use dent_protocol::{Answer, Model, Status as Wire};
 use serde_json::Value;
 
-use crate::data::{Artifact, FileDiff, Item, Kind, Question, Session, Tone, ToolLine, intern};
+use crate::data::{Artifact, FileDiff, Item, Kind, Question, Session, ToolLine, intern};
 use crate::theme::Status;
 
 /// Everything outside the timeline a session row needs.
@@ -374,7 +374,6 @@ pub fn session(
         items: built.items.clone(),
         arts,
         diff: cx.diff.unwrap_or_default(),
-        terminal: terminal(v),
         context: v.context,
         asides: v.asides.clone(),
         checkpoints: v.checkpoints.clone(),
@@ -426,36 +425,6 @@ fn servers_in(e: &Entry) -> Vec<String> {
         }
     }
     out
-}
-
-/// The last commands it ran and what they printed, newest last, capped.
-fn terminal(v: &SessionView) -> Vec<(Tone, String)> {
-    let mut blocks: Vec<Vec<(Tone, String)>> = Vec::new();
-    let mut lines = 0;
-    'scan: for e in v.entries.iter().rev() {
-        let Entry::Tools { calls } = e else { continue };
-        for c in calls.iter().rev() {
-            let (c, Some((err, out))) = (c, &c.result) else {
-                continue;
-            };
-            if c.name != "Bash" {
-                continue;
-            }
-            let cmd = c.input()["command"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string();
-            let tone = if *err { Tone::Quiet } else { Tone::Good };
-            let mut b = vec![(Tone::Command, format!("$ {cmd}"))];
-            b.extend(out.lines().take(40).map(|l| (tone, l.to_string())));
-            lines += b.len();
-            blocks.push(b);
-            if lines >= 400 {
-                break 'scan;
-            }
-        }
-    }
-    blocks.into_iter().rev().flatten().collect()
 }
 
 /// The agent's latest plan, from its last todo list.

@@ -1311,6 +1311,28 @@ fn checks() -> Vec<(f32, Act)> {
         ),
         (0.1, Call(restore_clipboard)),
         (0.1, Key("escape")),
+        (0.2, Key("cmd-3")),
+        (
+            0.2,
+            Until(
+                "⌘ 3 opens your own shell, focused",
+                |d, _| current(d).is_some_and(|s| d.shells.contains_key(&s.id)) && drawn(d, "shell").is_some(),
+                5.,
+            ),
+        ),
+        (1.0, Keys("echo dent-$((6*7))")),
+        (0.1, Key("enter")),
+        (
+            0.2,
+            Until(
+                "what you type runs in it",
+                |d, _| current(d).and_then(|s| d.shells.get(&s.id)).is_some_and(|sh| sh.text().contains("dent-42")),
+                5.,
+            ),
+        ),
+        (0.3, Shot("terminal")),
+        (0.1, Key("ctrl-c")),
+        (0.1, Key("cmd-2")),
         (0.1, Call(attach_red)),
         (0.3, Shot("attachment")),
         (0.1, Type(Field::Composer, "what is in this picture")),

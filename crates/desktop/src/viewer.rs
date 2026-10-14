@@ -8,7 +8,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use crate::app::{Dent, Tab, Viewport};
-use crate::data::{Kind, Line, Session, Tone};
+use crate::data::{Kind, Line, Session};
 use crate::ds::{CODE, LABEL, Typed, UI, radius, size, space};
 use crate::markdown;
 use crate::theme::{Status, status_square};
@@ -28,13 +28,15 @@ pub const CHAT_MIN: f32 = 440.;
 
 impl Dent {
     pub fn has_viewer(s: &Session) -> bool {
-        !s.arts.is_empty() || !s.diff.is_empty() || !s.terminal.is_empty()
+        !s.arts.is_empty() || !s.diff.is_empty()
     }
 
     /// Whether the right pane has anything for this session: what it made,
     /// or a side chat, even one just opened.
     pub fn shows_panel(&self, s: &Session) -> bool {
-        Self::has_viewer(s) || !s.asides.is_empty() || self.tabs.get(&s.id) == Some(&Tab::Aside)
+        Self::has_viewer(s)
+            || !s.asides.is_empty()
+            || matches!(self.tabs.get(&s.id), Some(Tab::Aside | Tab::Terminal))
     }
 
     /// Whether the live page should be on screen this frame.
@@ -81,7 +83,7 @@ impl Dent {
                 "git-compare",
             ));
         }
-        if !s.terminal.is_empty() {
+        if self.shells.contains_key(&s.id) || tab == Tab::Terminal {
             tabs.push((Tab::Terminal, "Terminal".into(), "square-terminal"));
         }
         if !s.asides.is_empty() || tab == Tab::Aside {
@@ -157,7 +159,7 @@ impl Dent {
                 None => div().into_any_element(),
             },
             Tab::Changes => self.changes(s, window, cx),
-            Tab::Terminal => self.terminal(s),
+            Tab::Terminal => self.shell_view(s, window, cx),
             Tab::Aside => self.side_chat(s, window, cx),
         };
         div()
@@ -1629,45 +1631,6 @@ impl Dent {
             .flex_col()
             .child(list)
             .child(input)
-            .into_any_element()
-    }
-
-    fn terminal(&mut self, s: &Session) -> AnyElement {
-        let t = self.t;
-        div()
-            .id("terminal")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .p(px(space::S4))
-            .flex()
-            .flex_col()
-            .children(s.terminal.iter().enumerate().map(|(i, (tone, line))| {
-                let mark = (*tone == Tone::Good).then(|| status_square(Status::Done, &t));
-                div()
-                    .h(px(size::LINE))
-                    .flex()
-                    .items_center()
-                    .gap(px(space::S2))
-                    .child(div().w(px(12.)).flex_none().children(mark))
-                    .child(
-                        div()
-                            .whitespace_nowrap()
-                            .ty(CODE)
-                            .text_color(match tone {
-                                Tone::Quiet => t.quiet,
-                                _ => t.ink,
-                            })
-                            .when(*tone == Tone::Command, |d| {
-                                d.font_weight(FontWeight::MEDIUM)
-                            })
-                            .child(crate::select::text(
-                                SharedString::from(format!("term-{i}")),
-                                line.clone(),
-                                &t,
-                            )),
-                    )
-            }))
             .into_any_element()
     }
 }

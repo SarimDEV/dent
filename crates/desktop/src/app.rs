@@ -57,6 +57,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-1", ShowFirst, None),
         KeyBinding::new("cmd-2", ShowChanges, None),
         KeyBinding::new("cmd-3", ShowTerminal, None),
+        KeyBinding::new("ctrl-`", ShowTerminal, None),
         KeyBinding::new("escape", Escape, None),
         KeyBinding::new("cmd-.", StopSession, None),
         KeyBinding::new("cmd-enter", SteerSend, None),
@@ -248,6 +249,13 @@ pub struct Dent {
     pub selected: Option<String>,
     pub focus: FocusHandle,
     pub inbox_focus: FocusHandle,
+    /// Your own terminals, one per session, started when first opened.
+    pub shells: HashMap<String, crate::shell::Shell>,
+    pub shell_tx:
+        futures::channel::mpsc::UnboundedSender<(String, alacritty_terminal::event::Event)>,
+    pub term_focus: FocusHandle,
+    /// The terminal pane's size when last drawn, to start the next at.
+    pub shell_pane: Rc<std::cell::Cell<Option<Size<Pixels>>>>,
     pub inbox_focused: bool,
     pub palette: Option<usize>,
     pub search: Entity<TextareaState>,
@@ -615,6 +623,26 @@ impl Dent {
             }
         })
         .detach();
+        // What your terminals draw arrives from their own threads.
+        let (shell_tx, mut shell_rx) = futures::channel::mpsc::unbounded();
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            while let Some(first) = shell_rx.next().await {
+                let mut batch = vec![first];
+                while let Ok(m) = shell_rx.try_recv() {
+                    batch.push(m);
+                }
+                let gone = this.update(cx, |this, cx| {
+                    for (id, ev) in batch {
+                        this.on_shell(id, ev, cx);
+                    }
+                });
+                if gone.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         let prefs = crate::prefs::load();
         // Usage moves however the account is used: look again every few minutes.
         cx.spawn(async move |this, cx| {
@@ -635,6 +663,10 @@ impl Dent {
             selected: None,
             focus: cx.focus_handle(),
             inbox_focus: cx.focus_handle(),
+            shells: HashMap::new(),
+            shell_tx,
+            term_focus: cx.focus_handle(),
+            shell_pane: Rc::default(),
             inbox_focused: false,
             palette: None,
             search,
@@ -804,11 +836,7 @@ impl Dent {
             .get(&s.id)
             .copied()
             .or_else(|| s.arts.last().map(|a| Tab::Art(a)))
-            .unwrap_or(if s.diff.is_empty() {
-                Tab::Terminal
-            } else {
-                Tab::Changes
-            })
+            .unwrap_or(Tab::Changes)
     }
     pub fn version(&self, art: &Artifact) -> usize {
         self.viewing
@@ -880,6 +908,9 @@ impl Dent {
         if let Some(s) = self.session_mut(id) {
             s.closed = true;
         }
+        if let Some(sh) = self.shells.remove(id) {
+            sh.shutdown();
+        }
         self.live.send(Request::Close {
             session: id.to_string(),
         });
@@ -904,7 +935,7 @@ impl Dent {
         cx.notify();
     }
 
-    fn toast(&mut self, action: ToastAction, text: String) {
+    pub fn toast(&mut self, action: ToastAction, text: String) {
         self.toast = Some(Toast {
             text,
             action,
@@ -1123,6 +1154,10 @@ impl Dent {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        // Your terminal takes every key but ⌘ while it has focus.
+        if self.shell_key(k, window, cx) {
+            return true;
+        }
         // The slash menu: arrows move, Tab or Return completes.
         if !k.modifiers.modified()
             && matches!(k.key.as_str(), "up" | "down" | "tab" | "enter")

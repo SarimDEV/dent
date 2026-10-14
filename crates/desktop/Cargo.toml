@@ -17,6 +17,8 @@ dent-client-core.workspace = true
 gpui-kit = "=0.7.1"
 # Live pages: the system web view as a child of the GPUI window (0037).
 wry = "=0.57.0"
+# Your own shell in the viewer's Terminal tab: Alacritty's terminal and pty (0042).
+alacritty_terminal = { version = "=0.26.0", default-features = false }
 pulldown-cmark = { version = "=0.13.4", default-features = false }
 serde.workspace = true
 serde_json.workspace = true

@@ -87,6 +87,19 @@ impl Dent {
             );
         }
         // Icon actions sit together, after the text ones.
+        // Once the viewer shows a Terminal tab, the tab is the way there.
+        let tab_shown = self.panel_open
+            && has_viewer
+            && (self.shells.contains_key(&s.id) || self.tabs.get(&s.id) == Some(&Tab::Terminal));
+        if !tab_shown {
+            actions = actions.child(
+                icon_button("terminal", "square-terminal", &t)
+                    .relative()
+                    .on_click(cx.listener(|this, _, window, cx| this.open_shell(window, cx)))
+                    .tooltip(tip("Your terminal", Some("⌘ 3"), t))
+                    .child(probe(&self.probes, "terminal")),
+            );
+        }
         if !s.items.is_empty() {
             actions = actions.child(
                 icon_button("side-chat", "message-circle-question-mark", &t)
@@ -198,8 +211,14 @@ impl Dent {
                             d.child(
                                 div()
                                     .id("title")
-                                    .flex_shrink_0()
-                                    .max_w(relative(0.7))
+                                    // With its details gone, the title takes all the room there is.
+                                    .map(|d| {
+                                        if tight {
+                                            d.flex_1().min_w_0()
+                                        } else {
+                                            d.flex_shrink_0().max_w(relative(0.7))
+                                        }
+                                    })
                                     .truncate()
                                     .ty(DISPLAY_COMPACT)
                                     .text_color(t.ink)
@@ -264,11 +283,7 @@ impl Dent {
                 .items_center()
                 .justify_center()
                 .when(!up, |d| d.border_l_1().border_color(t.hairline))
-                .child(icon(
-                    name,
-                    14.,
-                    if on { t.quiet } else { t.faint.opacity(0.45) },
-                ))
+                .child(icon(name, 14., if on { t.quiet } else { t.faint }))
                 .map(|d| {
                     if on {
                         d.cursor_pointer()
@@ -284,12 +299,13 @@ impl Dent {
                 })
                 .child(probe(&self.probes, id))
         };
+        // Outlined beside the outlined text buttons; plain among icons.
+        let outlined = self.chat_w >= 600.;
         div()
             .flex_none()
             .flex()
             .rounded(px(radius::MD))
-            .border_1()
-            .border_color(t.hairline)
+            .when(outlined, |d| d.border_1().border_color(t.hairline))
             .overflow_hidden()
             .child(half("mine-prev", true, prev, cx))
             .child(half("mine-next", false, next, cx))
@@ -354,50 +370,50 @@ impl Dent {
                 .transcript
                 .bounds_for_item(count - 1)
                 .is_none_or(|b| b.bottom() > bottom + px(space::S8));
-        let transcript = div()
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .child(transcript)
-            .when(away, |d| {
-                d.child(
+        let transcript = div().relative().flex_1().min_h_0().child(transcript);
+        // Drawn with the composer, above its fade.
+        let latest = away.then(|| {
+            div()
+                .absolute()
+                .top(px(-(size::CONTROL + space::S2)))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
                     div()
-                        .absolute()
-                        .bottom(px(space::S4))
-                        .left_0()
-                        .right_0()
+                        .id("to-latest")
+                        .relative()
+                        .h(px(size::CONTROL))
+                        .px(px(space::S3))
                         .flex()
-                        .justify_center()
-                        .child(
-                            div()
-                                .id("to-latest")
-                                .relative()
-                                .h(px(size::CONTROL))
-                                .px(px(space::S3))
-                                .flex()
-                                .items_center()
-                                .gap(px(space::S1H))
-                                .rounded_full()
-                                .bg(t.raised)
-                                .border_1()
-                                .border_color(t.hairline)
-                                .shadow_sm()
-                                .ty(UI)
-                                .text_color(t.quiet)
-                                .cursor_pointer()
-                                .hover(|d| d.text_color(t.ink))
-                                .active(|d| d.opacity(0.82))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.transcript.set_follow_mode(FollowMode::Tail);
-                                    this.transcript.scroll_to_end();
-                                    cx.notify();
-                                }))
-                                .child(icon("arrow-down", 13., t.quiet))
-                                .child("Latest")
-                                .child(probe(&self.probes, "to-latest")),
-                        ),
+                        .items_center()
+                        .gap(px(space::S1H))
+                        .rounded_full()
+                        // On Carbon a raised fill is barely off the page: lift it a step.
+                        .bg(if t.dark {
+                            theme::mix_pub(t.raised, t.ink, 0.08)
+                        } else {
+                            t.raised
+                        })
+                        .border_1()
+                        .border_color(t.hairline)
+                        .shadow_md()
+                        .ty(UI)
+                        .text_color(t.quiet)
+                        .cursor_pointer()
+                        .hover(|d| d.text_color(t.ink))
+                        .active(|d| d.opacity(0.82))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.transcript.set_follow_mode(FollowMode::Tail);
+                            this.transcript.scroll_to_end();
+                            cx.notify();
+                        }))
+                        .child(icon("arrow-down", 13., t.quiet))
+                        .child("Latest")
+                        .child(probe(&self.probes, "to-latest")),
                 )
-            });
+        });
         let footer: AnyElement = if s.closed {
             let id = s.id.clone();
             div()
@@ -431,16 +447,17 @@ impl Dent {
                 .child(
                     div()
                         .absolute()
-                        .top(px(-space::S6))
+                        .top(px(-FADE))
                         .left_0()
                         .right_0()
-                        .h(px(space::S6))
+                        .h(px(FADE))
                         .bg(linear_gradient(
                             180.,
                             linear_color_stop(t.surface.opacity(0.), 0.),
                             linear_color_stop(t.surface, 1.),
                         )),
                 )
+                .children(latest)
                 .child(self.composer_box(s, cx))
                 .into_any_element()
         };
@@ -2476,6 +2493,10 @@ pub fn duration(secs: u64) -> String {
 fn home() -> String {
     std::env::var("HOME").unwrap_or_default()
 }
+
+/// How far the conversation fades out above the composer: enough that the
+/// "Latest" pill sits on faded text, never on a line you're reading.
+const FADE: f32 = 48.;
 
 /// Effort levels, with what each is for.
 const EFFORTS: [(Option<&str>, &str); 6] = [
