@@ -363,6 +363,26 @@ impl Dent {
             .on_click(
                 cx.listener(move |this, _, window, cx| this.select(Some(id.clone()), window, cx)),
             )
+            .on_mouse_down(MouseButton::Right, {
+                let (sid, cwd, closed) = (s.id.clone(), s.cwd.clone(), s.closed);
+                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                    use crate::context::Do;
+                    let mut items = vec![
+                        ("Rename", Do::Rename(sid.clone())),
+                        ("Fork", Do::Fork(sid.clone())),
+                    ];
+                    if closed {
+                        items.push(("Reopen", Do::Reopen(sid.clone())));
+                    } else if closable {
+                        items.push(("Close", Do::CloseSession(sid.clone())));
+                    }
+                    if !cwd.is_empty() {
+                        items.push(("Copy folder path", Do::CopyPath(cwd.clone())));
+                        items.push(("Show folder in Finder", Do::Reveal(cwd.clone())));
+                    }
+                    this.open_context(e.position, items, cx);
+                })
+            })
             .child(div().h(px(20.)).flex().items_center().child(mark))
             .child(
                 div()

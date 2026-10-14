@@ -14,6 +14,37 @@ use crate::markdown;
 use crate::theme::{Status, status_square};
 use crate::ui::{Ready, action, button, ghost, icon, icon_button, kbd, probe, tip};
 
+/// Where a file the agent made is on disk: paths are kept as it wrote them,
+/// so `~/…` and relative ones are resolved here.
+pub fn art_file(a: &crate::data::Artifact) -> Option<std::path::PathBuf> {
+    if a.kind == Kind::Server {
+        return None;
+    }
+    let p = a.path;
+    if let Some(rest) = p.strip_prefix("~/") {
+        return std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(rest));
+    }
+    if p.starts_with('/') {
+        return Some(p.into());
+    }
+    a.dir.as_ref().map(|d| d.join(p))
+}
+
+/// A long name cut in the middle, so its start and its extension both show.
+fn middle_ellipsis(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let keep = max - 1;
+    let head: String = s.chars().take(keep - keep / 2).collect();
+    let tail: String = s.chars().skip(n - keep / 2).collect();
+    format!("{head}…{tail}")
+}
+
+/// Half the width of the grip on the panel's left edge.
+const GRIP: f32 = 4.;
+
 pub const MIN_WIDTH: f32 = 360.;
 
 /// A row of the diff list.
@@ -60,39 +91,77 @@ impl Dent {
     ) -> AnyElement {
         let t = self.t;
         let tab = self.tab(s);
-        let mut tabs: Vec<(Tab, String, &'static str)> = s
-            .arts
-            .iter()
-            .filter_map(|a| self.art(a))
-            .map(|a| {
-                (
-                    Tab::Art(a.id),
-                    if a.kind == Kind::Server {
-                        a.title.trim_start_matches("Dev server · ").to_string()
-                    } else {
-                        a.path.rsplit('/').next().unwrap_or(a.path).to_string()
-                    },
-                    a.kind.icon(),
-                )
-            })
-            .collect();
+        // Changes, Terminal and Side chat stay put on the left; the files
+        // the agent made follow, newest last.
+        let mut tabs: Vec<(Tab, String, &'static str, Option<&'static str>)> = Vec::new();
         if !s.diff.is_empty() {
             tabs.push((
                 Tab::Changes,
                 format!("Changes {}", s.diff.len()),
                 "git-compare",
+                None,
             ));
         }
         if self.shells.contains_key(&s.id) || tab == Tab::Terminal {
-            tabs.push((Tab::Terminal, "Terminal".into(), "square-terminal"));
+            tabs.push((Tab::Terminal, "Terminal".into(), "square-terminal", None));
         }
         if !s.asides.is_empty() || tab == Tab::Aside {
             tabs.push((
                 Tab::Aside,
                 "Side chat".into(),
                 "message-circle-question-mark",
+                None,
             ));
         }
+        for a in self.open_arts(s).into_iter().filter_map(|a| self.art(a)) {
+            tabs.push((
+                Tab::Art(a.id),
+                if a.kind == Kind::Server {
+                    a.title.trim_start_matches("Dev server · ").to_string()
+                } else {
+                    a.path.rsplit('/').next().unwrap_or(a.path).to_string()
+                },
+                a.kind.icon(),
+                Some(a.path),
+            ));
+        }
+        // Keep the tab you're looking at in view as tabs come and go.
+        let key = (tab, tabs.len(), self.panel_w as u32);
+        if self.revealed_tab != Some(key) && !self.dragging {
+            self.revealed_tab = Some(key);
+            self.reveal_pending = true;
+        }
+        if self.reveal_pending {
+            // Once the strip has been laid out it knows where each tab is
+            // (before scrolling): scroll just enough to show this one whole.
+            let ix = tabs.iter().position(|(w, ..)| *w == tab);
+            let view = self.tab_scroll.bounds();
+            match ix.and_then(|ix| self.tab_scroll.bounds_for_item(ix)) {
+                Some(b) if view.size.width > px(0.) => {
+                    let mut x = self.tab_scroll.offset().x;
+                    if b.right() + x > view.right() {
+                        x = view.right() - b.right();
+                    }
+                    if b.left() + x < view.left() {
+                        x = view.left() - b.left();
+                    }
+                    let x = x.min(px(0.)).max(-self.tab_scroll.max_offset().x);
+                    let shown = b.right() + x <= view.right() + px(0.5)
+                        && b.left() + x >= view.left() - px(0.5);
+                    self.tab_scroll.set_offset(point(x, px(0.)));
+                    // The strip's own measure lags a frame behind new tabs:
+                    // look again until the tab fits, a few frames at most.
+                    self.reveal_tries += 1;
+                    if shown || self.reveal_tries > 8 {
+                        self.reveal_pending = false;
+                        self.reveal_tries = 0;
+                    }
+                    window.request_animation_frame();
+                }
+                _ => window.request_animation_frame(),
+            }
+        }
+        let many = tabs.iter().filter(|(_, _, _, p)| p.is_some()).count() > 1;
         let header = div()
             .h(px(size::HEADER))
             .flex_none()
@@ -111,14 +180,15 @@ impl Dent {
             })
             .child(
                 div()
-                    .id("tabs")
+                    .id(SharedString::from(format!("tabs-{}", s.id)))
                     .flex_1()
                     .min_w_0()
                     .flex()
                     .items_center()
                     .gap(px(space::S1))
                     .overflow_x_scroll()
-                    .children(tabs.into_iter().map(|(which, name, ic)| {
+                    .track_scroll(&self.tab_scroll)
+                    .children(tabs.into_iter().map(|(which, name, ic, path)| {
                         let on = which == tab;
                         let key = match which {
                             Tab::Art(a) => format!("tab-{a}"),
@@ -126,12 +196,19 @@ impl Dent {
                             Tab::Terminal => "tab-terminal".into(),
                             Tab::Aside => "tab-aside".into(),
                         };
+                        let group = SharedString::from(format!("g-{key}"));
+                        let art = match which {
+                            Tab::Art(a) => Some(a),
+                            _ => None,
+                        };
                         div()
                             .id(SharedString::from(key.clone()))
+                            .group(group.clone())
                             .relative()
                             .flex_none()
                             .h(px(size::CONTROL))
-                            .px(px(space::S2))
+                            .pl(px(space::S2))
+                            .pr(px(if art.is_some() { space::S1 } else { space::S2 }))
                             .flex()
                             .items_center()
                             .gap(px(space::S1H))
@@ -141,13 +218,70 @@ impl Dent {
                             .when(!on, |d| d.hover(|d| d.bg(t.hover())))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(move |this, _, _, cx| this.show_tab(which, cx)))
+                            .when_some(path, |d, p| d.tooltip(crate::ui::tip_owned(p, t)))
+                            // A middle click closes a file's tab, as in a browser.
+                            .when_some(art, |d, a| {
+                                d.on_mouse_down(
+                                    MouseButton::Middle,
+                                    cx.listener(move |this, _, _, cx| this.close_tab(a, cx)),
+                                )
+                            })
                             .child(icon(ic, 13., if on { t.ink } else { t.quiet }))
                             .child(
                                 div()
                                     .ty(UI)
                                     .text_color(if on { t.ink } else { t.quiet })
-                                    .child(name),
+                                    .child(middle_ellipsis(&name, 28)),
                             )
+                            .when_some(art, |d, a| {
+                                d.child(
+                                    div()
+                                        .id(SharedString::from(format!("close-{key}")))
+                                        .flex_none()
+                                        .size(px(18.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(px(radius::SM))
+                                        .when(!on, |d| {
+                                            d.opacity(0.)
+                                                .group_hover(group.clone(), |s| s.opacity(1.))
+                                        })
+                                        .hover(|d| d.bg(t.hover()))
+                                        .active(|d| d.bg(t.press()))
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.close_tab(a, cx);
+                                        }))
+                                        .tooltip(tip("Close tab", None, t))
+                                        .child(icon("x", 12., t.quiet)),
+                                )
+                            })
+                            .when_some(art.zip(path), |d, (a, p)| {
+                                let _ = p;
+                                let full = self
+                                    .art(a)
+                                    .and_then(art_file)
+                                    .map(|f| f.display().to_string());
+                                d.on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                        use crate::context::Do;
+                                        let mut items = vec![("Close tab", Do::CloseTab(a))];
+                                        if many {
+                                            items.push(("Close other tabs", Do::CloseOtherTabs(a)));
+                                        }
+                                        if let Some(f) = &full {
+                                            items.push(("Copy path", Do::CopyPath(f.clone())));
+                                            items.push(("Show in Finder", Do::Reveal(f.clone())));
+                                        }
+                                        this.open_context(e.position, items, cx);
+                                    }),
+                                )
+                            })
                             .child(probe(&self.probes, key))
                     })),
             );
@@ -162,34 +296,42 @@ impl Dent {
             Tab::Terminal => self.shell_view(s, window, cx),
             Tab::Aside => self.side_chat(s, window, cx),
         };
+        // The panel clips its contents; its grip sits outside that, half
+        // over the chat, so it is easy to catch.
         div()
             .relative()
             .w(px(self.panel_w))
             .flex_none()
-            .overflow_hidden()
             .h_full()
-            .flex()
-            .flex_col()
-            .bg(t.panel)
-            .border_l_1()
-            .border_color(t.hairline)
-            .child(header)
-            .child(body)
-            // The left edge resizes the panel.
+            .child(
+                div()
+                    .size_full()
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .bg(t.panel)
+                    .border_l_1()
+                    .border_color(t.hairline)
+                    .child(header)
+                    .child(body),
+            )
+            // The left edge resizes the panel. A page stays clear of the
+            // grip's inner half: a native web view would take the press.
             .child(
                 div()
                     .id("resize")
                     .absolute()
-                    .left(px(-3.))
+                    .left(px(-GRIP))
                     .top_0()
                     .bottom_0()
-                    .w(px(6.))
+                    .w(px(GRIP * 2.))
                     .cursor_col_resize()
                     .hover(|d| d.bg(t.hairline))
                     .when(self.dragging, |d| d.bg(t.hairline))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
                             this.dragging = true;
                             cx.notify();
                         }),
@@ -493,6 +635,7 @@ impl Dent {
                 .relative()
                 .flex()
                 .justify_center()
+                .pl(px(GRIP))
                 .bg(if width.is_some() { t.surface } else { t.panel })
                 .when(width.is_some(), |d| d.py(px(space::S4)))
                 .child(
@@ -776,8 +919,7 @@ impl Dent {
                             }),
                         )
                     })
-                    .when_some(a.dir.clone(), |d, dir| {
-                        let full = dir.join(a.path);
+                    .when_some(art_file(&a), |d, full| {
                         d.child(
                             ghost("open-doc", "Open", &t)
                                 .on_click(move |_, _, cx| {

@@ -9,6 +9,7 @@ mod app;
 mod assets;
 mod bridge;
 mod chat;
+mod context;
 mod data;
 mod diagram;
 mod ds;
@@ -361,7 +362,8 @@ impl Render for Dent {
             .on_action(cx.listener(|this, _: &Escape, window, cx| {
                 // Esc backs out one thing at a time; with nothing open it moves
                 // to the inbox, where arrows, Enter and E work.
-                if gpui_kit::base::TextSelection::has_selection(window, cx) {
+                if this.context.take().is_some() {
+                } else if gpui_kit::base::TextSelection::has_selection(window, cx) {
                     gpui_kit::base::TextSelection::clear(window, cx);
                 } else if this.palette.is_some() {
                     this.close_palette(window, cx);
@@ -461,6 +463,7 @@ impl Render for Dent {
             })
             .when(self.dragging, |d| d.cursor_col_resize())
             .children(self.palette.map(|at| self.palette_view(at, cx)))
+            .children(self.context_view(window, cx))
     }
 }
 

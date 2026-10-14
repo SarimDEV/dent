@@ -228,12 +228,7 @@ impl Dent {
                                         cx.listener(move |this, e: &MouseDownEvent, window, cx| {
                                             if e.click_count == 2 {
                                                 cx.stop_propagation();
-                                                this.renaming = Some(sid.clone());
-                                                this.rename_input.update(cx, |i, cx| {
-                                                    i.set_value(title.clone(), window, cx);
-                                                    i.focus(window, cx);
-                                                });
-                                                cx.notify();
+                                                this.start_rename(&sid, &title, window, cx);
                                             }
                                         }),
                                     )
@@ -2162,9 +2157,17 @@ impl Dent {
                 } else {
                     anchored()
                         .snap_to_window_with_margin(px(8.))
-                        .child(div().mt(px(30.)).child(list))
+                        .child(div().mt(px(size::CONTROL_SM + 2. + 6.)).child(list))
                 };
-                d.child(deferred(placed).with_priority(1))
+                // Placed from the chip's top-left corner, not from below
+                // it, where the flow would put it.
+                d.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .child(deferred(placed).with_priority(1)),
+                )
             })
             .into_any_element()
     }

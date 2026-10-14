@@ -352,6 +352,16 @@ pub struct Dent {
     pub sidebar_forced: bool,
     pub dragging: bool,
     pub tabs: HashMap<String, Tab>,
+    /// Files you closed in each session's viewer, with how many versions
+    /// each had then: a new version brings the tab back.
+    pub closed_tabs: HashMap<String, HashMap<&'static str, usize>>,
+    /// The right-click menu, if one is open.
+    pub context: Option<crate::context::ContextMenu>,
+    pub tab_scroll: ScrollHandle,
+    /// The tab last scrolled into view, so it's only done on a change.
+    pub revealed_tab: Option<(Tab, usize, u32)>,
+    pub reveal_pending: bool,
+    pub reveal_tries: u8,
     pub preview: Option<Rc<RefCell<Preview>>>,
     pub viewing: HashMap<&'static str, usize>,
     pub viewport: Viewport,
@@ -699,6 +709,23 @@ impl Dent {
             older_models: false,
             window_h: 800.,
             menu_scroll: ScrollHandle::new(),
+            closed_tabs: prefs
+                .closed_tabs
+                .iter()
+                .map(|(id, c)| {
+                    (
+                        id.clone(),
+                        c.iter()
+                            .map(|(a, n)| (crate::data::intern(a), *n))
+                            .collect(),
+                    )
+                })
+                .collect(),
+            tab_scroll: ScrollHandle::new(),
+            context: None,
+            revealed_tab: None,
+            reveal_pending: false,
+            reveal_tries: 0,
             toast: None,
             show_closed: false,
             stopped: HashSet::new(),
@@ -843,11 +870,89 @@ impl Dent {
     }
 
     pub fn tab(&self, s: &Session) -> Tab {
+        let open = self.open_arts(s);
         self.tabs
             .get(&s.id)
             .copied()
-            .or_else(|| s.arts.last().map(|a| Tab::Art(a)))
+            .filter(|t| !matches!(t, Tab::Art(a) if !open.contains(a)))
+            .or_else(|| open.last().map(|a| Tab::Art(a)))
             .unwrap_or(Tab::Changes)
+    }
+
+    /// The files with a tab in this session's viewer: all it made, less
+    /// those you closed and that haven't changed since.
+    pub fn open_arts(&self, s: &Session) -> Vec<&'static str> {
+        let closed = self.closed_tabs.get(&s.id);
+        s.arts
+            .iter()
+            .copied()
+            .filter(|a| {
+                closed
+                    .and_then(|c| c.get(a))
+                    .is_none_or(|&n| self.art(a).is_some_and(|x| x.versions.len() > n))
+            })
+            .collect()
+    }
+
+    /// Close a file's tab. The tab beside it shows instead; with none left
+    /// the viewer closes.
+    pub fn close_tab(&mut self, art: &'static str, cx: &mut Context<Self>) {
+        let Some(s) = self.current().cloned() else {
+            return;
+        };
+        let open = self.open_arts(&s);
+        let showing = self.tab(&s) == Tab::Art(art);
+        let ix = open.iter().position(|a| *a == art);
+        let versions = self.art(art).map_or(0, |a| a.versions.len());
+        self.closed_tabs
+            .entry(s.id.clone())
+            .or_default()
+            .insert(art, versions);
+        if showing {
+            let next = ix.and_then(|i| {
+                open.get(i + 1)
+                    .or_else(|| i.checked_sub(1).and_then(|j| open.get(j)))
+            });
+            match next {
+                Some(a) => {
+                    self.tabs.insert(s.id.clone(), Tab::Art(a));
+                }
+                None if !s.diff.is_empty() => {
+                    self.tabs.insert(s.id.clone(), Tab::Changes);
+                }
+                None if self.shells.contains_key(&s.id) => {
+                    self.tabs.insert(s.id.clone(), Tab::Terminal);
+                }
+                None if !s.asides.is_empty() => {
+                    self.tabs.insert(s.id.clone(), Tab::Aside);
+                }
+                None => {
+                    self.tabs.remove(&s.id);
+                    self.panel_open = false;
+                }
+            }
+        }
+        self.save_prefs();
+        cx.notify();
+    }
+
+    /// Close every file tab in this session but `keep`.
+    pub fn close_other_tabs(&mut self, keep: &'static str, cx: &mut Context<Self>) {
+        let Some(s) = self.current().cloned() else {
+            return;
+        };
+        for a in self.open_arts(&s) {
+            if a != keep {
+                let versions = self.art(a).map_or(0, |x| x.versions.len());
+                self.closed_tabs
+                    .entry(s.id.clone())
+                    .or_default()
+                    .insert(a, versions);
+            }
+        }
+        self.tabs.insert(s.id.clone(), Tab::Art(keep));
+        self.save_prefs();
+        cx.notify();
     }
     pub fn version(&self, art: &Artifact) -> usize {
         self.viewing
@@ -909,6 +1014,22 @@ impl Dent {
     }
 
     /// Closing archives: it can always be reopened. The next thing to clear opens.
+    pub fn start_rename(
+        &mut self,
+        id: &str,
+        title: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.renaming = Some(id.to_string());
+        let title = title.to_string();
+        self.rename_input.update(cx, |i, cx| {
+            i.set_value(title, window, cx);
+            i.focus(window, cx);
+        });
+        cx.notify();
+    }
+
     pub fn close(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(s) = self.session(id) else { return };
         if !Self::can_close(s) {
@@ -1565,6 +1686,17 @@ impl Dent {
             effort: self.defaults.effort.clone(),
             panel_width: Some(self.panel_width),
             dark: Some(self.t.dark),
+            closed_tabs: self
+                .closed_tabs
+                .iter()
+                .filter(|(_, c)| !c.is_empty())
+                .map(|(id, c)| {
+                    (
+                        id.clone(),
+                        c.iter().map(|(a, n)| (a.to_string(), *n)).collect(),
+                    )
+                })
+                .collect(),
         };
         if self.saved_prefs.as_ref() != Some(&p) {
             crate::prefs::save(&p);
@@ -2075,6 +2207,12 @@ impl Dent {
     }
 
     pub fn open_art(&mut self, art: &'static str, version: Option<usize>, cx: &mut Context<Self>) {
+        if let Some(id) = &self.selected
+            && let Some(c) = self.closed_tabs.get_mut(id)
+            && c.remove(art).is_some()
+        {
+            self.save_prefs();
+        }
         match version {
             Some(v) if self.art(art).is_some_and(|a| v < a.versions.len()) => {
                 self.viewing.insert(art, v);
