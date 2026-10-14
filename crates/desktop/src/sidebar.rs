@@ -522,13 +522,11 @@ impl Dent {
             (None, Some(b)) => format!("Claude usage. The week resets in {b}."),
             (None, None) => "Claude usage across every way you use your account".to_string(),
         };
+        let machine = crate::data::machine_shown(&self.machine);
         let (link, link_tip) = match &self.connection {
             Ok(()) => (
-                format!("on {}", self.machine),
-                format!(
-                    "Sessions run on {}, and keep going when dent closes",
-                    self.machine
-                ),
+                format!("Sessions run on {machine}"),
+                "They keep going when dent closes".to_string(),
             ),
             Err(why) => (why.clone(), "dent's service isn't answering".to_string()),
         };
@@ -554,11 +552,13 @@ impl Dent {
                         .tooltip(crate::ui::tip_owned(usage_tip, t))
                         .child(icon("claude", 12., crate::theme::CLAUDE))
                         .when_some(five, |d, v| {
-                            d.child("5h").child(div().text_color(t.ink).child(v))
+                            d.child(div().text_color(t.ink).child(v))
+                                .child("of 5-hour limit")
                         })
                         .when(both, |d| d.child(div().text_color(t.faint).child("·")))
                         .when_some(week, |d, v| {
-                            d.child("week").child(div().text_color(t.ink).child(v))
+                            d.child(div().text_color(t.ink).child(v))
+                                .child("of weekly limit")
                         }),
                 )
             })

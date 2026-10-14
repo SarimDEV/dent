@@ -243,9 +243,11 @@ impl Render for Dent {
             .filter(|s| self.panel_open && self.shows_panel(s))
             .map(|s| self.panel(&s, window, cx));
         // Where the viewer starts, for telling which side a press is on.
-        self.panel_left = panel
-            .as_ref()
-            .map(|_| window.viewport_size().width.as_f32() - self.panel_w);
+        select::set_viewer_left(
+            panel
+                .as_ref()
+                .map(|_| window.viewport_size().width.as_f32() - self.panel_w),
+        );
         let toast =
             self.toast.clone().map(|toast| {
                 let label = match toast.action {
@@ -322,8 +324,7 @@ impl Render for Dent {
                     p.borrow().release_focus();
                 }
                 // A press outside the viewer: the chat's text selects.
-                let in_viewer = this.panel_left.is_some_and(|x| e.position.x.as_f32() >= x);
-                select::hover(in_viewer, true, window, cx);
+                select::hover(e.position, true, window, cx);
             }))
             // Clicking a button, a chip or the chat keeps the keyboard in
             // the text field you were typing in, as on the Mac. Only another
@@ -475,8 +476,7 @@ impl Render for Dent {
             }))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, cx| {
                 if e.pressed_button.is_none() {
-                    let in_viewer = this.panel_left.is_some_and(|x| e.position.x.as_f32() >= x);
-                    select::hover(in_viewer, false, window, cx);
+                    select::hover(e.position, false, window, cx);
                 }
                 if this.dragging_sidebar {
                     let w = window.viewport_size().width.as_f32();

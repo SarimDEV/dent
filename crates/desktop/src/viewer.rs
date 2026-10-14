@@ -3,7 +3,6 @@
 
 use std::rc::Rc;
 
-use gpui_kit::base::ElementExt;
 use gpui_kit::base::input::Textarea;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -124,7 +123,7 @@ impl Dent {
         let detached = self.preview.as_ref().is_some_and(|p| p.borrow().detached());
         self.panel_open
             && Self::has_viewer(s)
-            && matches!(self.tab(s), Tab::Art(a) if self.art(a).is_some_and(|a| a.kind.is_page()) && !self.popouts.contains_key(a))
+            && matches!(self.tab(s), Tab::Art(a) if self.art(a).is_some_and(|a| a.kind.is_page()) && !self.popouts.contains_key(a) && !self.servers_down.contains(a))
             && (detached || (self.menu.is_none() && self.palette.is_none() && !self.dragging))
     }
 
@@ -402,9 +401,7 @@ impl Dent {
                     .border_l_1()
                     .border_color(t.hairline)
                     .child(header)
-                    .child(body)
-                    // The viewer's text selects apart from the chat's.
-                    .text_selection_scope(crate::select::viewer_scope()),
+                    .child(body),
             )
             // The left edge resizes the panel. A page stays clear of the
             // grip's inner half: a native web view would take the press.
@@ -565,6 +562,10 @@ impl Dent {
         let latest = a.versions.len().max(1);
         let v = self.version(&a);
         let detached = self.preview.as_ref().is_some_and(|p| p.borrow().detached());
+        if server {
+            self.watch_server(id, a.path, cx);
+        }
+        let down = server && self.servers_down.contains(id);
         if let Some(p) = &self.preview {
             let mut p = p.borrow_mut();
             if server {
@@ -620,7 +621,7 @@ impl Dent {
         };
         let machine = self
             .current()
-            .map(|s| s.machine.clone())
+            .map(|s| crate::data::machine_shown(&s.machine))
             .unwrap_or_default();
         let toolbar = self
             .toolbar()
@@ -630,8 +631,15 @@ impl Dent {
                         .flex()
                         .items_center()
                         .gap(px(space::S1H))
-                        .child(status_square(Status::Done, &t))
-                        .child(div().ty(LABEL).text_color(t.ink).child("running")),
+                        .child(status_square(
+                            if down { Status::Idle } else { Status::Done },
+                            &t,
+                        ))
+                        .child(div().ty(LABEL).text_color(t.ink).child(if down {
+                            "stopped"
+                        } else {
+                            "running"
+                        })),
                 )
             })
             .when(!server, |d| d.children(self.versions(&a, cx)))
@@ -702,10 +710,13 @@ impl Dent {
                     .id("pick")
                     .relative()
                     .h(px(size::CONTROL))
-                    .on_hover(Self::hint(
-                        "Click an element on the page to point the agent at it",
-                        cx,
-                    ))
+                    // Off, its tooltip says why; the toolbar keeps the address.
+                    .when(!down, |d| {
+                        d.on_hover(Self::hint(
+                            "Click an element on the page to point the agent at it",
+                            cx,
+                        ))
+                    })
                     .px(px(space::S2))
                     .flex()
                     .items_center()
@@ -713,10 +724,16 @@ impl Dent {
                     .rounded(px(radius::MD))
                     .cursor_pointer()
                     .when(self.picking, |d| d.bg(t.ink).text_color(t.surface))
-                    .when(!self.picking, |d| {
+                    .when(!self.picking && !down, |d| {
                         d.text_color(t.ink).hover(|d| d.bg(t.hover()))
                     })
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_pick(cx)))
+                    .map(|d| {
+                        if down {
+                            crate::ui::off(d.text_color(t.ink), "The dev server stopped", &t)
+                        } else {
+                            d.on_click(cx.listener(|this, _, _, cx| this.toggle_pick(cx)))
+                        }
+                    })
                     .child(icon(
                         "square-dashed-mouse-pointer",
                         14.,
@@ -728,7 +745,14 @@ impl Dent {
             .child(
                 icon_button("reload", "rotate-cw", &t)
                     .on_hover(Self::hint("Reload", cx))
-                    .on_click(cx.listener(|this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        // A stopped server is checked again rather than
+                        // loaded into an error page.
+                        if down {
+                            let up = crate::app::server_answers(a.path);
+                            this.server_seen(id, up, cx);
+                            return;
+                        }
                         if let Some(p) = &this.preview {
                             p.borrow_mut().reload();
                         }
@@ -782,6 +806,8 @@ impl Dent {
         let width = viewport.width().filter(|w| self.panel_w > w + space::S8);
         let area = if detached {
             self.own_window_note(cx)
+        } else if down {
+            self.server_stopped(id, &a, cx)
         } else {
             div()
                 .flex_1()
@@ -946,6 +972,120 @@ impl Dent {
     }
 
     /// The viewer while the page is in a window of its own.
+    /// Keeps checking the dev server on screen: when it stops answering
+    /// its page gives way to a note, and when it's back the page reloads.
+    /// One check runs at a time, for the server shown; it ends when that
+    /// server is no longer shown.
+    fn watch_server(&mut self, id: &'static str, url: &'static str, cx: &mut Context<Self>) {
+        if self.server_watch.as_ref().is_some_and(|(w, _)| *w == id) {
+            return;
+        }
+        let task = cx.spawn(async move |this, cx| {
+            loop {
+                let up = cx
+                    .background_executor()
+                    .spawn(async move { crate::app::server_answers(url) })
+                    .await;
+                let shown = this
+                    .update(cx, |this, cx| {
+                        let shown = this.current().is_some_and(|s| this.tab(s) == Tab::Art(id))
+                            && !this.popouts.contains_key(id);
+                        if !shown {
+                            this.server_watch = None;
+                            return false;
+                        }
+                        this.server_seen(id, up, cx);
+                        true
+                    })
+                    .unwrap_or(false);
+                if !shown {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(2))
+                    .await;
+            }
+        });
+        self.server_watch = Some((id, task));
+    }
+
+    /// What a check of a dev server found.
+    fn server_seen(&mut self, id: &'static str, up: bool, cx: &mut Context<Self>) {
+        let was_down = self.servers_down.contains(id);
+        if up == !was_down {
+            return;
+        }
+        if up {
+            self.servers_down.remove(id);
+            if let Some(p) = &self.preview {
+                p.borrow_mut().reload();
+            }
+        } else {
+            self.servers_down.insert(id);
+        }
+        // A hint said over the toolbar no longer fits what it shows.
+        self.toolbar_hint = None;
+        cx.notify();
+    }
+
+    /// In place of a dev server's page once it stops answering.
+    fn server_stopped(
+        &mut self,
+        id: &'static str,
+        a: &crate::data::Artifact,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.t;
+        let url = a.path;
+        // The address as the agent gave it, as on its tab.
+        let shown = a.title.trim_start_matches("Dev server · ");
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(space::S3))
+            .px(px(space::S6))
+            .bg(t.panel)
+            .child(icon("unplug", 20., t.quiet))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(space::S1))
+                    .child(
+                        div()
+                            .ty(UI)
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(t.ink)
+                            .child("The dev server stopped."),
+                    )
+                    .child(
+                        div()
+                            .ty(UI)
+                            .text_color(t.quiet)
+                            .text_center()
+                            .child(format!(
+                                "Nothing answers at {shown}. The page comes back when it does."
+                            )),
+                    ),
+            )
+            .child(
+                button("server-retry", "Check again", false, &t)
+                    .relative()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let up = crate::app::server_answers(url);
+                        this.server_seen(id, up, cx);
+                    }))
+                    .child(probe(&self.probes, "server-retry")),
+            )
+            .child(probe(&self.probes, "server-stopped"))
+            .into_any_element()
+    }
+
     fn popped_out(
         &mut self,
         id: &'static str,
@@ -1669,6 +1809,16 @@ impl Dent {
                                     crate::highlight::runs(&spans, &l.text, &t),
                                     &t,
                                 )
+                                // Lines of a file copy one to a line, with
+                                // the blank lines above kept.
+                                .lead({
+                                    let blanks = file.lines[..i]
+                                        .iter()
+                                        .rev()
+                                        .take_while(|b| b.kind != Line::Hunk && b.text.is_empty())
+                                        .count();
+                                    "\n".repeat(blanks)
+                                })
                                 .into_any_element()
                             }),
                     )

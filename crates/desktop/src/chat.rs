@@ -478,6 +478,10 @@ impl Dent {
                             .when(ix == 0, |d| d.pt(px(space::S6)))
                             .pb(px(if ix + 1 == count {
                                 space::S8
+                            } else if matches!(s.items.get(ix), Some(Item::User { .. })) {
+                                // Room for the time and actions shown on
+                                // hover below your message.
+                                YOURS_GAP
                             } else {
                                 space::S4
                             }))
@@ -794,10 +798,11 @@ impl Dent {
                                     .flex()
                                     .items_center()
                                     .gap(px(space::S1))
-                                    // Shown on hover in the gap below the message,
-                                    // so it doesn't push the reply away.
-                                    .h(px(size::CONTROL))
-                                    .mb(px(-(size::CONTROL + space::S1)))
+                                    // Shown on hover in the gap below the message
+                                    // (`YOURS_GAP`), so it doesn't push the reply away.
+                                    .mt(px(space::S1))
+                                    .h(px(size::CONTROL_SM))
+                                    .mb(px(-(size::CONTROL_SM + space::S1)))
                                     .reveal_on_hover(group.clone())
                                     // When you sent it, beside what you can do with it.
                                     .when(*at > 0, |d| {
@@ -1131,7 +1136,11 @@ impl Dent {
                     })
                     .into_any_element()
             }
-            Item::Made { art, version } => self.made_card(s, art, *version, cx),
+            Item::Made {
+                art,
+                version,
+                review,
+            } => self.made_card(s, ix, art, *version, review.as_deref(), cx),
             Item::Approval {
                 id: ask,
                 title,
@@ -1385,19 +1394,7 @@ impl Dent {
                 )
                 .into_any_element(),
             Item::Changed { paths } => {
-                // Counts are the files' changes as they stand now, which only
-                // describe this turn if it's the latest to touch them.
-                let latest = !s.items[ix + 1..]
-                    .iter()
-                    .any(|i| matches!(i, Item::Changed { paths: p } if p.iter().any(|x| paths.contains(x))));
-                let (added, removed) = if latest {
-                    s.diff
-                        .iter()
-                        .filter(|f| paths.contains(&f.path))
-                        .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed))
-                } else {
-                    (0, 0)
-                };
+                let (added, removed) = turn_counts(s, ix, paths);
                 let n = paths.len();
                 let (sid, first) = (s.id.clone(), paths[0].clone());
                 div()
@@ -1413,10 +1410,12 @@ impl Dent {
                     // Opens Changes at the file this turn changed.
                     .on_click(cx.listener(move |this, _, _, cx| this.review(&sid, &first, cx)))
                     .child(icon("git-compare", 13., t.quiet))
+                    // The files are named just above, by the steps
+                    // that changed them; this sums the turn up.
                     .child(if n == 1 {
-                        format!("Changed {}", paths[0])
+                        "1 file changed".to_string()
                     } else {
-                        format!("Changed {n} files")
+                        format!("{n} files changed")
                     })
                     .when(added + removed > 0, |d| {
                         d.child(
@@ -1487,8 +1486,10 @@ impl Dent {
     fn made_card(
         &mut self,
         s: &Session,
+        ix: usize,
         art: &'static str,
         version: usize,
+        review: Option<&str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = self.t;
@@ -1503,6 +1504,21 @@ impl Dent {
         let thumb = (a.kind == Kind::Image)
             .then(|| self.picture(art, version))
             .flatten();
+        // This turn's edits include the file: its counts and Review sit on
+        // the card, opening Changes at it.
+        let counts = review
+            .map(|p| turn_counts(s, ix, &[p.to_string()]))
+            .filter(|(a, r)| a + r > 0);
+        let review_button = review.map(|p| {
+            let (sid, path) = (s.id.clone(), p.to_string());
+            ghost(SharedString::from(format!("review-{art}-{version}")), "Review", &t)
+                .relative()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.review(&sid, &path, cx);
+                }))
+                .child(probe(&self.probes, format!("review-{art}-{version}")))
+        });
         if old {
             // Older versions fold to one line; the latest keeps the card.
             return div()
@@ -1526,14 +1542,20 @@ impl Dent {
                 .when(showing, |d| {
                     d.child(div().ty(UI).text_color(t.ink).child("Showing"))
                 })
+                .when_some(review_button, |d, b| d.child(b))
                 .child(probe(&self.probes, format!("made-{art}-{version}")))
                 .into_any_element();
         }
         let note = if a.kind == Kind::Server {
             format!(
-                "{} · running on {}",
+                "{} · {} on {}",
                 a.title.trim_start_matches("Dev server · "),
-                s.machine
+                if self.servers_down.contains(art) {
+                    "stopped"
+                } else {
+                    "running"
+                },
+                crate::data::machine_shown(&s.machine)
             )
         } else {
             format!("{} · v{version}", a.path)
@@ -1597,10 +1619,23 @@ impl Dent {
                     )
                     .child(div().truncate().ty(LABEL).text_color(t.quiet).child(note)),
             )
+            .when_some(counts, |d, (added, removed)| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .ty(CODE)
+                        .text_color(t.faint)
+                        .child(format!("+{added} −{removed}")),
+                )
+            })
+            .when_some(review_button, |d, b| d.child(b))
+            // "Open" is what a press on the card does; "Showing" is only
+            // a state, quieter than the Review beside it.
             .child(
                 div()
+                    .flex_none()
                     .ty(UI)
-                    .text_color(t.quiet)
+                    .text_color(if showing { t.faint } else { t.quiet })
                     .child(if showing { "Showing" } else { "Open" }),
             )
             .child(probe(&self.probes, format!("made-{art}-{version}")))
@@ -3174,6 +3209,29 @@ pub fn code_lines(id: String, text: String, diff: bool, ink: Hsla, t: &crate::th
         .min_w_0()
         .whitespace_normal()
         .child(crate::select::styled(id, text, runs, t))
+}
+
+/// The gap below a message you sent: its time and actions show there on
+/// hover, clear of what follows.
+const YOURS_GAP: f32 = space::S1 + size::CONTROL_SM + space::S1;
+
+/// Lines added and removed in `paths`, for the turn whose edits end at
+/// item `ix`. The counts are the files as they stand now, so they only
+/// describe that turn if no later turn touched the same files; otherwise
+/// none are given.
+fn turn_counts(s: &Session, ix: usize, paths: &[String]) -> (usize, usize) {
+    let later = s.items[ix + 1..].iter().any(|i| match i {
+        Item::Changed { paths: p } => p.iter().any(|x| paths.contains(x)),
+        Item::Made { review: Some(p), .. } => paths.contains(p),
+        _ => false,
+    });
+    if later {
+        return (0, 0);
+    }
+    s.diff
+        .iter()
+        .filter(|f| paths.contains(&f.path))
+        .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed))
 }
 
 /// How a composer's footer fits its room: which words each chip keeps,

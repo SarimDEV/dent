@@ -1185,7 +1185,7 @@ fn checks() -> Vec<(f32, Act)> {
                 10.,
             ),
         ),
-        (0.1, Until("the turn's edits get a Review line", |d, _| has(d, |i| matches!(i, Item::Changed { paths } if paths.iter().any(|p| p == "site/page.html"))), 5.)),
+        (0.1, Until("the page's card offers Review, with no separate line", |d, _| has(d, |i| matches!(i, Item::Made { review: Some(p), .. } if p == "site/page.html")) && !has(d, |i| matches!(i, Item::Changed { paths } if paths.iter().any(|p| p == "site/page.html"))), 5.)),
         (1.0, Shot("viewer-page")),
         (0.1, Call(|d, _, _| d.panel_width = 600.)),
         (0.3, Press("resize", 0.5, 0.5)),

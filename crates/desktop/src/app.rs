@@ -328,6 +328,23 @@ pub struct Defaults {
 /// A dev server's address as the web view can load it. WebKit won't load
 /// `localhost` by name here, but loads an address: whichever of IPv4 and
 /// IPv6 the server answers on.
+/// Whether something answers at a page address's host and port.
+pub fn server_answers(url: &str) -> bool {
+    use std::net::ToSocketAddrs;
+    let rest = url.split("://").nth(1).unwrap_or(url);
+    let hostport = rest.split('/').next().unwrap_or(rest);
+    let hostport = if hostport.contains(':') {
+        hostport.to_string()
+    } else {
+        format!("{hostport}:80")
+    };
+    hostport.to_socket_addrs().is_ok_and(|mut addrs| {
+        addrs.any(|a| {
+            std::net::TcpStream::connect_timeout(&a, std::time::Duration::from_millis(300)).is_ok()
+        })
+    })
+}
+
 fn reachable(url: &str) -> String {
     let Some(rest) = url.strip_prefix("http://localhost:") else {
         return url.to_string();
@@ -490,8 +507,6 @@ pub struct Dent {
     /// Esc put the slash or @ menu away; typing brings it back.
     pub slash_dismissed: bool,
     pub palette_scroll: ScrollHandle,
-    /// The viewer's left edge in the window, while it shows.
-    pub panel_left: Option<f32>,
     /// Where you were reading each session, and whether you were at the end.
     pub read_at: HashMap<String, (ListOffset, bool)>,
     /// Parsed documents by file and version.
@@ -543,6 +558,10 @@ pub struct Dent {
     pub pictures: HashMap<(&'static str, usize), Arc<Image>>,
     /// Pages open in their own windows, by artifact.
     pub popouts: HashMap<&'static str, (AnyWindowHandle, Entity<crate::popout::PopOut>)>,
+    /// Dev servers that stopped answering, by tab.
+    pub servers_down: std::collections::HashSet<&'static str>,
+    /// Checks the dev server on screen, every couple of seconds.
+    pub server_watch: Option<(&'static str, Task<()>)>,
     /// Frames drawn, for the checks.
     pub frames: u64,
     /// What a check's script read off the page.
@@ -873,7 +892,6 @@ impl Dent {
             reveal_tries: 0,
             slash_dismissed: false,
             palette_scroll: ScrollHandle::new(),
-            panel_left: None,
             read_at: HashMap::new(),
             md_docs: HashMap::new(),
             undo_closes: Vec::new(),
@@ -952,6 +970,8 @@ impl Dent {
             mdv: crate::markdown::Md::default(),
             pictures: HashMap::new(),
             popouts: HashMap::new(),
+            servers_down: Default::default(),
+            server_watch: None,
             frames: 0,
             page_probe: None,
             code_em: 0.,
@@ -1687,7 +1707,7 @@ impl Dent {
                 None => false,
             };
             if !own {
-                let text = gpui_kit::base::TextSelection::selected_text(window, cx);
+                let text = crate::select::copied(window, cx);
                 if !text.is_empty() {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                     return true;
@@ -3205,10 +3225,14 @@ impl Dent {
                         .hash(&mut h);
                 }
             }
-            Item::Made { art, version } => {
+            Item::Made {
+                art,
+                version,
+                review,
+            } => {
                 // Older versions fold to one line.
                 let latest = self.art(art).map(|a| a.versions.len()).unwrap_or(0);
-                (art, version, *version < latest).hash(&mut h);
+                (art, version, *version < latest, review).hash(&mut h);
             }
             Item::Approval {
                 id, command, why, ..

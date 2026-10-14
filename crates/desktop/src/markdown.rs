@@ -209,6 +209,8 @@ impl Inline {
         let mut placed: Vec<(usize, Rc<DisplayList>, f32)> = Vec::new();
         // (original offset, bytes inserted there) to move link ranges.
         let mut shifts: Vec<(usize, usize)> = Vec::new();
+        // Stand-ins copy as the TeX they stand for.
+        let mut swaps: Vec<(std::ops::Range<usize>, String)> = Vec::new();
         let mut maths = self.math.iter().zip(&lists).peekable();
         let mut at = 0;
         let mut insert = |at: usize, text: &mut String, runs: &mut Vec<TextRun>, until: usize| {
@@ -220,6 +222,7 @@ impl Inline {
                         let (fill, fw) = filler(&*window, face, w);
                         placed.push((start, list.clone(), (fw - w) / 2.));
                         text.push_str(&fill);
+                        swaps.push((start..text.len(), format!("${tex}$")));
                         runs.push(plain_run(
                             fill.len(),
                             font(face.family),
@@ -311,7 +314,8 @@ impl Inline {
             runs,
             t,
         )
-        .links(links);
+        .links(links)
+        .swaps(swaps);
         let layout = styled.layout();
         let el = styled.into_any_element();
         if placed.is_empty() {
@@ -1055,14 +1059,44 @@ pub fn render(blocks: &[Block], t: &Theme, doc: bool, r: &mut R) -> Div {
 /// subagent's report, and shouldn't read as the answer.
 pub fn render_with(blocks: &[Block], t: &Theme, doc: bool, quiet: bool, r: &mut R) -> Div {
     let prev = LINK_BASE.with(|b| b.replace(r.base.clone()));
-    let out = render_in(blocks, t, doc, r, space::S3, quiet);
+    let out = render_in(blocks, t, doc, r, space::S3, quiet, None, false);
     LINK_BASE.with(|b| *b.borrow_mut() = prev);
     out
 }
 
+thread_local! {
+    /// What each copied line inside the blocks being laid out starts with:
+    /// a list item's indent, a quote's `> `.
+    static COPY_PREFIX: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// Lays out `f` with `more` added to the copy prefix.
+fn prefixed<T>(more: &str, f: impl FnOnce() -> T) -> T {
+    let saved = COPY_PREFIX.with(|p| {
+        let saved = p.borrow().clone();
+        p.borrow_mut().push_str(more);
+        saved
+    });
+    let out = f();
+    COPY_PREFIX.with(|p| *p.borrow_mut() = saved);
+    out
+}
+
 /// Blocks with `gap` between them; `quiet` sets their text in the quiet
-/// ink (a quote, or a task that's done).
-fn render_in(blocks: &[Block], t: &Theme, doc: bool, r: &mut R, gap: f32, quiet: bool) -> Div {
+/// ink (a quote, or a task that's done). They copy a blank line apart, or
+/// line by line when `tight` (inside a list item); `first` is what the first
+/// one copies with, like its list marker.
+#[allow(clippy::too_many_arguments)]
+fn render_in(
+    blocks: &[Block],
+    t: &Theme,
+    doc: bool,
+    r: &mut R,
+    gap: f32,
+    quiet: bool,
+    first: Option<String>,
+    tight: bool,
+) -> Div {
     let ink = if quiet { t.quiet } else { t.ink };
     let reading = theme::body();
     let mut out = Vec::with_capacity(blocks.len());
@@ -1070,6 +1104,13 @@ fn render_in(blocks: &[Block], t: &Theme, doc: bool, r: &mut R, gap: f32, quiet:
     let face = |ty: Type, family: &'static str, ink: Hsla| Face::of(ty, family, ink, bg);
     for (ix, b) in blocks.iter().enumerate() {
         let key = format!("{}/{ix}", r.scope);
+        let prefix = COPY_PREFIX.with(|p| p.borrow().clone());
+        let lead = match &first {
+            Some(f) if ix == 0 => f.clone(),
+            _ if tight => prefix.clone(),
+            _ => format!("{}\n{prefix}", prefix.trim_end()),
+        };
+        crate::select::lead_next(lead.clone());
         let el = match b {
             Block::Heading(level, i) => {
                 let (ty, family) = match (doc, level) {
@@ -1116,8 +1157,26 @@ fn render_in(blocks: &[Block], t: &Theme, doc: bool, r: &mut R, gap: f32, quiet:
                     // What the item holds, nested lists and code included,
                     // sits in its own column beside the marker.
                     let done = matches!(item.task, Some(true));
+                    let mark = match (item.task, item.number) {
+                        (Some(true), _) => "- [x] ".to_string(),
+                        (Some(false), _) => "- [ ] ".to_string(),
+                        (None, Some(n)) => format!("{n}. "),
+                        (None, None) => "- ".to_string(),
+                    };
+                    let item_lead = format!("{}{mark}", if li == 0 { &lead } else { &prefix });
                     let saved = std::mem::replace(&mut r.scope, format!("{key}.{li}"));
-                    let body = render_in(&item.blocks, t, doc, r, space::S2, done || quiet);
+                    let body = prefixed(&" ".repeat(mark.len()), || {
+                        render_in(
+                            &item.blocks,
+                            t,
+                            doc,
+                            r,
+                            space::S2,
+                            done || quiet,
+                            Some(item_lead),
+                            true,
+                        )
+                    });
                     r.scope = saved;
                     rows.push(
                         div()
@@ -1147,7 +1206,18 @@ fn render_in(blocks: &[Block], t: &Theme, doc: bool, r: &mut R, gap: f32, quiet:
             Block::Quote(callout, blocks) => {
                 let saved = std::mem::replace(&mut r.scope, format!("{key}.q"));
                 // A quote reads quieter; a callout is meant to be read.
-                let body = render_in(blocks, t, doc, r, space::S2, callout.is_none() || quiet);
+                let body = prefixed("> ", || {
+                    render_in(
+                        blocks,
+                        t,
+                        doc,
+                        r,
+                        space::S2,
+                        callout.is_none() || quiet,
+                        Some(format!("{lead}> ")),
+                        false,
+                    )
+                });
                 r.scope = saved;
                 match callout {
                     None => div()
@@ -1203,6 +1273,7 @@ fn render_in(blocks: &[Block], t: &Theme, doc: bool, r: &mut R, gap: f32, quiet:
             Block::Table(table) => table_block(table, t, &key, r),
             Block::Rule => div().h(px(1.)).bg(t.hairline).into_any_element(),
         };
+        crate::select::drop_lead();
         out.push(el);
     }
     div().flex().flex_col().gap(px(gap)).children(out)
@@ -1378,17 +1449,32 @@ fn code_frame(lang: &str, body: &str, t: &Theme, key: &str, dim: bool, r: &R) ->
                 .children({
                     // Highlighted once per block, line by line, then cached.
                     let lines = crate::highlight::block_lines(lang, body);
+                    // Lines copy one to a line, blank ones kept, each with
+                    // the block's prefix (inside a list or quote).
+                    let prefix = COPY_PREFIX.with(|p| p.borrow().clone());
+                    let mut first = Some(crate::select::take_lead().to_string());
+                    let mut blanks = String::new();
                     body.split('\n')
                         .enumerate()
                         .map(|(n, l)| {
-                            // A blank line still selects, so a copy keeps it.
+                            // A blank line still selects, so the drag can
+                            // cross it; it copies as a lead on the next.
                             if l.is_empty() {
-                                return div().child(crate::select::text(
-                                    SharedString::from(format!("code-{key}-{n}")),
-                                    " ",
-                                    t,
-                                ));
+                                if first.is_none() {
+                                    blanks = format!("{blanks}{}\n", prefix.trim_end());
+                                }
+                                return div().child(
+                                    crate::select::text(
+                                        SharedString::from(format!("code-{key}-{n}")),
+                                        " ",
+                                        t,
+                                    )
+                                    .lead(""),
+                                );
                             }
+                            let lead = first.take().unwrap_or_else(|| {
+                                format!("{}{prefix}", std::mem::take(&mut blanks))
+                            });
                             let runs: Vec<TextRun> = lines
                                 .get(n)
                                 .cloned()
@@ -1405,12 +1491,15 @@ fn code_frame(lang: &str, body: &str, t: &Theme, key: &str, dim: bool, r: &R) ->
                                     plain_run(len, f, tag.map(|g| g.color(t)).unwrap_or(t.ink))
                                 })
                                 .collect();
-                            div().whitespace_nowrap().child(crate::select::styled(
-                                SharedString::from(format!("code-{key}-{n}")),
-                                l.to_string(),
-                                runs,
-                                t,
-                            ))
+                            div().whitespace_nowrap().child(
+                                crate::select::styled(
+                                    SharedString::from(format!("code-{key}-{n}")),
+                                    l.to_string(),
+                                    runs,
+                                    t,
+                                )
+                                .lead(lead),
+                            )
                         })
                         .collect::<Vec<_>>()
                 }),
@@ -1756,6 +1845,7 @@ fn table_data(table: &Rc<Table>, key: &str, md: &Md, window: &Window) -> Rc<Tabl
 #[allow(clippy::too_many_arguments)]
 fn row(
     key: &str,
+    lead: &str,
     data: &TableData,
     cells: &[Inline],
     head: bool,
@@ -1786,7 +1876,15 @@ fn row(
                     Some(Alignment::Center) => d.text_center(),
                     _ => d,
                 })
-                .child(cell.element(&format!("{key}.{c}"), t, face, None, md, window)),
+                .child({
+                    // A row copies as one line, its cells a tab apart.
+                    crate::select::lead_next(if c == 0 {
+                        lead.to_string()
+                    } else {
+                        format!("{}\t", crate::select::SAME_LINE)
+                    });
+                    cell.element(&format!("{key}.{c}"), t, face, None, md, window)
+                }),
         );
     }
     div()
@@ -1942,6 +2040,9 @@ fn list_for(md: &Md, key: &str, n: usize) -> ListState {
 fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement {
     let data = table_data(table, key, &r.md, r.window);
     let n = table.rows.len();
+    // The header copies with the block's lead; each row on a line of its own.
+    let head_lead = crate::select::take_lead().to_string();
+    let prefix = COPY_PREFIX.with(|p| p.borrow().clone());
     let capped = data.capped();
     let bg = r.bg;
     let body: AnyElement = if capped {
@@ -1950,7 +2051,13 @@ fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement
         let max = state.max_offset_for_scrollbar().y.as_f32();
         // Half a row peeks out at the bottom: a cut-off row says "more".
         let h = (TABLE_ROWS as f32 + 0.5) * ROW_H;
-        let (rows, md, t2, k) = (data.clone(), r.md.clone(), *t, key.to_string());
+        let (rows, md, t2, k, pre) = (
+            data.clone(),
+            r.md.clone(),
+            *t,
+            key.to_string(),
+            prefix.clone(),
+        );
         div()
             .relative()
             .h(px(h))
@@ -1959,6 +2066,7 @@ fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement
                 list(state.clone(), move |ix, window, _| {
                     row(
                         &format!("{k}/r{ix}"),
+                        &pre,
                         &rows,
                         &rows.table.rows[ix],
                         false,
@@ -1982,6 +2090,7 @@ fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement
         for (i, cells) in table.rows.iter().enumerate() {
             rows.push(row(
                 &format!("{key}/r{i}"),
+                &prefix,
                 &data,
                 cells,
                 false,
@@ -1997,6 +2106,7 @@ fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement
     let gutter = if capped { GUTTER } else { 0. };
     let head = row(
         &format!("{key}/h"),
+        &head_lead,
         &data,
         &table.head,
         true,

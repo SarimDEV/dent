@@ -105,6 +105,9 @@ pub enum Item {
     Made {
         art: &'static str,
         version: usize,
+        /// The file as Changes lists it, when this turn's edits include
+        /// it: the card offers Review instead of a separate line.
+        review: Option<String>,
     },
     Approval {
         id: String,
@@ -403,6 +406,28 @@ pub fn span(secs: u64) -> String {
     }
 }
 
+/// A machine as people say it: "this Mac" for the computer dent is on,
+/// otherwise its name.
+pub fn machine_shown(name: &str) -> String {
+    static HERE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let here = HERE.get_or_init(|| {
+        std::process::Command::new("hostname")
+            .arg("-s")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    });
+    if !name.is_empty() && name == here {
+        if cfg!(target_os = "macos") {
+            "this Mac".into()
+        } else {
+            "this computer".into()
+        }
+    } else {
+        name.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,3 +459,4 @@ mod tests {
         );
     }
 }
+

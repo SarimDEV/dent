@@ -206,6 +206,7 @@ pub fn session(
                 items.push(Item::Made {
                     art: art_id(&v.id, &url),
                     version: 1,
+                    review: None,
                 });
             }
         }
@@ -317,10 +318,34 @@ pub fn session(
             Entry::Made { path, version } => items.push(Item::Made {
                 art: art_id(&v.id, path),
                 version: *version,
+                review: None,
             }),
-            Entry::Changed { paths } => items.push(Item::Changed {
-                paths: paths.iter().map(|p| relative(cwd, p)).collect(),
-            }),
+            Entry::Changed { paths } => {
+                // A file this turn wrote already has its card: Review goes
+                // on the card. The rest get a line of their own.
+                let turn = items
+                    .iter()
+                    .rposition(|i| matches!(i, Item::User { .. }))
+                    .map_or(0, |u| u + 1);
+                let mut rest = Vec::new();
+                for p in paths {
+                    let id = art_id(&v.id, p);
+                    let card = items[turn..]
+                        .iter_mut()
+                        .rev()
+                        .find_map(|i| match i {
+                            Item::Made { art, review, .. } if *art == id => Some(review),
+                            _ => None,
+                        });
+                    match card {
+                        Some(review) => *review = Some(relative(cwd, p)),
+                        None => rest.push(relative(cwd, p)),
+                    }
+                }
+                if !rest.is_empty() {
+                    items.push(Item::Changed { paths: rest });
+                }
+            }
             Entry::Note { note, text } => items.push(Item::Note {
                 icon: match note {
                     Note::Stopped => "square",
