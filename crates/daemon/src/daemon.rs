@@ -356,6 +356,49 @@ impl Daemon {
     /// before message `before` (or all of it) is copied over, and its agent
     /// resumes that conversation as a new agent session.
     pub async fn fork(self: &Arc<Self>, parent: &str, before: Option<&str>) -> Result<String> {
+        self.fork_with(parent, before, None).await
+    }
+
+    /// Make side question `id` and its answer into a new session: the
+    /// conversation so far, then the question and answer, carrying on from
+    /// the forked agent conversation that answered it.
+    pub async fn promote_aside(self: &Arc<Self>, parent: &str, id: &str) -> Result<String> {
+        let events = self.store().session_events(parent)?;
+        let question = events
+            .iter()
+            .find_map(|e| match &e.body {
+                Body::Aside { id: a, question } if a == id => Some(question.clone()),
+                _ => None,
+            })
+            .context("no such side question")?;
+        let (answer, agent) = events
+            .iter()
+            .find_map(|e| match &e.body {
+                Body::AsideReply {
+                    id: a,
+                    text,
+                    error: false,
+                    agent_session: Some(agent),
+                } if a == id => Some((text.clone(), agent.clone())),
+                _ => None,
+            })
+            .context("it hasn't been answered yet")?;
+        self.fork_with(
+            parent,
+            None,
+            Some((id.to_string(), question, answer, agent)),
+        )
+        .await
+    }
+
+    /// A fork, optionally ending with a side question's (id, question,
+    /// answer, agent conversation).
+    async fn fork_with(
+        self: &Arc<Self>,
+        parent: &str,
+        before: Option<&str>,
+        aside: Option<(String, String, String, String)>,
+    ) -> Result<String> {
         let row = self.store().session(parent)?.context("no such session")?;
         let events = self.store().session_events(parent)?;
         let cut = match before {
@@ -401,6 +444,8 @@ impl Daemon {
                 | Body::Unqueued { .. }
                 | Body::Background { .. }
                 | Body::Limits { .. }
+                | Body::Aside { .. }
+                | Body::AsideReply { .. }
                 | Body::Forked { .. } => continue,
                 Body::Asked { id, .. } => {
                     // Only questions that were answered.
@@ -425,24 +470,53 @@ impl Daemon {
             } => Some(u.clone()),
             _ => None,
         });
-        if let Some(agent) = &row.agent_session {
+        if let Some((id, question, answer, agent)) = aside {
+            // The side conversation already holds the question and answer:
+            // carry it on as it is.
+            for b in [
+                Body::User {
+                    id,
+                    text: question,
+                    queued: false,
+                    steer: false,
+                    attachments: Vec::new(),
+                },
+                Body::TurnStarted,
+                Body::Assistant {
+                    parent: None,
+                    blocks: vec![dent_protocol::Block::Text { text: answer }],
+                    uuid: None,
+                },
+                Body::TurnEnded {
+                    outcome: dent_protocol::Outcome::Done,
+                },
+                Body::Agent {
+                    agent_session: Some(agent),
+                    version: None,
+                },
+            ] {
+                self.append(&session, b, None)?;
+            }
+        } else {
+            if let Some(agent) = &row.agent_session {
+                self.append(
+                    &session,
+                    Body::Agent {
+                        agent_session: Some(agent.clone()),
+                        version: None,
+                    },
+                    None,
+                )?;
+            }
             self.append(
                 &session,
-                Body::Agent {
-                    agent_session: Some(agent.clone()),
-                    version: None,
+                Body::Forked {
+                    from: parent.to_string(),
+                    upto: at,
                 },
                 None,
             )?;
         }
-        self.append(
-            &session,
-            Body::Forked {
-                from: parent.to_string(),
-                upto: at,
-            },
-            None,
-        )?;
         self.append(
             &session,
             Body::Notice {
@@ -463,6 +537,61 @@ impl Daemon {
             .context("session row missing")?;
         session::start(self.clone(), row, Vec::new());
         Ok(session)
+    }
+
+    /// Ask a side question about session `id`'s conversation. It runs in the
+    /// background; the answer lands in the session's log.
+    pub async fn aside(self: &Arc<Self>, session: &str, id: &str, question: &str) -> Result<()> {
+        let row = self.store().session(session)?.context("no such session")?;
+        let events = self.store().session_events(session)?;
+        if events
+            .iter()
+            .any(|e| matches!(&e.body, Body::Aside { id: a, .. } if a == id))
+        {
+            return Ok(());
+        }
+        let started = events.iter().any(|e| matches!(e.body, Body::TurnStarted));
+        let Some(agent) = row.agent_session.clone().filter(|_| started) else {
+            bail!("ask something in the conversation first");
+        };
+        self.append(
+            session,
+            Body::Aside {
+                id: id.into(),
+                question: question.into(),
+            },
+            None,
+        )?;
+        let env = self.env();
+        let argv = crate::claude::aside_argv(
+            &env.claude,
+            &env.path,
+            row.model.as_deref(),
+            &agent,
+            question,
+        );
+        let (me, session, id, cwd) = (self.clone(), session.to_string(), id.to_string(), row.cwd);
+        tokio::spawn(async move {
+            let got = tokio::task::spawn_blocking(move || run_aside(&argv, &cwd))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+            let body = match got {
+                Ok((text, agent_session)) => Body::AsideReply {
+                    id,
+                    text,
+                    error: false,
+                    agent_session,
+                },
+                Err(why) => Body::AsideReply {
+                    id,
+                    text: why,
+                    error: true,
+                    agent_session: None,
+                },
+            };
+            let _ = me.append(&session, body, None);
+        });
+        Ok(())
     }
 
     /// Carry on a session started in a terminal: its history comes in, and
@@ -590,6 +719,83 @@ pub fn title(text: &str) -> String {
 
 /// Session ids: time then randomness, letters and digits only (process
 /// names append `-n`).
+/// Run a side question to the end: its answer and the agent conversation
+/// that holds it. Gives up after three minutes.
+fn run_aside(argv: &[String], cwd: &str) -> std::result::Result<(String, Option<String>), String> {
+    use std::io::BufRead;
+    let mut child = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Couldn't start Claude Code: {e}"))?;
+    // Stopped after three minutes, unless it has finished (and been waited
+    // for, so its pid can't belong to anything else yet) by then.
+    let pid = child.id();
+    let (done, finished) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        if finished
+            .recv_timeout(std::time::Duration::from_secs(180))
+            .is_err_and(|e| e == std::sync::mpsc::RecvTimeoutError::Timeout)
+        {
+            // SAFETY: kill has no memory preconditions; the child is unreaped.
+            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        }
+    });
+    let out = child.stdout.take().ok_or("no output")?;
+    let (mut texts, mut agent, mut failed) = (Vec::new(), None, None);
+    for line in std::io::BufReader::new(out).lines().map_while(|l| l.ok()) {
+        match crate::claude::wire::parse(line.as_bytes()) {
+            Ok(crate::claude::wire::Inbound::Init { session_id, .. }) => agent = Some(session_id),
+            Ok(crate::claude::wire::Inbound::Assistant {
+                parent: None,
+                blocks,
+                synthetic: false,
+                ..
+            }) => {
+                for b in blocks {
+                    if let crate::claude::wire::AssistantBlock::Text(t) = b
+                        && !t.trim().is_empty()
+                    {
+                        texts.push(t);
+                    }
+                }
+            }
+            Ok(crate::claude::wire::Inbound::Result {
+                is_error: true,
+                text,
+                ..
+            }) => failed = Some(text.unwrap_or_else(|| "The side question failed".into())),
+            _ => {}
+        }
+    }
+    // The watchdog must not fire once the child is reaped.
+    let _ = done.send(());
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if let Some(why) = failed {
+        return Err(why);
+    }
+    if texts.is_empty() {
+        let mut err = String::new();
+        if let Some(mut e) = child.stderr.take() {
+            let _ = std::io::Read::read_to_string(&mut e, &mut err);
+        }
+        let last = err
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
+        return Err(if last.is_empty() {
+            format!("Claude Code gave no answer ({status})")
+        } else {
+            format!("Claude Code gave no answer: {last}")
+        });
+    }
+    Ok((texts.join("\n\n"), agent))
+}
+
 pub fn new_id() -> String {
     let mut rnd = [0u8; 6];
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {

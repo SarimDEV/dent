@@ -43,6 +43,7 @@ actions!(
         InboxDown,
         InboxOpen,
         InboxClose,
+        SideChat,
     ]
 );
 
@@ -60,6 +61,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-.", StopSession, None),
         KeyBinding::new("cmd-enter", SteerSend, None),
         KeyBinding::new("cmd-k", Search, None),
+        KeyBinding::new("cmd-;", SideChat, None),
         KeyBinding::new("alt-cmd-up", SelectPrev, None),
         KeyBinding::new("alt-cmd-down", SelectNext, None),
         // With the inbox focused (Esc from an empty composer), it works like mail.
@@ -76,6 +78,8 @@ pub enum Tab {
     Art(&'static str),
     Changes,
     Terminal,
+    /// Side questions about the session.
+    Aside,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -250,6 +254,8 @@ pub struct Dent {
     pub composer: Entity<TextareaState>,
     pub starter: Entity<TextareaState>,
     pub comment_input: Entity<TextareaState>,
+    /// Where side questions are typed.
+    pub aside_input: Entity<TextareaState>,
     pub rename_input: Entity<TextareaState>,
     /// The session whose name is being edited in the header.
     pub renaming: Option<String>,
@@ -406,6 +412,22 @@ impl Dent {
                 .placeholder("Comment on this line")
                 .submit_on_enter(true)
         });
+        let aside_input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 8)
+                .placeholder("Ask about this session. It stays out of the conversation.")
+                .submit_on_enter(true)
+        });
+        cx.subscribe_in(
+            &aside_input,
+            window,
+            |this, _, ev: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = ev {
+                    this.ask_aside(window, cx);
+                }
+            },
+        )
+        .detach();
         let rename_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 1)
@@ -455,7 +477,14 @@ impl Dent {
         .detach();
         // Only edits redraw the window: watching the fields themselves would
         // redraw on every caret blink, even after they lose focus.
-        for input in [&composer, &starter, &comment_input, &search, &rename_input] {
+        for input in [
+            &composer,
+            &starter,
+            &comment_input,
+            &aside_input,
+            &search,
+            &rename_input,
+        ] {
             crate::style_input(input, &t, cx);
         }
         cx.subscribe_in(
@@ -532,6 +561,7 @@ impl Dent {
                         &this.composer,
                         &this.starter,
                         &this.comment_input,
+                        &this.aside_input,
                         &this.search,
                     ] {
                         crate::style_input(input, &this.t, cx);
@@ -602,6 +632,7 @@ impl Dent {
             composer,
             starter,
             comment_input,
+            aside_input,
             rename_input: rename_input.clone(),
             renaming: None,
             drafts: HashMap::new(),
@@ -1936,6 +1967,44 @@ impl Dent {
     }
 
     // ---- The viewer ----
+
+    /// Open the side chat for the open session, ready to type.
+    pub fn open_side_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected.is_none() {
+            return;
+        }
+        self.show_tab(Tab::Aside, cx);
+        self.aside_input.update(cx, |i, cx| i.focus(window, cx));
+    }
+
+    /// Ask what's in the side chat's box.
+    pub fn ask_aside(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.selected.clone() else {
+            return;
+        };
+        let text = self.aside_input.read(cx).value().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        self.live.send(Request::Aside {
+            session: id,
+            id: crate::message_id(),
+            text,
+        });
+        self.aside_input
+            .update(cx, |i, cx| i.set_value("", window, cx));
+        cx.notify();
+    }
+
+    /// A side question and its answer become a session of their own.
+    pub fn promote_aside(&mut self, session: &str, id: &str, cx: &mut Context<Self>) {
+        let n = self.live.send(Request::PromoteAside {
+            session: session.to_string(),
+            id: id.to_string(),
+        });
+        self.waiting.insert(n, Waiting::Create);
+        cx.notify();
+    }
 
     pub fn show_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         if let Some(id) = self.selected.clone() {

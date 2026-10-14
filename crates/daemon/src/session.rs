@@ -204,6 +204,25 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
         forgot: false,
     };
     s.rebuild();
+    // A side question this daemon never saw finish won't be answered now.
+    if let Ok(events) = s.d.store().session_events(&s.id) {
+        let mut open: Vec<String> = Vec::new();
+        for e in events {
+            match e.body {
+                Body::Aside { id, .. } => open.push(id),
+                Body::AsideReply { id, .. } => open.retain(|a| *a != id),
+                _ => {}
+            }
+        }
+        for id in open {
+            s.log(Body::AsideReply {
+                id,
+                text: "dent restarted before it was answered. Ask again.".into(),
+                error: true,
+                agent_session: None,
+            });
+        }
+    }
     tokio::spawn(async move {
         s.reattach(&row, &held).await;
         s.run(rx).await;

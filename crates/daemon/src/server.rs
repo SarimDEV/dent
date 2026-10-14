@@ -170,6 +170,13 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
         Request::Fork { session, before } => Reply::Created {
             session: d.fork(&session, before.as_deref()).await?,
         },
+        Request::Aside { session, id, text } => {
+            d.aside(&session, &id, &text).await?;
+            Reply::Ok
+        }
+        Request::PromoteAside { session, id } => Reply::Created {
+            session: d.promote_aside(&session, &id).await?,
+        },
         Request::Unqueue { session, id } => {
             d.command(&session, Op::Unqueue { id }).await?;
             Reply::Ok

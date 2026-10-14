@@ -25,6 +25,7 @@ pub enum Field {
     Composer,
     Starter,
     Comment,
+    Aside,
 }
 
 /// The walkthrough's vocabulary; not every scene uses every step.
@@ -199,6 +200,7 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
                     Field::Composer => this.composer.clone(),
                     Field::Starter => this.starter.clone(),
                     Field::Comment => this.comment_input.clone(),
+                    Field::Aside => this.aside_input.clone(),
                 };
                 input.update(cx, |i, cx| {
                     i.set_value(text, window, cx);
@@ -1032,6 +1034,50 @@ fn checks() -> Vec<(f32, Act)> {
             }
         }),
     ), (0.8, Shot("subagent"))]);
+    // Side chat: a question with the session's context, kept out of it.
+    v.extend([
+        (0.2, Key("cmd-;")),
+        (
+            0.1,
+            Until(
+                "⌘; opens the side chat",
+                |d, _| current(d).is_some_and(|s| d.tab(s) == Tab::Aside),
+                3.,
+            ),
+        ),
+        (0.1, Type(Field::Aside, "which tests are slow?")),
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until(
+                "a side question gets an answer, and the conversation doesn't change",
+                |d, _| {
+                    current(d).is_some_and(|s| {
+                        s.asides.iter().any(|a| {
+                            a.question == "which tests are slow?"
+                                && matches!(&a.answer, Some((t, false, Some(_))) if t.contains("which tests are slow?"))
+                        }) && !s.items.iter().any(|i| matches!(i, Item::User { text, .. } if text.contains("which tests")))
+                    })
+                },
+                10.,
+            ),
+        ),
+        (0.6, Shot("side-chat")),
+        (1.2, Click("promote-0")),
+        (
+            0.1,
+            Until(
+                "Make it a fork opens a session that carries on from the answer",
+                |d, _| {
+                    current(d).is_some_and(|s| {
+                        s.title.starts_with("Fork of")
+                            && s.items.iter().any(|i| matches!(i, Item::User { text, .. } if text == "which tests are slow?"))
+                    })
+                },
+                10.,
+            ),
+        ),
+    ]);
     v.extend(new_session("make a plan please"));
     v.extend([
         (

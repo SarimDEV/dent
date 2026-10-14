@@ -1139,3 +1139,75 @@ fn an_agent_stuck_starting_ends_the_turn_with_why() {
             if message.starts_with("Claude Code didn't start") && message.contains("waiting for a lock"))
     });
 }
+
+#[test]
+fn a_side_question_stays_out_of_the_conversation_and_can_become_a_fork() {
+    let w = World::new(&[]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "hi");
+    c.wait_turns(&s, 1);
+    let turns = c.count(&s, |b| matches!(b, Body::TurnStarted));
+    c.call(Request::Aside {
+        session: s.clone(),
+        id: "q1".into(),
+        text: "what does main do?".into(),
+    })
+    .unwrap();
+    c.wait(&s, "the side answer", |b| {
+        matches!(b, Body::AsideReply { error: false, .. })
+    });
+    let (text, agent) = c
+        .events(&s)
+        .into_iter()
+        .find_map(|b| match b {
+            Body::AsideReply {
+                text,
+                agent_session,
+                ..
+            } => Some((text, agent_session)),
+            _ => None,
+        })
+        .unwrap();
+    assert!(text.contains("what does main do?"), "{text}");
+    let agent = agent.expect("the forked conversation's id");
+    // The conversation itself didn't move.
+    assert_eq!(c.count(&s, |b| matches!(b, Body::TurnStarted)), turns);
+    assert!(!c.text(&s).contains("what does main do?"));
+
+    let fork = match c.call(Request::PromoteAside {
+        session: s.clone(),
+        id: "q1".into(),
+    }) {
+        Ok(Out::Reply {
+            reply: dent_protocol::Reply::Created { session },
+        }) => session,
+        other => panic!("{other:?}"),
+    };
+    c.wait(&fork, "the fork", |b| matches!(b, Body::Status { .. }));
+    assert!(c.text(&fork).contains("what does main do?"));
+    let before = c.turns_done(&fork);
+    c.say(&fork, "f1", "tell me your args", false);
+    c.wait_turns(&fork, before + 1);
+    let last = c.text(&fork);
+    let last = last.lines().last().unwrap_or_default();
+    assert!(
+        last.contains(&format!("--resume {agent}")) && !last.contains("--fork-session"),
+        "{last}"
+    );
+}
+
+#[test]
+fn a_side_question_about_no_session_is_refused() {
+    let w = World::new(&[]);
+    let mut c = w.client();
+    let refused = matches!(
+        c.call(Request::Aside {
+            session: "nope".into(),
+            id: "q".into(),
+            text: "?".into(),
+        }),
+        Ok(Out::Error { .. }) | Err(_)
+    );
+    assert!(refused);
+}

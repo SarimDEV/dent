@@ -171,6 +171,22 @@ pub enum Body {
     },
     Closed,
     Reopened,
+    /// A side question: asked with the conversation's context, kept out of
+    /// the conversation itself.
+    Aside {
+        id: String,
+        question: String,
+    },
+    /// The answer to side question `id`. `agent_session` is the forked agent
+    /// conversation that holds it, for making it a real fork.
+    AsideReply {
+        id: String,
+        text: String,
+        #[serde(default)]
+        error: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_session: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -435,6 +451,18 @@ pub enum Request {
     },
     Reopen {
         session: SessionId,
+    },
+    /// Ask a side question; the answer arrives as an `aside_reply` event.
+    Aside {
+        session: SessionId,
+        id: String,
+        text: String,
+    },
+    /// Make a side question and its answer into a new session that carries
+    /// on from there.
+    PromoteAside {
+        session: SessionId,
+        id: String,
     },
     Projects,
     Models,

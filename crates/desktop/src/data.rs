@@ -181,6 +181,8 @@ pub struct Session {
     pub checkpoints: std::collections::HashSet<String>,
     /// Tokens in context, and the window's size when known.
     pub context: Option<(u64, Option<u64>)>,
+    /// Side questions and their answers, kept out of the conversation.
+    pub asides: Vec<dent_client_core::Aside>,
 }
 
 impl Session {
@@ -207,6 +209,7 @@ impl Session {
             diff: Rc::default(),
             terminal: Vec::new(),
             context: None,
+            asides: Vec::new(),
             checkpoints: Default::default(),
             servers: Vec::new(),
             made_sig: 0,

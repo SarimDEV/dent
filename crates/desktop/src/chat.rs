@@ -28,7 +28,7 @@ impl Dent {
     fn header(&self, s: &Session, cx: &mut Context<Self>) -> Div {
         let t = self.t;
         let id = s.id.clone();
-        let has_viewer = !s.arts.is_empty() || !s.diff.is_empty() || !s.terminal.is_empty();
+        let has_viewer = self.shows_panel(s);
         // Buttons here must not start a window drag.
         let mut actions = div()
             .flex()
@@ -50,6 +50,13 @@ impl Dent {
                     .on_click(cx.listener(move |this, _, _, cx| this.fork(&sid, None, cx)))
                     .tooltip(tip("A new session that carries on from here", None, t))
                     .child(probe(&self.probes, "fork")),
+            );
+            actions = actions.child(
+                icon_button("side-chat", "message-circle-question-mark", &t)
+                    .relative()
+                    .on_click(cx.listener(|this, _, window, cx| this.open_side_chat(window, cx)))
+                    .tooltip(tip("Ask on the side", Some("⌘;"), t))
+                    .child(probe(&self.probes, "side-chat")),
             );
         }
         if Self::can_close(s) {

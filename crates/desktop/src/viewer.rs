@@ -31,6 +31,12 @@ impl Dent {
         !s.arts.is_empty() || !s.diff.is_empty() || !s.terminal.is_empty()
     }
 
+    /// Whether the right pane has anything for this session: what it made,
+    /// or a side chat, even one just opened.
+    pub fn shows_panel(&self, s: &Session) -> bool {
+        Self::has_viewer(s) || !s.asides.is_empty() || self.tabs.get(&s.id) == Some(&Tab::Aside)
+    }
+
     /// Whether the live page should be on screen this frame.
     pub fn preview_visible(&self) -> bool {
         let Some(s) = self.current() else {
@@ -78,6 +84,13 @@ impl Dent {
         if !s.terminal.is_empty() {
             tabs.push((Tab::Terminal, "Terminal".into(), "square-terminal"));
         }
+        if !s.asides.is_empty() || tab == Tab::Aside {
+            tabs.push((
+                Tab::Aside,
+                "Side chat".into(),
+                "message-circle-question-mark",
+            ));
+        }
         let header = div()
             .h(px(size::HEADER))
             .flex_none()
@@ -109,6 +122,7 @@ impl Dent {
                             Tab::Art(a) => format!("tab-{a}"),
                             Tab::Changes => "tab-changes".into(),
                             Tab::Terminal => "tab-terminal".into(),
+                            Tab::Aside => "tab-aside".into(),
                         };
                         div()
                             .id(SharedString::from(key.clone()))
@@ -144,6 +158,7 @@ impl Dent {
             },
             Tab::Changes => self.changes(s, window, cx),
             Tab::Terminal => self.terminal(s),
+            Tab::Aside => self.side_chat(s, cx),
         };
         div()
             .relative()
@@ -1348,6 +1363,152 @@ impl Dent {
                 .into_any_element(),
             None => div().into_any_element(),
         }
+    }
+
+    /// Side questions about the session, answered with everything said so
+    /// far, kept out of the conversation; any answer can become a fork.
+    fn side_chat(&mut self, s: &Session, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.t;
+        let started = s
+            .items
+            .iter()
+            .any(|i| matches!(i, crate::data::Item::Text(_)));
+        let mut list = div()
+            .id("asides")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p(px(space::S4))
+            .flex()
+            .flex_col()
+            .gap(px(space::S6));
+        if s.asides.is_empty() {
+            list = list.child(
+                div()
+                    .flex()
+                    .gap(px(space::S3))
+                    .child(div().pt(px(3.)).child(icon("message-circle-question-mark", 16., t.quiet)))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(space::S1))
+                            .child(
+                                div()
+                                    .ty(UI)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(t.ink)
+                                    .child("Ask on the side"),
+                            )
+                            .child(div().ty(UI).text_color(t.quiet).child(if started {
+                                "Answered with everything said so far. Nothing here goes into the conversation."
+                            } else {
+                                "Once the session has replied, ask about it here without adding to it."
+                            })),
+                    ),
+            );
+        }
+        for (i, a) in s.asides.iter().enumerate() {
+            let question = div().flex().justify_end().child(
+                div()
+                    .max_w(relative(0.85))
+                    .px(px(space::S3))
+                    .py(px(space::S2))
+                    .rounded(px(radius::LG))
+                    .bg(t.raised)
+                    .border_1()
+                    .border_color(t.hairline)
+                    .ty(UI)
+                    .text_color(t.ink)
+                    .child(a.question.clone()),
+            );
+            let answer = match &a.answer {
+                None => div()
+                    .ty(UI)
+                    .text_color(t.quiet)
+                    .child("Thinking…")
+                    .into_any_element(),
+                Some((text, true, _)) => div()
+                    .flex()
+                    .gap(px(space::S2))
+                    .child(div().pt(px(3.)).child(icon("circle-alert", 13., t.needs.0)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .ty(UI)
+                            .text_color(t.quiet)
+                            .child(text.clone()),
+                    )
+                    .into_any_element(),
+                Some((text, false, agent)) => {
+                    let blocks = self.markdown(text);
+                    let (sid, aid) = (s.id.clone(), a.id.clone());
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(space::S2))
+                        .child(markdown::render(blocks.as_slice(), &t, false))
+                        .when(agent.is_some(), |d| {
+                            d.child(
+                                div().flex().child(
+                                    ghost(
+                                        SharedString::from(format!("promote-{i}")),
+                                        "Make it a fork",
+                                        &t,
+                                    )
+                                    .relative()
+                                    .tooltip(tip(
+                                        "A new session that carries on from this answer",
+                                        None,
+                                        t,
+                                    ))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.promote_aside(&sid, &aid, cx)
+                                    }))
+                                    .child(probe(&self.probes, format!("promote-{i}"))),
+                                ),
+                            )
+                        })
+                        .into_any_element()
+                }
+            };
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::S2))
+                    .child(question)
+                    .child(answer),
+            );
+        }
+        let input = div()
+            .flex_none()
+            .p(px(space::S3))
+            .border_t_1()
+            .border_color(t.hairline)
+            .child(
+                div()
+                    .px(px(space::S3))
+                    .py(px(space::S2))
+                    .rounded(px(radius::LG))
+                    .bg(t.raised)
+                    .border_1()
+                    .border_color(t.hairline)
+                    .ty(UI)
+                    .text_color(t.ink)
+                    .relative()
+                    .child(Textarea::new(&self.aside_input))
+                    .child(probe(&self.probes, "aside-input")),
+            );
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(list)
+            .child(input)
+            .into_any_element()
     }
 
     fn terminal(&mut self, s: &Session) -> AnyElement {

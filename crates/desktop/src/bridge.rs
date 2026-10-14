@@ -341,6 +341,7 @@ pub fn session(
         diff: cx.diff.unwrap_or_default(),
         terminal: terminal(v),
         context: v.context,
+        asides: v.asides.clone(),
         checkpoints: v.checkpoints.clone(),
         servers: built.servers.iter().map(|(_, u)| u.clone()).collect(),
         made_sig: v.made.iter().map(|m| m.versions.len()).sum::<usize>() + v.made.len() * 1000,

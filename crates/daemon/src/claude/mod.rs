@@ -76,6 +76,51 @@ pub fn argv(
     v
 }
 
+/// A one-off side question: the conversation `agent_session` so far, forked
+/// so the original never sees it, answered without changing anything.
+pub fn aside_argv(
+    claude: &str,
+    path: &str,
+    model: Option<&str>,
+    agent_session: &str,
+    question: &str,
+) -> Vec<String> {
+    let mut v: Vec<String> = [
+        "/usr/bin/env",
+        "-u",
+        "CLAUDECODE",
+        "-u",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "-u",
+        "CLAUDE_CODE_SSE_PORT",
+    ]
+    .map(String::from)
+    .into();
+    v.push(format!("PATH={path}"));
+    v.push(claude.into());
+    v.extend(
+        [
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--resume",
+            agent_session,
+            "--fork-session",
+            // Reading is fine; nothing that changes the project or runs.
+            "--disallowedTools",
+            "Bash,Write,Edit,MultiEdit,NotebookEdit",
+            "--append-system-prompt",
+            "This is a side question about the conversation so far. Answer it directly and briefly. Don't change any files.",
+        ]
+        .map(String::from),
+    );
+    if let Some(m) = model {
+        v.extend(["--model".into(), m.into()]);
+    }
+    v.extend(["-p".into(), question.into()]);
+    v
+}
+
 /// How an agent process picks up its conversation.
 pub enum Start {
     /// A new conversation, under an id dent chose.

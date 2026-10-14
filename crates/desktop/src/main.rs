@@ -35,8 +35,8 @@ use gpui_kit::*;
 
 use app::{
     CloseSession, Dent, Escape, InboxClose, InboxDown, InboxOpen, InboxUp, NewSession,
-    NextNeedsYou, Search, SelectNext, SelectPrev, ShowChanges, ShowFirst, ShowTerminal, SteerSend,
-    StopSession, Tab, ToastAction, TogglePanel, UndoClose,
+    NextNeedsYou, Search, SelectNext, SelectPrev, ShowChanges, ShowFirst, ShowTerminal, SideChat,
+    SteerSend, StopSession, Tab, ToastAction, TogglePanel, UndoClose,
 };
 use ds::{Typed, UI, radius, size, space};
 use theme::Theme;
@@ -192,7 +192,7 @@ impl Render for Dent {
         // Lay out from the window: the chat keeps its minimum, the viewer
         // shrinks first, and only then does the sidebar fold away.
         let w = window.viewport_size().width.as_f32();
-        let wants_panel = self.panel_open && self.current().is_some_and(Self::has_viewer);
+        let wants_panel = self.panel_open && self.current().is_some_and(|s| self.shows_panel(s));
         if !wants_panel {
             self.sidebar_forced = false;
         }
@@ -212,7 +212,7 @@ impl Render for Dent {
         let main = self.main_column(window, cx);
         let panel = self
             .current_rc()
-            .filter(|s| self.panel_open && Self::has_viewer(s))
+            .filter(|s| self.panel_open && self.shows_panel(s))
             .map(|s| self.panel(&s, window, cx));
         let toast =
             self.toast.clone().map(|toast| {
@@ -322,6 +322,9 @@ impl Render for Dent {
             )
             .on_action(
                 cx.listener(|this, _: &SteerSend, window, cx| this.send_with(true, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SideChat, window, cx| this.open_side_chat(window, cx)),
             )
             .on_action(cx.listener(|this, _: &StopSession, window, cx| {
                 if let Some(id) = this.selected.clone() {

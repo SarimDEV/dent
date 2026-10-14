@@ -91,6 +91,13 @@ fn main() {
         context: 18_000,
         steer: false,
     };
+    // One-off: `-p "prompt"` without stream-json input answers and exits.
+    if !args.iter().any(|x| x == "--input-format")
+        && let Some(prompt) = arg("-p").filter(|p| !p.starts_with("--"))
+    {
+        let _ = a.turn(&prompt);
+        return;
+    }
     // Claude Code stuck before it starts (a lock held elsewhere, say).
     if std::env::var_os("FAKE_CLAUDE_HANG").is_some() {
         eprintln!("waiting for a lock");

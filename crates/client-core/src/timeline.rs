@@ -44,12 +44,24 @@ pub struct SessionView {
     /// Messages with a snapshot of the files from just before them, so
     /// rewinding can bring the files back too.
     pub checkpoints: std::collections::HashSet<String>,
+    /// Side questions, oldest first, kept apart from the conversation.
+    pub asides: Vec<Aside>,
     /// Where the current turn's entries begin.
     turn_from: usize,
     /// The first entry that changed since [`SessionView::take_changes`].
     changed_from: Option<usize>,
     /// Where each tool call lives: entry index and position in it.
     calls: HashMap<String, (usize, usize)>,
+}
+
+/// A side question and, once it's in, its answer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Aside {
+    pub id: String,
+    pub question: String,
+    /// The answer, whether it's an error, and the forked agent conversation
+    /// that holds it.
+    pub answer: Option<(String, bool, Option<String>)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -512,6 +524,21 @@ impl SessionView {
             }
             Body::Closed => self.closed = true,
             Body::Reopened => self.closed = false,
+            Body::Aside { id, question } => self.asides.push(Aside {
+                id: id.clone(),
+                question: question.clone(),
+                answer: None,
+            }),
+            Body::AsideReply {
+                id,
+                text,
+                error,
+                agent_session,
+            } => {
+                if let Some(a) = self.asides.iter_mut().find(|a| a.id == *id) {
+                    a.answer = Some((text.clone(), *error, agent_session.clone()));
+                }
+            }
             Body::Limits { .. } | Body::Agent { .. } | Body::Forked { .. } => {}
         }
     }
