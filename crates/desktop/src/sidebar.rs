@@ -32,6 +32,13 @@ impl Dent {
             .flex()
             .flex_col();
         if clear {
+            // Nothing at all yet reads differently from nothing to do.
+            let fresh = self.sessions.is_empty();
+            let (head, line) = if fresh {
+                ("No sessions yet", "Type a task to start one.")
+            } else {
+                ("All caught up", "Everything is working or closed.")
+            };
             body = body.child(
                 div()
                     .mx(px(space::S2))
@@ -40,7 +47,15 @@ impl Dent {
                     .py(px(space::S3))
                     .flex()
                     .gap(px(space::S3))
-                    .child(div().pt(px(4.)).child(icon("check-check", 16., t.quiet)))
+                    .child(div().pt(px(4.)).child(icon(
+                        if fresh {
+                            "message-square"
+                        } else {
+                            "check-check"
+                        },
+                        16.,
+                        t.quiet,
+                    )))
                     .child(
                         div()
                             .flex()
@@ -50,14 +65,9 @@ impl Dent {
                                     .ty(UI)
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(t.ink)
-                                    .child("All caught up"),
+                                    .child(head),
                             )
-                            .child(
-                                div()
-                                    .ty(UI)
-                                    .text_color(t.quiet)
-                                    .child("Everything is working or closed."),
-                            ),
+                            .child(div().ty(UI).text_color(t.quiet).child(line)),
                     ),
             );
         }

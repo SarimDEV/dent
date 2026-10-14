@@ -558,6 +558,21 @@ fn checks() -> Vec<(f32, Act)> {
             ),
         ),
         (0.3, Shot("stopped")),
+        (0.2, Type(Field::Composer, "")),
+        (0.2, Key("alt-up")),
+        (
+            0.1,
+            Until(
+                "Alt+Up jumps back through your own messages",
+                |d, _| {
+                    let top = d.transcript.logical_scroll_top().item_ix;
+                    top > 0
+                        && current(d)
+                            .is_some_and(|s| matches!(s.items.get(top), Some(Item::User { .. })))
+                },
+                3.,
+            ),
+        ),
     ]);
     v.extend(new_session("write site/page.html please"));
     v.extend([

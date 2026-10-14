@@ -443,8 +443,17 @@ impl Dent {
                     WindowAppearance::Dark | WindowAppearance::VibrantDark
                 );
                 if dark != this.t.dark {
-                    this.t = if dark { Theme::carbon() } else { Theme::paper() };
-                    for input in [&this.composer, &this.starter, &this.comment_input, &this.search] {
+                    this.t = if dark {
+                        Theme::carbon()
+                    } else {
+                        Theme::paper()
+                    };
+                    for input in [
+                        &this.composer,
+                        &this.starter,
+                        &this.comment_input,
+                        &this.search,
+                    ] {
                         crate::style_input(input, &this.t, cx);
                     }
                     this.md.clear();
@@ -939,6 +948,17 @@ impl Dent {
                 return true;
             }
         }
+        // Alt+Up and Alt+Down move between your own messages, while the
+        // composer has nothing to edit.
+        if k.modifiers.alt
+            && !k.modifiers.platform
+            && !k.modifiers.shift
+            && matches!(k.key.as_str(), "up" | "down")
+            && self.composer.read(cx).value().is_empty()
+            && self.jump_to_mine(k.key == "up", cx)
+        {
+            return true;
+        }
         // ⌘V with a picture or files on the clipboard attaches them.
         if k.key == "v"
             && k.modifiers.platform
@@ -962,6 +982,36 @@ impl Dent {
             return true;
         }
         false
+    }
+
+    /// Scroll to your previous or next message. Returns whether there was one.
+    pub fn jump_to_mine(&mut self, up: bool, cx: &mut Context<Self>) -> bool {
+        let Some(s) = self.current() else {
+            return false;
+        };
+        let mine: Vec<usize> = s
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| matches!(i, Item::User { .. }))
+            .map(|(ix, _)| ix)
+            .collect();
+        let top = self.transcript.logical_scroll_top().item_ix;
+        let to = if up {
+            mine.iter().rev().find(|ix| **ix < top).copied()
+        } else {
+            mine.iter().find(|ix| **ix > top).copied()
+        };
+        let Some(ix) = to else {
+            return false;
+        };
+        self.transcript.set_follow_mode(FollowMode::Normal);
+        self.transcript.scroll_to(ListOffset {
+            item_ix: ix,
+            offset_in_item: px(0.),
+        });
+        cx.notify();
+        true
     }
 
     /// Ask for a session's slash commands, once it has some.
