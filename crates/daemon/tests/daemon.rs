@@ -525,6 +525,12 @@ fn messages_sent_while_working_wait_unless_steered() {
     }
     c.pump(Duration::from_millis(200));
     c.say(&s, "st", "actually do the steer thing", true);
+    // Wait for the steered reply itself: on a busy machine the turn count
+    // can reach three before it arrives.
+    c.wait(&s, "the steered reply", |b| {
+        matches!(b, Body::Assistant { parent: None, blocks, .. }
+            if blocks.iter().any(|x| matches!(x, dent_protocol::Block::Text { text } if text.contains("steer thing"))))
+    });
     c.wait_turns(&s, 3);
     assert_eq!(
         c.count(&s, |b| matches!(
@@ -537,7 +543,7 @@ fn messages_sent_while_working_wait_unless_steered() {
         "{:#?}",
         c.events(&s)
     );
-    assert!(c.text(&s).contains("steer thing"));
+    assert!(c.text(&s).contains("steer thing"), "{}", c.text(&s));
     assert!(c.count(&s, |b| matches!(b, Body::User { steer: true, .. })) == 1);
 }
 

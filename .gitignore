@@ -22,3 +22,5 @@ node_modules
 *.db
 *.db-wal
 *.db-shm
+# Agents' working copies
+/.claude/worktrees

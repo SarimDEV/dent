@@ -1981,11 +1981,7 @@ impl Dent {
         let all = self.markdown(report);
         let blocks: &[markdown::Block] = &all;
         let long = blocks.len() > 2;
-        let blocks = if long && !open {
-            &blocks[..2]
-        } else {
-            &blocks[..]
-        };
+        let blocks = if long && !open { &blocks[..2] } else { blocks };
         div()
             .flex_1()
             .min_w_0()
