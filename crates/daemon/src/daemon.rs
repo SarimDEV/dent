@@ -341,7 +341,14 @@ impl Daemon {
                 cwd,
                 model,
                 permission,
-                title: title(&text),
+                // Started with files alone: named after the first.
+                title: match attachments.first() {
+                    Some(f) if text.trim().is_empty() => std::path::Path::new(f)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| title(&text)),
+                    _ => title(&text),
+                },
             },
             None,
         )?;

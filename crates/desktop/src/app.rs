@@ -2751,7 +2751,8 @@ impl Dent {
     /// Start a new session from the starter box with the chosen defaults.
     pub fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.starter.read(cx).value().trim().to_string();
-        if text.is_empty() || self.creating() {
+        // Files alone can start one, as they can be sent in a session.
+        if text.is_empty() && self.attachments.is_empty() || self.creating() {
             return;
         }
         if self.attachments.is_empty() && self.sent_own(&text, window, cx) {

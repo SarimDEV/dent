@@ -1794,71 +1794,6 @@ impl Dent {
             hint_text,
         );
         let labels = fit.labels.clone();
-        let chips: Vec<AnyElement> = self
-            .attachments
-            .clone()
-            .into_iter()
-            .enumerate()
-            .map(|(i, a)| {
-                div()
-                    .id(SharedString::from(format!("att-{i}")))
-                    .flex()
-                    .items_center()
-                    .gap(px(space::S1H))
-                    .max_w(px(420.))
-                    .h(px(size::CONTROL_SM + 2.))
-                    .pl(px(space::S2))
-                    .pr(px(space::S1))
-                    .rounded(px(radius::SM))
-                    .bg(t.selected())
-                    // A picture shows itself, small.
-                    .child(match &a {
-                        crate::app::Attachment::File { path }
-                            if Kind::of(path) == Some(Kind::Image) =>
-                        {
-                            div()
-                                .size(px(16.))
-                                .flex_none()
-                                .rounded(px(3.))
-                                .overflow_hidden()
-                                .child(
-                                    img(std::path::PathBuf::from(path))
-                                        .size_full()
-                                        .object_fit(ObjectFit::Cover),
-                                )
-                                .into_any_element()
-                        }
-                        _ => icon(a.icon(), 12., t.quiet).into_any_element(),
-                    })
-                    .child(div().truncate().ty(UI).text_color(t.ink).child(a.label()))
-                    .tooltip(crate::ui::tip_owned(
-                        match &a {
-                            crate::app::Attachment::File { path } => path.replacen(&home(), "~", 1),
-                            _ => a.label(),
-                        },
-                        t,
-                    ))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("att-x-{i}")))
-                            .size(px(18.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(3.))
-                            .cursor_pointer()
-                            .hover(|d| d.bg(t.press()))
-                            .on_press(cx.listener(move |this, _, _, cx| {
-                                if i < this.attachments.len() {
-                                    this.attachments.remove(i);
-                                }
-                                cx.notify();
-                            }))
-                            .child(icon("x", 11., t.quiet)),
-                    )
-                    .into_any_element()
-            })
-            .collect();
         div()
             .w_full()
             .max_w(px(size::COLUMN + space::S8 * 2.))
@@ -1879,9 +1814,7 @@ impl Dent {
                     .flex_col()
                     .gap(px(space::S2))
                     .children(self.plan_strip(s, cx))
-                    .when(!chips.is_empty(), |d| {
-                        d.child(div().flex().flex_wrap().gap(px(space::S1H)).children(chips))
-                    })
+                    .children(self.attachment_chips(cx))
                     .child(self.prompt_field(&self.composer.clone(), cx))
                     .child(
                         div()
@@ -2038,6 +1971,85 @@ impl Dent {
                 })
                 .into_any_element(),
         )
+    }
+
+    /// What rides along with the next message, as chips above whichever
+    /// prompt is showing: a session's composer or a new session's field.
+    fn attachment_chips(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = self.t;
+        let chips: Vec<AnyElement> = self
+            .attachments
+            .clone()
+            .into_iter()
+            .enumerate()
+            .map(|(i, a)| {
+                div()
+                    .id(SharedString::from(format!("att-{i}")))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S1H))
+                    .max_w(px(420.))
+                    .h(px(size::CONTROL_SM + 2.))
+                    .pl(px(space::S2))
+                    .pr(px(space::S1))
+                    .rounded(px(radius::SM))
+                    .bg(t.selected())
+                    // A picture shows itself, small.
+                    .child(match &a {
+                        crate::app::Attachment::File { path }
+                            if Kind::of(path) == Some(Kind::Image) =>
+                        {
+                            div()
+                                .size(px(16.))
+                                .flex_none()
+                                .rounded(px(3.))
+                                .overflow_hidden()
+                                .child(
+                                    img(std::path::PathBuf::from(path))
+                                        .size_full()
+                                        .object_fit(ObjectFit::Cover),
+                                )
+                                .into_any_element()
+                        }
+                        _ => icon(a.icon(), 12., t.quiet).into_any_element(),
+                    })
+                    .child(div().truncate().ty(UI).text_color(t.ink).child(a.label()))
+                    .tooltip(crate::ui::tip_owned(
+                        match &a {
+                            crate::app::Attachment::File { path } => path.replacen(&home(), "~", 1),
+                            _ => a.label(),
+                        },
+                        t,
+                    ))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("att-x-{i}")))
+                            .size(px(18.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(3.))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(t.press()))
+                            .on_press(cx.listener(move |this, _, _, cx| {
+                                if i < this.attachments.len() {
+                                    this.attachments.remove(i);
+                                }
+                                cx.notify();
+                            }))
+                            .child(icon("x", 11., t.quiet)),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        (!chips.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(space::S1H))
+                .children(chips)
+                .into_any_element()
+        })
     }
 
     /// Where a prompt is typed. A click can move the caret into or out of
@@ -2238,7 +2250,7 @@ impl Dent {
     fn starter_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let t = self.t;
         let text = self.starter.read(cx).value();
-        let empty = text.trim().is_empty();
+        let empty = text.trim().is_empty() && self.attachments.is_empty();
         let d = self.defaults.clone();
         let project = d
             .project
@@ -2348,6 +2360,7 @@ impl Dent {
                             .flex()
                             .flex_col()
                             .gap(px(space::S2))
+                            .children(self.attachment_chips(cx))
                             .child(self.prompt_field(&self.starter.clone(), cx))
                             .child(div().flex().justify_end().child(start))
                             .child(probe(&self.probes, "starter"))
