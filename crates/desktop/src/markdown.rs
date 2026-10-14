@@ -21,12 +21,25 @@ struct Style {
 pub struct Inline {
     pub text: String,
     runs: Vec<(usize, Style)>,
+    /// Byte ranges that are links, and where they go.
+    links: Vec<(std::ops::Range<usize>, String)>,
+    /// Where the link being read goes.
+    href: Option<String>,
 }
 
 impl Inline {
     fn push(&mut self, s: &str, st: Style) {
         if s.is_empty() {
             return;
+        }
+        if st.link
+            && let Some(url) = &self.href
+        {
+            let at = self.text.len();
+            match self.links.last_mut() {
+                Some((r, u)) if r.end == at && u == url => r.end += s.len(),
+                _ => self.links.push((at..at + s.len(), url.clone())),
+            }
         }
         self.text.push_str(s);
         self.runs.push((s.len(), st));
@@ -39,7 +52,7 @@ impl Inline {
         base: &'static str,
         ink: Hsla,
         fade: Option<&dyn Fn(usize) -> f32>,
-    ) -> StyledText {
+    ) -> AnyElement {
         let mut runs = Vec::new();
         let mut at = 0;
         for (len, st) in &self.runs {
@@ -78,7 +91,29 @@ impl Inline {
             }
             at += len;
         }
-        StyledText::new(self.text.clone()).with_runs(runs)
+        let text = StyledText::new(self.text.clone()).with_runs(runs);
+        if self.links.is_empty() {
+            return text.into_any_element();
+        }
+        // Links open in the browser; paths open in their default app.
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.text.hash(&mut h);
+        let urls: Vec<String> = self.links.iter().map(|(_, u)| u.clone()).collect();
+        InteractiveText::new(SharedString::from(format!("md-{:x}", h.finish())), text)
+            .on_click(
+                self.links.iter().map(|(r, _)| r.clone()).collect(),
+                move |ix, _, cx| {
+                    if let Some(url) = urls.get(ix) {
+                        if url.starts_with('/') {
+                            cx.open_url(&format!("file://{url}"));
+                        } else {
+                            cx.open_url(url);
+                        }
+                    }
+                },
+            )
+            .into_any_element()
     }
 }
 
@@ -115,6 +150,26 @@ pub enum Block {
 /// Head, rows, the row being read, and whether we are still in the head.
 type TableState = (Vec<Inline>, Vec<Vec<Inline>>, Vec<Inline>, bool);
 
+/// Text with bare web addresses made into links.
+fn push_linking(cur: &mut Inline, s: &str, st: Style) {
+    let mut rest = s;
+    while let Some(at) = rest.find("https://").or_else(|| rest.find("http://")) {
+        cur.push(&rest[..at], st);
+        let tail = &rest[at..];
+        let mut end = tail.find(char::is_whitespace).unwrap_or(tail.len());
+        // Trailing punctuation belongs to the sentence, not the address.
+        while end > 0 && tail[..end].ends_with(['.', ',', ')', ';', ':', '!', '?', '"', '\'']) {
+            end -= 1;
+        }
+        let url = &tail[..end];
+        cur.href = Some(url.to_string());
+        cur.push(url, Style { link: true, ..st });
+        cur.href = None;
+        rest = &tail[end..];
+    }
+    cur.push(rest, st);
+}
+
 pub fn parse(src: &str) -> Vec<Block> {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
@@ -135,12 +190,19 @@ pub fn parse(src: &str) -> Vec<Block> {
             Event::End(TagEnd::Strong) => st.strong = false,
             Event::Start(Tag::Emphasis) => st.emph = true,
             Event::End(TagEnd::Emphasis) => st.emph = false,
-            Event::Start(Tag::Link { .. }) => st.link = true,
-            Event::End(TagEnd::Link) => st.link = false,
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                st.link = true;
+                cur.href = Some(dest_url.to_string());
+            }
+            Event::End(TagEnd::Link) => {
+                st.link = false;
+                cur.href = None;
+            }
             Event::Code(c) => cur.push(&c, Style { code: true, ..st }),
             Event::Text(s) => match &mut code {
                 Some((_, body)) => body.push_str(&s),
-                None => cur.push(&s, st),
+                None if st.link => cur.push(&s, st),
+                None => push_linking(&mut cur, &s, st),
             },
             Event::SoftBreak | Event::HardBreak => cur.push(" ", st),
             Event::TaskListMarker(done) => task = Some(done),
@@ -431,4 +493,19 @@ fn checkbox(done: bool, t: &Theme) -> Div {
                     .text_color(t.surface),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn links_and_bare_addresses_are_found() {
+        let blocks = super::parse("See [the docs](https://a.example/x) or https://b.example/y.");
+        let super::Block::Para(p) = &blocks[0] else {
+            panic!()
+        };
+        let urls: Vec<&str> = p.links.iter().map(|(_, u)| u.as_str()).collect();
+        assert_eq!(urls, ["https://a.example/x", "https://b.example/y"]);
+        let (r, _) = &p.links[1];
+        assert_eq!(&p.text[r.clone()], "https://b.example/y");
+    }
 }
