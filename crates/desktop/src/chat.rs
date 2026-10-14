@@ -1684,15 +1684,16 @@ impl Dent {
             .to_string();
         let permission = s.permission.label().to_string();
         let hint_text = if s.status == Status::Needs {
-            match s.items.iter().rev().find_map(|i| match i {
-                Item::Question { .. } => Some("↩ answer"),
-                Item::Approval { .. } => Some("↩ deny with this reason"),
-                Item::Plan { .. } => Some("↩ ask for changes"),
-                _ => None,
-            }) {
-                Some(h) => h,
-                None => "↩ send",
-            }
+            s.items
+                .iter()
+                .rev()
+                .find_map(|i| match i {
+                    Item::Question { .. } => Some("↩ answer"),
+                    Item::Approval { .. } => Some("↩ deny with this reason"),
+                    Item::Plan { .. } => Some("↩ ask for changes"),
+                    _ => None,
+                })
+                .unwrap_or("↩ send")
         } else if working {
             "↩ queue · ⌘ ↩ steer"
         } else {
