@@ -225,110 +225,155 @@ impl Dent {
                     window.start_window_move();
                 }
             })
-            .child(
+            .child({
+                // An edge with more tabs past it fades, so a cut-off tab reads
+                // as "there's more", not as a broken one.
+                let off = self.tab_scroll.offset().x.as_f32();
+                let max = self.tab_scroll.max_offset().x.as_f32();
+                let fade = |left: bool| {
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .w(px(space::S4))
+                        .map(|d| if left { d.left_0() } else { d.right_0() })
+                        .bg(linear_gradient(
+                            if left { 90. } else { 270. },
+                            linear_color_stop(t.panel, 0.),
+                            linear_color_stop(t.panel.opacity(0.), 1.),
+                        ))
+                };
                 div()
-                    .id(SharedString::from(format!("tabs-{}", s.id)))
+                    .relative()
                     .flex_1()
                     .min_w_0()
+                    .h_full()
                     .flex()
                     .items_center()
-                    .gap(px(space::S1))
-                    .overflow_x_scroll()
-                    .track_scroll(&self.tab_scroll)
-                    .children(tabs.into_iter().map(|(which, name, ic, path)| {
-                        let on = which == tab;
-                        let key = match which {
-                            Tab::Art(a) => format!("tab-{a}"),
-                            Tab::Changes => "tab-changes".into(),
-                            Tab::Terminal => "tab-terminal".into(),
-                            Tab::Aside => "tab-aside".into(),
-                        };
-                        let group = SharedString::from(format!("g-{key}"));
-                        let art = match which {
-                            Tab::Art(a) => Some(a),
-                            _ => None,
-                        };
+                    .child(
                         div()
-                            .id(SharedString::from(key.clone()))
-                            .group(group.clone())
-                            .relative()
-                            .flex_none()
-                            .h(px(size::CONTROL))
-                            .pl(px(space::S2))
-                            .pr(px(if art.is_some() { space::S1 } else { space::S2 }))
+                            .id(SharedString::from(format!("tabs-{}", s.id)))
+                            .flex_1()
+                            .min_w_0()
                             .flex()
                             .items_center()
-                            .gap(px(space::S1H))
-                            .rounded(px(radius::MD))
-                            .cursor_pointer()
-                            .when(on, |d| d.bg(t.selected()))
-                            .when(!on, |d| d.hover(|d| d.bg(t.hover())))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(move |this, _, _, cx| this.show_tab(which, cx)))
-                            .when_some(path, |d, p| d.tooltip(crate::ui::tip_owned(p, t)))
-                            // A middle click closes a file's tab, as in a browser.
-                            .when_some(art, |d, a| {
-                                d.on_mouse_down(
-                                    MouseButton::Middle,
-                                    cx.listener(move |this, _, _, cx| this.close_tab(a, cx)),
-                                )
-                            })
-                            .child(icon(ic, 13., if on { t.ink } else { t.quiet }))
-                            .child(
+                            .gap(px(space::S1))
+                            .overflow_x_scroll()
+                            .track_scroll(&self.tab_scroll)
+                            .children(tabs.into_iter().map(|(which, name, ic, path)| {
+                                let on = which == tab;
+                                let key = match which {
+                                    Tab::Art(a) => format!("tab-{a}"),
+                                    Tab::Changes => "tab-changes".into(),
+                                    Tab::Terminal => "tab-terminal".into(),
+                                    Tab::Aside => "tab-aside".into(),
+                                };
+                                let group = SharedString::from(format!("g-{key}"));
+                                let art = match which {
+                                    Tab::Art(a) => Some(a),
+                                    _ => None,
+                                };
                                 div()
-                                    .ty(UI)
-                                    .text_color(if on { t.ink } else { t.quiet })
-                                    .child(middle_ellipsis(&name, 28)),
-                            )
-                            .when_some(art, |d, a| {
-                                d.child(
-                                    div()
-                                        .id(SharedString::from(format!("close-{key}")))
-                                        .flex_none()
-                                        .size(px(18.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded(px(radius::SM))
-                                        .when(!on, |d| d.reveal_on_hover(group.clone()))
-                                        .hover(|d| d.bg(t.hover()))
-                                        .active(|d| d.bg(t.press()))
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation()
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            this.close_tab(a, cx);
-                                        }))
-                                        .tooltip(tip("Close tab", None, t))
-                                        .child(icon("x", 12., t.quiet)),
-                                )
-                            })
-                            .when_some(art.zip(path), |d, (a, p)| {
-                                let _ = p;
-                                let full = self
-                                    .art(a)
-                                    .and_then(art_file)
-                                    .map(|f| f.display().to_string());
-                                d.on_mouse_down(
-                                    MouseButton::Right,
-                                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                                        use crate::context::Do;
-                                        let mut items = vec![("Close tab", Do::CloseTab(a))];
-                                        if many {
-                                            items.push(("Close other tabs", Do::CloseOtherTabs(a)));
-                                        }
-                                        if let Some(f) = &full {
-                                            items.push(("Copy path", Do::CopyPath(f.clone())));
-                                            items.push(("Show in Finder", Do::Reveal(f.clone())));
-                                        }
-                                        this.open_context(e.position, items, cx);
-                                    }),
-                                )
-                            })
-                            .child(probe(&self.probes, key))
-                    })),
-            );
+                                    .id(SharedString::from(key.clone()))
+                                    .group(group.clone())
+                                    .relative()
+                                    .flex_none()
+                                    .h(px(size::CONTROL))
+                                    .pl(px(space::S2))
+                                    .pr(px(if art.is_some() { space::S1 } else { space::S2 }))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(space::S1H))
+                                    .rounded(px(radius::MD))
+                                    .cursor_pointer()
+                                    .when(on, |d| d.bg(t.selected()))
+                                    .when(!on, |d| d.hover(|d| d.bg(t.hover())))
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation()
+                                    })
+                                    .on_click(
+                                        cx.listener(move |this, _, _, cx| this.show_tab(which, cx)),
+                                    )
+                                    .when_some(path, |d, p| d.tooltip(crate::ui::tip_owned(p, t)))
+                                    // A middle click closes a file's tab, as in a browser.
+                                    .when_some(art, |d, a| {
+                                        d.on_mouse_down(
+                                            MouseButton::Middle,
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.close_tab(a, cx)
+                                            }),
+                                        )
+                                    })
+                                    .child(icon(ic, 13., if on { t.ink } else { t.quiet }))
+                                    .child(
+                                        div()
+                                            .ty(UI)
+                                            .text_color(if on { t.ink } else { t.quiet })
+                                            .child(middle_ellipsis(&name, 28)),
+                                    )
+                                    .when_some(art, |d, a| {
+                                        d.child(
+                                            div()
+                                                .id(SharedString::from(format!("close-{key}")))
+                                                .flex_none()
+                                                .size(px(18.))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .rounded(px(radius::SM))
+                                                .when(!on, |d| d.reveal_on_hover(group.clone()))
+                                                .hover(|d| d.bg(t.hover()))
+                                                .active(|d| d.bg(t.press()))
+                                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                    cx.stop_propagation()
+                                                })
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.close_tab(a, cx);
+                                                }))
+                                                .tooltip(tip("Close tab", None, t))
+                                                .child(icon("x", 12., t.quiet)),
+                                        )
+                                    })
+                                    .when_some(art.zip(path), |d, (a, p)| {
+                                        let _ = p;
+                                        let full = self
+                                            .art(a)
+                                            .and_then(art_file)
+                                            .map(|f| f.display().to_string());
+                                        d.on_mouse_down(
+                                            MouseButton::Right,
+                                            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                                use crate::context::Do;
+                                                let mut items =
+                                                    vec![("Close tab", Do::CloseTab(a))];
+                                                if many {
+                                                    items.push((
+                                                        "Close other tabs",
+                                                        Do::CloseOtherTabs(a),
+                                                    ));
+                                                }
+                                                if let Some(f) = &full {
+                                                    items.push(("", Do::Separator));
+                                                    items.push((
+                                                        "Copy path",
+                                                        Do::CopyPath(f.clone()),
+                                                    ));
+                                                    items.push((
+                                                        "Show in Finder",
+                                                        Do::Reveal(f.clone()),
+                                                    ));
+                                                }
+                                                this.open_context(e.position, items, cx);
+                                            }),
+                                        )
+                                    })
+                                    .child(probe(&self.probes, key))
+                            })),
+                    )
+                    .when(off < -1., |d| d.child(fade(true)))
+                    .when(max > 1. && off > -max + 1., |d| d.child(fade(false)))
+            });
         let body = match tab {
             Tab::Art(id) => match self.art(id).map(|a| a.kind) {
                 Some(Kind::Html | Kind::Server) => self.page(id, window, cx),
@@ -1034,14 +1079,14 @@ impl Dent {
                             .is_some_and(|at| at.elapsed().as_secs_f32() < 1.5);
                         // The text is read when you copy, not each frame.
                         let bytes = a.versions[v - 1].clone();
-                        ghost("copy-doc", if copied { "Copied" } else { "Copy" }, &t).on_click(
-                            cx.listener(move |this, _, _, cx| {
+                        ghost("copy-doc", if copied { "Copied" } else { "Copy text" }, &t)
+                            .tooltip(tip("Copy the file's text", None, t))
+                            .on_click(cx.listener(move |this, _, _, cx| {
                                 let src = String::from_utf8_lossy(&bytes).into_owned();
                                 cx.write_to_clipboard(ClipboardItem::new_string(src));
                                 this.copied_at = Some(std::time::Instant::now());
                                 cx.notify();
-                            }),
-                        )
+                            }))
                     })
                     .when_some(art_file(&a), |d, full| {
                         d.child(

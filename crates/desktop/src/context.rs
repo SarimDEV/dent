@@ -17,6 +17,8 @@ pub struct ContextMenu {
 /// What a row does.
 #[derive(Clone)]
 pub enum Do {
+    /// A hairline between groups of actions.
+    Separator,
     CloseTab(&'static str),
     CloseOtherTabs(&'static str),
     CopyPath(String),
@@ -44,6 +46,7 @@ impl Dent {
     fn run_context(&mut self, what: Do, window: &mut Window, cx: &mut Context<Self>) {
         self.context = None;
         match what {
+            Do::Separator => {}
             Do::CloseTab(a) => self.close_tab(a, cx),
             Do::CloseOtherTabs(a) => self.close_other_tabs(a, cx),
             Do::CopyPath(p) => cx.write_to_clipboard(ClipboardItem::new_string(p)),
@@ -72,7 +75,18 @@ impl Dent {
         let menu = self.context.clone()?;
         let t: Theme = self.t;
         let vw = window.viewport_size();
-        let h = menu.items.len() as f32 * (size::ROW + 4.) + space::S2;
+        let h = menu
+            .items
+            .iter()
+            .map(|(_, w)| {
+                if matches!(w, Do::Separator) {
+                    space::S2 + 1.
+                } else {
+                    size::ROW + 4.
+                }
+            })
+            .sum::<f32>()
+            + space::S2;
         let x = menu
             .at
             .x
@@ -117,6 +131,14 @@ impl Dent {
                                 .into_iter()
                                 .enumerate()
                                 .map(|(i, (label, what))| {
+                                    if matches!(what, Do::Separator) {
+                                        return div()
+                                            .id(("context-sep", i))
+                                            .my(px(space::S1))
+                                            .mx(px(space::S2))
+                                            .h(px(1.))
+                                            .bg(t.hairline);
+                                    }
                                     div()
                                         .id(("context-row", i))
                                         .h(px(size::ROW + 4.))

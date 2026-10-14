@@ -1632,9 +1632,11 @@ impl Dent {
                 .items_center()
                 .justify_center()
                 .when(loud, |d| d.bg(t.ink).active(|d| d.opacity(0.8)))
+                // An outline that still reads as working, set apart from the hint.
                 .when(!loud, |d| {
-                    d.border_1()
-                        .border_color(t.ink.opacity(0.16))
+                    d.ml(px(space::S2))
+                        .border_1()
+                        .border_color(t.ink.opacity(0.35))
                         .hover(|d| d.bg(t.hover()))
                         .active(|d| d.bg(t.press()))
                 })
@@ -3040,17 +3042,23 @@ impl Dent {
             bg: t.surface,
             base: Some(std::path::PathBuf::from(&s.cwd)),
         };
-        let body = markdown::render(blocks, &t, false, &mut r);
+        // Inside the tool, quieter than the answer: as an opened thought.
+        let body = markdown::render_with(blocks, &t, false, true, &mut r);
         div()
             .flex_1()
             .min_w_0()
             .my(px(space::S1))
-            .pl(px(space::S1))
             .flex()
             .flex_col()
             .gap(px(space::S1))
             .child(div().ty(LABEL).text_color(t.quiet).child("REPORT"))
-            .child(body)
+            .child(
+                div()
+                    .pl(px(space::S3))
+                    .border_l_2()
+                    .border_color(t.hairline)
+                    .child(body),
+            )
             .when(long, |d| {
                 d.child(
                     div()
@@ -3142,6 +3150,8 @@ fn sent_attachment(line: &str, cwd: &str, t: &theme::Theme) -> Div {
 /// Lines of code or output that select and copy; with `diff`, removed
 /// ("- ") and added ("+ ") lines take the diff's colours.
 pub fn code_lines(id: String, text: String, diff: bool, ink: Hsla, t: &crate::theme::Theme) -> Div {
+    // A trailing line break would leave a blank line at the bottom.
+    let text = text.trim_end_matches('\n').to_string();
     let mut runs = Vec::new();
     for l in text.split_inclusive('\n') {
         let color = if diff && l.starts_with("- ") {

@@ -396,7 +396,9 @@ fn run(len: usize, font: Font, color: Hsla, st: &Style, t: &Theme) -> TextRun {
         len,
         font,
         color,
-        background_color: st.code.then(|| t.ink.opacity(0.06)),
+        // Code reads by its face alone: a tint hugging the letters looked
+        // like a selection.
+        background_color: None,
         underline: st.link.then(|| UnderlineStyle {
             thickness: px(1.),
             color: Some(t.quiet.opacity(0.6)),
@@ -1046,8 +1048,14 @@ fn image_block(src: &str, alt: &str, t: &Theme, key: &str, r: &mut R) -> AnyElem
 /// Render blocks in the reading column. `doc` sets headings for a document;
 /// replies in chat never have big headings.
 pub fn render(blocks: &[Block], t: &Theme, doc: bool, r: &mut R) -> Div {
+    render_with(blocks, t, doc, false, r)
+}
+
+/// Blocks in the quiet ink: words that sit inside something else, like a
+/// subagent's report, and shouldn't read as the answer.
+pub fn render_with(blocks: &[Block], t: &Theme, doc: bool, quiet: bool, r: &mut R) -> Div {
     let prev = LINK_BASE.with(|b| b.replace(r.base.clone()));
-    let out = render_in(blocks, t, doc, r, space::S3, false);
+    let out = render_in(blocks, t, doc, r, space::S3, quiet);
     LINK_BASE.with(|b| *b.borrow_mut() = prev);
     out
 }
@@ -1149,18 +1157,24 @@ fn render_in(blocks: &[Block], t: &Theme, doc: bool, r: &mut R, gap: f32, quiet:
                         .child(body)
                         .into_any_element(),
                     Some(c) => {
+                        // Signals are fills, never text, and the needs-you
+                        // magenta means only that: the colour marks the edge
+                        // and icon; the words stay ink.
                         let (label, icon_name, ink) = match c {
                             Callout::Note => ("Note", "info", t.working.0),
                             Callout::Tip => ("Tip", "lightbulb", t.done.0),
                             Callout::Important => {
-                                ("Important", "message-square-warning", t.needs.0)
+                                ("Important", "message-square-warning", t.waiting.0)
                             }
                             Callout::Warning => ("Warning", "triangle-alert", t.waiting.0),
-                            Callout::Caution => ("Caution", "octagon-alert", t.needs.0),
+                            Callout::Caution => ("Caution", "octagon-alert", t.waiting.0),
                         };
                         div()
                             .pl(px(space::S4))
-                            .py(px(space::S1))
+                            .pr(px(space::S3))
+                            .py(px(space::S2))
+                            .rounded(px(radius::SM))
+                            .bg(t.wash(ink))
                             .border_l_2()
                             .border_color(ink)
                             .flex()
@@ -1173,7 +1187,7 @@ fn render_in(blocks: &[Block], t: &Theme, doc: bool, r: &mut R, gap: f32, quiet:
                                     .gap(px(space::S1H))
                                     .ty(UI)
                                     .font_weight(FontWeight::MEDIUM)
-                                    .text_color(ink)
+                                    .text_color(t.ink)
                                     .child(crate::ui::icon(icon_name, 14., ink))
                                     .child(label),
                             )

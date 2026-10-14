@@ -449,6 +449,7 @@ impl Dent {
                         items.push(("Close", Do::CloseSession(sid.clone())));
                     }
                     if !cwd.is_empty() {
+                        items.push(("", Do::Separator));
                         items.push(("Copy folder path", Do::CopyPath(cwd.clone())));
                         items.push(("Show folder in Finder", Do::Reveal(cwd.clone())));
                     }
