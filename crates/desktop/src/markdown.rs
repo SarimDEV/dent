@@ -324,12 +324,28 @@ pub fn render(blocks: &[Block], t: &Theme, doc: bool) -> Div {
                             .items_center()
                             .border_b_1()
                             .border_color(t.hairline)
+                            .justify_between()
                             .ty(LABEL)
                             .text_color(t.quiet)
                             .child(if lang.is_empty() {
                                 "code".to_string()
                             } else {
                                 lang.clone()
+                            })
+                            .child({
+                                let text = body.clone();
+                                div()
+                                    .id(SharedString::from(format!("copy-{}-{}", body.len(), lang)))
+                                    .px(px(space::S1H))
+                                    .rounded(px(radius::SM))
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(t.hover()).text_color(t.ink))
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            text.clone(),
+                                        ))
+                                    })
+                                    .child("Copy")
                             }),
                     )
                     .child(

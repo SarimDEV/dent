@@ -240,6 +240,8 @@ pub struct Dent {
     pub picks: HashMap<String, Vec<Option<String>>>,
     /// Slash commands the agent offers, by session.
     pub commands: HashMap<String, Vec<Command>>,
+    /// Long messages you've unfolded.
+    pub expanded: HashSet<String>,
     /// The highlighted row of the slash menu.
     pub slash_ix: usize,
     /// The message whose "Edit from here" is asking to confirm.
@@ -495,6 +497,7 @@ impl Dent {
             rewinding: None,
             commands: HashMap::new(),
             slash_ix: 0,
+            expanded: HashSet::new(),
             partial_len: HashMap::new(),
             just_sent: None,
             panel_open: true,
@@ -1670,9 +1673,12 @@ impl Dent {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         std::mem::discriminant(item).hash(&mut h);
         match item {
-            Item::User { text: t, id } => {
-                (t, self.rewinding.as_ref().is_some_and(|(_, m)| m == id)).hash(&mut h)
-            }
+            Item::User { text: t, id } => (
+                t,
+                self.rewinding.as_ref().is_some_and(|(_, m)| m == id),
+                self.expanded.contains(id),
+            )
+                .hash(&mut h),
             Item::Text(t) | Item::Queued { text: t, .. } => t.hash(&mut h),
             Item::Tools {
                 lines,

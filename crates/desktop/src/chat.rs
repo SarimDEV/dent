@@ -314,7 +314,44 @@ impl Dent {
                                     .map(|a| sent_attachment(a.trim_start_matches("› "), &t)),
                             )
                             .when(!body.is_empty(), |d| {
-                                d.child(div().ty(READING).text_color(t.ink).child(body.join("\n")))
+                                // Long messages fold, so the reply stays in view.
+                                let full = body.join("\n");
+                                let long = body.len() > 8 || full.chars().count() > 600;
+                                let open = self.expanded.contains(msg);
+                                let shown = if long && !open {
+                                    let mut short: String = body[..body.len().min(8)]
+                                        .join("\n")
+                                        .chars()
+                                        .take(600)
+                                        .collect();
+                                    short.push('…');
+                                    short
+                                } else {
+                                    full
+                                };
+                                let key = msg.clone();
+                                d.child(div().ty(READING).text_color(t.ink).child(shown))
+                                    .when(long, |d| {
+                                        d.child(
+                                            div()
+                                                .id(SharedString::from(format!("fold-{ix}")))
+                                                .ty(UI)
+                                                .text_color(t.quiet)
+                                                .cursor_pointer()
+                                                .hover(|d| d.text_color(t.ink))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    if !this.expanded.remove(&key) {
+                                                        this.expanded.insert(key.clone());
+                                                    }
+                                                    cx.notify();
+                                                }))
+                                                .child(if open {
+                                                    "Show less"
+                                                } else {
+                                                    "Show full message"
+                                                }),
+                                        )
+                                    })
                             }),
                     )
                     .map(|d| {
