@@ -28,14 +28,35 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+  <!-- What macOS shows when dent first opens a project in a guarded folder. -->
+  <key>NSDocumentsFolderUsageDescription</key><string>dent runs your agents in the projects you open, and some of them are in Documents.</string>
+  <key>NSDesktopFolderUsageDescription</key><string>dent runs your agents in the projects you open, and some of them are on the Desktop.</string>
+  <key>NSDownloadsFolderUsageDescription</key><string>dent runs your agents in the projects you open, and some of them are in Downloads.</string>
   <!-- Previews of dev servers on this machine load over plain http. -->
   <key>NSAppTransportSecurity</key>
   <dict><key>NSAllowsLocalNetworking</key><true/></dict>
 </dict>
 </plist>
 PLIST
-# Ad-hoc signature, so macOS runs it locally and remembers its permissions.
-codesign --force --deep --sign - "$app" >/dev/null 2>&1 || true
+# Signed with the same certificate every build, macOS sees one app and keeps
+# the folder access you gave it. An ad-hoc signature is new on every build,
+# so macOS would ask again each time. DENT_SIGN picks the identity; by
+# default it's this Mac's Apple Development certificate, if it has one.
+id=${DENT_SIGN:-$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Apple Development/ {print $2; exit}')}
+sign() {
+  codesign --force --sign "${id:--}" "$@" >/dev/null
+}
+if [[ -n "$id" ]] && sign --identifier sh.dent.daemon "$app/Contents/MacOS/dent-daemon" \
+  && sign --identifier sh.dent.holder "$app/Contents/MacOS/dent-session-holder" \
+  && sign "$app"; then
+  echo "signed as $id"
+else
+  [[ -n "$id" ]] && echo "couldn't sign as $id; signing ad hoc (macOS will ask for folder access again)"
+  id=""
+  sign --identifier sh.dent.daemon "$app/Contents/MacOS/dent-daemon"
+  sign --identifier sh.dent.holder "$app/Contents/MacOS/dent-session-holder"
+  sign "$app"
+fi
 echo "built $app"
 if [[ "${1:-}" == "--install" ]]; then
   mkdir -p "$HOME/Applications"
