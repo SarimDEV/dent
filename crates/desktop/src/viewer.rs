@@ -12,7 +12,7 @@ use crate::data::{Kind, Line, Session, Tone};
 use crate::ds::{CODE, LABEL, Typed, UI, radius, size, space};
 use crate::markdown;
 use crate::theme::{Status, status_square};
-use crate::ui::{button, ghost, icon, icon_button, kbd, probe};
+use crate::ui::{button, ghost, icon, icon_button, kbd, probe, tip};
 
 pub const MIN_WIDTH: f32 = 360.;
 
@@ -739,6 +739,16 @@ impl Dent {
                                 cx.notify();
                             }),
                         )
+                    })
+                    .when_some(a.dir.clone(), |d, dir| {
+                        let full = dir.join(a.path);
+                        d.child(
+                            ghost("open-doc", "Open", &t)
+                                .on_click(move |_, _, cx| {
+                                    cx.open_url(&format!("file://{}", full.display()))
+                                })
+                                .tooltip(tip("Open in its app", None, t)),
+                        )
                     }),
             )
             .child(
@@ -1090,6 +1100,14 @@ impl Dent {
                                             .text_color(t.ink)
                                             .child(file.path.clone()),
                                     )
+                                    .child({
+                                        let full = std::path::Path::new(&s.cwd).join(&file.path);
+                                        ghost("open-file", "Open", &t)
+                                            .on_click(move |_, _, cx| {
+                                                cx.open_url(&format!("file://{}", full.display()))
+                                            })
+                                            .tooltip(tip("Open in its app", None, t))
+                                    })
                                     .child(div().ty(LABEL).text_color(t.faint).child(if compact {
                                         format!(
                                             "{} of {count} · +{} −{}",

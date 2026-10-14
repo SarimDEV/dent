@@ -292,6 +292,7 @@ pub fn session(
     Session {
         id: v.id.clone(),
         title: v.title.clone(),
+        cwd: v.cwd.clone(),
         project: cwd
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())

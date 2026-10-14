@@ -133,6 +133,8 @@ pub enum Item {
 pub struct Session {
     pub id: String,
     pub title: String,
+    /// The folder it works in.
+    pub cwd: String,
     pub project: String,
     pub machine: String,
     /// "Claude · Opus", for the composer.
@@ -169,6 +171,7 @@ impl Session {
         Session {
             id: id.to_string(),
             title: String::new(),
+            cwd: String::new(),
             project: String::new(),
             machine: String::new(),
             agent: String::new(),
