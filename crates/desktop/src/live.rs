@@ -155,7 +155,8 @@ fn run(
                             .ok()
                             .map(|p| dent_protocol::build_stamp(&p.with_file_name("dent-daemon")))
                             .unwrap_or_default();
-                        if !installed.is_empty() && !build.is_empty() && installed != build {
+                        // One too old to say its build is older still.
+                        if !installed.is_empty() && installed != build {
                             let _ = restart_tx.send(());
                         }
                         Incoming::Up { machine }
