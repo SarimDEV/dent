@@ -118,30 +118,10 @@ impl Dent {
                     .child(probe(&self.probes, "side-chat")),
             );
         }
-        if has_viewer {
-            let open = self.panel_open;
-            actions = actions.child(
-                icon_button(
-                    "panel",
-                    if open {
-                        "panel-right-close"
-                    } else {
-                        "panel-right-open"
-                    },
-                    &t,
-                )
-                .when(open, |d| d.bg(t.selected()))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.panel_open = !this.panel_open;
-                    this.end_pick();
-                    cx.notify();
-                }))
-                .tooltip(tip(
-                    if open { "Hide viewer" } else { "Show viewer" },
-                    Some("⌘ \\"),
-                    t,
-                )),
-            );
+        // Shown, the viewer has the toggle in its own header, in this same
+        // corner of the window.
+        if has_viewer && !self.panel_open {
+            actions = actions.child(self.panel_toggle(cx));
         }
         // Whole pieces drop out when there's no room; nothing ends mid-word.
         let meta = div()
@@ -251,6 +231,35 @@ impl Dent {
                     }),
             )
             .child(actions)
+    }
+
+    /// Shows or hides the viewer. It sits in the window's top-right corner
+    /// whether the viewer is shown or not (in the chat's header, then the
+    /// viewer's), so pressing it again and again never lands on anything
+    /// else.
+    pub fn panel_toggle(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = self.t;
+        let open = self.panel_open;
+        icon_button(
+            "panel",
+            if open {
+                "panel-right-close"
+            } else {
+                "panel-right-open"
+            },
+            &t,
+        )
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.panel_open = !this.panel_open;
+            this.end_pick();
+            cx.notify();
+        }))
+        .tooltip(tip(
+            if open { "Hide viewer" } else { "Show viewer" },
+            Some("⌘ \\"),
+            t,
+        ))
     }
 
     /// A tool call opened up: the command or edit, what came back, and the

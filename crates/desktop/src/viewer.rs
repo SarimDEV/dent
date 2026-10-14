@@ -211,7 +211,9 @@ impl Dent {
         let header = div()
             .h(px(size::HEADER))
             .flex_none()
-            .px(px(space::S2))
+            .pl(px(space::S2))
+            // The toggle at the end lines up with the chat header's.
+            .pr(px(space::S4))
             .flex()
             .items_center()
             .gap(px(space::S1))
@@ -372,7 +374,8 @@ impl Dent {
                     )
                     .when(off < -1., |d| d.child(fade(true)))
                     .when(max > 1. && off > -max + 1., |d| d.child(fade(false)))
-            });
+            })
+            .child(self.panel_toggle(cx));
         let body = match tab {
             Tab::Art(id) => match self.art(id).map(|a| a.kind) {
                 Some(Kind::Html | Kind::Server) => self.page(id, window, cx),
