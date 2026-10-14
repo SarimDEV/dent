@@ -81,6 +81,7 @@ async fn conn(d: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                         version: d.version.clone(),
                         machine: d.machine.clone(),
                         home: crate::paths::home().display().to_string(),
+                        build: d.build.clone(),
                     })
                 }
             }
@@ -113,6 +114,15 @@ async fn conn(d: Arc<Daemon>, stream: UnixStream) -> Result<()> {
 async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
     Ok(match req {
         Request::Hello { .. } | Request::Subscribe { .. } => Reply::Ok,
+        Request::Restart => {
+            eprintln!("dent-daemon: restarting for a newer build");
+            // Reply first, then go; the client starts the new daemon.
+            tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                std::process::exit(0);
+            });
+            Reply::Ok
+        }
         Request::Create {
             cwd,
             model,
@@ -123,7 +133,15 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             attachments,
         } => Reply::Created {
             session: d
-                .create(cwd, model, permission, effort, id, text, attachments)
+                .create(crate::daemon::NewSession {
+                    cwd,
+                    model,
+                    permission,
+                    effort,
+                    id,
+                    text,
+                    attachments,
+                })
                 .await?,
         },
         Request::Send {

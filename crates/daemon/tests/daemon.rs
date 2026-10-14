@@ -835,7 +835,11 @@ fn rewinding_restores_files_and_picks_the_conversation_up_there() {
 
     // Going back while it works is refused.
     c.say(&s, "long", "a long answer please", false);
-    c.wait(&s, "the long turn", |b| matches!(b, Body::User { id, .. } if id == "long"));
+    c.wait(
+        &s,
+        "the long turn",
+        |b| matches!(b, Body::User { id, .. } if id == "long"),
+    );
     std::thread::sleep(Duration::from_millis(100));
     assert!(
         c.call(Request::Rewind {
@@ -846,7 +850,14 @@ fn rewinding_restores_files_and_picks_the_conversation_up_there() {
         .is_err()
     );
     c.call(Request::Interrupt { session: s.clone() }).unwrap();
-    c.wait(&s, "stopped", |b| matches!(b, Body::TurnEnded { outcome: Outcome::Interrupted { .. } }));
+    c.wait(&s, "stopped", |b| {
+        matches!(
+            b,
+            Body::TurnEnded {
+                outcome: Outcome::Interrupted { .. }
+            }
+        )
+    });
     c.pump(Duration::from_millis(200));
 
     c.call(Request::Rewind {
@@ -863,7 +874,10 @@ fn rewinding_restores_files_and_picks_the_conversation_up_there() {
     c.say(&s, "args", "tell me your args", false);
     c.wait_turns(&s, 3);
     let t = c.text(&s);
-    assert!(t.contains("--resume-session-at") && t.contains("--fork-session"), "{t}");
+    assert!(
+        t.contains("--resume-session-at") && t.contains("--fork-session"),
+        "{t}"
+    );
 
     // Back to the very first message: a fresh conversation.
     c.call(Request::Rewind {
@@ -876,7 +890,10 @@ fn rewinding_restores_files_and_picks_the_conversation_up_there() {
     c.wait_turns(&s, 4);
     let last = c.text(&s);
     let last = last.lines().last().unwrap_or_default();
-    assert!(last.contains("--session-id") && !last.contains("--resume"), "{last}");
+    assert!(
+        last.contains("--session-id") && !last.contains("--resume"),
+        "{last}"
+    );
 }
 
 #[test]
@@ -909,5 +926,8 @@ fn effort_reaches_the_agent_and_changing_it_starts_a_new_process() {
     c.wait_turns(&s, 2);
     let last = c.text(&s);
     let last = last.lines().last().unwrap_or_default();
-    assert!(last.contains("--effort max") && last.contains("--resume"), "{last}");
+    assert!(
+        last.contains("--effort max") && last.contains("--resume"),
+        "{last}"
+    );
 }

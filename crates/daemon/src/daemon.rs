@@ -29,6 +29,8 @@ pub struct Daemon {
     pub paths: Paths,
     pub env: AgentEnv,
     pub version: String,
+    /// This binary's build stamp, taken at start.
+    pub build: String,
     pub machine: String,
     store: Mutex<Store>,
     pub live: broadcast::Sender<Arc<Live>>,
@@ -67,6 +69,9 @@ impl Daemon {
             paths,
             env,
             version: env!("CARGO_PKG_VERSION").into(),
+            build: std::env::current_exe()
+                .map(|p| dent_protocol::build_stamp(&p))
+                .unwrap_or_default(),
             machine: hostname(),
             store: Mutex::new(store),
             live,
@@ -278,16 +283,16 @@ impl Daemon {
     }
 
     /// Start a session and send its first message.
-    pub async fn create(
-        self: &Arc<Self>,
-        cwd: String,
-        model: Option<String>,
-        permission: Permission,
-        effort: Option<String>,
-        id: String,
-        text: String,
-        attachments: Vec<String>,
-    ) -> Result<String> {
+    pub async fn create(self: &Arc<Self>, new: NewSession) -> Result<String> {
+        let NewSession {
+            cwd,
+            model,
+            permission,
+            effort,
+            id,
+            text,
+            attachments,
+        } = new;
         if !std::path::Path::new(&cwd).is_dir() {
             bail!("{cwd} isn't a folder");
         }
@@ -353,6 +358,18 @@ impl Daemon {
         }
         Ok(())
     }
+}
+
+/// What a new session starts with.
+pub struct NewSession {
+    pub cwd: String,
+    pub model: Option<String>,
+    pub permission: Permission,
+    pub effort: Option<String>,
+    /// The first message's id and text, and the files that go with it.
+    pub id: String,
+    pub text: String,
+    pub attachments: Vec<String>,
 }
 
 /// A short title from the first message.

@@ -82,7 +82,10 @@ pub enum Start {
     Fresh(String),
     Resume(String),
     /// Resume up to the assistant message `at`, as a new session.
-    ResumeAt { id: String, at: String },
+    ResumeAt {
+        id: String,
+        at: String,
+    },
 }
 
 /// Claude Code's name for a permission mode. `None` is its default.

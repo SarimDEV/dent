@@ -178,7 +178,16 @@ fn snapshot(dir: &Path) -> Option<String> {
     let _ = std::fs::remove_file(&index);
     let tree = tree?;
     let head = git(dir, &["rev-parse", "--verify", "-q", "HEAD"]).map(|h| h.trim().to_string());
-    let mut args = vec!["-c", "user.name=dent", "-c", "user.email=dent@localhost", "commit-tree", &tree, "-m", "dent checkpoint"];
+    let mut args = vec![
+        "-c",
+        "user.name=dent",
+        "-c",
+        "user.email=dent@localhost",
+        "commit-tree",
+        &tree,
+        "-m",
+        "dent checkpoint",
+    ];
     if let Some(h) = &head {
         args.extend(["-p", h]);
     }
@@ -186,7 +195,14 @@ fn snapshot(dir: &Path) -> Option<String> {
 }
 
 fn temp_index(dir: &Path) -> Option<std::path::PathBuf> {
-    let p = git(dir, &["rev-parse", "--git-path", &format!("dent-index-{}", std::process::id())])?;
+    let p = git(
+        dir,
+        &[
+            "rev-parse",
+            "--git-path",
+            &format!("dent-index-{}", std::process::id()),
+        ],
+    )?;
     Some(dir.join(p.trim()))
 }
 
@@ -195,8 +211,19 @@ fn temp_index(dir: &Path) -> Option<std::path::PathBuf> {
 /// person's index are left alone.
 pub fn restore(dir: &Path, commit: &str) -> Result<(), String> {
     let now = snapshot(dir).ok_or("couldn't read the working tree")?;
-    let added = git(dir, &["diff-tree", "-r", "--name-only", "--diff-filter=A", "--no-renames", commit, &now])
-        .ok_or("couldn't compare with the checkpoint")?;
+    let added = git(
+        dir,
+        &[
+            "diff-tree",
+            "-r",
+            "--name-only",
+            "--diff-filter=A",
+            "--no-renames",
+            commit,
+            &now,
+        ],
+    )
+    .ok_or("couldn't compare with the checkpoint")?;
     for f in added.lines().filter(|l| !l.is_empty()) {
         let _ = std::fs::remove_file(dir.join(f));
     }
@@ -213,7 +240,11 @@ pub fn restore(dir: &Path, commit: &str) -> Result<(), String> {
     };
     let ok = run(&["read-tree", commit]) && run(&["checkout-index", "-a", "-f"]);
     let _ = std::fs::remove_file(&index);
-    if ok { Ok(()) } else { Err("couldn't write the checkpoint's files".into()) }
+    if ok {
+        Ok(())
+    } else {
+        Err("couldn't write the checkpoint's files".into())
+    }
 }
 
 #[cfg(test)]
@@ -226,22 +257,42 @@ mod checkpoint_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let g = |a: &[&str]| {
-            Command::new("git").arg("-C").arg(&dir).args(a).output().unwrap();
+            Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(a)
+                .output()
+                .unwrap();
         };
         g(&["init", "-q"]);
         std::fs::write(dir.join("a.txt"), "one\n").unwrap();
         g(&["add", "."]);
-        g(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]);
+        g(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "init",
+        ]);
         std::fs::write(dir.join("wip.txt"), "draft\n").unwrap();
         let before_index = std::fs::read(dir.join(".git/index")).unwrap();
         let c = checkpoint(&dir, "s/1").expect("checkpoint");
-        assert_eq!(std::fs::read(dir.join(".git/index")).unwrap(), before_index, "index untouched");
+        assert_eq!(
+            std::fs::read(dir.join(".git/index")).unwrap(),
+            before_index,
+            "index untouched"
+        );
         std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
         std::fs::write(dir.join("new.txt"), "agent made this\n").unwrap();
         std::fs::remove_file(dir.join("wip.txt")).unwrap();
         restore(&dir, &c).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one\n");
-        assert_eq!(std::fs::read_to_string(dir.join("wip.txt")).unwrap(), "draft\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("wip.txt")).unwrap(),
+            "draft\n"
+        );
         assert!(!dir.join("new.txt").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }

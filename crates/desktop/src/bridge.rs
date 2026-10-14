@@ -388,14 +388,20 @@ fn detail(v: &SessionView) -> String {
             if !v.partial.is_empty() {
                 return "Writing".into();
             }
+            // The plan's current step says it best; then the latest call.
+            let step = todos(v)
+                .into_iter()
+                .find(|(st, ..)| st == "in_progress")
+                .map(|(_, what, doing)| if doing.is_empty() { what } else { doing });
             match v.entries.last() {
                 Some(Entry::Tools { calls }) => calls
                     .iter()
                     .rev()
-                    .find(|c| c.parent.is_none())
+                    .find(|c| c.parent.is_none() && c.name != "TodoWrite")
                     .map(|c| c.line())
+                    .or(step)
                     .unwrap_or_else(|| "Working".into()),
-                _ => "Thinking".into(),
+                _ => step.unwrap_or_else(|| "Thinking".into()),
             }
         }
         Wire::Background => format!(

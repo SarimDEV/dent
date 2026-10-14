@@ -414,6 +414,26 @@ impl Dent {
                                     .justify_end()
                                     .items_center()
                                     .gap(px(space::S2))
+                                    // The Mac order: the destructive choice leads, the
+                                    // default trails, so Return never lands on it.
+                                    .when(!busy && has_files, |d| {
+                                        d.child(
+                                            button(
+                                                SharedString::from(format!("rewind-files-{ix}")),
+                                                "Go back and undo file changes",
+                                                false,
+                                                &t,
+                                            )
+                                            .relative()
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.rewind(&m2, true, window, cx)
+                                            }))
+                                            .child(
+                                                probe(&self.probes, format!("rewind-files-{ix}")),
+                                            ),
+                                        )
+                                        .child(div().flex_1())
+                                    })
                                     .child(
                                         ghost(
                                             SharedString::from(format!("rewind-cancel-{ix}")),
@@ -442,31 +462,6 @@ impl Dent {
                                             .child(
                                                 probe(&self.probes, format!("rewind-chat-{ix}")),
                                             ),
-                                        )
-                                        .when(
-                                            has_files,
-                                            |d| {
-                                                d.child(
-                                                    button(
-                                                        SharedString::from(format!(
-                                                            "rewind-files-{ix}"
-                                                        )),
-                                                        "Go back and undo file changes",
-                                                        false,
-                                                        &t,
-                                                    )
-                                                    .relative()
-                                                    .on_click(cx.listener(
-                                                        move |this, _, window, cx| {
-                                                            this.rewind(&m2, true, window, cx)
-                                                        },
-                                                    ))
-                                                    .child(probe(
-                                                        &self.probes,
-                                                        format!("rewind-files-{ix}"),
-                                                    )),
-                                                )
-                                            },
                                         )
                                     }),
                             )
@@ -1198,7 +1193,7 @@ impl Dent {
                             cx.notify();
                         }))
                         .child(icon("list-checks", 13., t.quiet))
-                        .child(div().ty(LABEL).text_color(t.quiet).child({
+                        .child(div().ty(UI).text_color(t.quiet).child({
                             let total = s.todos.len();
                             match s.todos.iter().position(|(st, ..)| st == "in_progress") {
                                 Some(i) if !open => format!("Step {} of {total}", i + 1),
@@ -1509,12 +1504,27 @@ impl Dent {
                         cx.notify();
                     }))
                     .child(icon(icon_name, 13., t.quiet))
-                    .child(
-                        div()
-                            .ty(UI)
-                            .text_color(if unset { t.quiet } else { t.ink })
-                            .child(label.to_string()),
-                    )
+                    .when(!label.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .ty(UI)
+                                .text_color(if unset { t.quiet } else { t.ink })
+                                .child(label.to_string()),
+                        )
+                    })
+                    // An icon-only chip still says what it is.
+                    .when(label.is_empty(), |d| {
+                        d.tooltip(tip(
+                            match which {
+                                Menu::Effort | Menu::SessionEffort => "Effort",
+                                Menu::Model | Menu::SessionModel => "Model",
+                                Menu::Permission | Menu::SessionPermission => "Permissions",
+                                Menu::Project => "Project",
+                            },
+                            None,
+                            t,
+                        ))
+                    })
                     .child(icon("chevron-down", 11., t.faint))
                     .child(probe(&self.probes, name)),
             )

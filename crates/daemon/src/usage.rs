@@ -59,7 +59,9 @@ pub fn probe(env: &AgentEnv) -> Option<Vec<Window>> {
         }
     });
     let until = Instant::now() + Duration::from_secs(20);
-    let got = rx.recv_timeout(until.saturating_duration_since(Instant::now())).ok();
+    let got = rx
+        .recv_timeout(until.saturating_duration_since(Instant::now()))
+        .ok();
     drop(stdin);
     let _ = child.kill();
     let _ = child.wait();
@@ -88,9 +90,16 @@ fn unix(s: &str) -> Option<i64> {
     let (date, rest) = s.split_once('T')?;
     let mut d = date.split('-').map(|x| x.parse::<i64>());
     let (y, m, day) = (d.next()?.ok()?, d.next()?.ok()?, d.next()?.ok()?);
-    let time: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == ':').collect();
+    let time: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == ':')
+        .collect();
     let mut t = time.split(':').map(|x| x.parse::<i64>());
-    let (hh, mm, ss) = (t.next()?.ok()?, t.next()?.ok()?, t.next()?.ok().unwrap_or(0));
+    let (hh, mm, ss) = (
+        t.next()?.ok()?,
+        t.next()?.ok()?,
+        t.next()?.ok().unwrap_or(0),
+    );
     let tz = &rest[time.len()..];
     let tz = tz.trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
     let offset = match tz.as_bytes().first() {
@@ -116,8 +125,14 @@ mod tests {
     #[test]
     fn reads_rfc3339() {
         assert_eq!(super::unix("1970-01-01T00:00:00+00:00"), Some(0));
-        assert_eq!(super::unix("2026-10-12T06:10:00.433002+00:00"), Some(1_791_785_400));
-        assert_eq!(super::unix("2026-10-12T08:10:00+02:00"), Some(1_791_785_400));
+        assert_eq!(
+            super::unix("2026-10-12T06:10:00.433002+00:00"),
+            Some(1_791_785_400)
+        );
+        assert_eq!(
+            super::unix("2026-10-12T08:10:00+02:00"),
+            Some(1_791_785_400)
+        );
     }
 
     #[test]

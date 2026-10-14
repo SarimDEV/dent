@@ -698,8 +698,9 @@ fn checks() -> Vec<(f32, Act)> {
                 10.,
             ),
         ),
+        (0.3, Shot("plan-folded")),
         (
-            0.2,
+            0.6,
             Call(|d, _, cx| {
                 d.plan_open = true;
                 cx.notify();
@@ -745,6 +746,7 @@ fn checks() -> Vec<(f32, Act)> {
             cx.notify();
         })),
         (0.4, Shot("rewind-confirm")),
+        (0.8, Wait),
         (0.1, Call(|d, w, cx| {
             if let Some(m) = last_sent(d) {
                 d.rewind(&m, true, w, cx);

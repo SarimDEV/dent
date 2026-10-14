@@ -130,6 +130,7 @@ fn run(
         // Lines from the daemon come through a reader thread; replies clear
         // pending requests here.
         let (done_tx, done_rx) = mpsc::channel::<u64>();
+        let (restart_tx, restart_rx) = mpsc::channel::<()>();
         let ui2 = ui.clone();
         let reading = std::thread::spawn(move || {
             for line in BufReader::new(reader).lines() {
@@ -146,8 +147,19 @@ fn run(
                 }
                 let msg = match out {
                     Out::Reply {
-                        reply: Reply::Welcome { machine, .. },
-                    } if req == 1 => Incoming::Up { machine },
+                        reply: Reply::Welcome { machine, build, .. },
+                    } if req == 1 => {
+                        // A daemon older than the one installed beside the app
+                        // makes way for it; agents keep running in the holder.
+                        let installed = std::env::current_exe()
+                            .ok()
+                            .map(|p| dent_protocol::build_stamp(&p.with_file_name("dent-daemon")))
+                            .unwrap_or_default();
+                        if !installed.is_empty() && !build.is_empty() && installed != build {
+                            let _ = restart_tx.send(());
+                        }
+                        Incoming::Up { machine }
+                    }
                     Out::Error { message } if req == 1 => Incoming::Down(message),
                     out => Incoming::Out { req, out },
                 };
@@ -159,6 +171,9 @@ fn run(
         loop {
             while let Ok(n) = done_rx.try_recv() {
                 pending.remove(&n);
+            }
+            if restart_rx.try_recv().is_ok() {
+                let _ = w.write_all(&encode(3, &Request::Restart));
             }
             if reading.is_finished() {
                 break;

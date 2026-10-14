@@ -285,7 +285,10 @@ pub fn user_message(text: &str, uuid: &str, steer: bool, attachments: &[String])
         // Images go in as images, so the agent sees them straight away; every
         // file is also named, so its tools can open it.
         let mut blocks: Vec<Value> = attachments.iter().filter_map(|p| image_block(p)).collect();
-        let names: Vec<String> = attachments.iter().map(|p| format!("Attached: {p}")).collect();
+        let names: Vec<String> = attachments
+            .iter()
+            .map(|p| format!("Attached: {p}"))
+            .collect();
         let body = if text.is_empty() {
             names.join("\n")
         } else {
@@ -437,7 +440,10 @@ mod tests {
         assert_eq!(blocks[0]["source"]["data"], "iVBORw==");
         let text = blocks[1]["text"].as_str().unwrap();
         assert!(text.starts_with("look") && text.contains(&png) && text.contains(&txt));
-        assert_eq!(user_message("plain", "u", true, &[])["message"]["content"], "plain");
+        assert_eq!(
+            user_message("plain", "u", true, &[])["message"]["content"],
+            "plain"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

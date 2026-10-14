@@ -415,6 +415,9 @@ pub enum Request {
         #[serde(default)]
         session: Option<SessionId>,
     },
+    /// Exit so a newer daemon can take over. Agents keep running in the
+    /// session holder, and the client starts the new daemon.
+    Restart,
     /// What the session's directory has changed, against its last commit.
     Changes {
         session: SessionId,
@@ -463,6 +466,10 @@ pub enum Reply {
         version: String,
         machine: String,
         home: String,
+        /// Identifies the exact daemon build: the running binary's size and
+        /// modification time. A client beside a newer one asks it to restart.
+        #[serde(default)]
+        build: String,
     },
     Ok,
     Created {
@@ -489,6 +496,23 @@ pub enum Reply {
     File {
         bytes_b64: String,
     },
+}
+
+/// A binary's build stamp: its size and modification time, so a replaced
+/// binary reads differently from the one that's running.
+pub fn build_stamp(path: &std::path::Path) -> String {
+    std::fs::metadata(path)
+        .ok()
+        .map(|m| {
+            let t = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            format!("{}-{t}", m.len())
+        })
+        .unwrap_or_default()
 }
 
 /// One line of the wire format.

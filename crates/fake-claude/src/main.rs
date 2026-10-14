@@ -445,7 +445,7 @@ impl Agent {
                 self.result(&id, "Todos updated", false, None);
                 self.pause(1200)?;
             }
-            self.say("Two of three done; the tests are next.", None)?;
+            self.say("One of three done; adding the rate limit now.", None)?;
             self.end("done", false);
             return Ok(());
         }

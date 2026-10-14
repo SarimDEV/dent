@@ -153,7 +153,7 @@ impl Call {
             "WebFetch" => "Fetched",
             "WebSearch" => "Searched the web for",
             "Task" | "Agent" => "Subagent:",
-            "TodoWrite" => "Plan",
+            "TodoWrite" => "Updated",
             other => other,
         };
         match what {

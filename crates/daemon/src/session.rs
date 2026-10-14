@@ -519,7 +519,7 @@ impl Session {
             steer,
             attachments,
         ))
-            .await?;
+        .await?;
         self.in_turn = true;
         self.idle_at = None;
         Ok(())
@@ -572,7 +572,9 @@ impl Session {
                 _ => None,
             });
             let Some(commit) = commit else {
-                bail!("there's no snapshot of the files from then (is the folder a git repository?)");
+                bail!(
+                    "there's no snapshot of the files from then (is the folder a git repository?)"
+                );
             };
             let cwd = self.cwd.clone();
             tokio::task::spawn_blocking(move || {
@@ -1062,7 +1064,13 @@ fn resume_point(events: &[dent_protocol::Event]) -> Option<String> {
 /// A message id as part of a ref name.
 fn safe_ref(id: &str) -> String {
     id.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
