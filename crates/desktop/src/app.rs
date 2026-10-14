@@ -3298,7 +3298,7 @@ impl Dent {
             .and_then(|d| d.resting)
             .is_some_and(|(until, ..)| Instant::now() >= until);
         // Once a minute, so "now" and "5m" in the sidebar stay true.
-        let new_minute = new_second && second % 60 == 0;
+        let new_minute = new_second && second.is_multiple_of(60);
         let due = page
             || toast_expired
             || copied
