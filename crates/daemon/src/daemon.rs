@@ -37,6 +37,8 @@ pub struct Daemon {
     /// Each session's reply so far, for clients that subscribe mid-stream.
     partials: Mutex<HashMap<String, String>>,
     models: Mutex<Vec<Model>>,
+    /// The last usage reading and when it was taken.
+    usage: tokio::sync::Mutex<Option<(Vec<dent_protocol::Window>, u64)>>,
     /// Slash commands by session, as each agent reported them.
     commands: Mutex<HashMap<String, Vec<dent_protocol::Command>>>,
 }
@@ -73,6 +75,7 @@ impl Daemon {
             partials: Mutex::new(HashMap::new()),
             models: Mutex::new(models),
             commands: Mutex::new(HashMap::new()),
+            usage: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -159,6 +162,24 @@ impl Daemon {
             .or_else(|| all.values().next())
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Account usage, read at most once a minute however many ask.
+    pub async fn usage(self: &Arc<Self>) -> (Vec<dent_protocol::Window>, u64) {
+        let mut cached = self.usage.lock().await;
+        if let Some((w, at)) = cached.as_ref()
+            && now_ms().saturating_sub(*at) < 60_000
+        {
+            return (w.clone(), *at);
+        }
+        let me = self.clone();
+        let read = tokio::task::spawn_blocking(move || crate::usage::probe(&me.env))
+            .await
+            .ok()
+            .flatten();
+        let reading = (read.unwrap_or_default(), now_ms());
+        *cached = Some(reading.clone());
+        reading
     }
 
     /// The holder, connecting (and starting it) on first use.

@@ -180,6 +180,9 @@ impl Agent {
                         json!({})
                     }
                     "interrupt" => json!({ "still_queued": [] }),
+                    "get_usage" => json!({"rate_limits": {
+                        "five_hour": {"utilization": 18, "resets_at": "2030-01-01T00:00:00+00:00"},
+                        "seven_day": {"utilization": 41, "resets_at": "2030-01-05T00:00:00+00:00"}}}),
                     "get_context_usage" => {
                         json!({ "totalTokens": self.context, "maxTokens": 200_000, "percentage": self.context / 2000 })
                     }

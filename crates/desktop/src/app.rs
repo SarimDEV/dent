@@ -195,6 +195,7 @@ pub struct Defaults {
 /// What a request's reply is for.
 enum Waiting {
     Models,
+    Usage,
     Commands(String),
     Projects,
     Changes(String),
@@ -245,6 +246,8 @@ pub struct Dent {
     pub changes: HashMap<String, Rc<Vec<FileDiff>>>,
     /// Choices made so far on a question, by question id.
     pub picks: HashMap<String, Vec<Option<String>>>,
+    /// The account's usage, as the provider last reported it, and when.
+    pub usage: Option<(Vec<dent_protocol::Window>, u64)>,
     /// Slash commands the agent offers, by session.
     pub commands: HashMap<String, Vec<Command>>,
     /// What was last written to the prefs file.
@@ -501,6 +504,18 @@ impl Dent {
         })
         .detach();
         let prefs = crate::prefs::load();
+        // Usage moves however the account is used: look again every few minutes.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_secs(300))
+                    .await;
+                if this.update(cx, |this, _| this.fetch_usage()).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         let mut this = Self {
             t,
             sessions: Vec::new(),
@@ -544,6 +559,7 @@ impl Dent {
             creating: false,
             rewinding: None,
             commands: HashMap::new(),
+            usage: None,
             slash_ix: 0,
             expanded: HashSet::new(),
             plan_open: false,
@@ -797,6 +813,7 @@ impl Dent {
                         .insert(self.live.send(Request::Models), Waiting::Models);
                     self.waiting
                         .insert(self.live.send(Request::Projects), Waiting::Projects);
+                    self.fetch_usage();
                 }
                 Incoming::Down(why) => {
                     if self.connection.is_ok() {
@@ -875,6 +892,16 @@ impl Dent {
                 // An agent that hasn't started yet has none to tell: ask again later.
                 if !commands.is_empty() {
                     self.commands.insert(id, commands);
+                }
+            }
+            (
+                Waiting::Usage,
+                Out::Reply {
+                    reply: Reply::Usage { windows, at },
+                },
+            ) => {
+                if !windows.is_empty() {
+                    self.usage = Some((windows, at));
                 }
             }
             (
@@ -1018,6 +1045,29 @@ impl Dent {
         });
         cx.notify();
         true
+    }
+
+    /// Ask the daemon for the account's usage.
+    pub fn fetch_usage(&mut self) {
+        let n = self.live.send(Request::Usage);
+        self.waiting.insert(n, Waiting::Usage);
+    }
+
+    /// The newest usage reading, from the provider or a session's stream.
+    pub fn limits(&self) -> Vec<dent_protocol::Window> {
+        let stream = self.core.limits.as_ref();
+        match (&self.usage, stream) {
+            (Some((w, at)), Some((sw, sat))) => {
+                if at >= sat {
+                    w.clone()
+                } else {
+                    sw.clone()
+                }
+            }
+            (Some((w, _)), None) => w.clone(),
+            (None, Some((sw, _))) => sw.clone(),
+            (None, None) => Vec::new(),
+        }
     }
 
     /// Ask for a session's slash commands, once it has some.

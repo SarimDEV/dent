@@ -329,12 +329,7 @@ impl Dent {
     pub fn status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = self.t;
         let needs = self.needs().len();
-        let limits = self
-            .core
-            .limits
-            .as_ref()
-            .map(|(w, _)| w.clone())
-            .unwrap_or_default();
+        let limits = self.limits();
         let window = |name: &str| {
             limits
                 .iter()

@@ -408,6 +408,8 @@ pub enum Request {
     },
     Projects,
     Models,
+    /// The account's usage windows, read from the provider.
+    Usage,
     /// The agent's slash commands: the session's, or the last ones seen.
     Commands {
         #[serde(default)]
@@ -474,6 +476,12 @@ pub enum Reply {
     },
     Commands {
         commands: Vec<Command>,
+    },
+    /// Empty when the agent can't say (signed out, or an API key).
+    Usage {
+        windows: Vec<Window>,
+        /// Unix milliseconds of the reading.
+        at: u64,
     },
     Changes {
         files: Vec<FileChange>,

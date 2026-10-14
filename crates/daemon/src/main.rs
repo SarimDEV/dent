@@ -14,6 +14,7 @@ mod projects;
 mod server;
 mod session;
 mod store;
+mod usage;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;

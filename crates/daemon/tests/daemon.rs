@@ -751,6 +751,15 @@ fn changes_files_and_settings() {
         } => assert!(projects.iter().any(|p| p.path == w.cwd())),
         other => panic!("{other:?}"),
     }
+    match c.call(Request::Usage).unwrap() {
+        Out::Reply {
+            reply: dent_protocol::Reply::Usage { windows, .. },
+        } => {
+            assert_eq!(windows.len(), 2, "{windows:?}");
+            assert!((windows[0].used - 0.18).abs() < 1e-9);
+        }
+        other => panic!("{other:?}"),
+    }
     match c.call(Request::Models).unwrap() {
         Out::Reply {
             reply: dent_protocol::Reply::Models { models },
