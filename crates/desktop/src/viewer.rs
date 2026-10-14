@@ -158,7 +158,7 @@ impl Dent {
             },
             Tab::Changes => self.changes(s, window, cx),
             Tab::Terminal => self.terminal(s),
-            Tab::Aside => self.side_chat(s, cx),
+            Tab::Aside => self.side_chat(s, window, cx),
         };
         div()
             .relative()
@@ -1376,7 +1376,12 @@ impl Dent {
 
     /// Side questions about the session, answered with everything said so
     /// far, kept out of the conversation; any answer can become a fork.
-    fn side_chat(&mut self, s: &Session, cx: &mut Context<Self>) -> AnyElement {
+    fn side_chat(
+        &mut self,
+        s: &Session,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = self.t;
         let started = s
             .items
@@ -1453,11 +1458,22 @@ impl Dent {
                 Some((text, false, agent)) => {
                     let blocks = self.markdown(text);
                     let (sid, aid) = (s.id.clone(), a.id.clone());
+                    let promote =
+                        cx.listener(move |this, _, _, cx| this.promote_aside(&sid, &aid, cx));
+                    let mut r = markdown::R {
+                        md: self.mdv.clone(),
+                        owner: cx.entity_id(),
+                        window: &mut *window,
+                        cx: &mut *cx,
+                        scope: format!("{}/aside-{}", s.id, a.id),
+                        bg: t.panel,
+                    };
+                    let body = markdown::render(blocks.as_slice(), &t, false, &mut r);
                     div()
                         .flex()
                         .flex_col()
                         .gap(px(space::S2))
-                        .child(markdown::render(blocks.as_slice(), &t, false))
+                        .child(body)
                         .when(agent.is_some(), |d| {
                             d.child(
                                 div().flex().child(
@@ -1473,9 +1489,7 @@ impl Dent {
                                         None,
                                         t,
                                     ))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.promote_aside(&sid, &aid, cx)
-                                    }))
+                                    .on_click(promote)
                                     .child(probe(&self.probes, format!("promote-{i}"))),
                                 ),
                             )

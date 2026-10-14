@@ -647,7 +647,7 @@ impl Dent {
                                         )
                                         .into_any_element(),
                                     Some(report) => row
-                                        .child(self.report(ix, &l.id, report, cx))
+                                        .child(self.report(s, ix, &l.id, report, window, cx))
                                         .into_any_element(),
                                 }
                             })
@@ -2049,9 +2049,11 @@ impl Dent {
     /// to its first lines until opened.
     fn report(
         &mut self,
+        s: &Session,
         ix: usize,
         call: &str,
         report: &str,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = self.t;
@@ -2062,6 +2064,21 @@ impl Dent {
         let blocks: &[markdown::Block] = &all;
         let long = blocks.len() > 2;
         let blocks = if long && !open { &blocks[..2] } else { blocks };
+        let fold = cx.listener(move |this, _, _, cx| {
+            if !this.expanded.remove(&key) {
+                this.expanded.insert(key.clone());
+            }
+            cx.notify();
+        });
+        let mut r = markdown::R {
+            md: self.mdv.clone(),
+            owner: cx.entity_id(),
+            window,
+            cx,
+            scope: format!("{}/{ix}/report-{call}", s.id),
+            bg: t.surface,
+        };
+        let body = markdown::render(blocks, &t, false, &mut r);
         div()
             .flex_1()
             .min_w_0()
@@ -2073,7 +2090,7 @@ impl Dent {
             .flex_col()
             .gap(px(space::S1))
             .child(div().ty(LABEL).text_color(t.quiet).child("REPORT"))
-            .child(markdown::render(blocks, &t, false))
+            .child(body)
             .when(long, |d| {
                 d.child(
                     div()
@@ -2082,12 +2099,7 @@ impl Dent {
                         .text_color(t.quiet)
                         .cursor_pointer()
                         .hover(|d| d.text_color(t.ink))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this.expanded.remove(&key) {
-                                this.expanded.insert(key.clone());
-                            }
-                            cx.notify();
-                        }))
+                        .on_click(fold)
                         .child(if open {
                             "Show less"
                         } else {
