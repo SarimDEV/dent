@@ -127,15 +127,16 @@ impl Render for PopOut {
                 let _ = window.drop_image(image);
             }
             if !events.is_empty() {
-                if events
-                    .iter()
-                    .any(|e| matches!(e, crate::web::PageEvent::Pick { .. } | crate::web::PageEvent::PickCancel))
-                {
+                if events.iter().any(|e| {
+                    matches!(
+                        e,
+                        crate::web::PageEvent::Pick { .. } | crate::web::PageEvent::PickCancel
+                    )
+                }) {
                     self.picking = false;
                 }
-                self.dent.update(cx, |d, cx| {
-                    d.page_events(art, showing, events, window, cx)
-                });
+                self.dent
+                    .update(cx, |d, cx| d.page_events(art, showing, events, window, cx));
             }
         }
         let errors = self
@@ -224,20 +225,22 @@ impl Render for PopOut {
                             ))
                             .child(div().ty(UI).child("Point")),
                     )
-                    .child(icon_button("pop-reload", "rotate-cw", &t).on_click(cx.listener(
-                        |this, _, _, cx| {
-                            if let Some(p) = &this.preview {
-                                p.borrow_mut().reload();
-                            }
-                            cx.notify();
-                        },
-                    )))
                     .child(
-                        button("pop-back", "Back to the viewer", false, &t).on_click(
-                            cx.listener(move |this, _, _, cx| {
+                        icon_button("pop-reload", "rotate-cw", &t).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                if let Some(p) = &this.preview {
+                                    p.borrow_mut().reload();
+                                }
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        button("pop-back", "Back to the viewer", false, &t).on_click(cx.listener(
+                            move |this, _, _, cx| {
                                 this.dent.update(cx, |d, cx| d.bring_back(art, cx));
-                            }),
-                        ),
+                            },
+                        )),
                     ),
             );
         let area = div().flex_1().min_h_0().child(

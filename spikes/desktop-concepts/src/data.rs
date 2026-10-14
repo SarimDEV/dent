@@ -532,7 +532,9 @@ pub fn sessions() -> Vec<Session> {
     );
     k.arts = vec!["admin-dev"];
     k.items = vec![
-        Item::User("Add a signups-per-day chart to the admin dashboard, fed from the real API.".into()),
+        Item::User(
+            "Add a signups-per-day chart to the admin dashboard, fed from the real API.".into(),
+        ),
         tools(
             "Edited 2 files, started the dev server",
             &[
@@ -541,8 +543,13 @@ pub fn sessions() -> Vec<Session> {
                 "Ran pnpm dev · ready on port 5173",
             ],
         ),
-        text("The chart reads `/api/signups` and refreshes every two seconds. The dev server is running on devbox, and dent forwards its port, so the preview below is the real app."),
-        Item::Made { art: "admin-dev", version: 1 },
+        text(
+            "The chart reads `/api/signups` and refreshes every two seconds. The dev server is running on devbox, and dent forwards its port, so the preview below is the real app.",
+        ),
+        Item::Made {
+            art: "admin-dev",
+            version: 1,
+        },
     ];
     k.terminal = vec![
         (Tone::Command, "$ pnpm dev".into()),
@@ -580,23 +587,65 @@ pub fn sessions() -> Vec<Session> {
 }
 
 const CRATES: &[&str] = &[
-    "tokio", "serde", "axum", "tower", "hyper", "rustls", "sqlx", "tracing", "uuid", "chrono",
-    "reqwest", "clap", "anyhow", "thiserror", "bytes", "futures", "regex", "rand",
+    "tokio",
+    "serde",
+    "axum",
+    "tower",
+    "hyper",
+    "rustls",
+    "sqlx",
+    "tracing",
+    "uuid",
+    "chrono",
+    "reqwest",
+    "clap",
+    "anyhow",
+    "thiserror",
+    "bytes",
+    "futures",
+    "regex",
+    "rand",
 ];
 
 fn lockfile_diff() -> FileDiff {
     let mut lines = Vec::new();
     let (mut old, mut new) = (1u32, 1u32);
     for (i, name) in CRATES.iter().cycle().take(214).enumerate() {
-        lines.push(DiffLine { old: None, new: None, kind: Line::Hunk, text: format!("@@ -{old},7 +{new},7 @@") });
+        lines.push(DiffLine {
+            old: None,
+            new: None,
+            kind: Line::Hunk,
+            text: format!("@@ -{old},7 +{new},7 @@"),
+        });
         for (kind, text) in [
             (Line::Context, "[[package]]".to_string()),
             (Line::Context, format!("name = \"{name}\"")),
-            (Line::Removed, format!("version = \"{}.{}.{}\"", 1 + i % 3, i % 17, i % 9)),
-            (Line::Added, format!("version = \"{}.{}.{}\"", 1 + i % 3, i % 17, i % 9 + 1)),
-            (Line::Context, "source = \"registry+https://github.com/rust-lang/crates.io-index\"".to_string()),
-            (Line::Removed, format!("checksum = \"{:064x}\"", (i as u128 + 7) * 0x9e3779b97f4a7c15)),
-            (Line::Added, format!("checksum = \"{:064x}\"", (i as u128 + 11) * 0x9e3779b97f4a7c15)),
+            (
+                Line::Removed,
+                format!("version = \"{}.{}.{}\"", 1 + i % 3, i % 17, i % 9),
+            ),
+            (
+                Line::Added,
+                format!("version = \"{}.{}.{}\"", 1 + i % 3, i % 17, i % 9 + 1),
+            ),
+            (
+                Line::Context,
+                "source = \"registry+https://github.com/rust-lang/crates.io-index\"".to_string(),
+            ),
+            (
+                Line::Removed,
+                format!(
+                    "checksum = \"{:064x}\"",
+                    (i as u128 + 7) * 0x9e3779b97f4a7c15
+                ),
+            ),
+            (
+                Line::Added,
+                format!(
+                    "checksum = \"{:064x}\"",
+                    (i as u128 + 11) * 0x9e3779b97f4a7c15
+                ),
+            ),
         ] {
             let (o, n) = match kind {
                 Line::Removed => (Some(old), None),
@@ -609,22 +658,52 @@ fn lockfile_diff() -> FileDiff {
             if kind != Line::Removed {
                 new += 1;
             }
-            lines.push(DiffLine { old: o, new: n, kind, text });
+            lines.push(DiffLine {
+                old: o,
+                new: n,
+                kind,
+                text,
+            });
         }
         old += 40;
         new += 40;
     }
-    FileDiff { path: "Cargo.lock".into(), added: 428, removed: 428, lines }
+    FileDiff {
+        path: "Cargo.lock".into(),
+        added: 428,
+        removed: 428,
+        lines,
+    }
 }
 
 fn manifest_diff() -> FileDiff {
-    let mut lines = vec![DiffLine { old: None, new: None, kind: Line::Hunk, text: "@@ -12,18 +12,18 @@ [dependencies]".into() }];
+    let mut lines = vec![DiffLine {
+        old: None,
+        new: None,
+        kind: Line::Hunk,
+        text: "@@ -12,18 +12,18 @@ [dependencies]".into(),
+    }];
     for (i, name) in CRATES.iter().enumerate() {
         let n = 12 + i as u32;
-        lines.push(DiffLine { old: Some(n), new: None, kind: Line::Removed, text: format!("{name} = \"{}.{}\"", 1 + i % 3, i % 17) });
-        lines.push(DiffLine { old: None, new: Some(n), kind: Line::Added, text: format!("{name} = \"{}.{}\"", 1 + i % 3, i % 17 + 1) });
+        lines.push(DiffLine {
+            old: Some(n),
+            new: None,
+            kind: Line::Removed,
+            text: format!("{name} = \"{}.{}\"", 1 + i % 3, i % 17),
+        });
+        lines.push(DiffLine {
+            old: None,
+            new: Some(n),
+            kind: Line::Added,
+            text: format!("{name} = \"{}.{}\"", 1 + i % 3, i % 17 + 1),
+        });
     }
-    FileDiff { path: "Cargo.toml".into(), added: CRATES.len(), removed: CRATES.len(), lines }
+    FileDiff {
+        path: "Cargo.toml".into(),
+        added: CRATES.len(),
+        removed: CRATES.len(),
+        lines,
+    }
 }
 
 fn limit_diff() -> FileDiff {

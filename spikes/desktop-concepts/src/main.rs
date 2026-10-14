@@ -447,87 +447,87 @@ fn main() {
         std::mem::forget(token);
     }
     app.run(move |cx| {
-            gpui_kit::init(cx);
-            load_fonts(cx);
-            app::bind_keys(cx);
-            let (x, y, w, h) = window_rect();
-            let background = o.background || o.demo.is_some();
-            BACKGROUND.store(background, Ordering::Relaxed);
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds {
-                    origin: point(px(x), px(y)),
-                    size: size(px(w), px(h)),
-                })),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("dent".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(16.), px(16.))),
-                }),
-                // Walkthroughs drive the window directly; they never need focus.
-                focus: !background,
-                ..Default::default()
-            };
-            let (dark, pace) = (o.dark, o.pace);
-            let demo = o
-                .demo
-                .clone()
-                .map(|name| demo::Demo::new(&name, o.shots.clone(), o.record.is_some()));
-            let length = demo.as_ref().map(|d| d.length());
-            let record = o.record.clone();
-            #[cfg(target_os = "linux")]
-            if std::env::var_os("DENT_NO_GTK").is_none() {
-                // WebKitGTK needs GTK running beside GPUI's own event loop.
-                let _ = gtk::init();
-                cx.spawn(async move |cx| {
-                    loop {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(16))
-                            .await;
-                        while gtk::events_pending() {
-                            gtk::main_iteration_do(false);
-                        }
-                    }
-                })
-                .detach();
-            }
-            let (main_window, view) = gpui_kit::open_window(options, cx, move |window, cx| {
-                let view = cx.new(|cx| Dent::new(dark, pace, demo, window, cx));
-                let composer = view.read(cx).composer.clone();
-                composer.update(cx, |c, cx| c.focus(window, cx));
-                view
-            })
-            .expect("open window");
-            if let (Some(path), Some(secs)) = (record, length) {
-                demo::record(path, secs);
-            }
-            // Look in eight times a second, but only draw when something on
-            // screen changes: a working square's step, a timer's second, a
-            // page's message.
-            let weak = view.downgrade();
+        gpui_kit::init(cx);
+        load_fonts(cx);
+        app::bind_keys(cx);
+        let (x, y, w, h) = window_rect();
+        let background = o.background || o.demo.is_some();
+        BACKGROUND.store(background, Ordering::Relaxed);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds {
+                origin: point(px(x), px(y)),
+                size: size(px(w), px(h)),
+            })),
+            titlebar: Some(TitlebarOptions {
+                title: Some("dent".into()),
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(16.), px(16.))),
+            }),
+            // Walkthroughs drive the window directly; they never need focus.
+            focus: !background,
+            ..Default::default()
+        };
+        let (dark, pace) = (o.dark, o.pace);
+        let demo = o
+            .demo
+            .clone()
+            .map(|name| demo::Demo::new(&name, o.shots.clone(), o.record.is_some()));
+        let length = demo.as_ref().map(|d| d.length());
+        let record = o.record.clone();
+        #[cfg(target_os = "linux")]
+        if std::env::var_os("DENT_NO_GTK").is_none() {
+            // WebKitGTK needs GTK running beside GPUI's own event loop.
+            let _ = gtk::init();
             cx.spawn(async move |cx| {
                 loop {
                     cx.background_executor()
-                        .timer(Duration::from_secs_f32(1. / ds::motion::PIXEL_FPS))
+                        .timer(Duration::from_millis(16))
                         .await;
-                    let Ok(due) = weak.update(cx, |this, _| this.tick_due()) else {
-                        break;
-                    };
-                    if due && weak.update(cx, |_, cx| cx.notify()).is_err() {
-                        break;
+                    while gtk::events_pending() {
+                        gtk::main_iteration_do(false);
                     }
                 }
             })
             .detach();
-            // Pages in their own windows close without quitting dent.
-            let main_id = main_window.window_id();
-            cx.on_window_closed(move |cx, id| {
-                if id == main_id {
-                    cx.quit();
+        }
+        let (main_window, view) = gpui_kit::open_window(options, cx, move |window, cx| {
+            let view = cx.new(|cx| Dent::new(dark, pace, demo, window, cx));
+            let composer = view.read(cx).composer.clone();
+            composer.update(cx, |c, cx| c.focus(window, cx));
+            view
+        })
+        .expect("open window");
+        if let (Some(path), Some(secs)) = (record, length) {
+            demo::record(path, secs);
+        }
+        // Look in eight times a second, but only draw when something on
+        // screen changes: a working square's step, a timer's second, a
+        // page's message.
+        let weak = view.downgrade();
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_secs_f32(1. / ds::motion::PIXEL_FPS))
+                    .await;
+                let Ok(due) = weak.update(cx, |this, _| this.tick_due()) else {
+                    break;
+                };
+                if due && weak.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
                 }
-            })
-            .detach();
-            if !background {
-                cx.activate(true);
             }
-        });
+        })
+        .detach();
+        // Pages in their own windows close without quitting dent.
+        let main_id = main_window.window_id();
+        cx.on_window_closed(move |cx, id| {
+            if id == main_id {
+                cx.quit();
+            }
+        })
+        .detach();
+        if !background {
+            cx.activate(true);
+        }
+    });
 }

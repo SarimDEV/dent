@@ -37,10 +37,7 @@ impl Dent {
             return false;
         };
         // A page in its own window never hides for menus: nothing covers it.
-        let detached = self
-            .preview
-            .as_ref()
-            .is_some_and(|p| p.borrow().detached());
+        let detached = self.preview.as_ref().is_some_and(|p| p.borrow().detached());
         self.panel_open
             && Self::has_viewer(s)
             && matches!(self.tab(s), Tab::Art(a) if self.art(a).is_some_and(|a| a.kind.is_page()) && !self.popouts.contains_key(a))
@@ -222,10 +219,7 @@ impl Dent {
         }
         let latest = a.versions.len().max(1);
         let v = self.version(&a);
-        let detached = self
-            .preview
-            .as_ref()
-            .is_some_and(|p| p.borrow().detached());
+        let detached = self.preview.as_ref().is_some_and(|p| p.borrow().detached());
         if let Some(p) = &self.preview {
             let mut p = p.borrow_mut();
             if server {
@@ -306,27 +300,27 @@ impl Dent {
             })
             .when(!server, |d| {
                 d.child(step(
-                "prev-version",
-                "chevron-left",
-                (v > 1).then(|| v - 1),
-                "Earlier version",
-                cx,
-            ))
-            .child(
-                div()
-                    .ty(LABEL)
-                    .text_color(t.ink)
-                    .child(format!("v{v}"))
-                    .child(div().text_color(t.faint).child(format!(" of {latest}")))
-                    .flex(),
-            )
-            .child(step(
-                "next-version",
-                "chevron-right",
-                (v < latest).then(|| v + 1),
-                "Later version",
-                cx,
-            ))
+                    "prev-version",
+                    "chevron-left",
+                    (v > 1).then(|| v - 1),
+                    "Earlier version",
+                    cx,
+                ))
+                .child(
+                    div()
+                        .ty(LABEL)
+                        .text_color(t.ink)
+                        .child(format!("v{v}"))
+                        .child(div().text_color(t.faint).child(format!(" of {latest}")))
+                        .flex(),
+                )
+                .child(step(
+                    "next-version",
+                    "chevron-right",
+                    (v < latest).then(|| v + 1),
+                    "Later version",
+                    cx,
+                ))
             })
             .child(div().w(px(1.)).h(px(16.)).mx(px(space::S1)).bg(t.hairline))
             .child(match self.toolbar_hint {
@@ -430,9 +424,9 @@ impl Dent {
                     icon_button("pop-out", "picture-in-picture-2", &t)
                         .relative()
                         .on_hover(Self::hint("Open in its own window", cx))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.pop_out(id, window, cx)
-                        }))
+                        .on_click(
+                            cx.listener(move |this, _, window, cx| this.pop_out(id, window, cx)),
+                        )
                         .child(probe(&self.probes, "pop-out")),
                 )
             })
@@ -698,13 +692,13 @@ impl Dent {
                     .text_color(t.ink)
                     .child("The page opens in its own window here."),
             )
-            .child(ghost("raise-page", "Show the page", &t).on_click(cx.listener(
-                |this, _, _, _| {
+            .child(
+                ghost("raise-page", "Show the page", &t).on_click(cx.listener(|this, _, _, _| {
                     if let Some(p) = &this.preview {
                         p.borrow().raise();
                     }
-                },
-            )))
+                })),
+            )
             .into_any_element()
     }
 
@@ -829,29 +823,24 @@ impl Dent {
                     .bg(t.surface)
                     .children(self.picture(id, a.versions.len()).map(|picture| {
                         img(picture)
-                        .map(|i| {
-                            if actual {
-                                // Screenshots are @2x: actual size is half the pixels.
-                                i.flex_none().w(px(w as f32 / 2.)).h(px(h as f32 / 2.))
-                            } else {
-                                i.max_w_full().max_h_full()
-                            }
-                        })
-                        .object_fit(ObjectFit::Contain)
-                        .rounded(px(radius::LG))
-                        .border_1()
-                        .border_color(t.hairline)
+                            .map(|i| {
+                                if actual {
+                                    // Screenshots are @2x: actual size is half the pixels.
+                                    i.flex_none().w(px(w as f32 / 2.)).h(px(h as f32 / 2.))
+                                } else {
+                                    i.max_w_full().max_h_full()
+                                }
+                            })
+                            .object_fit(ObjectFit::Contain)
+                            .rounded(px(radius::LG))
+                            .border_1()
+                            .border_color(t.hairline)
                     })),
             )
             .into_any_element()
     }
 
-    fn changes(
-        &mut self,
-        s: &Session,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn changes(&mut self, s: &Session, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.t;
         let selected = self
             .diff_file
@@ -958,7 +947,11 @@ impl Dent {
                 continue;
             }
             let n = l.new.or(l.old).unwrap_or(0);
-            for (k, _) in comments.iter().enumerate().filter(|(_, (line, _))| *line == n) {
+            for (k, _) in comments
+                .iter()
+                .enumerate()
+                .filter(|(_, (line, _))| *line == n)
+            {
                 rows.push(Row::Note(k));
             }
             if self
@@ -980,7 +973,8 @@ impl Dent {
         let key = hash(&|h| (file_key, rows.len(), &self.commenting, comments.len()).hash(h));
         if key != self.diff_key {
             // A new file starts at the top; a comment opening or landing keeps your place.
-            let keep = (file_key == self.diff_file_key).then(|| self.diff_list.logical_scroll_top());
+            let keep =
+                (file_key == self.diff_file_key).then(|| self.diff_list.logical_scroll_top());
             self.diff_key = key;
             self.diff_file_key = file_key;
             self.diff_list.reset(rows.len());
@@ -1112,18 +1106,14 @@ impl Dent {
                                     .min_h_0()
                                     .relative()
                                     .child(
-                                        div()
-                                            .id("diff")
-                                            .size_full()
-                                            .overflow_x_scroll()
-                                            .child(
-                                                div()
-                                                    .h_full()
-                                                    .min_w_full()
-                                                    .w(px(wide))
-                                                    .py(px(space::S1))
-                                                    .child(diff),
-                                            ),
+                                        div().id("diff").size_full().overflow_x_scroll().child(
+                                            div()
+                                                .h_full()
+                                                .min_w_full()
+                                                .w(px(wide))
+                                                .py(px(space::S1))
+                                                .child(diff),
+                                        ),
                                     )
                                     // Long lines scroll sideways; the edge fades to say so.
                                     .child(
@@ -1271,52 +1261,54 @@ impl Dent {
             Some(Row::Compose) => div()
                 .w_full()
                 .flex()
-                .child(div().w(px(self.diff_view_w)).flex_none().child(
-                    div()
-                        .mx(px(space::S3))
-                        .my(px(space::S2))
-                        .p(px(space::S3))
-                        .rounded(px(radius::LG))
-                        .bg(t.raised)
-                        .border_1()
-                        .border_color(t.hairline)
-                        .flex()
-                        .flex_col()
-                        .gap(px(space::S2))
-                        .child(
-                            div()
-                                .ty(UI)
-                                .text_color(t.ink)
-                                .child(Textarea::new(&self.comment_input)),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(space::S2))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .ty(LABEL)
-                                        .text_color(t.faint)
-                                        .child("comments collect into one review"),
-                                )
-                                .child(ghost("cancel-comment", "Cancel", &t).on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.commenting = None;
-                                        cx.notify();
-                                    }),
-                                ))
-                                .child(
-                                    button("add-comment", "Add comment", true, &t)
-                                        .relative()
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.add_comment(window, cx)
-                                        }))
-                                        .child(probe(&self.probes, "add-comment")),
-                                ),
-                        ),
-                ))
+                .child(
+                    div().w(px(self.diff_view_w)).flex_none().child(
+                        div()
+                            .mx(px(space::S3))
+                            .my(px(space::S2))
+                            .p(px(space::S3))
+                            .rounded(px(radius::LG))
+                            .bg(t.raised)
+                            .border_1()
+                            .border_color(t.hairline)
+                            .flex()
+                            .flex_col()
+                            .gap(px(space::S2))
+                            .child(
+                                div()
+                                    .ty(UI)
+                                    .text_color(t.ink)
+                                    .child(Textarea::new(&self.comment_input)),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(space::S2))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .ty(LABEL)
+                                            .text_color(t.faint)
+                                            .child("comments collect into one review"),
+                                    )
+                                    .child(ghost("cancel-comment", "Cancel", &t).on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.commenting = None;
+                                            cx.notify();
+                                        }),
+                                    ))
+                                    .child(
+                                        button("add-comment", "Add comment", true, &t)
+                                            .relative()
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.add_comment(window, cx)
+                                            }))
+                                            .child(probe(&self.probes, "add-comment")),
+                                    ),
+                            ),
+                    ),
+                )
                 .into_any_element(),
             None => div().into_any_element(),
         }

@@ -670,11 +670,9 @@ impl Dent {
                     .justify_center()
                     .overflow_hidden()
                     .map(|d| match thumb {
-                        Some(picture) => d.child(
-                            img(picture)
-                            .size_full()
-                            .object_fit(ObjectFit::Cover),
-                        ),
+                        Some(picture) => {
+                            d.child(img(picture).size_full().object_fit(ObjectFit::Cover))
+                        }
                         None => {
                             d.child(icon(a.kind.icon(), 18., if old { t.faint } else { t.ink }))
                         }
@@ -1142,7 +1140,11 @@ impl Dent {
                         menu_row(&self.probes, format!("m-{m}"), m, None, current == m, &t)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(id) = this.selected.clone()
-                                    && let Some(s) = this.sessions.iter_mut().find(|s| s.id == id).map(std::rc::Rc::make_mut)
+                                    && let Some(s) = this
+                                        .sessions
+                                        .iter_mut()
+                                        .find(|s| s.id == id)
+                                        .map(std::rc::Rc::make_mut)
                                 {
                                     s.agent = m.to_string();
                                 }
@@ -1173,7 +1175,11 @@ impl Dent {
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(id) = this.selected.clone()
-                                && let Some(s) = this.sessions.iter_mut().find(|s| s.id == id).map(std::rc::Rc::make_mut)
+                                && let Some(s) = this
+                                    .sessions
+                                    .iter_mut()
+                                    .find(|s| s.id == id)
+                                    .map(std::rc::Rc::make_mut)
                             {
                                 s.permission = p.to_string();
                             }

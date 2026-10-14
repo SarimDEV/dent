@@ -1138,10 +1138,7 @@ impl Dent {
                         list.push(msg);
                     }
                     // A broken latest page needs you, like any other error.
-                    let latest = self
-                        .art(art)
-                        .map(|x| x.versions.len().max(1))
-                        == Some(v);
+                    let latest = self.art(art).map(|x| x.versions.len().max(1)) == Some(v);
                     if latest
                         && let Some(s) = self
                             .sessions
@@ -1253,7 +1250,11 @@ impl Dent {
         std::mem::discriminant(item).hash(&mut h);
         match item {
             Item::User(t) | Item::Text(t) | Item::Queued(t) => t.hash(&mut h),
-            Item::Tools { lines, open, summary } => (lines.len(), open, summary).hash(&mut h),
+            Item::Tools {
+                lines,
+                open,
+                summary,
+            } => (lines.len(), open, summary).hash(&mut h),
             Item::Made { art, version } => {
                 // Older versions fold to one line.
                 let latest = self.art(art).map(|a| a.versions.len()).unwrap_or(0);
@@ -1550,8 +1551,9 @@ impl Dent {
         // Words fade in for a moment after they arrive; the agent's own updates
         // redraw when they happen, so a running agent alone needs no frames.
         let streaming = self.births.values().any(|(_, b)| {
-            b.last()
-                .is_some_and(|(_, at)| at.elapsed() < Duration::from_millis(crate::ds::motion::BASE as u64 + 40))
+            b.last().is_some_and(|(_, at)| {
+                at.elapsed() < Duration::from_millis(crate::ds::motion::BASE as u64 + 40)
+            })
         });
         streaming
             || fresh(&self.finished_at)

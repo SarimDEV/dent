@@ -428,7 +428,9 @@ impl Preview {
         });
         if resized {
             // The page reflows at a new size; the page reports when it settles.
-            let _ = self.web.evaluate_script("dispatchEvent(new Event('resize'))");
+            let _ = self
+                .web
+                .evaluate_script("dispatchEvent(new Event('resize'))");
         }
     }
 
@@ -547,8 +549,7 @@ impl Preview {
 
     /// Ask the web view for a picture of itself. It arrives a moment later.
     pub fn take_snapshot(&self) {
-        let (Some(size), Some(source)) = (self.bounds.map(|b| b.size), self.showing.clone())
-        else {
+        let (Some(size), Some(source)) = (self.bounds.map(|b| b.size), self.showing.clone()) else {
             return;
         };
         if !self.visible {
@@ -592,7 +593,7 @@ fn decode(bytes: &[u8], format: ImageFormat) -> Option<Arc<RenderImage>> {
     let mut rgba = image::load_from_memory_with_format(bytes, format)
         .ok()?
         .into_rgba8();
-    for px in rgba.chunks_exact_mut(4) {
+    for px in rgba.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
     Some(Arc::new(RenderImage::new([image::Frame::new(rgba)])))
@@ -662,7 +663,7 @@ mod snapshot {
     use gpui_kit::ImageFormat;
     use webview2_com::CapturePreviewCompletedHandler;
     use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG;
-    use windows::Win32::System::Com::{IStream, STATSTG, STATFLAG_NONAME, STREAM_SEEK_SET};
+    use windows::Win32::System::Com::{IStream, STATFLAG_NONAME, STATSTG, STREAM_SEEK_SET};
     use windows::Win32::UI::Shell::SHCreateMemStream;
     use wry::{WebView, WebViewExtWindows};
 

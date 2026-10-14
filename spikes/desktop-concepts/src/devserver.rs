@@ -52,9 +52,7 @@ fn serve(mut stream: TcpStream, started: Instant) {
 
 /// Fourteen days of signups; today keeps counting while you watch.
 fn signups(secs: u64) -> String {
-    let days = [
-        38, 41, 36, 52, 61, 47, 44, 58, 66, 71, 63, 80, 86, 0u64,
-    ];
+    let days = [38, 41, 36, 52, 61, 47, 44, 58, 66, 71, 63, 80, 86, 0u64];
     let today = 40 + secs / 3;
     let list: Vec<String> = days
         .iter()

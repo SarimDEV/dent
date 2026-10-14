@@ -321,7 +321,10 @@ fn status(d: &Dent, id: &str) -> Option<Status> {
     session(d, id).map(|s| s.status)
 }
 fn latest_new(d: &Dent) -> Option<&crate::data::Session> {
-    d.sessions.iter().find(|s| s.id.starts_with("new-")).map(|s| &**s)
+    d.sessions
+        .iter()
+        .find(|s| s.id.starts_with("new-"))
+        .map(|s| &**s)
 }
 
 // ---- Scenes ----
@@ -367,9 +370,12 @@ fn tour() -> Vec<(f32, Act)> {
             Until(
                 "the fix arrives as v3 and the preview follows it",
                 |d, _| {
-                    d.preview
-                        .as_ref()
-                        .is_some_and(|p| matches!(p.borrow().showing, Some(crate::web::Source::File { version: 3, .. })))
+                    d.preview.as_ref().is_some_and(|p| {
+                        matches!(
+                            p.borrow().showing,
+                            Some(crate::web::Source::File { version: 3, .. })
+                        )
+                    })
                 },
                 12.,
             ),
@@ -880,7 +886,12 @@ fn checks() -> Vec<(f32, Act)> {
             0.3,
             Until(
                 "the page leaves a snapshot to stand in for it",
-                |d, _| d.preview.as_ref().is_some_and(|p| { let p = p.borrow(); p.detached() || p.has_snapshot() }),
+                |d, _| {
+                    d.preview.as_ref().is_some_and(|p| {
+                        let p = p.borrow();
+                        p.detached() || p.has_snapshot()
+                    })
+                },
                 3.,
             ),
         ),
@@ -902,7 +913,12 @@ fn checks() -> Vec<(f32, Act)> {
             0.0,
             Until(
                 "…and its snapshot is drawn in its place",
-                |d, _| d.preview.as_ref().is_some_and(|p| { let p = p.borrow(); p.detached() || p.has_snapshot() }),
+                |d, _| {
+                    d.preview.as_ref().is_some_and(|p| {
+                        let p = p.borrow();
+                        p.detached() || p.has_snapshot()
+                    })
+                },
                 1.,
             ),
         ),
@@ -932,10 +948,7 @@ fn checks() -> Vec<(f32, Act)> {
             ),
         ),
         // ---- A dev server, forwarded ----
-        (
-            0.2,
-            Call(|d, w, cx| d.select(Some("admin".into()), w, cx)),
-        ),
+        (0.2, Call(|d, w, cx| d.select(Some("admin".into()), w, cx))),
         (
             1.8,
             Page(
@@ -997,10 +1010,7 @@ fn checks() -> Vec<(f32, Act)> {
             }),
         ),
         // ---- Long sessions draw only what's on screen ----
-        (
-            0.2,
-            Call(|d, w, cx| d.select(Some("deps".into()), w, cx)),
-        ),
+        (0.2, Call(|d, w, cx| d.select(Some("deps".into()), w, cx))),
         (
             0.6,
             Until(
@@ -1045,10 +1055,7 @@ fn checks() -> Vec<(f32, Act)> {
         (0.3, Shot("k-long-diff")),
         (0.2, Key("escape")),
         // ---- Frames: drawn only when something on screen moves ----
-        (
-            0.2,
-            Call(|d, w, cx| d.select(Some("ledger".into()), w, cx)),
-        ),
+        (0.2, Call(|d, w, cx| d.select(Some("ledger".into()), w, cx))),
         // The inbox has focus, so no text caret blinks while measuring.
         (0.3, Key("escape")),
         (
@@ -1167,7 +1174,12 @@ pub fn still(path: PathBuf) {
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(40));
             let id = std::process::Command::new("xdotool")
-                .args(["search", "--onlyvisible", "--pid", &std::process::id().to_string()])
+                .args([
+                    "search",
+                    "--onlyvisible",
+                    "--pid",
+                    &std::process::id().to_string(),
+                ])
                 .output()
                 .ok()
                 .and_then(|o| String::from_utf8(o.stdout).ok())
