@@ -215,6 +215,7 @@ pub fn session(
                 text,
                 queued: q,
                 attachments,
+                at,
                 ..
             } => {
                 if *q {
@@ -223,6 +224,7 @@ pub fn session(
                     items.push(Item::User {
                         id: id.clone(),
                         text: text.clone(),
+                        at: *at,
                     });
                 } else {
                     let mut lines: Vec<String> = attachments
@@ -235,11 +237,12 @@ pub fn session(
                     items.push(Item::User {
                         id: id.clone(),
                         text: lines.join("\n"),
+                        at: *at,
                     });
                 }
             }
             Entry::Text { text } => items.push(Item::Text(text.clone())),
-            Entry::Thinking { .. } => {}
+            Entry::Thinking { text } => items.push(Item::Thinking(text.clone())),
             Entry::Tools { calls } => {
                 // The plan belongs with the composer, and questions and plans
                 // have their own cards.

@@ -156,6 +156,11 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// A thought's key for being opened: its start, which doesn't change.
+pub fn thought_key(text: &str) -> String {
+    format!("thought:{}", text.chars().take(48).collect::<String>())
+}
+
 /// Make a field one line: a typed or pasted line break becomes a space, and
 /// any Return submits. For names and searches.
 pub fn single_line(field: &Entity<TextareaState>, window: &mut Window, cx: &mut App) {
@@ -2602,7 +2607,7 @@ impl Dent {
         };
         let text = self.session(&id).and_then(|s| {
             s.items.iter().find_map(|i| match i {
-                Item::User { id: m, text } if m == msg => Some(text.clone()),
+                Item::User { id: m, text, .. } if m == msg => Some(text.clone()),
                 _ => None,
             })
         });
@@ -3162,7 +3167,7 @@ impl Dent {
             b[b.len().saturating_sub(32)..].hash(h);
         };
         match item {
-            Item::User { text: t, id } => {
+            Item::User { text: t, id, .. } => {
                 fp(t, &mut h);
                 (
                     self.rewinding.as_ref().is_some_and(|(_, m)| m == id),
@@ -3171,6 +3176,10 @@ impl Dent {
                     .hash(&mut h)
             }
             Item::Text(t) | Item::Queued { text: t, .. } => fp(t, &mut h),
+            Item::Thinking(t) => {
+                fp(t, &mut h);
+                self.open_calls.contains(&thought_key(t)).hash(&mut h);
+            }
             Item::Tools { lines, summary } => {
                 (lines, summary).hash(&mut h);
                 lines

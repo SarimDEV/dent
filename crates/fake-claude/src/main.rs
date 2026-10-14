@@ -363,6 +363,16 @@ impl Agent {
         Ok(())
     }
 
+    /// A thinking block, whole, as the agent sends one before acting.
+    fn think(&mut self, text: &str) {
+        out(self.envelope(
+            json!({"type": "assistant", "message": {"id": format!("msg_fake_k{}", new_id()), "role": "assistant",
+                "model": self.model, "content": [{"type": "thinking", "thinking": text, "signature": "fake"}],
+                "usage": self.usage()}}),
+            None,
+        ));
+    }
+
     fn tool(&mut self, name: &str, input: Value, parent: Option<&str>) -> String {
         self.next += 1;
         let id = format!("toolu_fake_{}", self.next);
@@ -671,6 +681,9 @@ impl Agent {
             self.say("The background job finished cleanly.", None)?;
             self.end("done", false);
             return Ok(());
+        }
+        if lower.contains("think") {
+            self.think("The user wants this considered first. The parser keeps a stack of open containers, so a list item can hold code. I should check the tests before answering.");
         }
         let reply = if lower.contains("long") {
             LONG.to_string()

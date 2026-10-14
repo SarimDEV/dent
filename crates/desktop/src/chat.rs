@@ -627,7 +627,7 @@ impl Dent {
     ) -> AnyElement {
         let t = self.t;
         match item {
-            Item::User { id: msg, text } => {
+            Item::User { id: msg, text, at } => {
                 let (atts, body): (Vec<&str>, Vec<&str>) =
                     text.lines().partition(|l| l.starts_with("› "));
                 let asking = self
@@ -785,8 +785,19 @@ impl Dent {
                             d.child(
                                 div()
                                     .flex()
+                                    .items_center()
                                     .gap(px(space::S1))
                                     .reveal_on_hover(group.clone())
+                                    // When you sent it, beside what you can do with it.
+                                    .when(*at > 0, |d| {
+                                        d.child(
+                                            div()
+                                                .px(px(space::S2))
+                                                .ty(LABEL)
+                                                .text_color(t.faint)
+                                                .child(crate::data::clock(*at)),
+                                        )
+                                    })
                                     .child(
                                         ghost(
                                             SharedString::from(format!("fork-from-{ix}")),
@@ -1046,6 +1057,66 @@ impl Dent {
                             })
                             .collect();
                         d.children(rows)
+                    })
+                    .into_any_element()
+            }
+            Item::Thinking(text) => {
+                let key = crate::app::thought_key(text);
+                let open = self.open_calls.contains(&key);
+                let words = text.split_whitespace().count();
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::S1))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("thought-{ix}")))
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S2))
+                            .ty(CODE)
+                            .text_color(t.quiet)
+                            .cursor_pointer()
+                            .hover(|d| d.text_color(t.ink))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.open_calls.remove(&key) {
+                                    this.open_calls.insert(key.clone());
+                                }
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .w(px(space::S4))
+                                    .flex_none()
+                                    .flex()
+                                    .justify_center()
+                                    .child(icon(
+                                        if open {
+                                            "chevron-down"
+                                        } else {
+                                            "chevron-right"
+                                        },
+                                        12.,
+                                        t.quiet.opacity(0.7),
+                                    )),
+                            )
+                            .child(format!("Thought · {words} words")),
+                    )
+                    .when(open, |d| {
+                        d.child(
+                            div()
+                                .ml(px(space::S4))
+                                .pl(px(space::S3))
+                                .border_l_2()
+                                .border_color(t.hairline)
+                                .ty(READING)
+                                .text_color(t.quiet)
+                                .child(crate::select::text(
+                                    SharedString::from(format!("thought-text-{ix}")),
+                                    text.clone(),
+                                    &t,
+                                )),
+                        )
                     })
                     .into_any_element()
             }

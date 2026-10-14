@@ -89,9 +89,13 @@ pub enum Item {
     User {
         id: String,
         text: String,
+        /// When you sent it, in Unix milliseconds.
+        at: u64,
     },
     /// A reply, in Markdown.
     Text(String),
+    /// What the agent thought before acting, folded to one line.
+    Thinking(String),
     /// Tool calls folded to one line, expandable.
     Tools {
         summary: String,
@@ -343,6 +347,48 @@ pub fn ago(ms: u64) -> String {
         2_592_000..31_536_000 => format!("{}mo", s / 2_592_000),
         _ => format!("{}y", s / 31_536_000),
     }
+}
+
+/// A moment as a clock reads it: "3:42 PM" today, "Oct 12, 3:42 PM"
+/// before, "Oct 12 2025, 3:42 PM" in another year. Local time.
+pub fn clock(ms: u64) -> String {
+    #[cfg(unix)]
+    {
+        let local = |secs: i64| {
+            let t: libc::time_t = secs as libc::time_t;
+            let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+            // SAFETY: both pointers are valid for the call; localtime_r
+            // writes only into `tm`.
+            let ok = unsafe { !libc::localtime_r(&t, &mut tm).is_null() };
+            ok.then_some(tm)
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        if let (Some(at), Some(today)) = (local((ms / 1000) as i64), local(now)) {
+            const MONTHS: [&str; 12] = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ];
+            let h = match at.tm_hour % 12 {
+                0 => 12,
+                h => h,
+            };
+            let time = format!(
+                "{h}:{:02} {}",
+                at.tm_min,
+                if at.tm_hour < 12 { "AM" } else { "PM" }
+            );
+            let month = MONTHS[at.tm_mon.clamp(0, 11) as usize];
+            return if at.tm_year == today.tm_year && at.tm_yday == today.tm_yday {
+                time
+            } else if at.tm_year == today.tm_year {
+                format!("{month} {}, {time}", at.tm_mday)
+            } else {
+                format!("{month} {} {}, {time}", at.tm_mday, at.tm_year + 1900)
+            };
+        }
+    }
+    format!("{} ago", ago(ms))
 }
 
 /// A stretch of time ahead, in words: "40 minutes", "2h 10m", "3 days".

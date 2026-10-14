@@ -74,6 +74,8 @@ pub enum Entry {
         steer: bool,
         /// Paths of files that went with it.
         attachments: Vec<String>,
+        /// When it was sent, in Unix milliseconds.
+        at: u64,
     },
     Text {
         text: String,
@@ -346,6 +348,7 @@ impl SessionView {
                     queued: *queued,
                     steer: *steer,
                     attachments: attachments.clone(),
+                    at: e.at,
                 });
             }
             Body::Delivered { id } => {
