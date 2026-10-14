@@ -100,11 +100,16 @@ fn relative(cwd: &Path, path: &str) -> String {
     {
         return r.display().to_string();
     }
-    match cwd.strip_prefix("/private") {
-        Ok(alias) if alias != cwd => match p.strip_prefix(Path::new("/").join(alias)) {
-            Ok(r) => r.display().to_string(),
-            Err(_) => path.to_string(),
-        },
+    if let Ok(alias) = cwd.strip_prefix("/private")
+        && let Ok(r) = p.strip_prefix(Path::new("/").join(alias))
+    {
+        return r.display().to_string();
+    }
+    // Outside the project: home reads as ~.
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && path.starts_with(&format!("{home}/")) => {
+            format!("~{}", &path[home.len()..])
+        }
         _ => path.to_string(),
     }
 }
