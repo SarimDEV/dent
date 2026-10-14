@@ -41,6 +41,9 @@ impl Dent {
             .items_center()
             .gap(px(space::S1))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        if s.items.iter().any(|i| matches!(i, Item::User { .. })) {
+            actions = actions.child(self.message_arrows(s, cx));
+        }
         if s.stopped && !s.closed {
             let sid = id.clone();
             actions = actions.child(
@@ -72,9 +75,9 @@ impl Dent {
         if Self::can_close(s) {
             let sid = id.clone();
             let close = if tight {
-                icon_button("close", "archive", &t).tooltip(tip("Close", Some("⌘W"), t))
+                icon_button("close", "archive", &t).tooltip(tip("Close", Some("⌘ W"), t))
             } else {
-                button("close", "Close", false, &t).child(kbd("⌘W", &t))
+                button("close", "Close", false, &t).child(kbd("⌘ W", &t))
             };
             actions = actions.child(
                 close
@@ -89,7 +92,7 @@ impl Dent {
                 icon_button("side-chat", "message-circle-question-mark", &t)
                     .relative()
                     .on_click(cx.listener(|this, _, window, cx| this.open_side_chat(window, cx)))
-                    .tooltip(tip("Ask on the side", Some("⌘;"), t))
+                    .tooltip(tip("Ask on the side", Some("⌘ ;"), t))
                     .child(probe(&self.probes, "side-chat")),
             );
         }
@@ -113,7 +116,7 @@ impl Dent {
                 }))
                 .tooltip(tip(
                     if open { "Hide viewer" } else { "Show viewer" },
-                    Some("⌘\\"),
+                    Some("⌘ \\"),
                     t,
                 )),
             );
@@ -224,6 +227,74 @@ impl Dent {
             .child(actions)
     }
 
+    /// Up and down through your own messages, joined as one small pair (Alt+Up
+    /// and Alt+Down from the keyboard). An arrow with nowhere to go dims.
+    fn message_arrows(&self, s: &Session, cx: &mut Context<Self>) -> Div {
+        let t = self.t;
+        let top = self.transcript.logical_scroll_top().item_ix;
+        let (prev, next) = s
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| matches!(i, Item::User { .. }))
+            .fold((false, false), |(p, n), (ix, _)| {
+                (p || ix < top, n || ix > top)
+            });
+        let half = |id: &'static str, up: bool, on: bool, cx: &mut Context<Self>| {
+            let (name, label, off, keys) = if up {
+                (
+                    "chevron-up",
+                    "Your previous message",
+                    "No earlier message of yours",
+                    "⌥ ↑",
+                )
+            } else {
+                (
+                    "chevron-down",
+                    "Your next message",
+                    "No later message of yours",
+                    "⌥ ↓",
+                )
+            };
+            div()
+                .id(id)
+                .relative()
+                .size(px(26.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(!up, |d| d.border_l_1().border_color(t.hairline))
+                .child(icon(
+                    name,
+                    14.,
+                    if on { t.quiet } else { t.faint.opacity(0.45) },
+                ))
+                .map(|d| {
+                    if on {
+                        d.cursor_pointer()
+                            .hover(|d| d.bg(t.hover()))
+                            .active(|d| d.bg(t.press()))
+                            .tooltip(tip(label, Some(keys), t))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.jump_to_mine(up, cx);
+                            }))
+                    } else {
+                        d.cursor_not_allowed().tooltip(tip(off, None, t))
+                    }
+                })
+                .child(probe(&self.probes, id))
+        };
+        div()
+            .flex_none()
+            .flex()
+            .rounded(px(radius::MD))
+            .border_1()
+            .border_color(t.hairline)
+            .overflow_hidden()
+            .child(half("mine-prev", true, prev, cx))
+            .child(half("mine-next", false, next, cx))
+    }
+
     fn chat(&mut self, s: &Session, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.t;
         self.sync_transcript(s);
@@ -274,8 +345,59 @@ impl Dent {
                     .into_any_element()
             }),
         )
-        .flex_1()
-        .min_h_0();
+        .size_full();
+        // Read back far enough and a pill offers the way to the latest.
+        let bottom = self.transcript.viewport_bounds().bottom();
+        let away = !self.transcript.is_following_tail()
+            && count > 0
+            && self
+                .transcript
+                .bounds_for_item(count - 1)
+                .is_none_or(|b| b.bottom() > bottom + px(space::S8));
+        let transcript = div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(transcript)
+            .when(away, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .bottom(px(space::S4))
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .id("to-latest")
+                                .relative()
+                                .h(px(size::CONTROL))
+                                .px(px(space::S3))
+                                .flex()
+                                .items_center()
+                                .gap(px(space::S1H))
+                                .rounded_full()
+                                .bg(t.raised)
+                                .border_1()
+                                .border_color(t.hairline)
+                                .shadow_sm()
+                                .ty(UI)
+                                .text_color(t.quiet)
+                                .cursor_pointer()
+                                .hover(|d| d.text_color(t.ink))
+                                .active(|d| d.opacity(0.82))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.transcript.set_follow_mode(FollowMode::Tail);
+                                    this.transcript.scroll_to_end();
+                                    cx.notify();
+                                }))
+                                .child(icon("arrow-down", 13., t.quiet))
+                                .child("Latest")
+                                .child(probe(&self.probes, "to-latest")),
+                        ),
+                )
+            });
         let footer: AnyElement = if s.closed {
             let id = s.id.clone();
             div()
@@ -426,7 +548,11 @@ impl Dent {
                                     div()
                                         .ty(if command { CODE } else { READING })
                                         .text_color(t.ink)
-                                        .child(shown),
+                                        .child(crate::select::text(
+                                            SharedString::from(format!("user-text-{ix}")),
+                                            shown,
+                                            &t,
+                                        )),
                                 )
                                 .when(long, |d| {
                                     d.child(
@@ -576,7 +702,14 @@ impl Dent {
                         div()
                             .ty(READING)
                             .text_color(t.ink)
-                            .child(inline.element(&t, face, Some(&fade), &self.mdv, window))
+                            .child(inline.element(
+                                &format!("{}/{ix}/0", s.id),
+                                &t,
+                                face,
+                                Some(&fade),
+                                &self.mdv,
+                                window,
+                            ))
                             .into_any_element()
                     }
                     _ => {
@@ -588,7 +721,11 @@ impl Dent {
                             scope: format!("{}/{ix}", s.id),
                             bg: t.surface,
                         };
-                        markdown::render(blocks.as_slice(), &t, false, &mut r).into_any_element()
+                        div()
+                            .relative()
+                            .child(markdown::render(blocks.as_slice(), &t, false, &mut r))
+                            .child(probe(&self.probes, "reply"))
+                            .into_any_element()
                     }
                 }
             }
@@ -706,7 +843,11 @@ impl Dent {
                                                 .overflow_hidden()
                                                 .whitespace_nowrap()
                                                 .text_ellipsis()
-                                                .child(l.text.clone()),
+                                                .child(crate::select::text(
+                                                    SharedString::from(format!("tool-{ix}-{i}")),
+                                                    l.text.clone(),
+                                                    &t,
+                                                )),
                                         )
                                         .into_any_element(),
                                     Some(report) => row
@@ -947,7 +1088,11 @@ impl Dent {
                         .items_center()
                         .child(icon(name, 13., t.quiet)),
                 )
-                .child(div().flex_1().min_w_0().child(text.clone()))
+                .child(div().flex_1().min_w_0().child(crate::select::text(
+                    SharedString::from(format!("note-{ix}")),
+                    text.clone(),
+                    &t,
+                )))
                 // The last thing that went wrong can be tried again.
                 .when(
                     *name == "circle-alert"
@@ -1204,7 +1349,7 @@ impl Dent {
                 .bg(t.ink)
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, window, cx| this.stop(&id, window, cx)))
-                .tooltip(tip("Stop", Some("⌘."), t))
+                .tooltip(tip("Stop", Some("⌘ ."), t))
                 .child(div().size(px(9.)).bg(t.surface))
                 .child(probe(&self.probes, "send"))
                 .into_any_element()
@@ -1420,7 +1565,7 @@ impl Dent {
                                             None => "↩ send",
                                         }
                                     } else if working {
-                                        "↩ queue · ⌘↩ steer"
+                                        "↩ queue · ⌘ ↩ steer"
                                     } else {
                                         "↩ send"
                                     },

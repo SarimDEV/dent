@@ -177,12 +177,35 @@ impl raw_window_handle::HasWindowHandle for X11Parent<'_> {
 }
 
 fn kind(path: &str) -> &'static str {
-    match path.rsplit('.').next() {
-        Some("svg") => "image/svg+xml",
-        Some("png") => "image/png",
-        Some("css") => "text/css",
-        Some("js") => "text/javascript",
-        _ => "text/html; charset=utf-8",
+    let ext = path
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "ico" => "image/x-icon",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "json" | "map" => "application/json",
+        "wasm" => "application/wasm",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "txt" | "md" | "csv" => "text/plain; charset=utf-8",
+        "pdf" => "application/pdf",
+        _ => "application/octet-stream",
     }
 }
 
@@ -373,14 +396,19 @@ impl Preview {
 
     /// Show `bytes` as `name`, version `v`. Loading the same thing again is a no-op.
     pub fn show(&mut self, name: &str, v: usize, bytes: &[u8], root: Option<&std::path::Path>) {
-        if let Ok(mut r) = self.root.lock() {
-            *r = root.map(|p| p.to_path_buf());
-        }
+        // A page outside the project (a scratch folder, say) finds its
+        // images and styles beside itself.
+        let (name, root) = split_root(name, root);
+        let name = name.as_str();
+        let moved = match self.root.lock() {
+            Ok(mut r) => std::mem::replace(&mut *r, root.clone()) != root,
+            Err(_) => false,
+        };
         let src = Source::File {
             name: name.to_string(),
             version: v,
         };
-        if self.showing.as_ref() == Some(&src) {
+        if self.showing.as_ref() == Some(&src) && !moved {
             return;
         }
         let key = format!("{v}/{name}");
@@ -713,6 +741,18 @@ mod snapshot {
 
 /// A page's own file from disk: `path` is `{version}/{relative path}`, and
 /// nothing outside `root` is served.
+/// The name a page loads under and the folder its own files come from: the
+/// project for a page inside it, the page's folder for one outside.
+fn split_root(name: &str, root: Option<&std::path::Path>) -> (String, Option<std::path::PathBuf>) {
+    let path = std::path::Path::new(name);
+    if path.is_absolute()
+        && let (Some(dir), Some(file)) = (path.parent(), path.file_name())
+    {
+        return (file.to_string_lossy().into_owned(), Some(dir.to_path_buf()));
+    }
+    (name.to_string(), root.map(|p| p.to_path_buf()))
+}
+
 fn from_disk(root: &std::path::Path, path: &str) -> Option<Arc<[u8]>> {
     let rel = path.split_once('/')?.1;
     let rel = percent_decode(rel);
@@ -741,4 +781,25 @@ fn percent_decode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod root_tests {
+    use super::{kind, split_root};
+
+    #[test]
+    fn pages_outside_the_project_load_from_their_own_folder() {
+        let proj = std::path::Path::new("/p");
+        assert_eq!(
+            split_root("/tmp/x/index.html", Some(proj)),
+            ("index.html".into(), Some("/tmp/x".into()))
+        );
+        assert_eq!(
+            split_root("site/index.html", Some(proj)),
+            ("site/index.html".into(), Some("/p".into()))
+        );
+        assert_eq!(kind("a/Photo.JPG"), "image/jpeg");
+        assert_eq!(kind("f.woff2"), "font/woff2");
+        assert_eq!(kind("index.html"), "text/html; charset=utf-8");
+    }
 }

@@ -539,10 +539,11 @@ impl Agent {
             self.end("Something went wrong on the fake agent's side.", true);
             return Ok(());
         }
+        // The path as typed: folders can have capitals.
         if let Some(path) = lower
             .split_whitespace()
-            .skip_while(|w| *w != "write")
-            .nth(1)
+            .position(|w| w == "write")
+            .and_then(|at| text.split_whitespace().nth(at + 1))
         {
             let path = path.trim_matches(|c: char| c == '`' || c == '.' || c == ',');
             let body = file_body(path, text);
@@ -736,7 +737,9 @@ Every event, timed:
 }
 
 fn file_body(path: &str, prompt: &str) -> String {
-    if path.ends_with(".html") {
+    if path.ends_with(".html") && prompt.contains("with assets") {
+        "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>Page</title>\n<link rel=\"stylesheet\" href=\"style.css\"></head>\n<body><h1>Styled</h1><img src=\"dot.gif\" alt=\"\"></body></html>\n".to_string()
+    } else if path.ends_with(".html") {
         format!(
             "<!doctype html>\n<html><head><meta charset=\"utf-8\"><title>Page</title>\n<style>body{{font:16px system-ui;margin:40px}}h1{{font-size:28px}}</style></head>\n<body><h1>Hello</h1><p>{}</p></body></html>\n",
             prompt.replace('<', "&lt;")

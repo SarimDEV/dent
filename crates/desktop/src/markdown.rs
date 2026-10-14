@@ -152,6 +152,7 @@ impl Inline {
     /// `fade` gives each byte offset an opacity, for words streaming in.
     pub fn element(
         &self,
+        key: &str,
         t: &Theme,
         face: Face,
         fade: Option<&dyn Fn(usize) -> f32>,
@@ -182,13 +183,13 @@ impl Inline {
             let list = lists[i].clone();
             let mut col = div().flex().flex_col();
             if !before.is_empty() {
-                col = col.child(before.element(t, face, None, md, window));
+                col = col.child(before.element(&format!("{key}<"), t, face, None, md, window));
             }
             if let Some(list) = list {
                 col = col.child(math_line(md, list, em, face));
             }
             if !after.is_empty() {
-                col = col.child(after.element(t, face, None, md, window));
+                col = col.child(after.element(&format!("{key}>"), t, face, None, md, window));
             }
             return col.into_any_element();
         }
@@ -285,34 +286,21 @@ impl Inline {
                 .map(|(_, n)| n)
                 .sum::<usize>()
         };
-        let styled = StyledText::new(text.clone()).with_runs(runs);
-        let layout = styled.layout().clone();
-        let el = if self.links.is_empty() {
-            styled.into_any_element()
-        } else {
-            // Links open in the browser; paths open in their default app.
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            text.hash(&mut h);
-            let urls: Vec<String> = self.links.iter().map(|(_, u)| u.clone()).collect();
-            InteractiveText::new(SharedString::from(format!("md-{:x}", h.finish())), styled)
-                .on_click(
-                    self.links
-                        .iter()
-                        .map(|(r, _)| shift(r.start, true)..shift(r.end, false))
-                        .collect(),
-                    move |ix, _, cx| {
-                        if let Some(url) = urls.get(ix) {
-                            if url.starts_with('/') {
-                                cx.open_url(&format!("file://{url}"));
-                            } else {
-                                cx.open_url(url);
-                            }
-                        }
-                    },
-                )
-                .into_any_element()
-        };
+        // Links open in the browser; paths open in their default app.
+        let links = self
+            .links
+            .iter()
+            .map(|(r, u)| (shift(r.start, true)..shift(r.end, false), u.clone()))
+            .collect();
+        let styled = crate::select::styled(
+            SharedString::from(format!("md-{key}")),
+            text.clone(),
+            runs,
+            t,
+        )
+        .links(links);
+        let layout = styled.layout();
+        let el = styled.into_any_element();
         if placed.is_empty() {
             return el;
         }
@@ -795,7 +783,7 @@ pub fn render(blocks: &[Block], t: &Theme, doc: bool, r: &mut R) -> Div {
                     .ty(ty)
                     .text_color(t.ink)
                     .when(!doc || *level > 2, |d| d.font_weight(FontWeight::MEDIUM))
-                    .child(i.element(t, f, None, &r.md, r.window))
+                    .child(i.element(&key, t, f, None, &r.md, r.window))
                     .into_any_element()
             }
             Block::Para(i) => {
@@ -803,12 +791,12 @@ pub fn render(blocks: &[Block], t: &Theme, doc: bool, r: &mut R) -> Div {
                 div()
                     .ty(READING)
                     .text_color(t.ink)
-                    .child(i.element(t, f, None, &r.md, r.window))
+                    .child(i.element(&key, t, f, None, &r.md, r.window))
                     .into_any_element()
             }
             Block::List(items) => {
                 let mut rows = Vec::with_capacity(items.len());
-                for (depth, n, task, i) in items {
+                for (li, (depth, n, task, i)) in items.iter().enumerate() {
                     let marker: AnyElement = match (task, n) {
                         (Some(done), _) => checkbox(*done, t).into_any_element(),
                         (None, Some(n)) => div()
@@ -839,7 +827,7 @@ pub fn render(blocks: &[Block], t: &Theme, doc: bool, r: &mut R) -> Div {
                                     .items_center()
                                     .child(marker),
                             )
-                            .child(i.element(t, f, None, &r.md, r.window)),
+                            .child(i.element(&format!("{key}.{li}"), t, f, None, &r.md, r.window)),
                     );
                 }
                 div()
@@ -852,13 +840,15 @@ pub fn render(blocks: &[Block], t: &Theme, doc: bool, r: &mut R) -> Div {
             Block::Quote(ps) => {
                 let f = face(READING, reading, t.quiet);
                 let mut paras = Vec::with_capacity(ps.len());
-                for i in ps {
-                    paras.push(
-                        div()
-                            .ty(READING)
-                            .text_color(t.quiet)
-                            .child(i.element(t, f, None, &r.md, r.window)),
-                    );
+                for (pi, i) in ps.iter().enumerate() {
+                    paras.push(div().ty(READING).text_color(t.quiet).child(i.element(
+                        &format!("{key}.{pi}"),
+                        t,
+                        f,
+                        None,
+                        &r.md,
+                        r.window,
+                    )));
                 }
                 div()
                     .pl(px(space::S4))
@@ -1054,7 +1044,8 @@ fn code_frame(lang: &str, body: &str, t: &Theme, key: &str, dim: bool, r: &R) ->
                     let spans = crate::highlight::spans(lang, body);
                     let mut at = 0;
                     body.split('\n')
-                        .map(|l| {
+                        .enumerate()
+                        .map(|(n, l)| {
                             let start = at;
                             at += l.len() + 1;
                             if l.is_empty() {
@@ -1073,9 +1064,12 @@ fn code_frame(lang: &str, body: &str, t: &Theme, key: &str, dim: bool, r: &R) ->
                                     plain_run(len, f, tag.map(|g| g.color(t)).unwrap_or(t.ink))
                                 })
                                 .collect();
-                            div()
-                                .whitespace_nowrap()
-                                .child(StyledText::new(l.to_string()).with_runs(runs))
+                            div().whitespace_nowrap().child(crate::select::styled(
+                                SharedString::from(format!("code-{key}-{n}")),
+                                l.to_string(),
+                                runs,
+                                t,
+                            ))
                         })
                         .collect::<Vec<_>>()
                 }),
@@ -1420,6 +1414,7 @@ fn table_data(table: &Rc<Table>, key: &str, md: &Md, window: &Window) -> Rc<Tabl
 /// clear of a scrollbar, on the header too so columns stay aligned.
 #[allow(clippy::too_many_arguments)]
 fn row(
+    key: &str,
     data: &TableData,
     cells: &[Inline],
     head: bool,
@@ -1450,7 +1445,7 @@ fn row(
                     Some(Alignment::Center) => d.text_center(),
                     _ => d,
                 })
-                .child(cell.element(t, face, None, md, window)),
+                .child(cell.element(&format!("{key}.{c}"), t, face, None, md, window)),
         );
     }
     div()
@@ -1614,7 +1609,7 @@ fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement
         let max = state.max_offset_for_scrollbar().y.as_f32();
         // Half a row peeks out at the bottom: a cut-off row says "more".
         let h = (TABLE_ROWS as f32 + 0.5) * ROW_H;
-        let (rows, md, t2) = (data.clone(), r.md.clone(), *t);
+        let (rows, md, t2, k) = (data.clone(), r.md.clone(), *t, key.to_string());
         div()
             .relative()
             .h(px(h))
@@ -1622,6 +1617,7 @@ fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement
             .child(
                 list(state.clone(), move |ix, window, _| {
                     row(
+                        &format!("{k}/r{ix}"),
                         &rows,
                         &rows.table.rows[ix],
                         false,
@@ -1644,6 +1640,7 @@ fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement
         let mut rows = Vec::with_capacity(n);
         for (i, cells) in table.rows.iter().enumerate() {
             rows.push(row(
+                &format!("{key}/r{i}"),
                 &data,
                 cells,
                 false,
@@ -1657,7 +1654,17 @@ fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement
         div().children(rows).into_any_element()
     };
     let gutter = if capped { GUTTER } else { 0. };
-    let head = row(&data, &table.head, true, true, capped, &r.md, r.window, t);
+    let head = row(
+        &format!("{key}/h"),
+        &data,
+        &table.head,
+        true,
+        true,
+        capped,
+        &r.md,
+        r.window,
+        t,
+    );
     let grid = div()
         .flex()
         .flex_col()

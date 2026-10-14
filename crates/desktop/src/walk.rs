@@ -53,6 +53,34 @@ pub enum Act {
     Wheel(&'static str, f32),
     /// Open every session in turn, timing each, and report.
     Sweep,
+    /// Press the mouse at a point in a probe, given as fractions of its size.
+    Press(&'static str, f32, f32),
+    /// Move the pressed mouse by this much, in a few steps.
+    MoveBy(f32, f32),
+    /// Let go of the mouse where it is.
+    Release,
+}
+
+thread_local! {
+    static POINTER: std::cell::Cell<Point<Pixels>> = const { std::cell::Cell::new(point(px(0.), px(0.))) };
+    static CLIPBOARD: std::cell::RefCell<Option<ClipboardItem>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The walk copies text; your clipboard goes back the way it was after.
+pub fn save_clipboard(_: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
+    CLIPBOARD.with(|c| *c.borrow_mut() = cx.read_from_clipboard());
+}
+
+pub fn restore_clipboard(_: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
+    if let Some(item) = CLIPBOARD.with(|c| c.borrow_mut().take()) {
+        cx.write_to_clipboard(item);
+    }
+}
+
+fn copied(cx: &App) -> String {
+    cx.read_from_clipboard()
+        .and_then(|c| c.text())
+        .unwrap_or_default()
 }
 
 /// Progress through [`Act::Sweep`]: a queue of small steps, one a frame,
@@ -301,6 +329,56 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
         }
         Sweep => {
             advance = sweep_step(&me, window, cx);
+        }
+        Press(name, fx, fy) => {
+            let at = me.read(cx).probes.borrow().get(name).copied().map(|b| {
+                point(
+                    b.origin.x + b.size.width * fx,
+                    b.origin.y + b.size.height * fy,
+                )
+            });
+            match at {
+                Some(at) => {
+                    POINTER.with(|p| p.set(at));
+                    window.dispatch_event(
+                        PlatformInput::MouseMove(MouseMoveEvent {
+                            position: at,
+                            pressed_button: None,
+                            modifiers: Modifiers::default(),
+                        }),
+                        cx,
+                    );
+                    mouse(window, cx, at, true);
+                }
+                None => note(
+                    &me,
+                    cx,
+                    leak(format!("press target “{name}” on screen")),
+                    false,
+                ),
+            }
+        }
+        MoveBy(dx, dy) => {
+            let from = POINTER.with(|p| p.get());
+            for k in 1..=6 {
+                let at = point(
+                    from.x + px(dx * k as f32 / 6.),
+                    from.y + px(dy * k as f32 / 6.),
+                );
+                window.dispatch_event(
+                    PlatformInput::MouseMove(MouseMoveEvent {
+                        position: at,
+                        pressed_button: Some(MouseButton::Left),
+                        modifiers: Modifiers::default(),
+                    }),
+                    cx,
+                );
+            }
+            POINTER.with(|p| p.set(point(from.x + px(dx), from.y + px(dy))));
+        }
+        Release => {
+            let at = POINTER.with(|p| p.get());
+            mouse(window, cx, at, false);
         }
         Shot(name) => {
             let dir = me.read(cx).walk.as_ref().and_then(|d| d.shots.clone());
@@ -589,6 +667,13 @@ fn kill_daemon(_: &mut Dent, _: &mut Window, _: &mut Context<Dent>) {
     let _ = std::process::Command::new("pkill")
         .args(["-f", &format!("dent-daemon --state {}", state.display())])
         .status();
+}
+
+/// A page in a folder outside the project, with a stylesheet and a picture
+/// beside it (scripts/walk.sh puts them there).
+fn outside_page() -> &'static str {
+    let dir = std::env::var("DENT_WALK_OUTSIDE").unwrap_or_else(|_| "/nonexistent".into());
+    leak(format!("write {dir}/page.html with assets"))
 }
 
 fn new_session(text: &'static str) -> Vec<(f32, Act)> {
@@ -1023,7 +1108,38 @@ fn checks() -> Vec<(f32, Act)> {
         ),
         (0.3, Shot("stopped")),
         (0.2, Type(Field::Composer, "")),
-        (0.2, Key("alt-up")),
+        (0.2, Wheel("reply", 2400.)),
+        (
+            0.3,
+            Until(
+                "reading back offers the way to the latest, and the arrows know where your messages are",
+                |d, _| drawn(d, "to-latest").is_some() && drawn(d, "mine-next").is_some(),
+                2.,
+            ),
+        ),
+        (0.6, Shot("reading-back")),
+        (0.1, Click("mine-next")),
+        (
+            0.3,
+            Until(
+                "the down arrow takes you to your next message",
+                |d, _| {
+                    let top = d.transcript.logical_scroll_top().item_ix;
+                    top > 0 && current(d).is_some_and(|s| matches!(s.items.get(top), Some(Item::User { .. })))
+                },
+                2.,
+            ),
+        ),
+        (0.2, Click("to-latest")),
+        (
+            0.3,
+            Until(
+                "and the pill back to the latest",
+                |d, _| d.transcript.is_following_tail() && drawn(d, "to-latest").is_none(),
+                2.,
+            ),
+        ),
+        (0.3, Key("alt-up")),
         (
             0.1,
             Until(
@@ -1062,6 +1178,52 @@ fn checks() -> Vec<(f32, Act)> {
         ),
         (0.1, Until("the turn's edits get a Review line", |d, _| has(d, |i| matches!(i, Item::Changed { paths } if paths.iter().any(|p| p == "site/page.html"))), 5.)),
         (1.0, Shot("viewer-page")),
+        (0.1, Call(|d, _, _| d.panel_width = 600.)),
+        (0.3, Press("resize", 0.5, 0.5)),
+        (0.05, MoveBy(150., 0.)),
+        (
+            0.,
+            Until(
+                "dragging the panel's edge across a live page narrows it, the page standing aside meanwhile",
+                |d, _| d.panel_width < 460. && d.dragging && !d.preview_visible(),
+                1.,
+            ),
+        ),
+        (0.05, MoveBy(-250., 0.)),
+        (0.05, Release),
+        (
+            0.1,
+            Until(
+                "and back out wider, the page returning",
+                |d, _| d.panel_width > 520. && !d.dragging && d.preview_visible(),
+                1.,
+            ),
+        ),
+        (0.2, Type(Field::Composer, outside_page())),
+        (0.1, Key("enter")),
+        (0.1, Until("it asks to write there", |d, _| has(d, |i| matches!(i, Item::Approval { .. })) && status_is(d, Status::Needs), 10.)),
+        (0.2, Click("allow")),
+        (
+            0.1,
+            Until(
+                "a page written outside the project opens",
+                |d, _| {
+                    status_is(d, Status::Done)
+                        && current(d).is_some_and(|s| matches!(d.tab(s), Tab::Art(a) if a.ends_with("page.html") && a.contains("outside")))
+                },
+                10.,
+            ),
+        ),
+        (1.0, Page("window.ipc.postMessage(JSON.stringify({t:'probe', msg: getComputedStyle(document.querySelector('h1')).color + '|' + document.querySelector('img').naturalWidth}))")),
+        (
+            0.1,
+            Until(
+                "and finds its own styles and pictures beside it",
+                |d, _| d.page_probe.as_deref() == Some("rgb(200, 30, 30)|1"),
+                3.,
+            ),
+        ),
+        (0.2, Shot("outside-page")),
         (
             0.2,
             Until(
@@ -1121,6 +1283,33 @@ fn checks() -> Vec<(f32, Act)> {
     v.extend(new_session("hello again"));
     v.extend([
         (0.1, Until("ready for the next message", |d, _| status_is(d, Status::Done), 10.)),
+        (0.1, Call(save_clipboard)),
+        (0.2, Press("reply", 0.01, 0.2)),
+        (0.05, MoveBy(400., 0.)),
+        (0.05, MoveBy(2000., 40.)),
+        (0.05, Release),
+        (0.3, Shot("selected")),
+        (0.1, Key("cmd-c")),
+        (
+            0.2,
+            Until(
+                "a reply's text can be selected and copied",
+                |d, cx| {
+                    let got = copied(cx);
+                    let reply = current(d).and_then(|s| {
+                        s.items.iter().rev().find_map(|i| match i {
+                            Item::Text(t) => Some(t.clone()),
+                            _ => None,
+                        })
+                    });
+                    got.trim().len() > 3
+                        && reply.is_some_and(|r| r.contains(got.split_whitespace().next().unwrap_or("\0")))
+                },
+                2.,
+            ),
+        ),
+        (0.1, Call(restore_clipboard)),
+        (0.1, Key("escape")),
         (0.1, Call(attach_red)),
         (0.3, Shot("attachment")),
         (0.1, Type(Field::Composer, "what is in this picture")),

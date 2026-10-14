@@ -136,6 +136,10 @@ impl Theme {
     pub fn selected(&self) -> Hsla {
         self.ink.opacity(self.a(0.10, 0.12))
     }
+    /// Selected text, in replies and in inputs alike.
+    pub fn selection(&self) -> Hsla {
+        self.ink.opacity(self.a(0.16, 0.28))
+    }
     pub fn wash(&self, signal: Hsla) -> Hsla {
         signal.opacity(self.a(0.07, 0.12))
     }

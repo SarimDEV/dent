@@ -157,9 +157,9 @@ pub fn line_runs(
     runs
 }
 
-/// A line drawn with its tokens' colours.
-pub fn styled(spans: &[(Range<usize>, Tag)], line: &str, t: &Theme) -> StyledText {
-    let runs: Vec<TextRun> = line_runs(spans, 0, line)
+/// A line's runs in its tokens' colours.
+pub fn runs(spans: &[(Range<usize>, Tag)], line: &str, t: &Theme) -> Vec<TextRun> {
+    line_runs(spans, 0, line)
         .into_iter()
         .map(|(len, tag)| {
             let mut f = font(crate::theme::mono());
@@ -179,8 +179,7 @@ pub fn styled(spans: &[(Range<usize>, Tag)], line: &str, t: &Theme) -> StyledTex
                 strikethrough: None,
             }
         })
-        .collect();
-    StyledText::new(line.to_string()).with_runs(runs)
+        .collect()
 }
 
 #[cfg(test)]

@@ -81,7 +81,7 @@ impl Dent {
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.open_palette(window, cx)),
                             )
-                            .tooltip(tip("Search sessions", Some("⌘K"), t)),
+                            .tooltip(tip("Search sessions", Some("⌘ K"), t)),
                     )
                     .child(
                         icon_button("new-session", "square-pen", &t)
@@ -91,7 +91,7 @@ impl Dent {
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.select(None, window, cx)),
                             )
-                            .tooltip(tip("New session", Some("⌘N"), t))
+                            .tooltip(tip("New session", Some("⌘ N"), t))
                             .child(probe(&self.probes, "new-session")),
                     ),
             )
@@ -298,7 +298,7 @@ impl Dent {
                     cx.stop_propagation();
                     this.close(&close_id, window, cx);
                 }))
-                .tooltip(tip("Close", Some("⌘W"), t))
+                .tooltip(tip("Close", Some("⌘ W"), t))
                 .child(icon("archive", 13., t.quiet))
                 .into_any_element()
         } else if hovered && s.closed {
@@ -495,7 +495,7 @@ impl Dent {
                         } else {
                             format!("{needs} need you")
                         })
-                        .child(kbd("⌘J", &t)),
+                        .child(kbd("⌘ J", &t)),
                 )
             })
     }

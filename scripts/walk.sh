@@ -10,7 +10,10 @@ set -euo pipefail
 name=${1:-checks}; shift || true
 root=$(mktemp -d "${TMPDIR:-/tmp}/dent-walk.XXXXXX")
 trap 'pkill -f "dent-daemon --state $root/state" 2>/dev/null || true; rm -rf "$root"' EXIT
-mkdir -p "$root/home" "$root/state" "$root/proj"
+mkdir -p "$root/home" "$root/state" "$root/proj" "$root/outside"
+# A page's own files, in a folder outside the project.
+echo 'body{margin:40px;font:16px system-ui} h1{color:rgb(200,30,30)}' > "$root/outside/style.css"
+printf 'GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\x00\x00\x00\x00\x00!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;' > "$root/outside/dot.gif"
 git -C "$root/proj" init -q
 echo "# Scratch project" > "$root/proj/README.md"
 git -C "$root/proj" add . && git -C "$root/proj" -c user.name=walk -c user.email=walk@example.com commit -qm init
@@ -51,5 +54,6 @@ DENT_STATE="$root/state" \
 DENT_HOLDER_ORPHAN_MS=2000 \
 DENT_CLAUDE="$bin/dent-fake-claude" \
 DENT_WALK_PROJECT="$root/proj" \
+DENT_WALK_OUTSIDE="$root/outside" \
 FAKE_CLAUDE_SPEED="${FAKE_CLAUDE_SPEED:-0.3}" \
   "$bin/dent-desktop" --walk "$name" $([[ " $* " == *" --dark "* ]] || echo --light) "$@"

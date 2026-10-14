@@ -47,7 +47,7 @@ impl Dent {
         self.panel_open
             && Self::has_viewer(s)
             && matches!(self.tab(s), Tab::Art(a) if self.art(a).is_some_and(|a| a.kind.is_page()) && !self.popouts.contains_key(a))
-            && (detached || (self.menu.is_none() && self.palette.is_none()))
+            && (detached || (self.menu.is_none() && self.palette.is_none() && !self.dragging))
     }
 
     pub fn panel(
@@ -191,7 +191,8 @@ impl Dent {
                             this.dragging = true;
                             cx.notify();
                         }),
-                    ),
+                    )
+                    .child(probe(&self.probes, "resize")),
             )
             .into_any_element()
     }
@@ -1349,7 +1350,13 @@ impl Dent {
                                 // strings and comments, cached per line.
                                 let lang = file.path.rsplit('.').next().unwrap_or_default();
                                 let spans = crate::highlight::spans(lang, &l.text);
-                                crate::highlight::styled(&spans, &l.text, &t).into_any_element()
+                                crate::select::styled(
+                                    SharedString::from(format!("diff-text-{i}")),
+                                    l.text.clone(),
+                                    crate::highlight::runs(&spans, &l.text, &t),
+                                    &t,
+                                )
+                                .into_any_element()
                             }),
                     )
                     .into_any_element()
@@ -1635,7 +1642,7 @@ impl Dent {
             .p(px(space::S4))
             .flex()
             .flex_col()
-            .children(s.terminal.iter().map(|(tone, line)| {
+            .children(s.terminal.iter().enumerate().map(|(i, (tone, line))| {
                 let mark = (*tone == Tone::Good).then(|| status_square(Status::Done, &t));
                 div()
                     .h(px(size::LINE))
@@ -1654,7 +1661,11 @@ impl Dent {
                             .when(*tone == Tone::Command, |d| {
                                 d.font_weight(FontWeight::MEDIUM)
                             })
-                            .child(line.clone()),
+                            .child(crate::select::text(
+                                SharedString::from(format!("term-{i}")),
+                                line.clone(),
+                                &t,
+                            )),
                     )
             }))
             .into_any_element()

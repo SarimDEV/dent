@@ -15,7 +15,8 @@ The desktop app is a GPUI client for macOS, Linux and Windows, built around a ch
 - Virtualized message list that stays at 120 fps with tens of thousands of events; streaming text renders incrementally without re-laying-out earlier messages.
 - Tool calls collapse to one line ("Edited 3 files", "Ran tests: 2 failed") and expand inline; file edits open straight into the diff view.
 - Approvals appear inline with allow once, allow for session, and deny with a reason.
-- **Jump to my messages:** Alt+Up and Alt+Down move between your own messages; a thin rail on the right edge marks each of them and is clickable; a popover lists them all with search.
+- **Jump to my messages:** a joined up/down pair in the chat header, beside Fork and Close, steps through your own messages; Alt+Up and Alt+Down do the same. An arrow with nowhere to go dims and says so. Once you've scrolled back, a "Latest" pill above the composer returns to the end. Still to come: a popover listing them all with search.
+- **Selectable text:** replies, your messages, code, tool lines, notes, diffs and the terminal all join one window-wide selection (`select.rs`), so a drag can run across blocks and ⌘ C copies it. Links still open on a plain click.
 - Composer: multi-line, drafts saved per session as shared state, file and doc mentions with fuzzy completion, image paste, the agent's slash commands, and queued messages while the agent is working.
 - Interrupt, retry the last turn, fork a session from any message, and rename sessions (auto-titled by default).
 - **Fork:** the header's Fork, or Fork from here on any message you sent, opens a new session carrying the conversation so far; its agent resumes it as a new agent session, so the original goes on untouched.

@@ -20,6 +20,7 @@ mod notify;
 mod palette;
 mod popout;
 mod prefs;
+mod select;
 mod sidebar;
 mod theme;
 mod ui;
@@ -88,7 +89,7 @@ pub fn style_input(input: &Entity<TextareaState>, t: &Theme, cx: &mut App) {
         muted_foreground: t.faint,
         background: t.raised.opacity(0.),
         border: t.hairline.opacity(0.),
-        selection: t.ink.opacity(if t.dark { 0.28 } else { 0.16 }),
+        selection: t.selection(),
         caret: t.ink,
         ..Default::default()
     };
@@ -174,7 +175,7 @@ impl Render for Dent {
                 .current()
                 .is_some_and(|s| s.status == theme::Status::Working) =>
             {
-                "Queue a message, or steer with ⌘↩"
+                "Queue a message, or steer with ⌘ ↩"
             }
             None => "Reply",
         };
@@ -266,7 +267,7 @@ impl Render for Dent {
                                     .child(toast.text.clone()),
                             )
                             .when(matches!(toast.action, ToastAction::Undo(_)), |d| {
-                                d.child(ui::kbd("⌘Z", &t))
+                                d.child(ui::kbd("⌘ Z", &t))
                             })
                             .child(
                                 ui::button("toast-action", label, false, &t)
