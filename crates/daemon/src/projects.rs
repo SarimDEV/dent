@@ -23,7 +23,9 @@ pub fn list(
         let e = by_path.entry(p).or_default();
         *e = (*e).max(t);
     }
-    for p in claude_projects() {
+    // From the terminal's history, a folder in temporary space was a
+    // one-off; one used or added here is kept wherever it is.
+    for p in claude_projects().into_iter().filter(|p| !temporary(p)) {
         by_path.entry(p).or_default();
     }
     let mut out: Vec<Project> = by_path
@@ -40,6 +42,22 @@ pub fn list(
         .collect();
     out.sort_by(|a, b| b.last_used.cmp(&a.last_used).then(a.name.cmp(&b.name)));
     out
+}
+
+/// A folder in the system's temporary space.
+fn temporary(path: &str) -> bool {
+    let tmp = std::env::temp_dir();
+    let tmp = tmp.to_string_lossy();
+    let tmp = tmp.trim_end_matches('/');
+    [
+        tmp,
+        "/tmp",
+        "/private/tmp",
+        "/private/var/folders",
+        "/var/folders",
+    ]
+    .iter()
+    .any(|t| path == *t || path.starts_with(&format!("{t}/")))
 }
 
 /// The project paths in `~/.claude.json`. Only the keys are read.
@@ -237,6 +255,13 @@ pub fn folders(partial: &str) -> Result<(String, Vec<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temporary_folders_are_not_projects() {
+        assert!(temporary("/tmp/x") && temporary("/private/tmp/a/b"));
+        assert!(temporary("/private/var/folders/7h/T/dent-1"));
+        assert!(!temporary("/Users/me/code") && !temporary("/tmpfoo"));
+    }
 
     #[test]
     fn slugs_and_repo_names() {
