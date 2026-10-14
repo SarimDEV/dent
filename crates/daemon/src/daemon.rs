@@ -18,6 +18,7 @@ use crate::store::{Source, Store};
 #[derive(Debug, Clone)]
 pub enum Live {
     Event(Event),
+    Models(Vec<Model>),
     Delta {
         session: String,
         text: String,
@@ -151,7 +152,8 @@ impl Daemon {
         if let Ok(s) = serde_json::to_string(&models) {
             let _ = self.store().put("models", &s);
         }
-        *lock(&self.models) = models;
+        *lock(&self.models) = models.clone();
+        let _ = self.live.send(Arc::new(Live::Models(models)));
     }
 
     pub fn set_commands(&self, session: &str, commands: Vec<dent_protocol::Command>) {
@@ -179,11 +181,15 @@ impl Daemon {
             return (w.clone(), *at);
         }
         let me = self.clone();
-        let read = tokio::task::spawn_blocking(move || crate::usage::probe(&me.env()))
-            .await
-            .ok()
-            .flatten();
-        let reading = (read.unwrap_or_default(), now_ms());
+        let read = tokio::task::spawn_blocking({
+            let me = me.clone();
+            move || crate::usage::probe(&me.env())
+        })
+        .await
+        .ok();
+        let (windows, models) = read.map(|p| (p.windows, p.models)).unwrap_or_default();
+        me.set_models(models);
+        let reading = (windows.unwrap_or_default(), now_ms());
         *cached = Some(reading.clone());
         reading
     }

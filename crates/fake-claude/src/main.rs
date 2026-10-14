@@ -192,11 +192,17 @@ impl Agent {
                             {"name": "deep-research", "description": "Research a question across many sources", "argumentHint": "<question>"},
                         ],
                         "agents": [],
+                        // The shape Claude Code 2.1 sends: aliases first, then
+                        // pinned older versions, each with its exact model.
                         "models": [
-                            {"value": "default", "displayName": "Default (recommended)", "description": "Sonnet · Efficient for routine tasks"},
-                            {"value": "opus", "displayName": "Opus", "description": "For complex work"},
-                            {"value": "sonnet", "displayName": "Sonnet", "description": "Most efficient for simpler tasks"},
-                            {"value": "haiku", "displayName": "Haiku", "description": "Fastest for quick answers"},
+                            {"value": "default", "resolvedModel": "claude-sonnet-5-5", "displayName": "Default (recommended)", "description": "Sonnet 5.5 · Efficient for routine tasks", "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]},
+                            {"value": "opus", "resolvedModel": "claude-opus-5-5", "displayName": "Opus 5.5", "description": "For complex work and everyday tasks", "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]},
+                            {"value": "fable", "resolvedModel": "claude-fable-5-1", "displayName": "Fable 5.1", "description": "For your toughest challenges", "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]},
+                            {"value": "sonnet", "resolvedModel": "claude-sonnet-5-5", "displayName": "Sonnet 5.5", "description": "Most efficient for simpler tasks", "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]},
+                            {"value": "haiku", "resolvedModel": "claude-haiku-5-5", "displayName": "Haiku 5.5", "description": "Fastest for quick answers", "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]},
+                            {"value": "claude-haiku-4-5-20251001", "resolvedModel": "claude-haiku-4-5-20251001", "displayName": "Haiku 4.5", "description": "Fastest for quick answers"},
+                            {"value": "claude-opus-4-6", "resolvedModel": "claude-opus-4-6", "displayName": "Opus 4.6", "description": "Best for everyday, complex tasks", "supportedEffortLevels": ["low", "medium", "high", "max"]},
+                            {"value": "claude-sonnet-4-6", "resolvedModel": "claude-sonnet-4-6", "displayName": "Sonnet 4.6", "description": "Efficient for routine tasks", "supportedEffortLevels": ["low", "medium", "high", "max"]},
                         ],
                         "pid": std::process::id(),
                         "claude_code_version": "0.0.0-fake",

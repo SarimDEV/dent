@@ -29,20 +29,48 @@ pub fn status(s: Wire) -> Status {
     }
 }
 
+/// A model as people say it, with its version: "Opus 5.5", or for the
+/// account's default, what it runs: "Default · Sonnet 5.5".
 pub fn model_name(models: &[Model], id: Option<&str>) -> String {
     let id = id.unwrap_or("default");
+    let Some(m) = models.iter().find(|m| m.id == id) else {
+        return pretty_model(id);
+    };
+    if m.id == "default" {
+        return match runs(models, m) {
+            Some(name) => format!("Default · {name}"),
+            None => "Default model".into(),
+        };
+    }
+    m.name.trim_end_matches(" (recommended)").to_string()
+}
+
+/// The named model a choice like "default" runs, found by its exact model.
+pub fn runs<'a>(models: &'a [Model], m: &Model) -> Option<&'a str> {
     models
         .iter()
-        .find(|m| m.id == id)
-        .map(|m| m.name.trim_end_matches(" (recommended)").to_string())
-        .map(|n| {
-            if n == "Default" {
-                "Default model".to_string()
-            } else {
-                n
-            }
-        })
-        .unwrap_or_else(|| id.to_string())
+        .find(|o| o.id != m.id && !m.resolved.is_empty() && o.resolved == m.resolved)
+        .map(|o| o.name.as_str())
+}
+
+/// A model id the list doesn't know, made readable: `claude-opus-4-6` is
+/// "Opus 4.6", `opus` is "Opus".
+pub fn pretty_model(id: &str) -> String {
+    let id = id.split('[').next().unwrap_or(id);
+    let mut parts = id.trim_start_matches("claude-").split('-');
+    let Some(family) = parts.next().filter(|f| !f.is_empty()) else {
+        return id.to_string();
+    };
+    let mut name: String = family[..1].to_uppercase() + &family[1..];
+    // Dated snapshots (`-20251001`) name the same version.
+    let version: Vec<&str> = parts
+        .filter(|p| p.len() < 8 && p.chars().all(|c| c.is_ascii_digit()))
+        .collect();
+    if !version.is_empty() {
+        name.push(' ');
+        name.push_str(&version.join("."));
+    }
+    name
 }
 
 /// A session's artifacts: every viewable file it wrote, each version.
@@ -974,6 +1002,43 @@ mod bench {
         eprintln!(
             "entries {} · clone {clone:?} · build {build:?}",
             v.entries.len()
+        );
+    }
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::*;
+
+    fn m(id: &str, name: &str, resolved: &str) -> Model {
+        Model {
+            id: id.into(),
+            name: name.into(),
+            description: String::new(),
+            resolved: resolved.into(),
+            efforts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn names_carry_versions() {
+        let list = [
+            m("default", "Default (recommended)", "claude-sonnet-5-5"),
+            m("opus", "Opus 5.5", "claude-opus-5-5"),
+            m("sonnet", "Sonnet 5.5", "claude-sonnet-5-5"),
+        ];
+        assert_eq!(model_name(&list, None), "Default · Sonnet 5.5");
+        assert_eq!(model_name(&list, Some("opus")), "Opus 5.5");
+        assert_eq!(model_name(&list, Some("claude-opus-4-6")), "Opus 4.6");
+        assert_eq!(
+            model_name(&[], Some("claude-haiku-4-5-20251001")),
+            "Haiku 4.5"
+        );
+        assert_eq!(model_name(&[], Some("claude-opus-5-5[1m]")), "Opus 5.5");
+        assert_eq!(model_name(&[], Some("fable")), "Fable");
+        assert_eq!(
+            model_name(&[m("default", "Default", "")], None),
+            "Default model"
         );
     }
 }

@@ -684,13 +684,80 @@ fn checks() -> Vec<(f32, Act)> {
         (
             0.1,
             Until(
+                "the model menu names versions before any session starts",
+                |d, _| {
+                    crate::bridge::model_name(&d.models, d.defaults.model.as_deref())
+                        == "Default · Sonnet 5.5"
+                        && d.models.iter().any(|m| m.name == "Fable 5.1")
+                },
+                25.,
+            ),
+        ),
+        (0.2, Click("chip-model")),
+        (
+            0.1,
+            Until(
+                "older versions wait behind a row",
+                |d, _| drawn(d, "m-opus").is_some() && drawn(d, "m-claude-opus-4-6").is_none(),
+                3.,
+            ),
+        ),
+        (0.3, Shot("model-menu")),
+        (0.1, Click("m-older")),
+        (
+            0.1,
+            Until(
+                "and open in place",
+                |d, _| drawn(d, "m-claude-opus-4-6").is_some(),
+                3.,
+            ),
+        ),
+        (0.3, Shot("model-menu-older")),
+        (0.1, Click("m-claude-opus-4-6")),
+        (0.2, Click("chip-effort")),
+        (
+            0.1,
+            Until(
+                "effort offers only what the model takes",
+                |d, _| {
+                    d.defaults.model.as_deref() == Some("claude-opus-4-6")
+                        && drawn(d, "m-effort-max").is_some()
+                        && drawn(d, "m-effort-xhigh").is_none()
+                },
+                3.,
+            ),
+        ),
+        (0.3, Shot("effort-menu")),
+        (0.1, Click("m-effort-default")),
+        (0.2, Click("chip-model")),
+        (0.2, Click("m-default")),
+        (
+            0.1,
+            Until(
                 "sessions from the terminal are offered",
                 |d, _| !d.recent.is_empty(),
                 5.,
             ),
         ),
+        (
+            0.1,
+            Until(
+                "one still open in a terminal is listed but can't be picked",
+                |d, _| d.recent.first().is_some_and(|r| r.open) && d.recent.iter().any(|r| !r.open),
+                5.,
+            ),
+        ),
         (0.3, Shot("terminal-sessions")),
         (0.1, Click("adopt-0")),
+        (
+            0.3,
+            Until(
+                "clicking it does nothing",
+                |d, _| current(d).is_none() && !d.recent.is_empty(),
+                1.,
+            ),
+        ),
+        (0.1, Click("adopt-1")),
         (
             0.1,
             Until(
@@ -944,6 +1011,14 @@ fn checks() -> Vec<(f32, Act)> {
                         && !has(d, |i| matches!(i, Item::Queued { .. }))
                 },
                 3.,
+            ),
+        ),
+        (
+            0.,
+            Until(
+                "and can be sent straight away",
+                |d, _| d.just_sent.is_none(),
+                0.2,
             ),
         ),
         (0.3, Shot("stopped")),

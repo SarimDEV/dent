@@ -12,7 +12,7 @@ use crate::data::{Kind, Line, Session, Tone};
 use crate::ds::{CODE, LABEL, Typed, UI, radius, size, space};
 use crate::markdown;
 use crate::theme::{Status, status_square};
-use crate::ui::{button, ghost, icon, icon_button, kbd, probe, tip};
+use crate::ui::{Ready, action, button, ghost, icon, icon_button, kbd, probe, tip};
 
 pub const MIN_WIDTH: f32 = 360.;
 
@@ -956,12 +956,7 @@ impl Dent {
                                     .text_color(t.ink)
                                     .child(name),
                             )
-                            .child(
-                                div()
-                                    .ty(LABEL)
-                                    .text_color(t.faint)
-                                    .child(format!("+{} −{}", f.added, f.removed)),
-                            ),
+                            .child(div().ty(LABEL).text_color(t.faint).child(counts(f))),
                     )
                     .child(div().truncate().ty(LABEL).text_color(t.faint).child(dir))
             }));
@@ -1142,14 +1137,9 @@ impl Dent {
                                             .tooltip(tip("Open in its app", None, t))
                                     })
                                     .child(div().ty(LABEL).text_color(t.faint).child(if compact {
-                                        format!(
-                                            "{} of {count} · +{} −{}",
-                                            selected + 1,
-                                            file.added,
-                                            file.removed
-                                        )
+                                        format!("{} of {count} · {}", selected + 1, counts(file))
                                     } else {
-                                        format!("+{} −{}", file.added, file.removed)
+                                        counts(file)
                                     })),
                             )
                             .child(
@@ -1157,16 +1147,62 @@ impl Dent {
                                     .flex_1()
                                     .min_h_0()
                                     .relative()
-                                    .child(
-                                        div().id("diff").size_full().overflow_x_scroll().child(
-                                            div()
-                                                .h_full()
-                                                .min_w_full()
-                                                .w(px(wide))
-                                                .py(px(space::S1))
-                                                .child(diff),
-                                        ),
-                                    )
+                                    .child(if file.lines.is_empty() {
+                                        // Nothing to compare line by line: a
+                                        // picture shows itself, anything else says so.
+                                        let full = std::path::Path::new(&s.cwd).join(&file.path);
+                                        let picture = crate::data::Kind::of(&file.path)
+                                            == Some(crate::data::Kind::Image)
+                                            && full.exists();
+                                        div()
+                                            .id("diff")
+                                            .size_full()
+                                            .p(px(space::S6))
+                                            .flex()
+                                            .flex_col()
+                                            .items_center()
+                                            .justify_center()
+                                            .gap(px(space::S3))
+                                            .when(picture, |d| {
+                                                d.child(
+                                                    div()
+                                                        .max_w_full()
+                                                        .max_h(px(360.))
+                                                        .rounded(px(radius::MD))
+                                                        .border_1()
+                                                        .border_color(t.hairline)
+                                                        .overflow_hidden()
+                                                        .child(
+                                                            img(full.clone())
+                                                                .max_w_full()
+                                                                .max_h(px(360.))
+                                                                .object_fit(ObjectFit::Contain),
+                                                        ),
+                                                )
+                                            })
+                                            .child(div().ty(UI).text_color(t.quiet).child(
+                                                if picture {
+                                                    "A picture; there are no lines to compare"
+                                                } else {
+                                                    "Not a text file; there are no lines to compare"
+                                                },
+                                            ))
+                                            .into_any_element()
+                                    } else {
+                                        div()
+                                            .id("diff")
+                                            .size_full()
+                                            .overflow_x_scroll()
+                                            .child(
+                                                div()
+                                                    .h_full()
+                                                    .min_w_full()
+                                                    .w(px(wide))
+                                                    .py(px(space::S1))
+                                                    .child(diff),
+                                            )
+                                            .into_any_element()
+                                    })
                                     // Long lines scroll sideways; the edge fades to say so.
                                     .child(
                                         div()
@@ -1506,38 +1542,64 @@ impl Dent {
                     .child(answer),
             );
         }
-        let input = div()
-            .flex_none()
-            .p(px(space::S3))
-            .border_t_1()
-            .border_color(t.hairline)
-            .child(
-                div()
-                    .px(px(space::S3))
-                    .py(px(space::S2))
-                    .rounded(px(radius::LG))
-                    .bg(t.raised)
-                    .border_1()
-                    .border_color(t.hairline)
-                    .ty(UI)
-                    .text_color(t.ink)
-                    .relative()
-                    .flex()
-                    .items_end()
-                    .gap(px(space::S2))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Textarea::new(&self.aside_input)),
-                    )
-                    .child(
-                        icon_button("aside-send", "arrow-up", &t)
-                            .on_click(cx.listener(|this, _, window, cx| this.ask_aside(window, cx)))
-                            .tooltip(tip("Ask", Some("↩"), t)),
-                    )
-                    .child(probe(&self.probes, "aside-input")),
-            );
+        let input =
+            div()
+                .flex_none()
+                .p(px(space::S3))
+                .border_t_1()
+                .border_color(t.hairline)
+                .child(
+                    div()
+                        .px(px(space::S3))
+                        .py(px(space::S2))
+                        .rounded(px(radius::LG))
+                        .bg(t.raised)
+                        .border_1()
+                        .border_color(t.hairline)
+                        .ty(UI)
+                        .text_color(t.ink)
+                        .relative()
+                        .flex()
+                        .items_end()
+                        .gap(px(space::S2))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(Textarea::new(&self.aside_input)),
+                        )
+                        .child({
+                            let ready = if self.aside_input.read(cx).value().trim().is_empty() {
+                                Ready::No("Type a question first")
+                            } else {
+                                Ready::Yes
+                            };
+                            action(
+                                div()
+                                    .id("aside-send")
+                                    .size(px(size::CONTROL))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(radius::MD))
+                                    .when(ready == Ready::Yes, |d| {
+                                        d.on_click(cx.listener(|this, _, window, cx| {
+                                            this.ask_aside(window, cx)
+                                        }))
+                                        .tooltip(tip(
+                                            "Ask",
+                                            Some("↩"),
+                                            t,
+                                        ))
+                                    }),
+                                ready,
+                                &t,
+                                |d, fg| d.child(icon("arrow-up", 15., fg)),
+                            )
+                        })
+                        .child(probe(&self.probes, "aside-input")),
+                );
         div()
             .flex_1()
             .min_h_0()
@@ -1610,4 +1672,16 @@ fn comment_note(line: u32, text: &str, t: &crate::theme::Theme) -> Div {
                 .text_color(t.ink)
                 .child(text.to_string()),
         )
+}
+
+/// A changed file's size in lines, or what it is when it has none.
+fn counts(f: &crate::data::FileDiff) -> String {
+    if f.lines.is_empty() {
+        match crate::data::Kind::of(&f.path) {
+            Some(crate::data::Kind::Image) => "picture".into(),
+            _ => "binary".into(),
+        }
+    } else {
+        format!("+{} −{}", f.added, f.removed)
+    }
 }

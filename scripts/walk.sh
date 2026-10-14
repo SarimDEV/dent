@@ -39,6 +39,13 @@ if [[ "$name" == "real" ]]; then
   [[ "$mine" == *dent-walk* && -d "$mine" ]] && rm -rf "$mine"
   exit $status
 fi
+# One still running in a terminal: listed, but not to be picked up. Written
+# last, so it counts as running when the window looks.
+now=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+cat > "$root/home/.claude/projects/-proj/33333333-4444-4555-8666-777777777777.jsonl" <<JSONL
+{"type":"user","entrypoint":"cli","cwd":"$root/proj","uuid":"o1","timestamp":"$now","message":{"role":"user","content":"Profile the startup path"}}
+{"type":"assistant","uuid":"o2","timestamp":"$now","message":{"content":[{"type":"text","text":"Looking at the startup path now."}]}}
+JSONL
 HOME="$root/home" \
 DENT_STATE="$root/state" \
 DENT_HOLDER_ORPHAN_MS=2000 \

@@ -168,6 +168,15 @@ pub fn models(init: &Value) -> Vec<Model> {
                         id: m["value"].as_str()?.into(),
                         name: m["displayName"].as_str().unwrap_or_default().into(),
                         description: m["description"].as_str().unwrap_or_default().into(),
+                        resolved: m["resolvedModel"].as_str().unwrap_or_default().into(),
+                        efforts: m["supportedEffortLevels"]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|e| e.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                     })
                 })
                 .collect()
@@ -192,7 +201,8 @@ pub fn commands(init: &Value) -> Vec<dent_protocol::Command> {
         .unwrap_or_default()
 }
 
-/// Models to offer before any session has told us the real list.
+/// Models to offer before the agent has told us its list: only until the
+/// first usage reading, which asks it.
 pub fn default_models() -> Vec<Model> {
     [
         ("default", "Default", "The account's recommended model"),
@@ -204,6 +214,8 @@ pub fn default_models() -> Vec<Model> {
         id: id.into(),
         name: name.into(),
         description: description.into(),
+        resolved: String::new(),
+        efforts: Vec::new(),
     })
     .into()
 }

@@ -13,3 +13,5 @@ Usage is account-level on the provider's side, so this reading already includes 
 ## Consequences
 
 `get_usage` is undocumented: it gets contract tests per Claude Code version, with `rate_limit_event` as the fallback. Windows are labelled by duration because plans differ (a free Codex plan has one 30-day window).
+
+The same short-lived CLI also answers `initialize`, which lists the account's models with their versions, exact model ids and effort levels. dent keeps that list (and refreshes it on every session start), so the model menu names real versions, such as "Opus 5.5", before any session runs, and never keeps its own copy of the catalogue.

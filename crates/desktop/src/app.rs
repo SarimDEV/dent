@@ -262,6 +262,12 @@ pub struct Dent {
     pub drafts: HashMap<String, String>,
     pub defaults: Defaults,
     pub menu: Option<Menu>,
+    /// The model menu shows pinned older versions.
+    pub older_models: bool,
+    /// The window's height, for fitting menus.
+    pub window_h: f32,
+    /// Where the open menu is scrolled.
+    pub menu_scroll: ScrollHandle,
     pub toast: Option<Toast>,
     pub show_closed: bool,
     pub stopped: HashSet<String>,
@@ -647,6 +653,9 @@ impl Dent {
                 effort: prefs.effort.clone(),
             },
             menu: None,
+            older_models: false,
+            window_h: 800.,
+            menu_scroll: ScrollHandle::new(),
             toast: None,
             show_closed: false,
             stopped: HashSet::new(),
@@ -968,6 +977,10 @@ impl Dent {
                             }
                         }
                     }
+                    if let Out::Models { models } = &out {
+                        self.models = models.clone();
+                        changed.extend(self.core.list.keys().cloned());
+                    }
                     let first = !self.core.live;
                     for id in self.core.apply(&out) {
                         if !changed.contains(&id) {
@@ -991,6 +1004,8 @@ impl Dent {
         self.live
             .seq
             .store(self.core.last_seq, std::sync::atomic::Ordering::Relaxed);
+        changed.sort();
+        changed.dedup();
         for id in changed {
             self.rebuild(&id);
         }
@@ -1527,24 +1542,9 @@ impl Dent {
             .map(|p| p.path.clone())
     }
 
-    /// Models to offer; the agent's list once a session has started.
+    /// Models to offer: the agent's own list, from the daemon.
     pub fn models_or_default(&self) -> Vec<Model> {
-        if self.models.is_empty() {
-            ["default", "opus", "sonnet", "haiku"]
-                .map(|id| Model {
-                    id: id.into(),
-                    name: {
-                        let mut c = id.chars();
-                        c.next()
-                            .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
-                            .unwrap_or_default()
-                    },
-                    description: String::new(),
-                })
-                .into()
-        } else {
-            self.models.clone()
-        }
+        self.models.clone()
     }
 
     pub fn project_name(path: &str) -> String {
@@ -1582,6 +1582,12 @@ impl Dent {
             .update(cx, |c, cx| c.set_value("", window, cx));
         self.drafts.remove(&id);
         self.just_sent = Some(Instant::now());
+        // Send wakes up again when the pause ends, whatever else happens.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
         // Typing while it asks a question answers it; while it asks to run
         // something, the text is the reason for denying; on a plan, it's
         // what to change.
@@ -1663,6 +1669,8 @@ impl Dent {
             let text = waiting.join("\n\n");
             self.composer
                 .update(cx, |c, cx| c.set_value(text, window, cx));
+            // It's yours again to send: no double-press pause on it.
+            self.just_sent = None;
         }
         // The header offers Resume once it has stopped.
         self.live.send(Request::Interrupt {
@@ -2392,6 +2400,17 @@ impl Dent {
             .collect()
     }
 
+    /// Keyboard focus to the inbox, where arrows, Enter and E work. With
+    /// the sidebar hidden it goes to the window instead: a hidden element
+    /// holding focus would leave every shortcut with nowhere to go.
+    pub fn focus_inbox(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar_hidden {
+            window.focus(&self.focus, cx);
+        } else {
+            window.focus(&self.inbox_focus, cx);
+        }
+    }
+
     pub fn step_selection(
         &mut self,
         by: isize,
@@ -2413,7 +2432,7 @@ impl Dent {
         };
         self.select(Some(order[next].clone()), window, cx);
         if keep_focus {
-            window.focus(&self.inbox_focus, cx);
+            self.focus_inbox(window, cx);
         }
     }
 

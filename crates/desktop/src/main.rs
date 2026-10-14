@@ -6,6 +6,7 @@
 
 mod anim;
 mod app;
+mod assets;
 mod bridge;
 mod chat;
 mod data;
@@ -194,12 +195,17 @@ impl Render for Dent {
         // Lay out from the window: the chat keeps its minimum, the viewer
         // shrinks first, and only then does the sidebar fold away.
         let w = window.viewport_size().width.as_f32();
+        self.window_h = window.viewport_size().height.as_f32();
         let wants_panel = self.panel_open && self.current().is_some_and(|s| self.shows_panel(s));
         if !wants_panel {
             self.sidebar_forced = false;
         }
         let room = w - sidebar::WIDTH - viewer::CHAT_MIN;
         self.sidebar_hidden = wants_panel && room < viewer::MIN_WIDTH && !self.sidebar_forced;
+        // Folding away takes keyboard focus with it, to the window.
+        if self.sidebar_hidden && self.inbox_focus.is_focused(window) {
+            window.focus(&self.focus, cx);
+        }
         let side = if self.sidebar_hidden {
             0.
         } else {
@@ -293,7 +299,7 @@ impl Render for Dent {
                 // Enter opens, and ⌘Z undoes without a text field taking it.
                 if let Some(id) = this.selected.clone() {
                     this.close(&id, window, cx);
-                    window.focus(&this.inbox_focus, cx);
+                    this.focus_inbox(window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &UndoClose, window, cx| {
@@ -356,7 +362,7 @@ impl Render for Dent {
                     this.renaming = None;
                     this.commenting = None;
                 } else {
-                    window.focus(&this.inbox_focus, cx);
+                    this.focus_inbox(window, cx);
                 }
                 cx.notify();
             }))
@@ -379,7 +385,7 @@ impl Render for Dent {
             .on_action(cx.listener(|this, _: &InboxClose, window, cx| {
                 if let Some(id) = this.selected.clone() {
                     this.close(&id, window, cx);
-                    window.focus(&this.inbox_focus, cx);
+                    this.focus_inbox(window, cx);
                 }
             }))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, window, cx| {
@@ -518,7 +524,7 @@ fn main() {
     let o = opts();
     let _ = WINDOW.set((40., 40., o.size.0, o.size.1));
 
-    let app = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
+    let app = gpui_kit::application().with_assets(assets::Assets);
     // A background run starts as an accessory app on macOS: no Dock icon, and
     // macOS never brings it forward, so it leaves whatever you're doing alone.
     // Its windows draw as usual.

@@ -405,6 +405,24 @@ impl Dent {
                 .map(|w| format!("{:.0}%", w.used * 100.))
         };
         let (five, week) = (window("five_hour"), window("seven_day"));
+        // When each window starts over, for the tooltip.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        let resets = |name: &str| {
+            limits
+                .iter()
+                .find(|w| w.name == name && w.resets_at > now)
+                .map(|w| crate::data::span((w.resets_at - now) as u64))
+        };
+        let usage_tip = match (resets("five_hour"), resets("seven_day")) {
+            (Some(a), Some(b)) => {
+                format!("Claude usage. The 5-hour window resets in {a}, the week in {b}.")
+            }
+            (Some(a), None) => format!("Claude usage. The 5-hour window resets in {a}."),
+            (None, Some(b)) => format!("Claude usage. The week resets in {b}."),
+            (None, None) => "Claude usage across every way you use your account".to_string(),
+        };
         let link = match &self.connection {
             Ok(()) => self.machine.clone(),
             Err(why) => why.clone(),
@@ -424,9 +442,12 @@ impl Dent {
             .when(five.is_some() || week.is_some(), |d| {
                 d.child(
                     div()
+                        .id("usage")
                         .flex()
+                        .items_center()
                         .gap(px(space::S1H))
-                        .child("claude")
+                        .tooltip(crate::ui::tip_owned(usage_tip, t))
+                        .child(icon("claude", 12., crate::theme::CLAUDE))
                         .when_some(five, |d, v| {
                             d.child("5h").child(div().text_color(t.ink).child(v))
                         })

@@ -77,12 +77,17 @@ pub struct Spring {
     pub state: SpringState,
 }
 
+/// A spring from a perceptual duration (seconds) and bounce (0 is none).
+pub fn spring_config(duration: f32, bounce: f32) -> SpringConfig {
+    let stiffness = (std::f32::consts::TAU / duration).powi(2);
+    let damping = 4. * std::f32::consts::PI * (1. - bounce) / duration;
+    SpringConfig::new(stiffness, damping, 1.)
+}
+
 impl Spring {
     pub fn new(duration: f32, bounce: f32, at: f32) -> Self {
-        let stiffness = (std::f32::consts::TAU / duration).powi(2);
-        let damping = 4. * std::f32::consts::PI * (1. - bounce) / duration;
         Self {
-            config: SpringConfig::new(stiffness, damping, 1.),
+            config: spring_config(duration, bounce),
             state: SpringState {
                 position: at,
                 velocity: 0.,

@@ -93,6 +93,7 @@ Three layers. Components never use a hex value.
 | `focus` | ink, 2 px, 2 px offset | same | Keyboard focus only, appears instantly |
 
 - **Contrast:** `ink` is for reading, `quiet` meets 4.5:1 on every surface, `faint` meets 3:1 and is never used for anything you must read.
+- **The agent's mark** (the Claude logo, in Claude's terracotta on every theme) names the agent wherever its model or usage shows. It is identity, not a signal.
 - **Signals are fills, never text** on Paper. A signal colour appears as a square, a wash, an edge or a fill.
 - **Diffs:** added and removed lines get a tinted row and a 2 px gutter bar in the signal colour.
 
@@ -111,8 +112,11 @@ Shadows are drawn once per floating layer, never animated, never stacked on scro
 - **Press:** the background layer insets 1 px (reads as a 0.97 press) and steps to `state.press`, so neighbours never move. It springs back on release.
 - **Selected:** `state.selected`, instant, edge to edge.
 - **Focus:** a 2 px ink ring, keyboard only, instant.
-- **Disabled:** `faint` ink, no hover.
+- **Disabled:** `faint` ink, no hover, the not-allowed cursor, and a tooltip saying why ("Type a message first"). A form's main action (send, start) is one shared control, `ui::action`: ink when it can go, a faint wash when it can't, its colours tweening between the two over `dur.fast`.
+- **Unavailable rows:** shown, not hidden, so you know where something went: quiet text, a tag naming why in place of the time ("In use"), the not-allowed cursor and a tooltip.
 - **Busy:** keeps its label and size; progress shows inside it.
+- **Short of room:** chips give up words in a fixed order and keep their icons, with a tooltip naming the value; labels never all truncate at once.
+- **Menus** open towards the side with more room and are as tall as it allows; longer lists scroll, and their rows never squeeze.
 
 ## Motion
 

@@ -7,7 +7,7 @@ use std::rc::Rc;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
-use crate::ds::{LABEL, Typed, UI, radius, size, space};
+use crate::ds::{LABEL, Typed, UI, motion, radius, size, space};
 use crate::theme::Theme;
 
 pub fn icon(name: &str, px_size: f32, color: Hsla) -> Svg {
@@ -64,6 +64,48 @@ pub fn button(
                 .active(|s| s.bg(t.press()))
         })
         .child(label.into())
+}
+
+/// Whether the main action of a form can go, and if not, why.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Ready {
+    Yes,
+    /// Unavailable; the reason shows on hover, like "Type a message first".
+    No(&'static str),
+}
+
+/// The main action of a form (send, start): ink when it can go, a faint
+/// wash when it can't. Its colours tween between the two (`dur.fast`), so
+/// the change is seen; an unavailable one shows the not-allowed cursor and
+/// says why on hover; an available one presses. `fill` draws the content in
+/// the colour it's given. The caller adds the click, only when ready.
+pub fn action(
+    mut el: Stateful<Div>,
+    ready: Ready,
+    t: &Theme,
+    fill: impl FnOnce(Stateful<Div>, Hsla) -> Stateful<Div> + 'static,
+) -> impl IntoElement {
+    let on = ready == Ready::Yes;
+    let (off_bg, on_bg, off_fg, on_fg) = (t.ink.opacity(0.08), t.ink, t.faint, t.surface);
+    let key = el.interactivity().element_id.clone();
+    let el = match ready {
+        Ready::Yes => el.cursor_pointer().active(|s| s.opacity(0.82)),
+        Ready::No(why) => el.cursor_not_allowed().tooltip(tip(why, None, *t)),
+    };
+    el.with_spring(
+        key.map_or_else(
+            || ElementId::Name("action".into()),
+            |k| ElementId::Name(format!("{k}-state").into()),
+        ),
+        SpringAnimation::new(crate::anim::spring_config(motion::FAST / 1000., 0.)).to(on),
+        move |el, phase| {
+            let p = phase.0.clamp(0., 1.);
+            fill(
+                el.bg(Hsla::interpolate(off_bg, on_bg, p)),
+                Hsla::interpolate(off_fg, on_fg, p),
+            )
+        },
+    )
 }
 
 /// A small, flat, text-only button for inline actions.
@@ -200,6 +242,8 @@ pub fn menu_row(
         .id(ElementId::Name(id.clone()))
         .relative()
         .child(probe(probes, id.to_string()))
+        // A long menu scrolls; its rows never squeeze to fit.
+        .flex_none()
         .min_h(px(size::ROW + 4.))
         .px(px(space::S2))
         .py(px(space::S1))
@@ -264,6 +308,22 @@ pub fn tip(
         cx.new(|_| Tip {
             text: text.into(),
             keys,
+            t,
+        })
+        .into()
+    }
+}
+
+/// A tooltip with text made at run time, like a file's full path.
+pub fn tip_owned(
+    text: impl Into<SharedString>,
+    t: Theme,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let text: SharedString = text.into();
+    move |_, cx| {
+        cx.new(|_| Tip {
+            text: text.clone(),
+            keys: None,
             t,
         })
         .into()

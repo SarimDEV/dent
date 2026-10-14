@@ -3,6 +3,15 @@
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+/// Claude's own mark colour, the same on every theme: it names the agent,
+/// so it isn't a signal.
+pub const CLAUDE: Hsla = Hsla {
+    h: 15. / 360.,
+    s: 0.63,
+    l: 0.6,
+    a: 1.,
+};
+
 #[derive(Clone, Copy)]
 pub struct Theme {
     pub dark: bool,

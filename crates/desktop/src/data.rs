@@ -325,9 +325,30 @@ pub fn ago(ms: u64) -> String {
     }
 }
 
+/// A stretch of time ahead, in words: "40 minutes", "2h 10m", "3 days".
+pub fn span(secs: u64) -> String {
+    match secs {
+        0..60 => "under a minute".into(),
+        60..120 => "a minute".into(),
+        120..3600 => format!("{} minutes", secs / 60),
+        3600..86_400 => format!("{}h {:02}m", secs / 3600, secs % 3600 / 60),
+        _ if secs / 86_400 == 1 => "a day".into(),
+        _ => format!("{} days", secs / 86_400),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spans_read_as_words() {
+        assert_eq!(span(30), "under a minute");
+        assert_eq!(span(40 * 60), "40 minutes");
+        assert_eq!(span(2 * 3600 + 10 * 60), "2h 10m");
+        assert_eq!(span(86_400 + 5), "a day");
+        assert_eq!(span(3 * 86_400), "3 days");
+    }
 
     #[test]
     fn diffs_number_their_lines() {

@@ -1,6 +1,8 @@
 //! Account usage, read through the agent's own CLI ([decision 0031]): a
 //! short-lived `claude` answers `get_usage` from the provider, so the
-//! reading counts every way the account is used. No model is called.
+//! reading counts every way the account is used. No model is called. The
+//! same short-lived CLI also says which models the account has, with their
+//! versions, so the model menu is right before any session starts.
 //!
 //! [decision 0031]: ../../docs/decisions/0031-usage-limits-through-agent-clis.md
 
@@ -8,14 +10,36 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use dent_protocol::Window;
+use dent_protocol::{Model, Window};
 use serde_json::{Value, json};
 
 use crate::env::AgentEnv;
 
-/// Ask the CLI for the account's usage windows. `None` if it can't say
-/// (signed out, an API key, or the CLI failed).
-pub fn probe(env: &AgentEnv) -> Option<Vec<Window>> {
+/// What the CLI said: usage windows (`None` when it can't say: signed out,
+/// an API key, or the CLI failed) and the models it offers (empty if it
+/// didn't answer).
+pub struct Probe {
+    pub windows: Option<Vec<Window>>,
+    pub models: Vec<Model>,
+}
+
+/// Ask the CLI for the account's usage windows and its models.
+pub fn probe(env: &AgentEnv) -> Probe {
+    let none = || Probe {
+        windows: None,
+        models: Vec::new(),
+    };
+    let Some((init, usage)) = ask(env) else {
+        return none();
+    };
+    Probe {
+        windows: usage.as_ref().and_then(windows),
+        models: init.as_ref().map(crate::claude::models).unwrap_or_default(),
+    }
+}
+
+/// The `initialize` and `get_usage` answers, each `None` if it didn't come.
+fn ask(env: &AgentEnv) -> Option<(Option<Value>, Option<Value>)> {
     let mut child = Command::new("/usr/bin/env")
         .args(["-u", "CLAUDECODE", "-u", "CLAUDE_CODE_ENTRYPOINT"])
         .arg(format!("PATH={}", env.path))
@@ -51,21 +75,31 @@ pub fn probe(env: &AgentEnv) -> Option<Vec<Window>> {
         for line in BufReader::new(out).lines().map_while(Result::ok) {
             if let Ok(v) = serde_json::from_str::<Value>(&line)
                 && v["type"] == "control_response"
-                && v["response"]["request_id"] == "u-usage"
             {
-                let _ = tx.send(v["response"]["response"].clone());
-                return;
+                let id = v["response"]["request_id"].as_str().unwrap_or_default();
+                let done = id == "u-usage";
+                let _ = tx.send((id.to_string(), v["response"]["response"].clone()));
+                if done {
+                    return;
+                }
             }
         }
     });
     let until = Instant::now() + Duration::from_secs(20);
-    let got = rx
-        .recv_timeout(until.saturating_duration_since(Instant::now()))
-        .ok();
+    let (mut init, mut usage) = (None, None);
+    while usage.is_none() {
+        let Ok((id, v)) = rx.recv_timeout(until.saturating_duration_since(Instant::now())) else {
+            break;
+        };
+        match id.as_str() {
+            "u-init" => init = Some(v),
+            _ => usage = Some(v),
+        }
+    }
     drop(stdin);
     let _ = child.kill();
     let _ = child.wait();
-    windows(&got?)
+    Some((init, usage))
 }
 
 fn windows(usage: &Value) -> Option<Vec<Window>> {

@@ -350,6 +350,9 @@ async fn subscribe(
                                 events: vec![e.clone()],
                             }
                         }
+                        Live::Models(models) => Out::Models {
+                            models: models.clone(),
+                        },
                         Live::Delta {
                             session,
                             text,

@@ -15,7 +15,10 @@ use crate::ds::{
 };
 use crate::markdown;
 use crate::theme::{self, Status, status_square};
-use crate::ui::{button, floating, ghost, hint, icon, icon_button, kbd, menu_row, probe, tip};
+use crate::ui::{
+    Ready, action, button, floating, ghost, hint, icon, icon_button, kbd, menu_row, probe, tip,
+    tip_owned,
+};
 
 impl Dent {
     pub fn main_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -573,7 +576,9 @@ impl Dent {
             }
             Item::Tools { summary, lines } => {
                 let key = (s.id.clone(), ix);
-                let open = self.open_tools.contains(&key);
+                // One call with nothing under it has nothing more to show.
+                let more = lines.len() > 1 || lines.iter().any(|l| l.report.is_some());
+                let open = more && self.open_tools.contains(&key);
                 div()
                     .flex()
                     .flex_col()
@@ -585,19 +590,34 @@ impl Dent {
                             .gap(px(space::S2))
                             .ty(CODE)
                             .text_color(t.quiet)
-                            .cursor_pointer()
-                            .hover(|d| d.text_color(t.ink))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.open_tools.remove(&key) {
-                                    this.open_tools.insert(key.clone());
-                                }
-                                cx.notify();
-                            }))
-                            .child(div().text_color(t.quiet.opacity(0.6)).child(if open {
-                                "┬"
-                            } else {
-                                "├"
-                            }))
+                            .when(more, |d| {
+                                d.cursor_pointer().hover(|d| d.text_color(t.ink)).on_click(
+                                    cx.listener(move |this, _, _, cx| {
+                                        if !this.open_tools.remove(&key) {
+                                            this.open_tools.insert(key.clone());
+                                        }
+                                        cx.notify();
+                                    }),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .w(px(space::S4))
+                                    .flex_none()
+                                    .flex()
+                                    .justify_center()
+                                    .when(more, |d| {
+                                        d.child(icon(
+                                            if open {
+                                                "chevron-down"
+                                            } else {
+                                                "chevron-right"
+                                            },
+                                            12.,
+                                            t.quiet.opacity(0.7),
+                                        ))
+                                    }),
+                            )
                             .child(
                                 div()
                                     .flex_1()
@@ -1146,30 +1166,39 @@ impl Dent {
                 .child(probe(&self.probes, "send"))
                 .into_any_element()
         } else {
-            let live = !empty && !settling;
-            div()
-                .id("send")
-                .relative()
-                .flex_none()
-                .size(px(size::CONTROL))
-                .rounded(px(radius::MD))
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(if live { t.ink } else { t.ink.opacity(0.12) })
-                .when(live, |d| {
-                    d.cursor_pointer()
-                        .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
-                })
-                .child(icon(
-                    "arrow-up",
-                    15.,
-                    if live { t.surface } else { t.faint },
-                ))
-                .child(probe(&self.probes, "send"))
-                .into_any_element()
+            let ready = if settling {
+                Ready::No("Sending…")
+            } else if empty {
+                Ready::No("Type a message first")
+            } else {
+                Ready::Yes
+            };
+            action(
+                div()
+                    .id("send")
+                    .child(probe(&self.probes, "send"))
+                    .relative()
+                    .flex_none()
+                    .size(px(size::CONTROL))
+                    .rounded(px(radius::MD))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(ready == Ready::Yes, |d| {
+                        d.on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
+                            .tooltip(tip("Send", Some("↩"), t))
+                    }),
+                ready,
+                &t,
+                |d, fg| d.child(icon("arrow-up", 15., fg)),
+            )
+            .into_any_element()
         };
-        let model = s.agent.split(" · ").nth(1).unwrap_or(&s.agent).to_string();
+        let model = s
+            .agent
+            .split_once(" · ")
+            .map_or(s.agent.as_str(), |(_, m)| m)
+            .to_string();
         let permission = s.permission.label().to_string();
         let chips: Vec<AnyElement> = self
             .attachments
@@ -1188,8 +1217,33 @@ impl Dent {
                     .pr(px(space::S1))
                     .rounded(px(radius::SM))
                     .bg(t.selected())
-                    .child(icon(a.icon(), 12., t.quiet))
+                    // A picture shows itself, small.
+                    .child(match &a {
+                        crate::app::Attachment::File { path }
+                            if Kind::of(path) == Some(Kind::Image) =>
+                        {
+                            div()
+                                .size(px(16.))
+                                .flex_none()
+                                .rounded(px(3.))
+                                .overflow_hidden()
+                                .child(
+                                    img(std::path::PathBuf::from(path))
+                                        .size_full()
+                                        .object_fit(ObjectFit::Cover),
+                                )
+                                .into_any_element()
+                        }
+                        _ => icon(a.icon(), 12., t.quiet).into_any_element(),
+                    })
                     .child(div().truncate().ty(UI).text_color(t.ink).child(a.label()))
+                    .tooltip(crate::ui::tip_owned(
+                        match &a {
+                            crate::app::Attachment::File { path } => path.replacen(&home(), "~", 1),
+                            _ => a.label(),
+                        },
+                        t,
+                    ))
                     .child(
                         div()
                             .id(SharedString::from(format!("att-x-{i}")))
@@ -1246,22 +1300,36 @@ impl Dent {
                             .items_center()
                             .gap(px(space::S1))
                             .ml(px(-space::S2))
-                            .child(self.chip(Menu::SessionModel, "sparkle", &model, false, cx))
+                            // Short of room, chips give up words in a fixed
+                            // order: the default's "Default ·", then effort's
+                            // label, then permission's; each keeps its icon
+                            // and says what it is on hover. The model's name
+                            // always shows.
                             .child(self.chip(
-                                Menu::SessionPermission,
-                                "shield",
-                                &permission,
+                                Menu::SessionModel,
+                                "claude",
+                                if self.chat_w >= 620. {
+                                    &model
+                                } else {
+                                    model.trim_start_matches("Default · ")
+                                },
                                 false,
                                 cx,
                             ))
-                            // Short of room, the chip keeps its icon.
+                            .child(self.chip(
+                                Menu::SessionPermission,
+                                "shield",
+                                if self.chat_w >= 500. { &permission } else { "" },
+                                false,
+                                cx,
+                            ))
                             .child(self.chip(
                                 Menu::SessionEffort,
                                 "gauge",
                                 if self.chat_w >= 620. {
                                     effort_label(s.effort.as_deref())
                                 } else {
-                                    "Effort"
+                                    ""
                                 },
                                 false,
                                 cx,
@@ -1539,7 +1607,7 @@ impl Dent {
             .gap(px(space::S1))
             .ml(px(-space::S2))
             .child(self.chip(Menu::Project, "folder", &project, d.project.is_none(), cx))
-            .child(self.chip(Menu::Model, "sparkle", &model, false, cx))
+            .child(self.chip(Menu::Model, "claude", &model, false, cx))
             .child(self.chip(Menu::Permission, "shield", d.permission.label(), false, cx))
             .child(self.chip(
                 Menu::Effort,
@@ -1548,39 +1616,43 @@ impl Dent {
                 false,
                 cx,
             ));
-        let start = div()
-            .id("start")
-            .relative()
-            .flex_none()
-            .h(px(size::CONTROL))
-            .px(px(space::S3))
-            .flex()
-            .items_center()
-            .gap(px(space::S2))
-            .rounded(px(radius::MD))
-            .ty(UI)
-            .font_weight(FontWeight::MEDIUM)
-            .bg(if empty || self.creating {
-                t.ink.opacity(0.12)
-            } else {
-                t.ink
-            })
-            .text_color(if empty || self.creating {
-                t.faint
-            } else {
-                t.surface
-            })
-            .when(!empty && !self.creating, |d| {
-                d.cursor_pointer()
-                    .on_click(cx.listener(|this, _, window, cx| this.start(window, cx)))
-            })
-            .child(if self.creating {
-                "Starting…"
-            } else {
-                "Start"
-            })
-            .child(div().ty(LABEL).opacity(0.7).child("↩"))
-            .child(probe(&self.probes, "start"));
+        let ready = if self.creating {
+            Ready::No("Starting the session…")
+        } else if empty {
+            Ready::No("Describe a task first")
+        } else {
+            Ready::Yes
+        };
+        let label = if self.creating {
+            "Starting…"
+        } else {
+            "Start"
+        };
+        let start = action(
+            div()
+                .id("start")
+                .child(probe(&self.probes, "start"))
+                .relative()
+                .flex_none()
+                .h(px(size::CONTROL))
+                .px(px(space::S3))
+                .flex()
+                .items_center()
+                .gap(px(space::S2))
+                .rounded(px(radius::MD))
+                .ty(UI)
+                .font_weight(FontWeight::MEDIUM)
+                .when(ready == Ready::Yes, |d| {
+                    d.on_click(cx.listener(|this, _, window, cx| this.start(window, cx)))
+                }),
+            ready,
+            &t,
+            move |d, fg| {
+                d.text_color(fg)
+                    .child(label)
+                    .child(div().ty(LABEL).opacity(0.7).child("↩"))
+            },
+        );
         div()
             .flex_1()
             .min_w_0()
@@ -1660,7 +1732,7 @@ impl Dent {
                 let detail = if open {
                     // Picking it up now would run it twice.
                     format!(
-                        "{} · Open in a terminal right now",
+                        "{} · Close it in the terminal to pick it up here",
                         Self::project_name(&r.cwd)
                     )
                 } else if r.last.is_empty() || r.last == r.title {
@@ -1679,13 +1751,23 @@ impl Dent {
                             .hover(|d| d.bg(t.hover()))
                             .on_click(cx.listener(move |this, _, _, cx| this.adopt(&id, cx)))
                     })
+                    // Running in a terminal: shown, so you know where it
+                    // went, but it can't be picked up until it's closed there.
                     .when(open, |d| {
-                        d.tooltip(tip("Close it in the terminal to pick it up here", None, t))
+                        d.cursor_not_allowed().tooltip(tip(
+                            "Running in a terminal. Close it there to pick it up here.",
+                            None,
+                            t,
+                        ))
                     })
                     .flex()
                     .items_center()
                     .gap(px(space::S3))
-                    .child(icon("square-terminal", 14., t.quiet))
+                    .child(icon(
+                        "square-terminal",
+                        14.,
+                        if open { t.faint } else { t.quiet },
+                    ))
                     .child(
                         div()
                             .flex_1()
@@ -1694,22 +1776,37 @@ impl Dent {
                                 div()
                                     .truncate()
                                     .ty(UI)
-                                    .text_color(t.ink)
+                                    .text_color(if open { t.quiet } else { t.ink })
                                     .child(r.title.clone()),
                             )
-                            .child(div().truncate().ty(UI).text_color(t.quiet).child(detail)),
+                            .child(
+                                div()
+                                    .truncate()
+                                    .ty(UI)
+                                    .text_color(if open { t.faint } else { t.quiet })
+                                    .child(detail),
+                            ),
                     )
-                    .child(
+                    .child(if open {
+                        div()
+                            .flex_none()
+                            .h(px(size::CONTROL_SM))
+                            .px(px(space::S2))
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S1H))
+                            .rounded(px(radius::SM))
+                            .border_1()
+                            .border_color(t.hairline)
+                            .child(div().size(px(6.)).bg(t.working.0))
+                            .child(div().ty(LABEL).text_color(t.quiet).child("In use"))
+                    } else {
                         div()
                             .flex_none()
                             .ty(LABEL)
                             .text_color(t.faint)
-                            .child(if open {
-                                "now".into()
-                            } else {
-                                crate::data::ago(r.updated)
-                            }),
-                    )
+                            .child(crate::data::ago(r.updated))
+                    })
                     .child(probe(&self.probes, format!("adopt-{i}")))
                     .into_any_element()
             })
@@ -1747,11 +1844,15 @@ impl Dent {
         let t = self.t;
         let open = self.menu == Some(which);
         let name = format!("chip-{which:?}").to_lowercase();
+        // Chips give up width before anything beside them does: the label
+        // ends in an ellipsis.
         div()
             .relative()
+            .min_w_0()
             .child(
                 div()
                     .id(SharedString::from(name.clone()))
+                    .min_w_0()
                     .h(px(size::CONTROL_SM + 2.))
                     .px(px(space::S2))
                     .flex()
@@ -1765,14 +1866,26 @@ impl Dent {
                         this.menu = if this.menu == Some(which) {
                             None
                         } else {
+                            // Each menu opens at its top.
+                            this.menu_scroll = ScrollHandle::new();
                             Some(which)
                         };
                         cx.notify();
                     }))
-                    .child(icon(icon_name, 13., t.quiet))
+                    .child(icon(
+                        icon_name,
+                        13.,
+                        if icon_name == "claude" {
+                            crate::theme::CLAUDE
+                        } else {
+                            t.quiet
+                        },
+                    ))
                     .when(!label.is_empty(), |d| {
                         d.child(
                             div()
+                                .min_w_0()
+                                .truncate()
                                 .ty(UI)
                                 .text_color(if unset { t.quiet } else { t.ink })
                                 .child(label.to_string()),
@@ -1780,23 +1893,52 @@ impl Dent {
                     })
                     // An icon-only chip still says what it is.
                     .when(label.is_empty(), |d| {
-                        d.tooltip(tip(
+                        let current = self.current();
+                        d.tooltip(tip_owned(
                             match which {
-                                Menu::Effort | Menu::SessionEffort => "Effort",
-                                Menu::Model | Menu::SessionModel => "Model",
-                                Menu::Permission | Menu::SessionPermission => "Permissions",
-                                Menu::Project => "Project",
+                                Menu::Effort => {
+                                    format!(
+                                        "Effort: {}",
+                                        effort_label(self.defaults.effort.as_deref())
+                                    )
+                                }
+                                Menu::SessionEffort => format!(
+                                    "Effort: {}",
+                                    effort_label(current.and_then(|s| s.effort.as_deref()))
+                                ),
+                                Menu::Permission => {
+                                    format!("Permissions: {}", self.defaults.permission.label())
+                                }
+                                Menu::SessionPermission => format!(
+                                    "Permissions: {}",
+                                    current.map(|s| s.permission).unwrap_or_default().label()
+                                ),
+                                Menu::Model | Menu::SessionModel => "Model".into(),
+                                Menu::Project => "Project".into(),
                             },
-                            None,
                             t,
                         ))
                     })
                     .child(icon("chevron-down", 11., t.faint))
-                    .child(probe(&self.probes, name)),
+                    .child(probe(&self.probes, name.clone())),
             )
             .when(open, |d| {
-                let list = self.menu_list(which, cx);
-                let placed = if which.upward() {
+                // As tall as the room between the chip and the window's
+                // edge allows; longer lists scroll.
+                // It opens on its usual side unless the other has clearly
+                // more room, then is as tall as that room allows; longer
+                // lists scroll.
+                let (above, below) = self.probes.borrow().get(&name).map_or((0., 440.), |b| {
+                    (b.top().as_f32(), self.window_h - b.bottom().as_f32())
+                });
+                let up = if which.upward() {
+                    !(above < 320. && below > above)
+                } else {
+                    below < 320. && above > below
+                };
+                let fit = ((if up { above } else { below }) - space::S8).clamp(160., 440.);
+                let list = self.menu_list(which, fit, cx);
+                let placed = if up {
                     anchored()
                         .anchor(Anchor::BottomLeft)
                         .snap_to_window_with_margin(px(8.))
@@ -1811,7 +1953,12 @@ impl Dent {
             .into_any_element()
     }
 
-    fn menu_list(&mut self, which: Menu, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn menu_list(
+        &mut self,
+        which: Menu,
+        max_h: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let t = self.t;
         let d = self.defaults.clone();
         let rows: Vec<AnyElement> = match which {
@@ -1865,37 +2012,96 @@ impl Dent {
                 v
             }
             Menu::Model | Menu::SessionModel => {
-                let current = if which == Menu::Model {
-                    d.model.clone()
-                } else {
-                    self.current().and_then(|s| s.model.clone())
+                let current = self.menu_model(which, cx);
+                let models = self.models_or_default();
+                // Aliases follow the newest version; pinned versions are
+                // full model ids, and wait behind "Older versions".
+                let (latest, older): (Vec<dent_protocol::Model>, Vec<dent_protocol::Model>) =
+                    models
+                        .into_iter()
+                        .partition(|m| !m.id.starts_with("claude-"));
+                let open = self.older_models || older.iter().any(|m| m.id == current);
+                let row = |this: &mut Self, m: &dent_protocol::Model, cx: &mut Context<Self>| {
+                    let id = m.id.clone();
+                    let (name, note) = if m.id == "default" {
+                        ("Default".to_string(), m.description.clone())
+                    } else {
+                        (m.name.clone(), m.description.clone())
+                    };
+                    menu_row(
+                        &this.probes,
+                        format!("m-{}", m.id),
+                        &name,
+                        (!note.is_empty()).then_some(note),
+                        current == m.id,
+                        &t,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if which == Menu::Model {
+                            this.defaults.model = Some(id.clone());
+                        } else {
+                            this.set_model(id.clone(), cx);
+                        }
+                        this.menu = None;
+                        cx.notify();
+                    }))
+                    .into_any_element()
                 };
-                let current = current.unwrap_or_else(|| "default".into());
-                self.models_or_default()
-                    .into_iter()
-                    .map(|m| {
-                        let id = m.id.clone();
-                        let note = (!m.description.is_empty()).then(|| m.description.clone());
-                        menu_row(
-                            &self.probes,
-                            format!("m-{}", m.id),
-                            &m.name,
-                            note,
-                            current == m.id,
-                            &t,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if which == Menu::Model {
-                                this.defaults.model = Some(id.clone());
-                            } else {
-                                this.set_model(id.clone(), cx);
-                            }
-                            this.menu = None;
-                            cx.notify();
-                        }))
-                        .into_any_element()
-                    })
-                    .collect()
+                let mut v: Vec<AnyElement> = latest.iter().map(|m| row(self, m, cx)).collect();
+                if v.is_empty() {
+                    v.push(menu_note("Asking Claude Code for its models…", &t));
+                }
+                if !older.is_empty() {
+                    let older_at = v.len();
+                    v.push(
+                        div()
+                            .id("m-older")
+                            .flex_none()
+                            .relative()
+                            .child(probe(&self.probes, "m-older"))
+                            .mx(px(space::S1))
+                            .mt(px(space::S1))
+                            .px(px(space::S2))
+                            .h(px(size::ROW))
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S2))
+                            .rounded(px(radius::MD))
+                            .border_t_1()
+                            .border_color(t.hairline)
+                            .cursor_pointer()
+                            .hover(|d| d.bg(t.hover()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.older_models = !this.older_models;
+                                // What opened comes into view.
+                                if this.older_models {
+                                    this.menu_scroll.scroll_to_top_of_item(older_at);
+                                }
+                                cx.notify();
+                            }))
+                            .child(icon(
+                                if open {
+                                    "chevron-down"
+                                } else {
+                                    "chevron-right"
+                                },
+                                12.,
+                                t.quiet,
+                            ))
+                            .child(
+                                div()
+                                    .ty(UI)
+                                    .text_size(px(12.))
+                                    .text_color(t.quiet)
+                                    .child(format!("Older versions · {}", older.len())),
+                            )
+                            .into_any_element(),
+                    );
+                    if open {
+                        v.extend(older.iter().map(|m| row(self, m, cx)));
+                    }
+                }
+                v
             }
             Menu::Permission | Menu::SessionPermission => {
                 let current = if which == Menu::Permission {
@@ -1934,8 +2140,31 @@ impl Dent {
                 } else {
                     self.current().and_then(|s| s.effort.clone())
                 };
+                let model = self.menu_model(
+                    if which == Menu::Effort {
+                        Menu::Model
+                    } else {
+                        Menu::SessionModel
+                    },
+                    cx,
+                );
+                let takes = self
+                    .models
+                    .iter()
+                    .find(|m| m.id == model)
+                    .map(|m| m.efforts.clone())
+                    .unwrap_or_default();
                 EFFORTS
                     .iter()
+                    // A level the model doesn't take isn't offered, unless
+                    // it's the one already chosen.
+                    .filter(|(value, _)| {
+                        value.is_none_or(|v| {
+                            takes.is_empty()
+                                || takes.iter().any(|e| e == v)
+                                || current.as_deref() == Some(v)
+                        })
+                    })
                     .map(|(value, note)| {
                         let v = value.map(str::to_string);
                         menu_row(
@@ -1963,12 +2192,38 @@ impl Dent {
         floating(&t)
             .id("menu")
             .w(px(280.))
+            .max_h(px(max_h))
+            .overflow_y_scroll()
+            .track_scroll(&self.menu_scroll)
             .py(px(space::S1))
             .flex()
             .flex_col()
             .occlude()
             .children(rows)
     }
+
+    /// The model a model menu is choosing for: the new session's, or the
+    /// open session's.
+    fn menu_model(&self, which: Menu, _cx: &mut Context<Self>) -> String {
+        if which == Menu::Model {
+            self.defaults.model.clone()
+        } else {
+            self.current().and_then(|s| s.model.clone())
+        }
+        .unwrap_or_else(|| "default".into())
+    }
+}
+
+/// A quiet line in a menu that isn't a choice.
+fn menu_note(text: &'static str, t: &theme::Theme) -> AnyElement {
+    div()
+        .px(px(space::S3))
+        .py(px(space::S2))
+        .ty(UI)
+        .text_size(px(12.))
+        .text_color(t.quiet)
+        .child(text)
+        .into_any_element()
 }
 
 /// Elapsed time in words: 12s, 3m 05s, 1h 02m.

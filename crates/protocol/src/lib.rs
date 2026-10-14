@@ -305,6 +305,13 @@ pub struct Model {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    /// The exact model this choice runs, like `claude-opus-5-5`; empty when
+    /// the agent didn't say.
+    #[serde(default)]
+    pub resolved: String,
+    /// The effort levels it takes; empty when the agent didn't say.
+    #[serde(default)]
+    pub efforts: Vec<String>,
 }
 
 /// A slash command or skill the agent offers in a session's folder.
@@ -518,6 +525,10 @@ pub enum Out {
     },
     Events {
         events: Vec<Event>,
+    },
+    /// The agent's model list changed, say after it updated.
+    Models {
+        models: Vec<Model>,
     },
     /// Catch-up is over; what follows is live.
     CaughtUp {
