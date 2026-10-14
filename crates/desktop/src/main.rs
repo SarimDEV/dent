@@ -118,6 +118,10 @@ impl Render for Dent {
         self.frames += 1;
         ui::FRAME.store(self.frames, std::sync::atomic::Ordering::Relaxed);
         self.drain_page(window, cx);
+        // A clicked notification opens its session.
+        if let Some(id) = notify::take_clicked() {
+            self.pending_select = Some(id);
+        }
         // A session just created opens once the daemon has told us about it.
         if let Some(id) = self.pending_select.clone()
             && self.session(&id).is_some()

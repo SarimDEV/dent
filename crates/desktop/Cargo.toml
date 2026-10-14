@@ -33,7 +33,7 @@ objc2 = "=0.6.5"
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSImage", "NSApplication", "NSResponder"] }
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSData", "NSError", "NSProcessInfo", "NSString", "NSBundle"] }
 # Notifications when a session needs you or finishes (dent.app only).
-objc2-user-notifications = { version = "=0.3.2", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "UNNotificationSound"] }
+objc2-user-notifications = { version = "=0.3.2", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "UNNotificationSound", "UNNotification", "UNNotificationResponse"] }
 objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "WKWebView", "WKSnapshotConfiguration"] }
 
 # Linux and Windows are parked until after the Mac release (spike 08).
