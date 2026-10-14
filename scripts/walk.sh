@@ -13,8 +13,15 @@ mkdir -p "$root/home" "$root/state" "$root/proj"
 git -C "$root/proj" init -q
 echo "# Scratch project" > "$root/proj/README.md"
 git -C "$root/proj" add . && git -C "$root/proj" -c user.name=walk -c user.email=walk@example.com commit -qm init
+unset DENT_CLAUDE
 cargo build -q -p dent-desktop -p dent-daemon -p dent-session-holder -p dent-fake-claude
 bin=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug
+if [[ "$name" == "real" ]]; then
+  # The real agent on its smallest model, signed in as you: your own home.
+  DENT_STATE="$root/state" DENT_WALK_PROJECT="$root/proj" DENT_HOLDER_ORPHAN_MS=2000 \
+    "$bin/dent-desktop" --walk real "$@"
+  exit
+fi
 HOME="$root/home" \
 DENT_STATE="$root/state" \
 DENT_HOLDER_ORPHAN_MS=2000 \

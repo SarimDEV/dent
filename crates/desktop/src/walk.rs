@@ -68,6 +68,7 @@ impl Walk {
     pub fn new(name: &str, shots: Option<PathBuf>) -> Self {
         let steps = match name {
             "stills" => stills(),
+            "real" => real(),
             _ => checks(),
         };
         Self {
@@ -622,6 +623,51 @@ fn checks() -> Vec<(f32, Act)> {
             0.5,
             Idle("with nothing moving, the window draws nothing", 3., 0.5),
         ),
+    ]);
+    v
+}
+
+/// A short session against the real agent on its smallest model: tiny
+/// prompts, so it costs next to nothing. Lenient about wording, strict
+/// about the flow.
+fn real() -> Vec<(f32, Act)> {
+    fn haiku(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
+        d.defaults.model = Some("haiku".into());
+        d.defaults.permission = dent_protocol::Permission::Ask;
+        cx.notify();
+    }
+    fn done(d: &Dent) -> bool {
+        status_is(d, Status::Done)
+    }
+    let mut v: Vec<(f32, Act)> = vec![(
+        0.,
+        Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+    )];
+    v.push((0.2, Call(haiku)));
+    v.extend(new_session("Reply with just the word ok."));
+    v.extend([
+        (0.1, Until("Haiku replies and the turn ends", |d, _| done(d) && says(d, "ok"), 60.)),
+        (0.5, Shot("real-reply")),
+        (0.2, Type(Field::Composer, "Use the Bash tool to run exactly: echo hi > hi.txt  Then reply with just: done")),
+        (0.2, Key("enter")),
+        (0.1, Until("it asks before running a command", |d, _| has(d, |i| matches!(i, Item::Approval { .. })), 60.)),
+        (0.5, Shot("real-approval")),
+        (0.2, Click("allow")),
+        (0.1, Until("allowed, it runs and finishes", |d, _| done(d) && says(d, "done"), 60.)),
+        (0.2, Type(Field::Composer, "Use the AskUserQuestion tool to ask me tea or coffee, with two options. Then reply with just my answer.")),
+        (0.2, Key("enter")),
+        (0.1, Until("it asks a question with choices", |d, _| has(d, |i| matches!(i, Item::Question { .. })), 60.)),
+        (0.5, Shot("real-question")),
+        (0.2, Click("opt-0-0")),
+        (0.1, Until("the answer reaches it", |d, _| done(d), 60.)),
+        (0.2, Type(Field::Composer, "Use the Write tool to create hello.html: a minimal page with an h1 saying Hello from Haiku. Then reply with just: written")),
+        (0.2, Key("enter")),
+        (0.1, Until("it asks before writing a file", |d, _| has(d, |i| matches!(i, Item::Approval { .. })), 60.)),
+        (0.2, Click("allow-session")),
+        (0.1, Until("the page opens in the viewer", |d, _| done(d) && has(d, |i| matches!(i, Item::Made { .. })), 60.)),
+        (1.2, Shot("real-page")),
+        (0.3, Key("cmd-n")),
+        (0.6, Shot("real-new")),
     ]);
     v
 }

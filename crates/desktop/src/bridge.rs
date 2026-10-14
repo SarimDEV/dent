@@ -85,9 +85,22 @@ pub fn art_id(session: &str, path: &str) -> &'static str {
 /// when it's inside it.
 fn relative(cwd: &Path, path: &str) -> String {
     let p = PathBuf::from(path);
-    match p.strip_prefix(cwd) {
-        Ok(r) => r.display().to_string(),
-        Err(_) => path.to_string(),
+    if let Ok(r) = p.strip_prefix(cwd) {
+        return r.display().to_string();
+    }
+    // The agent may name the real path where the session's folder is a
+    // link to it (on macOS, /var is /private/var).
+    if let Ok(real) = cwd.canonicalize()
+        && let Ok(r) = p.strip_prefix(&real)
+    {
+        return r.display().to_string();
+    }
+    match cwd.strip_prefix("/private") {
+        Ok(alias) if alias != cwd => match p.strip_prefix(Path::new("/").join(alias)) {
+            Ok(r) => r.display().to_string(),
+            Err(_) => path.to_string(),
+        },
+        _ => path.to_string(),
     }
 }
 
@@ -548,7 +561,8 @@ fn answered(tool: &str, input: &Value, a: &Answer, cwd: &Path) -> Item {
         "ExitPlanMode" => "the plan".into(),
         _ => {
             let (_, c) = what(tool, input, cwd);
-            c.lines()
+            c.trim_start_matches("$ ")
+                .lines()
                 .next()
                 .unwrap_or_default()
                 .chars()
@@ -574,4 +588,25 @@ fn answered(tool: &str, input: &Value, a: &Answer, cwd: &Path) -> Item {
         Answer::Expired => ("clock", "No longer needed".to_string()),
     };
     Item::Note { icon, text }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paths_read_relative_through_links() {
+        let tmp = std::env::temp_dir().canonicalize().unwrap();
+        let dir = tmp.join(format!("dent-rel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("site/a.html").display().to_string();
+        assert_eq!(relative(&dir, &file), "site/a.html");
+        // Named through /private when the folder was given without it.
+        if let Ok(short) = dir.strip_prefix("/private") {
+            let short = Path::new("/").join(short);
+            assert_eq!(relative(&short, &file), "site/a.html");
+        }
+        assert_eq!(relative(&dir, "/elsewhere/x"), "/elsewhere/x");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

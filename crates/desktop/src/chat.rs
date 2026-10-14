@@ -577,7 +577,7 @@ impl Dent {
                                                         .text_color(t.ink)
                                                         .child(label.clone()),
                                                 )
-                                                .when(!desc.is_empty(), |d| {
+                                                .when(!desc.is_empty() && desc != label, |d| {
                                                     d.child(
                                                         div()
                                                             .ty(UI)
