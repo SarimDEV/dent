@@ -218,7 +218,30 @@ pub fn session(
                 }
                 items.push(Item::Tools {
                     summary: summary(&calls, cwd),
-                    lines: calls.iter().map(|c| line(c, cwd)).collect(),
+                    lines: calls
+                        .iter()
+                        .map(|c| {
+                            let l = line(c, cwd);
+                            if !matches!(c.name.as_str(), "Task" | "Agent") {
+                                return l;
+                            }
+                            // A subagent says how far it got.
+                            let steps = calls
+                                .iter()
+                                .filter(|x| x.parent.as_deref() == Some(c.id.as_str()))
+                                .count();
+                            let state = match &c.result {
+                                None => "working",
+                                Some((true, _)) => "failed",
+                                Some((false, _)) => "done",
+                            };
+                            match steps {
+                                0 => format!("{l} · {state}"),
+                                1 => format!("{l} · {state} · 1 step"),
+                                n => format!("{l} · {state} · {n} steps"),
+                            }
+                        })
+                        .collect(),
                 });
             }
             Entry::Ask {
