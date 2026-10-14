@@ -123,6 +123,8 @@ pub fn default_models() -> Vec<Model> {
 pub fn blocks(blocks: Vec<AssistantBlock>) -> Vec<Block> {
     blocks
         .into_iter()
+        // Some models send empty thinking blocks; there's nothing to keep.
+        .filter(|b| !matches!(b, AssistantBlock::Thinking(t) if t.trim().is_empty()))
         .map(|b| match b {
             AssistantBlock::Text(text) => Block::Text { text },
             AssistantBlock::Thinking(text) => Block::Thinking { text },

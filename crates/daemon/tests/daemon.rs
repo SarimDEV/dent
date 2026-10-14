@@ -769,3 +769,40 @@ fn background_work_waits_for_the_follow_up_turn() {
     assert_eq!(c.status(&s), Some(Status::Done));
     assert!(c.text(&s).contains("finished cleanly"));
 }
+
+#[test]
+fn agents_wind_down_when_no_daemon_comes_back() {
+    let mut w = World::new(&[("DENT_HOLDER_ORPHAN_MS", "500")]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "hi");
+    c.wait_turns(&s, 1);
+    let agent = c
+        .events(&s)
+        .iter()
+        .find_map(|b| match b {
+            Body::Agent {
+                agent_session: Some(a),
+                ..
+            } => Some(a.clone()),
+            _ => None,
+        })
+        .expect("agent named");
+    let running = || {
+        Command::new("pgrep")
+            .args(["-f", &agent])
+            .output()
+            .map(|o| !o.stdout.is_empty())
+            .unwrap_or(false)
+    };
+    assert!(running(), "the agent waits for the next message");
+    w.kill();
+    let until = Instant::now() + Duration::from_secs(10);
+    while running() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !running(),
+        "the agent should exit once the holder gives up on the daemon"
+    );
+}

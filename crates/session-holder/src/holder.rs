@@ -27,6 +27,10 @@ pub struct Options {
     pub dir: PathBuf,
     /// Exit after this long with no processes and no daemon.
     pub idle: Duration,
+    /// With no daemon for this long, close every process's stdin so agents
+    /// finish what they're doing and exit, rather than wait forever for a
+    /// daemon that isn't coming back.
+    pub orphan: Duration,
     /// Overrides for testing upgrades.
     pub proto: u32,
     pub version: String,
@@ -37,6 +41,7 @@ impl Options {
         Self {
             dir,
             idle: Duration::from_secs(60),
+            orphan: Duration::from_secs(600),
             proto: PROTO,
             version: env!("CARGO_PKG_VERSION").into(),
         }
@@ -167,6 +172,13 @@ impl Holder {
             let empty = lock(&self.procs).is_empty();
             let alone = lock(&self.current).1.is_none();
             let idle = lock(&self.idle_since).elapsed() >= self.o.idle;
+            if alone && !empty && lock(&self.idle_since).elapsed() >= self.o.orphan {
+                for p in lock(&self.procs).values() {
+                    if lock(&p.stdin).take().is_some() {
+                        eprintln!("holder: no daemon for a while; closing stdin of {}", p.id);
+                    }
+                }
+            }
             if empty && (self.draining.load(Ordering::SeqCst) || (alone && idle)) {
                 let _ = std::fs::remove_file(socket(&self.o.dir));
                 eprintln!("holder: idle, exiting");

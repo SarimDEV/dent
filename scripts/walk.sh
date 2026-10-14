@@ -17,6 +17,7 @@ cargo build -q -p dent-desktop -p dent-daemon -p dent-session-holder -p dent-fak
 bin=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug
 HOME="$root/home" \
 DENT_STATE="$root/state" \
+DENT_HOLDER_ORPHAN_MS=2000 \
 DENT_CLAUDE="$bin/dent-fake-claude" \
 DENT_WALK_PROJECT="$root/proj" \
 FAKE_CLAUDE_SPEED="${FAKE_CLAUDE_SPEED:-0.3}" \

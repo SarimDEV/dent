@@ -18,5 +18,11 @@ fn main() -> Result<()> {
     if let Some(ms) = get("--idle-ms").and_then(|s| s.parse().ok()) {
         o.idle = Duration::from_millis(ms);
     }
+    if let Some(ms) = std::env::var("DENT_HOLDER_ORPHAN_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+    {
+        o.orphan = Duration::from_millis(ms);
+    }
     holder::serve(o)
 }
