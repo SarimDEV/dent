@@ -1375,7 +1375,11 @@ impl Dent {
                     .when(i == at, |d| d.bg(t.selected()))
                     .hover(|d| d.bg(t.hover()))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.complete_slash(&name, window, cx);
+                        if mention {
+                            this.complete_mention(&name, window, cx);
+                        } else {
+                            this.complete_slash(&name, window, cx);
+                        }
                         this.composer.update(cx, |c, cx| c.focus(window, cx));
                     }))
                     .child(
@@ -1383,7 +1387,11 @@ impl Dent {
                             .flex_none()
                             .ty(CODE)
                             .text_color(t.ink)
-                            .child(format!("/{}", c.name)),
+                            .child(if mention {
+                                c.name.clone()
+                            } else {
+                                format!("/{}", c.name)
+                            }),
                     )
                     .when(!c.hint.is_empty(), |d| {
                         d.child(
