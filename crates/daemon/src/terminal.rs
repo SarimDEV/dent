@@ -16,8 +16,45 @@ fn store() -> PathBuf {
 }
 
 /// How recently a transcript must have changed for its session to count as
-/// still open in a terminal.
+/// still open in a terminal, when Claude Code keeps no record of it running.
 const OPEN_MS: u64 = 60_000;
+
+/// Sessions a Claude Code process is running now. Each running `claude`
+/// keeps `~/.claude/sessions/<pid>.json` naming its session; a record whose
+/// process is gone is stale.
+fn running() -> HashSet<String> {
+    running_in(&crate::paths::home().join(".claude/sessions"))
+}
+
+fn running_in(dir: &Path) -> HashSet<String> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|f| f.path().extension().is_some_and(|e| e == "json"))
+        .filter_map(|f| {
+            let v: Value = serde_json::from_slice(&std::fs::read(f.path()).ok()?).ok()?;
+            let pid = v.get("pid")?.as_i64()?;
+            alive(pid).then(|| v.get("sessionId")?.as_str().map(str::to_string))?
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn alive(pid: i64) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // Signal 0 only asks whether the process exists; EPERM means it does.
+    pid > 0
+        && (unsafe { libc::kill(pid, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+}
+
+#[cfg(not(unix))]
+fn alive(pid: i64) -> bool {
+    pid > 0
+}
 
 /// Recent interactive sessions, newest first by the last thing said in
 /// them, leaving out `owned` (dent's own). One still being written is
@@ -39,6 +76,7 @@ pub fn recent(owned: &HashSet<String>, limit: usize) -> Vec<RecentSession> {
     // file's time only narrows the search; the last message orders it.
     files.sort_by_key(|(_, t)| std::cmp::Reverse(*t));
     let now = crate::daemon::now_ms();
+    let live = running();
     let mut out = Vec::new();
     for (path, changed) in files {
         if out.len() >= limit * 3 {
@@ -51,7 +89,7 @@ pub fn recent(owned: &HashSet<String>, limit: usize) -> Vec<RecentSession> {
             continue;
         }
         if let Some(mut r) = summary(&path, &id, changed) {
-            r.open = now.saturating_sub(changed) < OPEN_MS;
+            r.open = live.contains(&id) || now.saturating_sub(changed) < OPEN_MS;
             out.push(r);
         }
     }
@@ -62,10 +100,11 @@ pub fn recent(owned: &HashSet<String>, limit: usize) -> Vec<RecentSession> {
 
 /// Whether a terminal session looks open right now.
 pub fn is_open(agent_session: &str) -> bool {
-    find(agent_session)
-        .and_then(|p| p.metadata().ok()?.modified().ok())
-        .and_then(|t| t.elapsed().ok())
-        .is_some_and(|age| age.as_millis() < u128::from(OPEN_MS))
+    running().contains(agent_session)
+        || find(agent_session)
+            .and_then(|p| p.metadata().ok()?.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age.as_millis() < u128::from(OPEN_MS))
 }
 
 /// Unix milliseconds from a transcript timestamp like
@@ -527,6 +566,30 @@ fn save_picture(source: &Value, media: &Path, n: usize) -> Option<String> {
 mod tests {
     use super::*;
     use dent_protocol::Block;
+
+    #[test]
+    fn a_session_counts_as_running_while_its_process_lives() {
+        let dir = std::env::temp_dir().join(format!("dent-running-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let me = std::process::id();
+        std::fs::write(
+            dir.join(format!("{me}.json")),
+            format!(r#"{{"pid":{me},"sessionId":"live-one"}}"#),
+        )
+        .unwrap();
+        // A pid far past any real one: its record is stale.
+        std::fs::write(
+            dir.join("99999999.json"),
+            r#"{"pid":99999999,"sessionId":"gone"}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("junk.json"), "not json").unwrap();
+        let live = running_in(&dir);
+        assert!(live.contains("live-one"));
+        assert!(!live.contains("gone"));
+        assert_eq!(live.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Made-up lines in the shapes Claude Code writes.
     const TRANSCRIPT: &str = r#"{"type":"user","cwd":"/tmp/p","uuid":"u1","message":{"role":"user","content":"Fix the footer"}}
