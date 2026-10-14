@@ -633,12 +633,33 @@ fn checks() -> Vec<(f32, Act)> {
         (0.3, Type(Field::Composer, "a long answer please")),
         (0.1, Key("enter")),
         (0.1, Until("streams a third time", |d, _| streaming(d), 10.)),
+        (0.1, Type(Field::Composer, "save this for later")),
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until(
+                "it waits",
+                |d, _| has(d, |i| matches!(i, Item::Queued { .. })),
+                5.,
+            ),
+        ),
         (0.1, Key("cmd-.")),
         (
             0.1,
             Until(
                 "⌘. stops it within three seconds",
                 |d, _| status_is(d, Status::Idle),
+                3.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "a message still waiting comes back to the composer",
+                |d, cx| {
+                    d.composer.read(cx).value() == "save this for later"
+                        && !has(d, |i| matches!(i, Item::Queued { .. }))
+                },
                 3.,
             ),
         ),

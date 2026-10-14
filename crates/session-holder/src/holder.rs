@@ -550,6 +550,10 @@ fn pump(p: Arc<Proc>, src: Option<Box<dyn Read + Send>>, path: PathBuf, err: boo
 }
 
 fn stop(p: Arc<Proc>, grace: Duration) {
+    // kill(0) or kill(-1) would signal far more than this process's group.
+    if p.pid <= 1 {
+        return;
+    }
     let group = -(p.pid as i32);
     // SAFETY: kill has no memory preconditions.
     unsafe { libc::kill(group, libc::SIGTERM) };

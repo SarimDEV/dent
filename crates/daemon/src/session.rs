@@ -31,6 +31,19 @@ fn idle() -> Duration {
 /// After asking the agent to stop, how long before stopping its process.
 const STOP_GRACE: Duration = Duration::from_secs(2);
 
+/// A new agent process that hasn't answered in this long is stuck starting.
+fn start_limit() -> Duration {
+    std::env::var("DENT_START_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(60))
+}
+
+/// What Claude Code says when the conversation it was asked to resume has
+/// no transcript (it was stopped before writing one, or the file is gone).
+const FORGOTTEN: &str = "No conversation found with session ID";
+
 pub struct Cmd {
     pub op: Op,
     pub reply: Option<oneshot::Sender<Result<(), String>>>,
@@ -91,6 +104,8 @@ struct Proc {
     err_off: u64,
     /// We asked it to stop, so its exit isn't a crash.
     stopping: bool,
+    /// It was started to carry on an earlier conversation.
+    resumed: bool,
 }
 
 struct Pending {
@@ -142,6 +157,14 @@ struct Session {
     max_context: Option<u64>,
     idle_at: Option<Instant>,
     stop_at: Option<Instant>,
+    /// When a starting agent must have answered by.
+    start_by: Option<Instant>,
+    /// Replies owed to the agent, written once its output is handled.
+    outbox: Vec<Value>,
+    /// The last message sent, to send again if the agent has to start over.
+    last: Option<(String, String, Vec<String>)>,
+    /// The agent couldn't find the conversation it was asked to resume.
+    forgot: bool,
 }
 
 /// Start a session's task from its row. `held` is what the holder is
@@ -175,6 +198,10 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
         max_context: None,
         idle_at: None,
         stop_at: None,
+        start_by: None,
+        outbox: Vec::new(),
+        last: None,
+        forgot: false,
     };
     s.rebuild();
     tokio::spawn(async move {
@@ -290,6 +317,7 @@ impl Session {
                 err: Vec::new(),
                 err_off: alive.map(|p| p.err).unwrap_or(0),
                 stopping: false,
+                resumed: true,
             });
             if !self.in_turn {
                 self.idle_at = Some(Instant::now() + idle());
@@ -306,7 +334,10 @@ impl Session {
 
     async fn run(mut self, mut rx: mpsc::UnboundedReceiver<Cmd>) {
         loop {
-            let deadline = [self.idle_at, self.stop_at].into_iter().flatten().min();
+            let deadline = [self.idle_at, self.stop_at, self.start_by]
+                .into_iter()
+                .flatten()
+                .min();
             let cmd = match deadline {
                 Some(at) => tokio::select! {
                     c = rx.recv() => c,
@@ -344,6 +375,9 @@ impl Session {
             Op::Interrupt => self.interrupt().await,
             Op::Answer { id, answer } => self.answer(id, answer).await,
             Op::SetModel(model) => {
+                if self.model.as_deref() == Some(model.as_str()) {
+                    return Ok(());
+                }
                 if self.proc.is_some() {
                     self.control("set_model", json!({ "model": model }), Ctl::Other)
                         .await?;
@@ -358,6 +392,9 @@ impl Session {
                 Ok(())
             }
             Op::SetPermission(p) => {
+                if p == self.permission {
+                    return Ok(());
+                }
                 if self.proc.is_some() {
                     let mode = claude::mode_name(p);
                     self.control("set_permission_mode", json!({ "mode": mode }), Ctl::Other)
@@ -373,6 +410,10 @@ impl Session {
                 Ok(())
             }
             Op::SetEffort(effort) => {
+                // The same effort again mustn't restart the agent.
+                if self.effort.as_deref().unwrap_or("") == effort {
+                    return Ok(());
+                }
                 self.effort = (!effort.is_empty()).then(|| effort.clone());
                 self.log(Body::Settings {
                     effort: Some(effort),
@@ -416,6 +457,12 @@ impl Session {
                 bytes,
             } => {
                 self.output(&proc, err, off, &bytes);
+                for reply in std::mem::take(&mut self.outbox) {
+                    let _ = self.write(&reply).await;
+                }
+                if std::mem::take(&mut self.forgot) {
+                    self.start_over().await;
+                }
                 if self.respawn && !self.in_turn {
                     self.retire_proc().await;
                 }
@@ -514,6 +561,12 @@ impl Session {
         attachments: &[String],
     ) -> Result<()> {
         self.checkpoint(id).await;
+        self.last = (!steer).then(|| (id.to_string(), text.to_string(), attachments.to_vec()));
+        self.hand_over(text, steer, attachments).await
+    }
+
+    /// Write a message to the agent process, starting one if needed.
+    async fn hand_over(&mut self, text: &str, steer: bool, attachments: &[String]) -> Result<()> {
         if let Err(e) = self.ensure_proc().await {
             self.log(Body::Notice {
                 text: format!("Couldn't start Claude Code: {e:#}"),
@@ -533,6 +586,25 @@ impl Session {
         self.in_turn = true;
         self.idle_at = None;
         Ok(())
+    }
+
+    /// The agent had no record of the conversation it was resuming: carry
+    /// on in a new one rather than failing every message from now on.
+    async fn start_over(&mut self) {
+        self.retire_proc().await;
+        self.agent_started = false;
+        self.resume_at = Some(None);
+        self.log(Body::Notice {
+            text: "Claude Code no longer had this conversation's history, so it started a new \
+                   one. It won't remember what was said before."
+                .into(),
+        });
+        match self.last.clone() {
+            Some((_, text, attachments)) => {
+                let _ = self.hand_over(&text, false, &attachments).await;
+            }
+            None => self.end_turn(Outcome::Interrupted { reason: None }),
+        }
     }
 
     /// After a turn, the next held message goes.
@@ -654,10 +726,14 @@ impl Session {
             None if self.agent_started => claude::Start::Resume(agent_session),
             None => claude::Start::Fresh(agent_session),
         };
+        let resumed = !matches!(start, claude::Start::Fresh(_));
         let proc = self.d.store().next_proc(&self.id)?;
+        let env = self.d.env();
+        // Each new agent also refreshes the PATH for the one after it.
+        self.d.refresh_env();
         let argv = claude::argv(
-            &self.d.env.claude,
-            &self.d.env.path,
+            &env.claude,
+            &env.path,
             self.model.as_deref(),
             self.permission,
             &start,
@@ -673,7 +749,9 @@ impl Session {
             err: Vec::new(),
             err_off: 0,
             stopping: false,
+            resumed,
         });
+        self.start_by = Some(Instant::now() + start_limit());
         self.control("initialize", json!({}), Ctl::Initialize)
             .await?;
         Ok(())
@@ -696,8 +774,10 @@ impl Session {
             .await
     }
 
+    /// Stop always ends the turn: by asking, then by stopping the process,
+    /// then by letting go of it.
     async fn interrupt(&mut self) -> Result<()> {
-        if !self.in_turn || self.proc.is_none() {
+        if !self.in_turn {
             return Ok(());
         }
         // Stop means nothing more arrives: held messages come back.
@@ -705,9 +785,19 @@ impl Session {
             self.log(Body::Unqueued { id });
         }
         self.steered = false;
-        self.control("interrupt", json!({}), Ctl::Interrupt).await?;
-        // The agent doesn't always end the turn after an interrupt.
-        self.stop_at = Some(Instant::now() + STOP_GRACE);
+        if self.proc.is_none() {
+            self.end_turn(Outcome::Interrupted { reason: None });
+            return Ok(());
+        }
+        // The agent doesn't always end the turn after an interrupt, and one
+        // that can't be reached gets its process stopped straight away.
+        let asked = self.control("interrupt", json!({}), Ctl::Interrupt).await;
+        let grace = if asked.is_ok() {
+            STOP_GRACE
+        } else {
+            Duration::ZERO
+        };
+        self.stop_at = Some(Instant::now() + grace);
         Ok(())
     }
 
@@ -742,11 +832,37 @@ impl Session {
             if self.in_turn
                 && let Some(p) = self.proc.as_mut()
             {
-                p.stopping = true;
-                let id = p.id.clone();
-                if let Ok(h) = self.d.holder().await {
-                    let _ = h.stop(&id, Duration::from_secs(1)).await;
+                if p.stopping {
+                    // Stopped, and still no exit: let it go.
+                    self.retire_proc().await;
+                    self.end_turn(Outcome::Interrupted { reason: None });
+                } else {
+                    p.stopping = true;
+                    let id = p.id.clone();
+                    let stopped = match self.d.holder().await {
+                        Ok(h) => h.stop(&id, Duration::from_secs(1)).await.is_ok(),
+                        Err(_) => false,
+                    };
+                    if stopped {
+                        self.stop_at = Some(now + Duration::from_secs(5));
+                    } else {
+                        self.retire_proc().await;
+                        self.end_turn(Outcome::Interrupted { reason: None });
+                    }
                 }
+            }
+        }
+        if self.start_by.is_some_and(|t| t <= now) {
+            self.start_by = None;
+            if let Some(p) = self.proc.as_ref() {
+                let tail = String::from_utf8_lossy(&p.err).trim().to_string();
+                let last = tail.lines().last().unwrap_or_default().to_string();
+                self.retire_proc().await;
+                let mut message = "Claude Code didn't start within a minute".to_string();
+                if !last.is_empty() {
+                    message = format!("{message}: {last}");
+                }
+                self.end_turn(Outcome::Error { message });
             }
         }
         if self.idle_at.is_some_and(|t| t <= now) {
@@ -838,6 +954,7 @@ impl Session {
                 self.in_turn = true;
                 self.agent_started = true;
                 self.idle_at = None;
+                self.start_by = None;
                 self.log_from(Body::TurnStarted, end);
             }
             Inbound::MessageStart { parent: None } => self.d.clear_partial(&self.id),
@@ -918,7 +1035,20 @@ impl Session {
                 ok,
                 body,
             } => match (self.controls.remove(&request_id), ok) {
+                (Some(Ctl::Initialize), _) if !ok => {
+                    self.start_by = None;
+                    self.log_from(
+                        Body::Notice {
+                            text: format!(
+                                "Claude Code refused: {}",
+                                body.as_str().unwrap_or("unknown request")
+                            ),
+                        },
+                        end,
+                    );
+                }
                 (Some(Ctl::Initialize), true) => {
+                    self.start_by = None;
                     self.d.set_models(claude::models(&body));
                     self.d.set_commands(&self.id, claude::commands(&body));
                 }
@@ -933,6 +1063,24 @@ impl Session {
                     end,
                 ),
             },
+            Inbound::Request {
+                request_id,
+                subtype,
+                server,
+            } => {
+                if subtype == "elicitation" {
+                    let who = server.unwrap_or_else(|| "An MCP server".into());
+                    self.log_from(
+                        Body::Notice {
+                            text: format!(
+                                "{who} asked for input dent can't show yet, so it was declined"
+                            ),
+                        },
+                        end,
+                    );
+                }
+                self.outbox.push(wire::refuse(&request_id, &subtype));
+            }
             Inbound::CancelRequest { request_id } => {
                 if self.asked.remove(&request_id).is_some() {
                     self.log_from(
@@ -953,6 +1101,13 @@ impl Session {
                     terminal_reason.as_deref(),
                     Some("aborted_streaming" | "aborted_tools")
                 );
+                if is_error
+                    && text.as_deref().is_some_and(|t| t.starts_with(FORGOTTEN))
+                    && self.proc.as_ref().is_some_and(|p| p.resumed)
+                {
+                    self.forgot = true;
+                    return;
+                }
                 if !self.in_turn {
                     // Results with no turn running are the agent's own
                     // bookkeeping (after an interrupt, say).
@@ -995,6 +1150,7 @@ impl Session {
 
     fn end_turn_at(&mut self, outcome: Outcome, end: Option<u64>) {
         self.stop_at = None;
+        self.start_by = None;
         // Approvals still open belonged to the turn that just ended.
         for id in std::mem::take(&mut self.asked).into_keys() {
             self.log(Body::Answered {
@@ -1031,7 +1187,13 @@ impl Session {
             let _ = h.release(proc).await;
         }
         self.idle_at = None;
+        self.start_by = None;
         if p.stopping && !self.in_turn {
+            return;
+        }
+        let tail = String::from_utf8_lossy(&p.err).trim().to_string();
+        if self.in_turn && p.resumed && !p.stopping && tail.contains(FORGOTTEN) {
+            self.start_over().await;
             return;
         }
         let why = match (code, signal) {
@@ -1039,11 +1201,19 @@ impl Session {
             (Some(c), _) => format!("exit code {c}"),
             _ => "no exit status".into(),
         };
-        let tail = String::from_utf8_lossy(&p.err).trim().to_string();
         let last = tail.lines().last().unwrap_or_default().to_string();
+        if code == Some(127) {
+            // `env` couldn't find it: maybe installed since dent started.
+            self.d.refresh_env();
+        }
         if self.in_turn {
             let reason = if p.stopping {
                 None
+            } else if code == Some(127) {
+                Some(format!(
+                    "Couldn't find Claude Code (`{}`). Install it, then send again.",
+                    self.d.env().claude
+                ))
             } else if last.is_empty() {
                 Some(format!("Claude Code stopped unexpectedly ({why})"))
             } else {

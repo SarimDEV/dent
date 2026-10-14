@@ -58,6 +58,13 @@ pub enum Inbound {
         ok: bool,
         body: Value,
     },
+    /// Any other `control_request`. The agent waits on every one of these,
+    /// so each gets an answer, even if only "no".
+    Request {
+        request_id: String,
+        subtype: String,
+        server: Option<String>,
+    },
     /// The agent no longer needs an answer (after an interrupt, say).
     CancelRequest {
         request_id: String,
@@ -210,6 +217,11 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
                 suggestions: r["permission_suggestions"].clone(),
             }
         }
+        ("control_request", _) => Inbound::Request {
+            request_id: s(&v, "request_id"),
+            subtype: s(&v["request"], "subtype"),
+            server: v["request"]["mcp_server_name"].as_str().map(str::to_owned),
+        },
         ("control_response", _) => {
             let r = &v["response"];
             let ok = r["subtype"] == "success";
@@ -383,6 +395,22 @@ pub fn deny(request_id: &str, reason: &str) -> Value {
         request_id,
         json!({ "behavior": "deny", "message": message, "decisionClassification": "user_reject" }),
     )
+}
+
+/// Turn down a request dent doesn't handle, so the agent stops waiting.
+pub fn refuse(request_id: &str, subtype: &str) -> Value {
+    if subtype == "elicitation" {
+        // An MCP server asking the person for input: a plain decline.
+        return control_success(request_id, json!({ "action": "decline" }));
+    }
+    json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "error",
+            "request_id": request_id,
+            "error": format!("dent doesn't handle {subtype} requests"),
+        },
+    })
 }
 
 fn control_success(request_id: &str, response: Value) -> Value {

@@ -91,6 +91,29 @@ fn main() {
         context: 18_000,
         steer: false,
     };
+    // Claude Code stuck before it starts (a lock held elsewhere, say).
+    if std::env::var_os("FAKE_CLAUDE_HANG").is_some() {
+        eprintln!("waiting for a lock");
+        loop {
+            std::thread::park();
+        }
+    }
+    // Claude Code with no record of the conversation it was asked to resume.
+    if std::env::var_os("FAKE_CLAUDE_FORGET").is_some() && arg("--resume").is_some() {
+        while let Ok(v) = a.rx.recv() {
+            if v["type"] == "user" {
+                break;
+            }
+        }
+        let id = arg("--resume").unwrap_or_default();
+        out(
+            json!({"type": "result", "subtype": "error_during_execution", "is_error": true,
+            "num_turns": 0, "session_id": id,
+            "errors": [format!("No conversation found with session ID: {id}")]}),
+        );
+        eprintln!("No conversation found with session ID: {id}");
+        std::process::exit(1);
+    }
     loop {
         if let Some(text) = a.queue.pop_front() {
             if a.turn(&text).is_err() && !a.stdin_open {
@@ -245,13 +268,16 @@ impl Agent {
 
     /// Ask for permission and wait for the answer.
     fn permission(&mut self, tool: &str, tool_id: &str, input: &Value) -> Result<Value, Cut> {
+        self.request(json!({
+            "subtype": "can_use_tool", "tool_name": tool, "display_name": tool, "input": input,
+            "description": input["description"], "permission_suggestions": [], "tool_use_id": tool_id}))
+    }
+
+    /// Send a control request to the host and wait for its answer.
+    fn request(&mut self, request: Value) -> Result<Value, Cut> {
         self.next += 1;
         let id = format!("fake-req-{}", self.next);
-        out(
-            json!({"type": "control_request", "request_id": id, "request": {
-            "subtype": "can_use_tool", "tool_name": tool, "display_name": tool, "input": input,
-            "description": input["description"], "permission_suggestions": [], "tool_use_id": tool_id}}),
-        );
+        out(json!({"type": "control_request", "request_id": id, "request": request}));
         loop {
             match self.rx.recv() {
                 Ok(v) => {
@@ -518,6 +544,17 @@ impl Agent {
                 let _ = std::fs::write(path, &body);
                 self.say(&format!("Wrote `{path}`."), None)?;
             }
+            self.end("done", false);
+            return Ok(());
+        }
+        if lower.contains("elicit") {
+            // An MCP server asking for input, the way the real CLI relays it.
+            let resp = self.request(
+                json!({"subtype": "elicitation", "mcp_server_name": "tickets",
+                "message": "Which project?", "requested_schema": {"type": "object"}}),
+            )?;
+            let action = resp["action"].as_str().unwrap_or("no answer").to_string();
+            self.say(&format!("The tickets server got: {action}."), None)?;
             self.end("done", false);
             return Ok(());
         }

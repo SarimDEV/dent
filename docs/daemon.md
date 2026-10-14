@@ -160,6 +160,20 @@ You are notified when an agent is blocked or has finished and is waiting for you
 - The notification says whether the agent finished or asked you a question, using the last message.
 - Per project you can mute finished-turn notifications and keep only blocks.
 
+### Turns always end
+
+Other harnesses that drive Claude Code this way have hit the same failures again and again: threads stuck on "Working", conversations that can no longer be resumed, and agents still running after the app said they had stopped. dent guards against each one:
+
+- **A turn is open from the message dent hands over until a `result` or the process exits.** Nothing else, such as heartbeats or status lines, opens or closes one. A restarted daemon whose agent is gone ends the open turn as interrupted.
+- **Stop always ends the turn.** dent sends an interrupt and allows 2 s. Then it stops the agent's whole process group, and 5 s after that it lets go of a process that still hasn't exited. If the agent can't be reached at all, it is stopped at once. Messages that were still waiting come back to the composer instead of disappearing.
+- **An agent stuck starting** (one holding a lock, say) gets a minute to answer `initialize`. After that the turn ends with the last line Claude Code printed.
+- **A conversation Claude Code can't find** ("No conversation found with session ID", when a process was stopped before it wrote a transcript) doesn't break the session. dent starts a new conversation, says so, and sends the message again.
+- **Every `control_request` gets an answer.** Approvals and questions go to you. An MCP server asking for input (`elicitation`) is declined with a note, and any other request is refused. An unanswered request would stall the agent for good.
+- **Approvals still open when a turn ends** are expired, so nothing waits on an answer that can't be used.
+- **A setting changed to what it already is does nothing.** In particular it never restarts a running agent.
+- **The PATH agents get is re-read from the login shell** in the background each time an agent starts, so tools installed after dent started are found. A missing `claude` is reported as such.
+- **"Done" is notified once**, when the turn and any background work it started have both finished.
+
 ## Decision model
 
 A small decision model answers questions with fixed answers in a few hundred milliseconds for a fraction of a cent. Jev ([overview](https://apidog.com/blog/what-is-jev/)) and Cloudflare's Clef, which accepts the same requests and has open weights ([deep dive](https://flaviocopes.com/clef/)), both fit behind one interface.

@@ -1073,3 +1073,63 @@ fn terminal_sessions_are_listed_and_carried_on_with_their_history() {
     assert!(t.contains(&format!("--resume {id}")), "{t}");
     let _ = std::fs::remove_dir_all(&home);
 }
+
+#[test]
+fn requests_dent_doesnt_handle_are_declined_so_the_agent_never_waits() {
+    let w = World::new(&[]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "elicit a project");
+    c.wait(&s, "the turn to end", is_done);
+    assert!(
+        c.text(&s).contains("The tickets server got: decline"),
+        "{}",
+        c.text(&s)
+    );
+    assert_eq!(
+        c.count(
+            &s,
+            |b| matches!(b, Body::Notice { text } if text.starts_with("tickets asked"))
+        ),
+        1
+    );
+}
+
+#[test]
+fn a_conversation_the_agent_forgot_carries_on_in_a_new_one() {
+    let w = World::new(&[("DENT_IDLE_MS", "300"), ("FAKE_CLAUDE_FORGET", "1")]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "hi");
+    c.wait_turns(&s, 1);
+    // The agent stops when idle, so the next message resumes, and the
+    // resume finds nothing.
+    std::thread::sleep(Duration::from_millis(900));
+    c.say(&s, "2", "tell me your args", false);
+    c.wait_turns(&s, 2);
+    let text = c.text(&s);
+    let last = text.lines().last().unwrap_or_default();
+    assert!(
+        last.contains("--session-id") && !last.contains("--resume"),
+        "{last}"
+    );
+    assert!(
+        c.events(&s)
+            .iter()
+            .any(|b| matches!(b, Body::Notice { text } if text.contains("started a new one")))
+    );
+    assert_eq!(c.count(&s, |b| matches!(b, Body::TurnEnded { .. })), 2);
+    assert_eq!(c.count(&s, is_done), 2);
+}
+
+#[test]
+fn an_agent_stuck_starting_ends_the_turn_with_why() {
+    let w = World::new(&[("DENT_START_MS", "500"), ("FAKE_CLAUDE_HANG", "1")]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "hi");
+    c.wait(&s, "the turn to fail", |b| {
+        matches!(b, Body::TurnEnded { outcome: Outcome::Error { message } }
+            if message.starts_with("Claude Code didn't start") && message.contains("waiting for a lock"))
+    });
+}

@@ -1412,7 +1412,8 @@ impl Dent {
                 Status::Needs => {
                     crate::notify::post("Needs you", &format!("{} · {}", s.title, s.detail), id)
                 }
-                Status::Done if old_status == Some(Status::Working) => {
+                // After the turn and anything it left running in the background.
+                Status::Done if matches!(old_status, Some(Status::Working | Status::Waiting)) => {
                     crate::notify::post("Done", &format!("{} · {}", s.title, s.detail), id)
                 }
                 _ => {}
@@ -1602,10 +1603,25 @@ impl Dent {
         cx.notify();
     }
 
-    pub fn stop(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn stop(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(s) = self.session(id) else { return };
         if !matches!(s.status, Status::Working | Status::Needs) {
             return;
+        }
+        // Stopping drops messages still waiting their turn: their text comes
+        // back to the composer rather than vanishing.
+        let waiting: Vec<String> = s
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Queued { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        if !waiting.is_empty() && self.composer.read(cx).value().trim().is_empty() {
+            let text = waiting.join("\n\n");
+            self.composer
+                .update(cx, |c, cx| c.set_value(text, window, cx));
         }
         // The header offers Resume once it has stopped.
         self.live.send(Request::Interrupt {

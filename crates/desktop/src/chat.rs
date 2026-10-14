@@ -1062,7 +1062,7 @@ impl Dent {
                 .justify_center()
                 .bg(t.ink)
                 .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| this.stop(&id, cx)))
+                .on_click(cx.listener(move |this, _, window, cx| this.stop(&id, window, cx)))
                 .tooltip(tip("Stop", Some("⌘."), t))
                 .child(div().size(px(9.)).bg(t.surface))
                 .child(probe(&self.probes, "send"))

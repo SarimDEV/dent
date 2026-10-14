@@ -27,7 +27,8 @@ pub enum Live {
 
 pub struct Daemon {
     pub paths: Paths,
-    pub env: AgentEnv,
+    /// Re-read now and then, so tools installed after dent started are found.
+    env: Mutex<Arc<AgentEnv>>,
     pub version: String,
     /// This binary's build stamp, taken at start.
     pub build: String,
@@ -67,7 +68,7 @@ impl Daemon {
         let (live, _) = broadcast::channel(4096);
         Arc::new(Self {
             paths,
-            env,
+            env: Mutex::new(Arc::new(env)),
             version: env!("CARGO_PKG_VERSION").into(),
             build: std::env::current_exe()
                 .map(|p| dent_protocol::build_stamp(&p))
@@ -178,7 +179,7 @@ impl Daemon {
             return (w.clone(), *at);
         }
         let me = self.clone();
-        let read = tokio::task::spawn_blocking(move || crate::usage::probe(&me.env))
+        let read = tokio::task::spawn_blocking(move || crate::usage::probe(&me.env()))
             .await
             .ok()
             .flatten();
@@ -188,6 +189,19 @@ impl Daemon {
     }
 
     /// The holder, connecting (and starting it) on first use.
+    pub fn env(&self) -> Arc<AgentEnv> {
+        lock(&self.env).clone()
+    }
+
+    /// Ask the login shell again, in the background; the next agent started
+    /// gets the answer.
+    pub fn refresh_env(self: &Arc<Self>) {
+        let me = self.clone();
+        tokio::task::spawn_blocking(move || {
+            *lock(&me.env) = Arc::new(AgentEnv::detect());
+        });
+    }
+
     pub async fn holder(self: &Arc<Self>) -> Result<Arc<Holder>> {
         let mut h = self.holder.lock().await;
         if let Some(h) = h.as_ref() {
