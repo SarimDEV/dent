@@ -171,3 +171,7 @@ With the system's reduce-motion setting on, every motion resolves instantly, the
 - The dither is a grid of flat quads, so it is for small surfaces only. Across a whole window it measured far over budget, which is why the theme switch is a colour tween.
 - Only the working square repaints a quiet window, at 8 fps, and only while a session is working and visible.
 - Every new motion is measured with the frame-timing bench before it lands (Reliability requirements).
+
+## Code
+
+Code blocks are highlighted (arborium, [0016](decisions/0016-highlighting-arborium.md)) within the palette: keywords in ink at medium weight; strings, functions, types and numbers are the ink mixed about halfway toward the done, working, waiting and needs hues; comments quiet and italic. Nothing is louder than the prose around it.

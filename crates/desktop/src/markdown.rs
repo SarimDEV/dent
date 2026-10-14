@@ -418,13 +418,46 @@ pub fn render(blocks: &[Block], t: &Theme, doc: bool) -> Div {
                             .py(px(space::S2))
                             .ty(CODE)
                             .text_color(t.ink)
-                            .children(body.lines().map(|l| {
-                                div().whitespace_nowrap().child(if l.is_empty() {
-                                    " ".to_string()
-                                } else {
-                                    l.to_string()
-                                })
-                            })),
+                            .children({
+                                // Highlighted once per block, then cached.
+                                let spans = crate::highlight::spans(lang, body);
+                                let mut at = 0;
+                                body.split('\n')
+                                    .map(|l| {
+                                        let start = at;
+                                        at += l.len() + 1;
+                                        if l.is_empty() {
+                                            return div().child(" ".to_string());
+                                        }
+                                        let runs: Vec<TextRun> =
+                                            crate::highlight::line_runs(&spans, start, l)
+                                                .into_iter()
+                                                .map(|(len, tag)| {
+                                                    let mut f = font(theme::mono());
+                                                    if tag == Some(crate::highlight::Tag::Keyword) {
+                                                        f.weight = FontWeight::MEDIUM;
+                                                    }
+                                                    if tag == Some(crate::highlight::Tag::Comment) {
+                                                        f.style = FontStyle::Italic;
+                                                    }
+                                                    TextRun {
+                                                        len,
+                                                        font: f,
+                                                        color: tag
+                                                            .map(|g| g.color(t))
+                                                            .unwrap_or(t.ink),
+                                                        background_color: None,
+                                                        underline: None,
+                                                        strikethrough: None,
+                                                    }
+                                                })
+                                                .collect();
+                                        div()
+                                            .whitespace_nowrap()
+                                            .child(StyledText::new(l.to_string()).with_runs(runs))
+                                    })
+                                    .collect::<Vec<_>>()
+                            }),
                     )
                     .into_any_element(),
                 Block::Table(head, rows) => {

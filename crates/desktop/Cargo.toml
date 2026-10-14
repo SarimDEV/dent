@@ -22,6 +22,8 @@ serde.workspace = true
 serde_json.workspace = true
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff"] }
 libc = "=0.2.190"
+# Syntax highlighting (0016): the languages agents write most.
+arborium = { version = "=2.18.2", default-features = false, features = ["lang-rust", "lang-python", "lang-javascript", "lang-typescript", "lang-tsx", "lang-json", "lang-toml", "lang-yaml", "lang-bash", "lang-html", "lang-css", "lang-go", "lang-swift", "lang-sql", "lang-c", "lang-cpp", "lang-java", "lang-ruby", "lang-diff", "lang-markdown"] }
 futures = { version = "=0.3.34", default-features = false, features = ["std", "async-await"] }
 
 # Snapshots of the live page, drawn under menus while the web view hides.

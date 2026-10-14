@@ -72,6 +72,11 @@ impl Theme {
 }
 
 /// Colours mix in RGB so a tween never swings through other hues.
+/// `a` part way to `b`.
+pub fn mix_pub(a: Hsla, b: Hsla, k: f32) -> Hsla {
+    mix(a, b, k)
+}
+
 fn mix(a: Hsla, b: Hsla, k: f32) -> Hsla {
     let (a, b) = (a.to_rgb(), b.to_rgb());
     let l = |x: f32, y: f32| x + (y - x) * k;

@@ -10,6 +10,7 @@ mod bridge;
 mod chat;
 mod data;
 mod ds;
+mod highlight;
 mod live;
 mod markdown;
 mod notify;
