@@ -647,6 +647,20 @@ fn checks() -> Vec<(f32, Act)> {
         (0.1, Key("enter")),
         (0.1, Until("a dropped picture goes with the message", |d, _| has(d, |i| matches!(i, Item::User { text: t, .. } if t.contains("Attached") && t.contains("red.png"))) && status_is(d, Status::Done), 10.)),
     ]);
+    v.extend(new_session("make a plan please"));
+    v.extend([
+        (0.1, Until("the agent's plan shows above the composer", |d, _| current(d).is_some_and(|s| s.todos.len() == 3 && s.todos.iter().any(|(st, ..)| st == "in_progress")), 10.)),
+        (0.2, Call(|d, _, cx| {
+            d.plan_open = true;
+            cx.notify();
+        })),
+        (0.4, Shot("plan")),
+        (0.1, Until("the plan moves along and the turn ends", |d, _| status_is(d, Status::Done) && current(d).is_some_and(|s| s.todos.iter().filter(|(st, ..)| st == "completed").count() == 1), 10.)),
+        (0.1, Call(|d, _, cx| {
+            d.plan_open = false;
+            cx.notify();
+        })),
+    ]);
     v.extend(new_session("write first.md please"));
     v.extend([
         (0.1, Until("asks to write", |d, _| has(d, |i| matches!(i, Item::Approval { .. })), 10.)),

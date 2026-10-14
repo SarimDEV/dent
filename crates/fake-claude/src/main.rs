@@ -424,6 +424,28 @@ impl Agent {
             self.say("Starting on that now, ", None)?;
             std::process::exit(3);
         }
+        if lower.contains("make a plan") {
+            let todo = |done: usize| {
+                let steps = ["Read the handler", "Add the rate limit", "Run the tests"];
+                let todos: Vec<Value> = steps
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        let status = if i < done { "completed" } else if i == done { "in_progress" } else { "pending" };
+                        json!({"content": s, "status": status, "activeForm": format!("Working on: {}", s.to_lowercase())})
+                    })
+                    .collect();
+                json!({"todos": todos})
+            };
+            for done in 0..2 {
+                let id = self.tool("TodoWrite", todo(done), None);
+                self.result(&id, "Todos updated", false, None);
+                self.pause(1200)?;
+            }
+            self.say("Two of three done; the tests are next.", None)?;
+            self.end("done", false);
+            return Ok(());
+        }
         if lower.contains("your args") {
             let args: Vec<String> = std::env::args().skip(1).collect();
             let text = args.join(" ");

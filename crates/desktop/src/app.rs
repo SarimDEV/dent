@@ -240,6 +240,8 @@ pub struct Dent {
     pub picks: HashMap<String, Vec<Option<String>>>,
     /// Slash commands the agent offers, by session.
     pub commands: HashMap<String, Vec<Command>>,
+    /// The plan above the composer is open.
+    pub plan_open: bool,
     /// Long messages you've unfolded.
     pub expanded: HashSet<String>,
     /// The highlighted row of the slash menu.
@@ -498,6 +500,7 @@ impl Dent {
             commands: HashMap::new(),
             slash_ix: 0,
             expanded: HashSet::new(),
+            plan_open: false,
             partial_len: HashMap::new(),
             just_sent: None,
             panel_open: true,

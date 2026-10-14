@@ -152,6 +152,8 @@ pub struct Session {
     pub arts: Vec<&'static str>,
     pub diff: Rc<Vec<FileDiff>>,
     pub terminal: Vec<(Tone, String)>,
+    /// The agent's plan, as its latest todo list: (state, what, doing-form).
+    pub todos: Vec<(String, String, String)>,
     /// Messages with a snapshot of the files from just before them.
     pub checkpoints: std::collections::HashSet<String>,
     /// Tokens in context, and the window's size when known.

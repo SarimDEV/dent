@@ -296,7 +296,31 @@ pub fn session(v: &SessionView, cx: Context<'_>) -> Session {
         terminal,
         context: v.context,
         checkpoints: v.checkpoints.clone(),
+        todos: todos(v),
     }
+}
+
+/// The agent's latest plan, from its last todo list.
+fn todos(v: &SessionView) -> Vec<(String, String, String)> {
+    let last = v.entries.iter().rev().find_map(|e| match e {
+        Entry::Tools { calls } => calls.iter().rev().find(|c| c.name == "TodoWrite"),
+        _ => None,
+    });
+    let Some(c) = last else { return Vec::new() };
+    c.input()["todos"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|t| {
+                    (
+                        t["status"].as_str().unwrap_or("pending").to_string(),
+                        t["content"].as_str().unwrap_or_default().to_string(),
+                        t["activeForm"].as_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// What it's doing or wants, for the inbox row and the working line.

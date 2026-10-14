@@ -1033,6 +1033,7 @@ impl Dent {
                     .flex()
                     .flex_col()
                     .gap(px(space::S2))
+                    .children(self.plan_strip(s, cx))
                     .when(!chips.is_empty(), |d| {
                         d.child(div().flex().flex_wrap().gap(px(space::S1H)).children(chips))
                     })
@@ -1105,6 +1106,90 @@ impl Dent {
                     .child(probe(&self.probes, "composer"))
                     .children(self.slash_menu(cx)),
             )
+    }
+
+    /// The agent's plan, folded to one line above the composer.
+    fn plan_strip(&self, s: &Session, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if s.todos.is_empty()
+            || s.todos.iter().all(|(st, ..)| st == "completed") && s.status != Status::Working
+        {
+            return None;
+        }
+        let t = self.t;
+        let done = s.todos.iter().filter(|(st, ..)| st == "completed").count();
+        let now = s
+            .todos
+            .iter()
+            .find(|(st, ..)| st == "in_progress")
+            .map(|(_, what, doing)| {
+                if doing.is_empty() {
+                    what.clone()
+                } else {
+                    doing.clone()
+                }
+            });
+        let open = self.plan_open;
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(space::S1))
+                .pb(px(space::S1))
+                .border_b_1()
+                .border_color(t.hairline)
+                .child(
+                    div()
+                        .id("plan-strip")
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S2))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.plan_open = !this.plan_open;
+                            cx.notify();
+                        }))
+                        .child(icon("list-checks", 13., t.quiet))
+                        .child(
+                            div()
+                                .ty(LABEL)
+                                .text_color(t.quiet)
+                                .child(format!("Plan {done} of {}", s.todos.len())),
+                        )
+                        .when_some(now, |d, now| {
+                            d.child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .ty(UI)
+                                    .text_color(t.ink)
+                                    .child(now),
+                            )
+                        })
+                        .child(icon(
+                            if open { "chevron-down" } else { "chevron-up" },
+                            11.,
+                            t.faint,
+                        )),
+                )
+                .when(open, |d| {
+                    d.children(s.todos.iter().map(|(st, what, _)| {
+                        let (mark, ink) = match st.as_str() {
+                            "completed" => ("✓", t.faint),
+                            "in_progress" => ("▸", t.ink),
+                            _ => ("○", t.quiet),
+                        };
+                        div()
+                            .flex()
+                            .gap(px(space::S2))
+                            .ty(UI)
+                            .text_color(ink)
+                            .child(div().w(px(14.)).flex_none().child(mark))
+                            .child(div().flex_1().min_w_0().child(what.clone()))
+                    }))
+                })
+                .into_any_element(),
+        )
     }
 
     /// Commands matching a `/word` in the composer, above it.
