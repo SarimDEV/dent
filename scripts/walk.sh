@@ -8,7 +8,8 @@
 # never takes focus. Stills need WINID (a build of crates/desktop/tools/winid.swift).
 set -euo pipefail
 name=${1:-checks}; shift || true
-root=$(mktemp -d "${TMPDIR:-/tmp}/dent-walk.XXXXXX")
+tmp=${TMPDIR:-/tmp}
+root=$(mktemp -d "${tmp%/}/dent-walk.XXXXXX")
 trap 'pkill -f "dent-daemon --state $root/state" 2>/dev/null || true; rm -rf "$root"' EXIT
 mkdir -p "$root/home" "$root/state" "$root/proj" "$root/outside"
 # A page's own files, in a folder outside the project.

@@ -567,11 +567,30 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
                 false,
             ),
         },
+        // The scene waits for the picture, so it shows this moment and not a
+        // later one, and a still that couldn't be taken fails the walk.
         Shot(name) => {
+            use std::sync::atomic::Ordering::SeqCst;
             let dir = me.read(cx).walk.as_ref().and_then(|d| d.shots.clone());
             if let Some(dir) = dir {
-                let _ = std::fs::create_dir_all(&dir);
-                still(dir.join(format!("{name}.png")));
+                let path = dir.join(format!("{name}.png"));
+                let asked = SHOT_ASKED.with(|a| a.get());
+                match SHOT.load(SeqCst) {
+                    TAKING => advance = false,
+                    TAKEN if asked => {
+                        SHOT_ASKED.with(|a| a.set(false));
+                        if std::fs::metadata(&path).map_or(true, |m| m.len() == 0) {
+                            note(&me, cx, "the still was saved", false);
+                        }
+                    }
+                    _ => {
+                        let _ = std::fs::create_dir_all(&dir);
+                        let _ = std::fs::remove_file(&path);
+                        SHOT_ASKED.with(|a| a.set(true));
+                        still(path);
+                        advance = false;
+                    }
+                }
             }
         }
     }
@@ -3669,7 +3688,11 @@ fn attaching() -> Vec<(f32, Act)> {
             0.1,
             Until(
                 "dragging files over the window says where they'd go",
-                |d, cx| cx.has_active_drag() && drawn(d, "composer").is_some(),
+                |d, cx| {
+                    cx.has_active_drag()
+                        && drawn(d, "drop-message").is_some()
+                        && drawn(d, "drop-shell").is_none()
+                },
                 3.,
             ),
         ),
@@ -3696,6 +3719,14 @@ fn attaching() -> Vec<(f32, Act)> {
             ),
         ),
         (1.0, DragFiles("shell", 0.5, 0.5)),
+        (
+            0.1,
+            Until(
+                "over the terminal, only the terminal says so",
+                |d, _| drawn(d, "drop-shell").is_some() && drawn(d, "drop-message").is_none(),
+                3.,
+            ),
+        ),
         (0.3, Shot("drop-terminal")),
         (0.2, DropFiles),
         (
@@ -3739,6 +3770,7 @@ fn attaching() -> Vec<(f32, Act)> {
                 3.,
             ),
         ),
+        (0.2, Shot("output-folded")),
         (0.1, Click("call-out-all")),
         (0.5, Shot("output-all")),
         (
@@ -4104,9 +4136,23 @@ fn stills() -> Vec<(f32, Act)> {
     v
 }
 
+/// Where the latest still is: not asked for, being taken, or done (saved or not).
+static SHOT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(IDLE);
+const IDLE: u8 = 0;
+const TAKING: u8 = 1;
+const TAKEN: u8 = 2;
+thread_local! {
+    /// A `Shot` step asked for the still in flight (a sweep's own don't count).
+    static SHOT_ASKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// The window only, never what's around it: by window number when the
 /// `WINID` helper (tools/winid.swift) is given, else the window's rectangle.
+/// `SHOT` says when it's done.
 pub fn still(path: PathBuf) {
+    use std::sync::atomic::Ordering::SeqCst;
+    SHOT.store(TAKING, SeqCst);
+
     // On Linux: dent's own window, found by process, never the whole screen.
     #[cfg(target_os = "linux")]
     {
@@ -4125,12 +4171,14 @@ pub fn still(path: PathBuf) {
                 .and_then(|s| s.lines().last().map(str::to_string));
             let Some(id) = id else {
                 eprintln!("still: no window to capture for {}", path.display());
+                SHOT.store(TAKEN, SeqCst);
                 return;
             };
             let _ = std::process::Command::new("import")
                 .args(["-window", &id])
                 .arg(&path)
                 .status();
+            SHOT.store(TAKEN, SeqCst);
         });
         return;
     }
@@ -4147,11 +4195,13 @@ pub fn still(path: PathBuf) {
         // Only ever the window itself: without its number, no still.
         let Some(id) = id else {
             eprintln!("still: set WINID to capture {}", path.display());
+            SHOT.store(TAKEN, SeqCst);
             return;
         };
         let _ = std::process::Command::new("screencapture")
             .args(["-x", "-o", &format!("-l{id}")])
             .arg(&path)
             .status();
+        SHOT.store(TAKEN, SeqCst);
     });
 }
