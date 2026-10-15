@@ -77,6 +77,12 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 - Fix: let the window settle (wait for no reconnect or streaming activity) before measuring, and measure over a longer window so one stray frame can't tip it.
 - Check: the check's spread over 5 runs stays under the limit.
 
+### Scripted multi-file edits misfire
+- Seen: 2026-10-15. Edits applied with Python string replacement in a script failed twice: once an anchor wasn't unique, and once a 4-space-indented anchor matched inside a 16-space-indented line in another scene, adding the new scene to the wrong place.
+- Cost: about 5 minutes each to notice and repair; a silent wrong edit could ship.
+- Fix: use the editor tool (it refuses non-unique anchors) for anything but mechanical renames; when scripting, anchor on whole lines and assert the line number.
+- Check: misfired edits per batch.
+
 ### `walk.rs` is one 3,939-line file
 - Seen: 2026-10-15. Every walkthrough scene lives in `crates/desktop/src/walk.rs`.
 - Cost: each edit means reading or searching a large file, which costs agent time and tokens and makes conflicts likelier.
