@@ -49,7 +49,7 @@ The desktop app is a GPUI client for macOS, Linux and Windows, built around a ch
 
 Cmd/Ctrl+N opens an empty chat with the cursor in the composer: you start by typing. Under the composer are the session's settings, already chosen, each a click (or a key) to change:
 
-- **Project:** never guessed from what you type ([0045](decisions/0045-no-project-guessing.md)): the folder of the session you came from, otherwise the last project you started or picked. Its chip opens a picker you type into ([0044](decisions/0044-project-picker.md)): words search the projects (name, then a folder on the path), newest first, ⌘1–⌘9 for the first nine; a path starting with `/` or `~` goes to a folder, Tab steps into the lit subfolder and "Make …" creates one that isn't there; a name that matches nothing offers New project, a Git repository with a first commit in `~/dent/projects`; a pasted Git URL offers Clone into the same place. "Choose a folder…" opens the Mac's folder picker and "No project" uses `~/dent/scratch`. ⌘⌫ or the lit row's × takes a project off the list (its folder stays), with Undo. Esc steps back out of naming or cloning, then closes.
+- **Project:** never guessed from what you type ([0045](decisions/0045-no-project-guessing.md)): the folder of the session you came from, otherwise the last project you started or picked. Its chip opens a picker you type into ([0044](decisions/0044-project-picker.md)): words search the projects (name, then a folder on the path), newest first, ⌘1–⌘9 for the first nine; a path starting with `/` or `~` goes to a folder, Tab steps into the lit subfolder and "Make …" creates one that isn't there; a name that matches nothing offers New project, a Git repository with a first commit in `~/dent/projects`; a pasted Git URL offers Clone into the same place. "Choose a folder…" opens the Mac's folder picker and "No project" uses `~/dent/scratch`. The lit row's ×, or ⌘⌫ while nothing is typed (with text, ⌘⌫ deletes it), takes a project off the list (its folder stays), with Undo. Esc steps back out of naming or cloning, then closes.
 - **Machine:** the least busy online machine with the project's repo.
 - **Model, permissions, worktree:** whatever you used last.
 
@@ -172,6 +172,8 @@ Every action has a command, and every command can be bound in a keymap file. The
 | Undo close | Cmd/Ctrl+Z |
 | Stage / unstage file in diff list | S / U |
 | Search everything | Cmd/Ctrl+Shift+F |
+
+**Text fields keep the Mac's editing keys.** In every field (the reply box, a new session, ⌘F, ⌘K, the project search, renaming, comments, side chat) ⌘A, ⌘C, ⌘X, ⌘V, ⌘Z and ⇧⌘Z, the ⌥ and ⌘ arrows, ⌥⌫ and ⌘⌫, and the Control keys (⌃A, ⌃E, ⌃B, ⌃F, ⌃N, ⌃P, ⌃D, ⌃H, ⌃K) do what they do anywhere on the Mac; a shortcut of dent's never takes one of them from a field. ⌘A and ⌘C go where you last were: to text selected in the chat or viewer if that was the last thing you pressed, else to the field; pressing a field, its taking the keyboard, or typing in it makes it the field's turn again. ⌘C or ⌘X with nothing selected leaves the clipboard as it was. Characters typed in a field are always text: the number keys pick a question's answer and ? opens the shortcuts only outside one. In your terminal ⌘A selects everything in it.
 
 ## Motion and responsiveness
 

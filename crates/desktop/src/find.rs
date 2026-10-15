@@ -196,10 +196,12 @@ impl Dent {
                         .child(icon("search", 13., t.quiet))
                         .child(
                             div()
+                                .relative()
                                 .w(px(200.))
                                 .ty(UI)
                                 .text_color(t.ink)
-                                .child(Textarea::new(&self.find_input)),
+                                .child(Textarea::new(&self.find_input))
+                                .child(probe(&self.probes, "find-field")),
                         )
                         .child(
                             div()

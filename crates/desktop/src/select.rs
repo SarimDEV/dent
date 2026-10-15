@@ -172,6 +172,10 @@ struct State {
     sources: HashMap<Area, Source>,
     /// A control took this press: it doesn't start a selection.
     claimed: bool,
+    /// The keyboard's editing keys (⌘A, ⌘C) have gone to a text field
+    /// since the selection was made: by a press elsewhere, the field
+    /// taking focus, or typing in it.
+    yielded: bool,
     /// What ⌘F looks for, and how many matches each item has painted so
     /// far this frame, so the current one can be told apart.
     find: Option<Find>,
@@ -372,8 +376,13 @@ pub fn layer() -> impl IntoElement {
             // Registered first, these run last as the event bubbles: a
             // control under the pointer has had its say.
             window.on_mouse_event(|e: &MouseDownEvent, phase, window, cx| {
-                if phase.bubble() && e.button == MouseButton::Left {
-                    press(e, window, cx);
+                // Every press yields the keys first; one that selects takes
+                // them back. A field or control that keeps the press to
+                // itself has still had the last word.
+                match (e.button, phase) {
+                    (MouseButton::Left, DispatchPhase::Capture) => yield_keys(),
+                    (MouseButton::Left, DispatchPhase::Bubble) => press(e, window, cx),
+                    _ => {}
                 }
             });
             window.on_mouse_event(|e: &MouseMoveEvent, phase, window, cx| {
@@ -558,6 +567,7 @@ fn press(e: &MouseDownEvent, window: &mut Window, _cx: &mut App) {
                 if let Some(sel) = s.sel.as_mut() {
                     sel.head = head;
                 }
+                s.yielded = false;
                 s.drag = Some(Drag {
                     area,
                     win,
@@ -622,6 +632,7 @@ fn press(e: &MouseDownEvent, window: &mut Window, _cx: &mut App) {
     };
     with(|s| {
         s.sel = Some(sel);
+        s.yielded = false;
         s.drag = Some(Drag {
             area,
             win,
@@ -862,9 +873,24 @@ pub fn select_all(area: Area, window: &mut Window) -> bool {
     let Some((anchor, head)) = ends else {
         return false;
     };
-    with(|s| s.sel = Some(Sel { anchor, head }));
+    with(|s| {
+        s.sel = Some(Sel { anchor, head });
+        s.yielded = false;
+    });
     changed(window);
     true
+}
+
+/// A text field has the keyboard's editing keys now: ⌘A and ⌘C are its
+/// own, not the selection's, though the selection stays on screen.
+pub fn yield_keys() {
+    with(|s| s.yielded = true);
+}
+
+/// Whether the selection was the last thing pressed or made, so ⌘A and
+/// ⌘C belong to it even while a text field keeps the keyboard.
+pub fn holds_keys() -> bool {
+    with(|s| s.sel.is_some() && !s.yielded)
 }
 
 /// The area last pressed in, or selected in, if the last press was in one.

@@ -1472,6 +1472,18 @@ fn checks() -> Vec<(f32, Act)> {
             ),
         ),
         (0.3, Shot("terminal")),
+        (0.1, Key("cmd-a")),
+        (
+            0.1,
+            Until(
+                "⌘A in your terminal selects all of it, not the chat",
+                |d, _| {
+                    current(d).and_then(|s| d.shells.get(&s.id)).and_then(|sh| sh.copy()).is_some_and(|t| t.contains("dent-42"))
+                        && !crate::select::has_selection()
+                },
+                1.,
+            ),
+        ),
         (0.1, Key("ctrl-c")),
         (0.1, Key("cmd-2")),
         (0.1, Call(attach_red)),
@@ -2084,6 +2096,10 @@ fn recall() -> Vec<(f32, Act)> {
     v
 }
 
+fn find_text(d: &Dent, cx: &App) -> String {
+    d.find_input.read(cx).value().to_string()
+}
+
 fn find_at(d: &Dent) -> Option<(usize, usize)> {
     d.find.as_ref().map(|f| (f.at, f.hits.len()))
 }
@@ -2125,7 +2141,25 @@ fn ask_and_wait(text: &'static str) -> Vec<(f32, Act)> {
 
 /// ⌘F finds in the session: counts, steps round, says when nothing matches.
 fn find() -> Vec<(f32, Act)> {
-    let mut v = new_session("check the parser");
+    // The project menu's search is a text field like any other: what you
+    // type there is typed, not taken as a shortcut.
+    let mut v = vec![
+        (0.3, Key("cmd-n")),
+        (0.2, Click("chip-project")),
+        (0.2, Keys("2?")),
+        (0.1, Key("cmd-a")),
+        (0.1, Keys("x?")),
+        (
+            0.1,
+            Until(
+                "keys typed in the project search stay there",
+                |d, cx| d.menu_query.read(cx).value() == "x?" && !d.keys_open,
+                1.,
+            ),
+        ),
+        (0.1, Key("escape")),
+    ];
+    v.extend(new_session("check the parser"));
     v.push((
         0.1,
         Until(
@@ -2190,8 +2224,23 @@ fn find() -> Vec<(f32, Act)> {
                 1.,
             ),
         ),
+        // A click in the chat, then one back in the field: the editing
+        // keys are the field's again.
+        (0.1, Call(save_clipboard)),
+        (0.2, Press("reply", 0.01, 0.2)),
+        (0.05, Release),
+        (0.2, Press("find-field", 0.5, 0.5)),
+        (0.05, Release),
         (0.1, Key("cmd-a")),
         (0.1, Keys("zzqx")),
+        (
+            0.1,
+            Until(
+                "after a click in the chat, ⌘A in the field takes what's typed there",
+                |d, cx| find_text(d, cx) == "zzqx" && !crate::select::has_selection(),
+                1.,
+            ),
+        ),
         (
             0.1,
             Until(
@@ -2201,6 +2250,78 @@ fn find() -> Vec<(f32, Act)> {
             ),
         ),
         (0.3, Shot("find-none")),
+        (
+            0.8,
+            Call(|_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string("kept".into()))),
+        ),
+        (0.1, Key("cmd-c")),
+        (
+            0.1,
+            Until(
+                "⌘C with nothing selected leaves the clipboard be",
+                |_, cx| clipboard_text(cx) == "kept",
+                1.,
+            ),
+        ),
+        (0.1, Key("cmd-a")),
+        (0.1, Key("cmd-x")),
+        (
+            0.1,
+            Until(
+                "⌘X cuts",
+                |d, cx| find_text(d, cx).is_empty() && clipboard_text(cx) == "zzqx",
+                1.,
+            ),
+        ),
+        (0.1, Key("cmd-v")),
+        (
+            0.1,
+            Until("⌘V pastes", |d, cx| find_text(d, cx) == "zzqx", 1.),
+        ),
+        (0.1, Key("cmd-z")),
+        (
+            0.1,
+            Until("⌘Z undoes", |d, cx| find_text(d, cx).is_empty(), 1.),
+        ),
+        (0.1, Keys("abc")),
+        (0.1, Key("ctrl-b")),
+        (0.1, Key("ctrl-d")),
+        (
+            0.1,
+            Until(
+                "⌃B steps back and ⌃D deletes forward",
+                |d, cx| find_text(d, cx) == "ab",
+                1.,
+            ),
+        ),
+        (0.1, Key("ctrl-a")),
+        (0.1, Key("ctrl-k")),
+        (
+            0.1,
+            Until(
+                "⌃A goes to the start and ⌃K deletes the rest",
+                |d, cx| find_text(d, cx).is_empty(),
+                1.,
+            ),
+        ),
+        // Text selected in the chat after: ⌘C copies that.
+        (0.1, Keys("parse")),
+        (0.2, Press("reply", 0.01, 0.2)),
+        (0.05, MoveBy(400., 0.)),
+        (0.05, Release),
+        (0.2, Key("cmd-c")),
+        (
+            0.1,
+            Until(
+                "text selected in the chat since is what ⌘C copies",
+                |d, cx| {
+                    let got = clipboard_text(cx);
+                    got.trim().len() > 3 && got != "kept" && find_text(d, cx) == "parse"
+                },
+                1.,
+            ),
+        ),
+        (0.1, Call(restore_clipboard)),
         (0.8, Key("escape")),
         (
             0.1,
@@ -2210,6 +2331,24 @@ fn find() -> Vec<(f32, Act)> {
                 1.,
             ),
         ),
+        // The reply box keeps the keyboard while you select in the chat;
+        // typing in it hands ⌘A back to it.
+        (0.2, Press("reply", 0.01, 0.2)),
+        (0.05, MoveBy(400., 0.)),
+        (0.05, Release),
+        (0.1, Keys("hi")),
+        (0.1, Key("cmd-a")),
+        (0.1, Keys("yo")),
+        (
+            0.1,
+            Until(
+                "typing after selecting in the chat gives ⌘A back to the field",
+                |d, cx| d.composer.read(cx).value() == "yo" && crate::select::has_selection(),
+                1.,
+            ),
+        ),
+        (0.1, Key("cmd-a")),
+        (0.1, Key("backspace")),
     ]);
     v
 }

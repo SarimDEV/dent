@@ -149,6 +149,7 @@ pub fn set_menus(cx: &mut App) {
 }
 
 pub fn bind_keys(cx: &mut App) {
+    use gpui_kit::base::input;
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-h", Hide, None),
@@ -189,6 +190,15 @@ pub fn bind_keys(cx: &mut App) {
             },
             Some("Input"),
         ),
+        // The Mac's Control keys in every text box, as anywhere else: the
+        // field brings ⌃A and ⌃E, these are the rest that get used.
+        KeyBinding::new("ctrl-f", input::MoveRight, Some("Input")),
+        KeyBinding::new("ctrl-b", input::MoveLeft, Some("Input")),
+        KeyBinding::new("ctrl-n", input::MoveDown, Some("Input")),
+        KeyBinding::new("ctrl-p", input::MoveUp, Some("Input")),
+        KeyBinding::new("ctrl-d", input::Delete, Some("Input")),
+        KeyBinding::new("ctrl-h", input::Backspace, Some("Input")),
+        KeyBinding::new("ctrl-k", input::DeleteToEndOfLine, Some("Input")),
         // With the inbox focused (Esc from an empty composer), it works like mail.
         KeyBinding::new("up", InboxUp, Some("Inbox")),
         KeyBinding::new("down", InboxDown, Some("Inbox")),
@@ -264,6 +274,8 @@ pub enum Field {
     Search,
     Rename,
     Find,
+    /// The search at the top of a menu that has one (projects).
+    Menu,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -946,6 +958,25 @@ impl Dent {
             },
         )
         .detach();
+        // A field taking the keyboard takes ⌘A and ⌘C from text selected
+        // in the chat (see `intercept`).
+        for field in [
+            &composer,
+            &starter,
+            &comment_input,
+            &aside_input,
+            &search,
+            &rename_input,
+            &menu_query,
+            &find_input,
+        ] {
+            cx.subscribe(field, |_, _, ev: &InputEvent, _| {
+                if let InputEvent::Focus = ev {
+                    crate::select::yield_keys();
+                }
+            })
+            .detach();
+        }
         // Before any binding: a text field's own Tab or ⌘Z would win otherwise.
         let me = cx.entity().downgrade();
         cx.intercept_keystrokes(move |ev, window, cx| {
@@ -2222,14 +2253,22 @@ impl Dent {
                 return true;
             }
         }
-        // ⌘A, after selecting text in the chat or viewer, takes all of it;
-        // with no text field in use, all of the chat.
-        if k.key == "a"
-            && k.modifiers.platform
-            && !k.modifiers.shift
-            && !k.modifiers.alt
-            && !k.modifiers.control
-        {
+        // The editing keys (⌘A, ⌘C, ⌘X) go where you last were: text
+        // selected in the chat or viewer if that was the last thing you
+        // pressed, else the field with the keyboard, as in any Mac app.
+        let cmd_only =
+            k.modifiers.platform && !k.modifiers.shift && !k.modifiers.alt && !k.modifiers.control;
+        let editing = cmd_only && matches!(k.key.as_str(), "a" | "c" | "x");
+        let in_text = field.is_some() || self.term_focus.is_focused(window);
+        // Typing in a field, or any key there but these, makes it the
+        // field's turn.
+        if in_text && !editing {
+            crate::select::yield_keys();
+        }
+        let selection_keys = !in_text || crate::select::holds_keys();
+        // ⌘A takes all of what's selected in; with no text field in use,
+        // all of the chat.
+        if cmd_only && k.key == "a" && selection_keys {
             let area = crate::select::selected_area().or_else(|| {
                 field
                     .is_none()
@@ -2243,28 +2282,26 @@ impl Dent {
                 return true;
             }
         }
-        // ⌘C copies text selected in the chat or viewer, even while a text
-        // field keeps the keyboard, unless the field has a selection itself.
-        if k.key == "c"
-            && k.modifiers.platform
-            && !k.modifiers.shift
-            && !k.modifiers.alt
-            && crate::select::has_selection()
-        {
-            let own = match field {
-                Some(f) => !self.field_entity(f).read(cx).selected_range().is_empty(),
-                None => false,
-            };
-            if !own {
-                let text = crate::select::copied();
-                if !text.is_empty() {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    return true;
-                }
+        // ⌘C copies the selection in the chat or viewer.
+        if cmd_only && k.key == "c" && selection_keys && crate::select::has_selection() {
+            let text = crate::select::copied();
+            if !text.is_empty() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                return true;
             }
         }
+        // ⌘C or ⌘X in a field with nothing selected does nothing: the
+        // clipboard keeps what you copied before.
+        if cmd_only
+            && matches!(k.key.as_str(), "c" | "x")
+            && let Some(f) = field
+            && self.field_entity(f).read(cx).selected_range().is_empty()
+        {
+            return true;
+        }
         // A menu that searches: Tab goes into the lit folder, ⌘1–⌘9 choose
-        // the rows showing them, ⌘⌫ takes the lit row off the list.
+        // the rows showing them, ⌘⌫ with nothing typed takes the lit row off
+        // the list.
         if let Some(which) = self.menu
             && which.searches()
         {
@@ -2288,8 +2325,10 @@ impl Dent {
                 }
                 return true;
             }
+            // Only with nothing typed: there ⌘⌫ deletes what you typed.
             if cmd
                 && k.key == "backspace"
+                && self.menu_query.read(cx).value().is_empty()
                 && let Some(i) = self.menu_ix
                 && let Some((_, remove)) = self
                     .menu_entries(which, cx)
@@ -2517,6 +2556,8 @@ impl Dent {
             Some(Field::Rename)
         } else if on(&self.find_input) {
             Some(Field::Find)
+        } else if on(&self.menu_query) {
+            Some(Field::Menu)
         } else {
             None
         }
@@ -2609,6 +2650,7 @@ impl Dent {
             Field::Search => &self.search,
             Field::Rename => &self.rename_input,
             Field::Find => &self.find_input,
+            Field::Menu => &self.menu_query,
         }
     }
 

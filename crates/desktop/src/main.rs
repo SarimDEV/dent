@@ -461,15 +461,18 @@ impl Render for Dent {
             .capture_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
                 let k = &e.keystroke;
                 // A held shortcut acts once: holding ⌘W doesn't close every
-                // session. Moving and deleting still repeat, and so does
-                // ⌘Z in a text field.
+                // session. Moving and deleting still repeat, and in a text
+                // field so do undo, paste and the Control keys.
+                let field = this.field_focused(window, cx).is_some();
                 if e.is_held
                     && (k.modifiers.platform || k.modifiers.control)
                     && !matches!(
                         k.key.as_str(),
                         "left" | "right" | "up" | "down" | "backspace" | "delete"
                     )
-                    && !(k.key == "z" && this.field_focused(window, cx).is_some())
+                    && !(field
+                        && (matches!(k.key.as_str(), "z" | "v")
+                            || !k.modifiers.platform && k.key.len() == 1))
                 {
                     cx.stop_propagation();
                     return;

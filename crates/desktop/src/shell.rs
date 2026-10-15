@@ -168,6 +168,20 @@ impl Shell {
         self.type_bytes(bytes.into_bytes());
     }
 
+    /// ⌘A: everything in the scrollback and on screen, as in Terminal.
+    pub fn select_all(&self) {
+        let mut term = self.term.lock();
+        let (top, bottom) = (term.topmost_line(), term.bottommost_line());
+        let last = term.last_column();
+        let mut sel = Selection::new(
+            SelectionType::Simple,
+            GridPoint::new(top, Column(0)),
+            Side::Left,
+        );
+        sel.update(GridPoint::new(bottom, last), Side::Right);
+        term.selection = Some(sel);
+    }
+
     pub fn copy(&self) -> Option<String> {
         self.term
             .lock()
@@ -462,12 +476,17 @@ impl Dent {
         }
         if k.modifiers.platform {
             match k.key.as_str() {
+                // With nothing selected, ⌘C leaves the clipboard be.
                 "c" => {
                     if let Some(text) = sh.copy() {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
-                        return true;
                     }
-                    false
+                    true
+                }
+                "a" => {
+                    sh.select_all();
+                    cx.notify();
+                    true
                 }
                 "v" => {
                     if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
