@@ -45,6 +45,8 @@ pub enum PageEvent {
     Probe(String),
     /// Text you copied in the page, for the clipboard.
     Copy(String),
+    /// How many matches ⌘F found in the page.
+    Found(usize),
     /// Files dropped on the page, to attach.
     Dropped(Vec<std::path::PathBuf>),
 }
@@ -89,6 +91,48 @@ const SCRIPT: &str = r#"
     }
     if (text) send({ t: 'copy', text });
     if (cut && text) document.execCommand('delete');
+  };
+  // ⌘F in the page: every match tinted, the current one stronger and
+  // scrolled to, and the count sent back.
+  window.__dentFind = (q, at, tint, strong) => {
+    const H = window.CSS && CSS.highlights;
+    if (H) { H.delete('dent-find'); H.delete('dent-find-now'); }
+    if (!q) { send({ t: 'found', n: 0 }); return; }
+    let style = document.querySelector('style[data-dent-find]');
+    if (!style) {
+      style = document.createElement('style');
+      style.dataset.dentFind = '';
+      document.documentElement.appendChild(style);
+    }
+    style.textContent = `::highlight(dent-find){background-color:${tint}}::highlight(dent-find-now){background-color:${strong}}`;
+    const low = q.toLowerCase();
+    const ranges = [];
+    const walk = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => {
+        const p = n.parentElement;
+        if (!p || p.closest('script,style,noscript,template,[data-dent]')) return NodeFilter.FILTER_REJECT;
+        return p.getClientRects().length ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      },
+    });
+    for (let n; (n = walk.nextNode()) && ranges.length < 10000;) {
+      const t = n.data.toLowerCase();
+      for (let i = t.indexOf(low); i >= 0; i = t.indexOf(low, i + low.length)) {
+        const r = new Range();
+        r.setStart(n, i);
+        r.setEnd(n, Math.min(n.data.length, i + q.length));
+        ranges.push(r);
+      }
+    }
+    const now = ranges[Math.min(at, ranges.length - 1)];
+    if (H && window.Highlight) {
+      H.set('dent-find', new Highlight(...ranges));
+      if (now) H.set('dent-find-now', new Highlight(now));
+    }
+    if (now) {
+      const r = now.getBoundingClientRect();
+      if (r.top < 0 || r.bottom > innerHeight) scrollBy(0, r.top - innerHeight / 3);
+    }
+    send({ t: 'found', n: ranges.length });
   };
   // A press inside the page: it may keep the keyboard.
   addEventListener('pointerdown', () => send({ t: 'down' }), { passive: true, capture: true });
@@ -345,6 +389,9 @@ impl Preview {
                     "pick-cancel" => PageEvent::PickCancel,
                     "probe" => PageEvent::Probe(s("msg")),
                     "copy" => PageEvent::Copy(s("text")),
+                    "found" => {
+                        PageEvent::Found(v.get("n").and_then(|n| n.as_u64()).unwrap_or(0) as usize)
+                    }
                     // Settling only makes the snapshot stale; it wakes nothing.
                     "settled" => {
                         ipc_settled.store(true, Ordering::Release);
@@ -617,6 +664,27 @@ impl Preview {
         if !over && !self.pressed.load(Ordering::Acquire) && self.has_focus() {
             let _ = self.web.focus_parent();
         }
+    }
+
+    /// ⌘F in the page: tint each match of `needle`, mark match `at` and
+    /// scroll to it; the page answers with how many it found.
+    pub fn find(&self, needle: &str, at: usize, tint: Hsla, strong: Hsla) {
+        let css = |c: Hsla| {
+            let c = Rgba::from(c);
+            format!(
+                "rgba({},{},{},{:.2})",
+                (c.r * 255.).round(),
+                (c.g * 255.).round(),
+                (c.b * 255.).round(),
+                c.a
+            )
+        };
+        self.script(&format!(
+            "window.__dentFind && window.__dentFind({}, {at}, {:?}, {:?})",
+            serde_json::to_string(needle).unwrap_or_default(),
+            css(tint),
+            css(strong),
+        ));
     }
 
     /// Give the page the keyboard, as a click into it does (walkthrough).

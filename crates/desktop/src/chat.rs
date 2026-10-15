@@ -707,7 +707,7 @@ impl Dent {
         );
         // ⌘F keeps up with a reply still arriving.
         self.refresh_find(false, cx);
-        let find = self.find_bar(cx);
+        let find = self.find_bar(crate::find::Scope::Chat, cx);
         let transcript = div()
             .relative()
             .flex_1()

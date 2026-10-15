@@ -756,6 +756,8 @@ pub struct Dent {
     pub row_born: HashMap<usize, (Instant, f32)>,
     /// The diff draws only the lines on screen.
     pub diff_list: ListState,
+    /// Side chat's place.
+    pub aside_scroll: ScrollHandle,
     /// Each document's scroll, so each keeps its own place.
     pub doc_scrolls: HashMap<&'static str, ScrollHandle>,
     pub diff_key: u64,
@@ -1208,6 +1210,7 @@ impl Dent {
             transcript_sigs: (None, Vec::new()),
             row_born: HashMap::new(),
             diff_list: ListState::new(0, ListAlignment::Top, px(400.)),
+            aside_scroll: ScrollHandle::new(),
             doc_scrolls: HashMap::new(),
             diff_key: 0,
             diff_file_key: 0,
@@ -1606,6 +1609,7 @@ impl Dent {
             self.used(id);
         }
         // Find belongs to the session it searched.
+        self.unmark_page();
         if self.find.take().is_some() {
             crate::select::set_find(None);
         }
@@ -4318,6 +4322,7 @@ impl Dent {
                 PageEvent::PickCancel => self.picking = false,
                 PageEvent::Probe(text) => self.page_probe = Some(text),
                 PageEvent::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+                PageEvent::Found(n) => self.page_found(n),
                 PageEvent::Dropped(paths) => self.attach_paths(&paths, window, cx),
                 PageEvent::External(url) => cx.open_url(&url),
             }

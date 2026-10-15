@@ -13,7 +13,7 @@ use crate::ui::Press;
 use crate::ui::RevealOnHover;
 
 use crate::app::{Dent, Tab, Viewport};
-use crate::data::{Kind, Line, Session};
+use crate::data::{FileDiff, Kind, Line, Session};
 use crate::ds::{CODE, LABEL, Typed, UI, radius, size, space};
 use crate::markdown;
 use crate::theme::{Status, status_square};
@@ -394,6 +394,20 @@ impl Dent {
             Tab::Terminal => self.shell_view(s, window, cx),
             Tab::Aside => self.side_chat(s, window, cx),
         };
+        // ⌘F over what it searches here, and the match it went to in view.
+        self.reveal_found(s, window, cx);
+        let find = self
+            .viewer_scope(s)
+            .filter(|here| !matches!(here, crate::find::Scope::Page(_)))
+            .and_then(|here| self.find_bar(here, cx));
+        let body = div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(body)
+            .children(find);
         // The panel clips its contents; its grip sits outside that, half
         // over the chat, so it is easy to catch.
         div()
@@ -968,12 +982,24 @@ impl Dent {
                         .child(probe(&self.probes, "fix")),
                 )
         });
+        // ⌘F in the page: a strip of its own under the toolbar, as the
+        // page is drawn over anything that would float on it.
+        let find = self.find_bar(crate::find::Scope::Page(id), cx).map(|bar| {
+            div()
+                .flex_none()
+                .relative()
+                .h(px(size::CONTROL + space::S2 * 3.))
+                .border_b_1()
+                .border_color(t.hairline)
+                .child(bar)
+        });
         div()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
             .child(toolbar)
+            .children(find)
             .children(banner)
             .children(hint)
             .child(area)
@@ -1249,26 +1275,36 @@ impl Dent {
                     }),
             )
             .child(
-                // Each document keeps its own place.
+                // The region stays put over what's on screen, outside what
+                // scrolls.
                 div()
-                    .id(SharedString::from(format!("doc-{id}")))
                     .relative()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&scroll)
+                    .flex()
+                    .flex_col()
+                    .child(
+                        // Each document keeps its own place.
+                        div()
+                            .id(SharedString::from(format!("doc-{id}")))
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .track_scroll(&scroll)
+                            .child(
+                                div()
+                                    .max_w(px(680.))
+                                    .mx_auto()
+                                    .px(px(space::S8))
+                                    .py(px(space::S6))
+                                    .child(page),
+                            ),
+                    )
                     .child(crate::select::region(area, move |dy| {
                         let (o, max) = (by.offset(), by.max_offset());
                         by.set_offset(point(o.x, (o.y - px(dy)).clamp(-max.y, px(0.))));
                     }))
-                    .child(
-                        div()
-                            .max_w(px(680.))
-                            .mx_auto()
-                            .px(px(space::S8))
-                            .py(px(space::S6))
-                            .child(page),
-                    ),
+                    .child(probe(&self.probes, "doc")),
             )
             .into_any_element()
     }
@@ -1354,14 +1390,59 @@ impl Dent {
             .into_any_element()
     }
 
-    fn changes(&mut self, s: &Session, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let t = self.t;
-        let selected = self
-            .diff_file
+    /// Which of the changed files is shown.
+    pub fn diff_selected(&self, s: &Session) -> usize {
+        self.diff_file
             .get(&s.id)
             .copied()
             .unwrap_or(0)
-            .min(s.diff.len().saturating_sub(1));
+            .min(s.diff.len().saturating_sub(1))
+    }
+
+    /// The rows of a file's diff: one per line, plus a row for each
+    /// comment and the open comment box.
+    pub fn diff_rows(&self, file: &FileDiff) -> (Vec<Row>, Vec<(u32, String)>) {
+        let comments: Vec<(u32, String)> = self
+            .review
+            .iter()
+            .filter_map(|a| match a {
+                crate::app::Attachment::Comment {
+                    file: f,
+                    line,
+                    text,
+                } if *f == file.path => Some((*line, text.clone())),
+                _ => None,
+            })
+            .collect();
+        // One row per line, plus a row for each comment and the open comment box.
+        let mut rows: Vec<Row> = Vec::with_capacity(file.lines.len());
+        for (i, l) in file.lines.iter().enumerate() {
+            rows.push(Row::Line(i));
+            if l.kind == Line::Hunk {
+                continue;
+            }
+            let n = l.new.or(l.old).unwrap_or(0);
+            for (k, _) in comments
+                .iter()
+                .enumerate()
+                .filter(|(_, (line, _))| *line == n)
+            {
+                rows.push(Row::Note(k));
+            }
+            if self
+                .commenting
+                .as_ref()
+                .is_some_and(|(f, line)| *f == file.path && *line == n)
+            {
+                rows.push(Row::Compose);
+            }
+        }
+        (rows, comments)
+    }
+
+    fn changes(&mut self, s: &Session, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.t;
+        let selected = self.diff_selected(s);
         let sid = s.id.clone();
         let total_add: usize = s.diff.iter().map(|f| f.added).sum();
         let total_del: usize = s.diff.iter().map(|f| f.removed).sum();
@@ -1436,41 +1517,7 @@ impl Dent {
         let Some(file) = s.diff.get(selected) else {
             return div().into_any_element();
         };
-        let comments: Vec<(u32, String)> = self
-            .review
-            .iter()
-            .filter_map(|a| match a {
-                crate::app::Attachment::Comment {
-                    file: f,
-                    line,
-                    text,
-                } if *f == file.path => Some((*line, text.clone())),
-                _ => None,
-            })
-            .collect();
-        // One row per line, plus a row for each comment and the open comment box.
-        let mut rows: Vec<Row> = Vec::with_capacity(file.lines.len());
-        for (i, l) in file.lines.iter().enumerate() {
-            rows.push(Row::Line(i));
-            if l.kind == Line::Hunk {
-                continue;
-            }
-            let n = l.new.or(l.old).unwrap_or(0);
-            for (k, _) in comments
-                .iter()
-                .enumerate()
-                .filter(|(_, (line, _))| *line == n)
-            {
-                rows.push(Row::Note(k));
-            }
-            if self
-                .commenting
-                .as_ref()
-                .is_some_and(|(f, line)| *f == file.path && *line == n)
-            {
-                rows.push(Row::Compose);
-            }
-        }
+        let (rows, comments) = self.diff_rows(file);
         let hash = |v: &dyn Fn(&mut std::collections::hash_map::DefaultHasher)| {
             use std::hash::Hasher;
             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1710,22 +1757,29 @@ impl Dent {
                                             }))
                                             .into_any_element()
                                     } else {
+                                        // The region stays over what's on
+                                        // screen, outside what scrolls.
                                         div()
-                                            .id("diff")
                                             .relative()
                                             .size_full()
-                                            .overflow_x_scroll()
+                                            .child(
+                                                div()
+                                                    .id("diff")
+                                                    .size_full()
+                                                    .overflow_x_scroll()
+                                                    .child(
+                                                        div()
+                                                            .h_full()
+                                                            .min_w_full()
+                                                            .w(px(wide))
+                                                            .py(px(space::S1))
+                                                            .child(diff),
+                                                    ),
+                                            )
                                             .child(crate::select::region(area, move |dy| {
                                                 lines.scroll_by(px(dy))
                                             }))
-                                            .child(
-                                                div()
-                                                    .h_full()
-                                                    .min_w_full()
-                                                    .w(px(wide))
-                                                    .py(px(space::S1))
-                                                    .child(diff),
-                                            )
+                                            .child(probe(&self.probes, "diff"))
                                             .into_any_element()
                                     })
                                     // Long lines scroll sideways; the edge fades to say so.
@@ -1974,11 +2028,19 @@ impl Dent {
             .items
             .iter()
             .any(|i| matches!(i, crate::data::Item::Text(_)));
+        let area = crate::select::area(&format!("aside/{}", s.id));
+        let by = self.aside_scroll.clone();
+        // A drag past the edge scrolls, and ⌘F brings a match into view.
+        let region = crate::select::region(area, move |dy| {
+            let (o, max) = (by.offset(), by.max_offset());
+            by.set_offset(point(o.x, (o.y - px(dy)).clamp(-max.y, px(0.))));
+        });
         let mut list = div()
             .id("asides")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&self.aside_scroll)
             .p(px(space::S4))
             .flex()
             .flex_col()
@@ -2010,7 +2072,7 @@ impl Dent {
             );
         }
         for (i, a) in s.asides.iter().enumerate() {
-            let _place = crate::select::item(crate::select::area(&format!("aside/{}", s.id)), i);
+            let _place = crate::select::item(area, i);
             let question = div().flex().justify_end().child(
                 div()
                     .max_w(relative(0.85))
@@ -2158,7 +2220,18 @@ impl Dent {
             .min_h_0()
             .flex()
             .flex_col()
-            .child(list)
+            // The region stays over what's on screen, outside what scrolls.
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(list)
+                    .child(region)
+                    .child(probe(&self.probes, "asides")),
+            )
             .child(input)
             .into_any_element()
     }

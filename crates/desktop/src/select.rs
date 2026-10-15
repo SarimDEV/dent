@@ -122,13 +122,16 @@ struct Placed {
     links: Rc<Vec<(Range<usize>, String)>>,
 }
 
+/// How to scroll an area: `scroll(dy)` moves its content up by `dy`.
+type Scroll = Rc<dyn Fn(f32)>;
+
 /// An area as laid out this frame, and how to scroll it.
 struct Region {
     area: Area,
     win: WindowId,
     bounds: Bounds<Pixels>,
     hitbox: Hitbox,
-    scroll: Rc<dyn Fn(f32)>,
+    scroll: Scroll,
 }
 
 struct Drag {
@@ -176,6 +179,8 @@ struct State {
     /// since the selection was made: by a press elsewhere, the field
     /// taking focus, or typing in it.
     yielded: bool,
+    /// The area last pressed or scrolled in: what ⌘F searches.
+    last: Option<Area>,
     /// What ⌘F looks for, and how many matches each item has painted so
     /// far this frame, so the current one can be told apart.
     find: Option<Find>,
@@ -192,6 +197,9 @@ pub struct Find {
     pub tint: Hsla,
     pub strong: Hsla,
 }
+
+/// About a line of text, to keep a match clear of the edge.
+const LINE: f32 = 24.;
 
 /// Show (or with `None`, stop showing) what ⌘F found.
 pub fn set_find(find: Option<Find>) {
@@ -375,12 +383,25 @@ pub fn layer() -> impl IntoElement {
         |_, _, window, _| {
             // Registered first, these run last as the event bubbles: a
             // control under the pointer has had its say.
+            window.on_mouse_event(|e: &ScrollWheelEvent, phase, window, _| {
+                if phase == DispatchPhase::Capture {
+                    let win = window.window_handle().window_id();
+                    if let Some(area) = region_at(e.position, win, window) {
+                        with(|s| s.last = Some(area));
+                    }
+                }
+            });
             window.on_mouse_event(|e: &MouseDownEvent, phase, window, cx| {
                 // Every press yields the keys first; one that selects takes
                 // them back. A field or control that keeps the press to
                 // itself has still had the last word.
                 match (e.button, phase) {
-                    (MouseButton::Left, DispatchPhase::Capture) => yield_keys(),
+                    (MouseButton::Left, DispatchPhase::Capture) => {
+                        yield_keys();
+                        let win = window.window_handle().window_id();
+                        let area = region_at(e.position, win, window);
+                        with(|s| s.last = area);
+                    }
                     (MouseButton::Left, DispatchPhase::Bubble) => press(e, window, cx),
                     _ => {}
                 }
@@ -891,6 +912,97 @@ pub fn yield_keys() {
 /// ⌘C belong to it even while a text field keeps the keyboard.
 pub fn holds_keys() -> bool {
     with(|s| s.sel.is_some() && !s.yielded)
+}
+
+/// The area last pressed or scrolled in, if it was in one.
+pub fn last_area() -> Option<Area> {
+    with(|s| s.last)
+}
+
+/// The pieces of `area` as last laid out, in reading order, with what
+/// each says.
+fn texts(s: &State, area: Area) -> Vec<(Vec<u32>, SharedString)> {
+    s.pieces
+        .get(&area)
+        .into_iter()
+        .flatten()
+        .filter(|(path, _)| live(s, area, path))
+        .map(|(path, p)| (path.clone(), p.text.clone()))
+        .collect()
+}
+
+/// How many times `needle` is in each item of `area` that has any, in
+/// reading order: what ⌘F counts in an area drawn whole (a document).
+pub fn counts(area: Area, needle: &str) -> Vec<(u32, usize)> {
+    let mut out: Vec<(u32, usize)> = Vec::new();
+    with(|s| {
+        for (path, text) in texts(s, area) {
+            let Some(&item) = path.first() else { continue };
+            let n = matches(&text, needle).len();
+            if n == 0 {
+                continue;
+            }
+            match out.last_mut() {
+                Some((i, c)) if *i == item => *c += n,
+                _ => out.push((item, n)),
+            }
+        }
+    });
+    out
+}
+
+/// Where the `k`th match of `needle` in `item` of `area` was laid out (its
+/// top), the bounds of what's on screen there, and how to scroll it.
+fn locate(
+    area: Area,
+    item: u32,
+    k: usize,
+    needle: &str,
+    window: &Window,
+) -> Option<(Pixels, Bounds<Pixels>, Scroll)> {
+    let win = window.window_handle().window_id();
+    with(|s| {
+        let mut seen = 0;
+        for (path, text) in texts(s, area) {
+            if path.first() != Some(&item) {
+                continue;
+            }
+            let hits = matches(&text, needle);
+            if k < seen + hits.len() {
+                let at = hits[k - seen].start;
+                let placed = s
+                    .placed
+                    .iter()
+                    .find(|x| x.win == win && x.key.area == area && x.key.path == path)?;
+                let y = placed
+                    .layout
+                    .position_for_index(at)
+                    .map_or(placed.bounds.top(), |p| p.y);
+                let r = s.regions.iter().find(|r| r.area == area && r.win == win)?;
+                return Some((y, r.bounds, r.scroll.clone()));
+            }
+            seen += hits.len();
+        }
+        None
+    })
+}
+
+/// Whether the `k`th match of `needle` in `item` is on screen.
+pub fn in_view(area: Area, item: u32, k: usize, needle: &str, window: &Window) -> bool {
+    locate(area, item, k, needle, window)
+        .is_some_and(|(y, view, _)| y >= view.top() && y + px(LINE) <= view.bottom())
+}
+
+/// Scroll `area` so the `k`th match of `needle` in `item` is in view, a
+/// third of the way down, if it's out of it. Returns whether it was found.
+pub fn reveal(area: Area, item: u32, k: usize, needle: &str, window: &Window) -> bool {
+    let Some((y, view, scroll)) = locate(area, item, k, needle, window) else {
+        return false;
+    };
+    if y < view.top() || y + px(LINE) > view.bottom() {
+        scroll((y - (view.top() + view.size.height / 3.)).as_f32());
+    }
+    true
 }
 
 /// The area last pressed in, or selected in, if the last press was in one.

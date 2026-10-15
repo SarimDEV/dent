@@ -17,10 +17,11 @@ use std::sync::Arc;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Point as GridPoint, Side};
+use alacritty_terminal::index::{Column, Direction, Point as GridPoint, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
 use alacritty_terminal::term::{Config, Term, TermMode, viewport_to_point};
 use alacritty_terminal::tty;
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
@@ -166,6 +167,43 @@ impl Shell {
             text
         };
         self.type_bytes(bytes.into_bytes());
+    }
+
+    /// ⌘F: every place `needle` is in the scrollback and on screen, top
+    /// to bottom, ignoring case.
+    pub fn find_all(&self, needle: &str) -> Vec<Match> {
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let literal: String = needle
+            .chars()
+            .flat_map(|c| {
+                let special = "\\.+*?()|[]{}^$#&-~".contains(c);
+                special.then_some('\\').into_iter().chain([c])
+            })
+            .collect();
+        let Ok(mut regex) = RegexSearch::new(&format!("(?i){literal}")) else {
+            return Vec::new();
+        };
+        let term = self.term.lock();
+        let start = GridPoint::new(term.topmost_line(), Column(0));
+        let end = GridPoint::new(term.bottommost_line(), term.last_column());
+        RegexIter::new(start, end, Direction::Right, &term, &mut regex)
+            .take(10_000)
+            .collect()
+    }
+
+    /// What ⌘F's matches were counted against: the scrollback's length
+    /// and where the cursor is, which move as anything is printed.
+    pub fn find_sig(&self) -> (usize, i32, usize) {
+        let term = self.term.lock();
+        let cursor = term.grid().cursor.point;
+        (term.grid().history_size(), cursor.line.0, cursor.column.0)
+    }
+
+    /// Scroll so a match is on screen.
+    pub fn show_match(&self, m: &Match) {
+        self.term.lock().scroll_to_point(*m.start());
     }
 
     /// ⌘A: everything in the scrollback and on screen, as in Terminal.
@@ -545,6 +583,22 @@ impl Dent {
         let cell_w = cell_width(window);
 
         let term = sh.term.lock();
+        // What ⌘F found on screen, and which is current.
+        let shown = term.grid().display_offset() as i32;
+        let (top, bottom) = (-shown, term.screen_lines() as i32 - 1 - shown);
+        let found: Vec<(&Match, bool)> = self
+            .find
+            .as_ref()
+            .filter(|f| f.session == s.id && f.scope == crate::find::Scope::Terminal)
+            .map(|f| {
+                f.cells
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, m)| m.end().line.0 >= top && m.start().line.0 <= bottom)
+                    .map(|(i, m)| (m, f.hits.get(f.at).is_some_and(|h| h.0 == i)))
+                    .collect()
+            })
+            .unwrap_or_default();
         let content = term.renderable_content();
         let offset = content.display_offset;
         let sel = content.selection;
@@ -583,6 +637,9 @@ impl Dent {
                 fg = t.panel;
             } else if sel.is_some_and(|r| r.contains(cell.point)) {
                 bg = Some(t.selection());
+            } else if let Some((_, now)) = found.iter().find(|(m, _)| m.contains(&cell.point)) {
+                let (tint, strong) = crate::find::tints(&t);
+                bg = Some(if *now { strong } else { tint });
             }
             let c = if cell.flags.contains(Flags::HIDDEN) || cell.c == '\0' {
                 ' '
