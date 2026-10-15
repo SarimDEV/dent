@@ -73,7 +73,44 @@ pub enum Inbound {
         request_id: String,
     },
     /// Claude Code summarised the conversation so far to make room.
-    Compacted,
+    Compacted {
+        auto: bool,
+        before: u64,
+        after: Option<u64>,
+    },
+    /// `system/status`: compacting started (`Some(true)`), or stopped.
+    Compacting {
+        on: bool,
+        /// Why a compaction failed, when it did.
+        failed: Option<String>,
+    },
+    /// `system/api_retry`: a request failed and will be tried again.
+    Retrying {
+        attempt: u32,
+        max: u32,
+        delay_ms: u64,
+        error: String,
+    },
+    /// `system/commands_changed`: the whole new list.
+    CommandsChanged(Value),
+    /// A command Claude Code ran itself: its answer, as the synthetic
+    /// assistant message carries it.
+    LocalCommand {
+        name: Option<String>,
+        args: String,
+        text: String,
+        outcome: dent_protocol::CommandOutcome,
+        view: Option<dent_protocol::View>,
+    },
+    /// Something the agent wants said in the chat: a notification, a
+    /// warning, a model falling back.
+    Notice(String),
+    /// `control_request/request_user_dialog`: a question for the person.
+    Dialog {
+        request_id: String,
+        kind: String,
+        payload: Value,
+    },
     /// The end of a turn.
     Result {
         terminal_reason: Option<String>,
@@ -144,7 +181,58 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
             version: s(&v, "claude_code_version"),
             permission_mode: s(&v, "permissionMode"),
         },
-        ("system", "compact_boundary") => Inbound::Compacted,
+        ("system", "compact_boundary") => {
+            let m = &v["compact_metadata"];
+            Inbound::Compacted {
+                auto: m["trigger"] == "auto",
+                before: m["pre_tokens"].as_u64().unwrap_or(0),
+                after: m["post_tokens"].as_u64(),
+            }
+        }
+        ("system", "status") => match (v["status"].as_str(), v["compact_result"].as_str()) {
+            (Some("compacting"), _) => Inbound::Compacting {
+                on: true,
+                failed: None,
+            },
+            (_, Some(r)) => Inbound::Compacting {
+                on: false,
+                failed: (r == "failed").then(|| {
+                    v["compact_error"]
+                        .as_str()
+                        .unwrap_or("Claude Code couldn't summarise the conversation")
+                        .to_string()
+                }),
+            },
+            _ => Inbound::Other,
+        },
+        ("system", "api_retry") => Inbound::Retrying {
+            attempt: v["attempt"].as_u64().unwrap_or(1) as u32,
+            max: v["max_retries"].as_u64().unwrap_or(0) as u32,
+            delay_ms: v["retry_delay_ms"].as_u64().unwrap_or(0),
+            error: retry_error(&v),
+        },
+        ("system", "commands_changed") => Inbound::CommandsChanged(v),
+        ("system", "notification") => match v["text"].as_str() {
+            Some(t) if !t.trim().is_empty() => Inbound::Notice(t.to_string()),
+            _ => Inbound::Other,
+        },
+        // Suggestions and plain info are the terminal's chatter.
+        ("system", "informational")
+            if matches!(v["level"].as_str(), Some("warning" | "notice")) =>
+        {
+            match v["content"].as_str() {
+                Some(t) if !t.trim().is_empty() => Inbound::Notice(t.to_string()),
+                _ => Inbound::Other,
+            }
+        }
+        (
+            "system",
+            "model_refusal_fallback" | "model_refusal_no_fallback" | "model_consent_fallback",
+        ) => match v["content"].as_str() {
+            Some(t) if !t.trim().is_empty() => Inbound::Notice(t.to_string()),
+            _ => Inbound::Other,
+        },
+        ("assistant", _) if v.get("local_command_source").is_some() => local_command(&v),
         ("system", "background_tasks_changed") => {
             Inbound::BackgroundTasks(serde_json::from_value(v["tasks"].clone()).unwrap_or_default())
         }
@@ -224,6 +312,13 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
                 suggestions: r["permission_suggestions"].clone(),
             }
         }
+        ("control_request", _) if v["request"]["subtype"] == "request_user_dialog" => {
+            Inbound::Dialog {
+                request_id: s(&v, "request_id"),
+                kind: s(&v["request"], "dialog_kind"),
+                payload: v["request"]["payload"].clone(),
+            }
+        }
         ("control_request", _) => Inbound::Request {
             request_id: s(&v, "request_id"),
             subtype: s(&v["request"], "subtype"),
@@ -270,6 +365,134 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
         }
         _ => Inbound::Other,
     })
+}
+
+/// What a retry is about, short: the status and the agent's words.
+fn retry_error(v: &Value) -> String {
+    let words = match &v["error"] {
+        Value::String(s) => s.clone(),
+        e => e["message"].as_str().unwrap_or_default().to_string(),
+    };
+    let words = if v["no_response"].is_object() {
+        "No response from the API".to_string()
+    } else {
+        words
+    };
+    match v["error_status"].as_u64() {
+        Some(529) if words.is_empty() || words.contains("verloaded") => {
+            "Claude is overloaded".into()
+        }
+        Some(code) if words.is_empty() => format!("The API answered {code}"),
+        _ if words.is_empty() => "The request failed".into(),
+        _ => words,
+    }
+}
+
+/// A command Claude Code ran itself, from its synthetic assistant message.
+fn local_command(v: &Value) -> Inbound {
+    use dent_protocol::{CommandOutcome, View};
+    let text = v["message"]["content"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|b| b["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    let run = &v["local_command_run"];
+    let o = &v["local_command_outcome"];
+    let outcome = match o["kind"].as_str() {
+        Some("unavailable_headless") => CommandOutcome::TerminalOnly,
+        Some("unknown") => CommandOutcome::Unknown {
+            suggestion: o["suggestion"]
+                .as_str()
+                .map(|s| s.trim_start_matches('/').to_string()),
+        },
+        Some("failed") => CommandOutcome::Failed,
+        _ => CommandOutcome::Done,
+    };
+    let cu = &v["context_usage"];
+    let ur = &v["usage_report"];
+    let view = if let Some(used) = cu["total_tokens"].as_u64() {
+        Some(View::Meter {
+            used,
+            max: cu["raw_max_tokens"].as_u64().unwrap_or(0),
+            compacts_at: None,
+            parts: parts(&cu["categories"]),
+        })
+    } else if ur.is_object() {
+        usage_bars(ur).map(|bars| View::Limits { bars })
+    } else {
+        None
+    }
+    .filter(|v| !matches!(v, View::Meter { max: 0, .. }));
+    Inbound::LocalCommand {
+        name: run["command"].as_str().map(str::to_string),
+        args: run["args"].as_str().unwrap_or_default().to_string(),
+        text,
+        outcome,
+        view,
+    }
+}
+
+/// What fills the context, by kind: used and deferred, never the free
+/// space or the buffer, which are what's left.
+pub fn parts(categories: &Value) -> Vec<dent_protocol::Part> {
+    categories
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|c| {
+                    !matches!(c["kind"].as_str(), Some("free" | "buffer"))
+                        && !matches!(
+                            c["name"].as_str(),
+                            Some("Free space" | "Autocompact buffer")
+                        )
+                })
+                .filter_map(|c| {
+                    Some(dent_protocol::Part {
+                        // Listed under "loaded only when needed", the
+                        // name needn't say it.
+                        name: c["name"]
+                            .as_str()?
+                            .trim_end_matches(" (deferred)")
+                            .to_string(),
+                        tokens: c["tokens"].as_u64()?,
+                        deferred: c["kind"] == "deferred" || c["isDeferred"] == true,
+                    })
+                })
+                .filter(|p| p.tokens > 0)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `/usage`'s limits, from its report, labelled as the terminal labels
+/// them.
+fn usage_bars(report: &Value) -> Option<Vec<dent_protocol::Bar>> {
+    let bars: Vec<dent_protocol::Bar> = report["rate_limits"]["limits"]
+        .as_array()?
+        .iter()
+        .filter_map(|l| {
+            let scope = l["scope"]["model"]["display_name"].as_str();
+            let label = match (l["kind"].as_str()?, scope) {
+                ("session", _) => "Current session".to_string(),
+                (_, Some(m)) => format!("This week ({m})"),
+                ("weekly_all", None) => "This week (all models)".to_string(),
+                (k, None) => k.replace('_', " "),
+            };
+            Some(dent_protocol::Bar {
+                label,
+                used: l["percent"].as_f64()? / 100.,
+                resets_at: l["resets_at"]
+                    .as_str()
+                    .and_then(crate::usage::unix)
+                    .unwrap_or(0),
+            })
+        })
+        .collect();
+    (!bars.is_empty()).then_some(bars)
 }
 
 /// A tool result's text, cut to [`OUTPUT_CAP`] on a character boundary.
@@ -418,6 +641,18 @@ pub fn refuse(request_id: &str, subtype: &str) -> Value {
             "error": format!("dent doesn't handle {subtype} requests"),
         },
     })
+}
+
+/// The person's answer to a dialog Claude Code asked through dent; `None`
+/// when they dismissed it.
+pub fn dialog_answer(request_id: &str, value: Option<&str>) -> Value {
+    control_success(
+        request_id,
+        match value {
+            Some(v) if v != "cancelled" => json!({ "behavior": "completed", "result": v }),
+            _ => json!({ "behavior": "cancelled" }),
+        },
+    )
 }
 
 fn control_success(request_id: &str, response: Value) -> Value {

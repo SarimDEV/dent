@@ -263,6 +263,7 @@ fn compare(name: &str, raw: &Raw, bodies: &[Body], t: &mut Tally) {
                 outcome: dent_protocol::Outcome::Interrupted { .. },
             } => t.stops += 1,
             Body::Notice { text } if text == "Conversation compacted" => t.compactions += 1,
+            Body::Compacted { .. } => t.compactions += 1,
             _ => {}
         }
     }

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use dent_protocol::{Answer, Body, Outcome, Permission, Status, Task};
+use dent_protocol::{Activity, Answer, Body, Outcome, Permission, Status, Task};
 use dent_session_holder::wire::Proc as HeldProc;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
@@ -112,6 +112,9 @@ struct Pending {
     tool: String,
     input: Value,
     suggestions: Value,
+    /// A question from Claude Code itself (`request_user_dialog`), shown
+    /// as an agent question: each option's label and the answer it gives.
+    dialog: Option<Vec<(String, String)>>,
 }
 
 #[derive(Clone, Copy)]
@@ -120,6 +123,8 @@ enum Ctl {
     Interrupt,
     /// How full the context is, by the agent's own count.
     ContextUsage,
+    /// What's in effect (`get_settings`), to say which choice is current.
+    Settings,
     Other,
 }
 
@@ -268,6 +273,7 @@ impl Session {
                         id,
                         Pending {
                             tool,
+                            dialog: claude::dialog_values(&input),
                             input,
                             suggestions: Value::Null,
                         },
@@ -300,7 +306,7 @@ impl Session {
                 Body::Settings {
                     effort: Some(e), ..
                 } => self.effort = (!e.is_empty()).then_some(e),
-                Body::Context { used, max } => {
+                Body::Context { used, max, .. } => {
                     self.context = Some(used);
                     self.max_context = max.or(self.max_context);
                 }
@@ -780,8 +786,12 @@ impl Session {
             resumed,
         });
         self.start_by = Some(Instant::now() + start_limit());
-        self.control("initialize", json!({}), Ctl::Initialize)
-            .await?;
+        self.control(
+            "initialize",
+            json!({ "supportedDialogKinds": claude::DIALOGS }),
+            Ctl::Initialize,
+        )
+        .await?;
         Ok(())
     }
 
@@ -843,19 +853,31 @@ impl Session {
         let Some(p) = self.asked.get(&id) else {
             bail!("already answered");
         };
-        let msg = match &answer {
-            Answer::Allow { always } => {
-                wire::allow(&id, &p.tool, &p.input, *always, &p.suggestions)
+        let msg = match (&answer, &p.dialog) {
+            (Answer::Choose { answers }, Some(values)) => {
+                let picked = answers.first().map(String::as_str).unwrap_or_default();
+                let value = values
+                    .iter()
+                    .find(|(label, _)| label == picked)
+                    .map(|(_, v)| v.as_str())
+                    .unwrap_or("cancelled");
+                wire::dialog_answer(&id, Some(value))
             }
-            Answer::Deny { message } => wire::deny(&id, message),
-            Answer::Choose { answers } => wire::allow(
-                &id,
-                &p.tool,
-                &claude::answers(&p.input, answers),
-                false,
-                &Value::Null,
-            ),
-            Answer::Expired => bail!("can't answer with expired"),
+            (Answer::Deny { .. }, Some(_)) => wire::dialog_answer(&id, None),
+            (answer, _) => match answer {
+                Answer::Allow { always } => {
+                    wire::allow(&id, &p.tool, &p.input, *always, &p.suggestions)
+                }
+                Answer::Deny { message } => wire::deny(&id, message),
+                Answer::Choose { answers } => wire::allow(
+                    &id,
+                    &p.tool,
+                    &claude::answers(&p.input, answers),
+                    false,
+                    &Value::Null,
+                ),
+                Answer::Expired => bail!("can't answer with expired"),
+            },
         };
         self.write(&msg).await?;
         self.asked.remove(&id);
@@ -995,7 +1017,11 @@ impl Session {
                 self.start_by = None;
                 self.log_from(Body::TurnStarted, end);
             }
-            Inbound::MessageStart { parent: None } => self.d.clear_partial(&self.id),
+            Inbound::MessageStart { parent: None } => {
+                // A reply is coming: any retry worked.
+                self.d.set_activity(&self.id, None);
+                self.d.clear_partial(&self.id);
+            }
             Inbound::TextDelta { parent: None, text } => self.d.delta(&self.id, &text, false),
             // The turn's result says the same thing, as an error.
             Inbound::Assistant {
@@ -1073,6 +1099,7 @@ impl Session {
                         tool: tool_name,
                         input,
                         suggestions,
+                        dialog: None,
                     },
                 );
             }
@@ -1097,6 +1124,12 @@ impl Session {
                     self.start_by = None;
                     self.d.set_models(claude::models(&body));
                     self.d.set_commands(&self.id, claude::commands(&body));
+                    let (styles, style) = claude::styles(&body);
+                    self.d.catalog(&self.id, |c| {
+                        c.styles = styles;
+                        c.style = style;
+                    });
+                    self.control_later("get_settings", Ctl::Settings);
                     // A resumed conversation is as full as it was: say so
                     // before the first reply rather than after it.
                     if self.agent_started {
@@ -1111,12 +1144,24 @@ impl Session {
                             Body::Context {
                                 used,
                                 max: self.max_context,
+                                compacts_at: body["autoCompactThreshold"]
+                                    .as_u64()
+                                    .filter(|_| body["isAutoCompactEnabled"] != false),
+                                parts: wire::parts(&body["categories"]),
                             },
                             end,
                         );
                     }
                 }
-                (Some(Ctl::Interrupt | Ctl::ContextUsage), _) | (Some(Ctl::Other), true) | (None, _) => {}
+                (Some(Ctl::Settings), true) => {
+                    self.d.catalog(&self.id, |c| {
+                        c.effective = body["effective"].clone();
+                        c.applied = body["applied"].clone();
+                    });
+                }
+                (Some(Ctl::Interrupt | Ctl::ContextUsage | Ctl::Settings), _)
+                | (Some(Ctl::Other), true)
+                | (None, _) => {}
                 (Some(_), false) => self.log_from(
                     Body::Notice {
                         text: format!(
@@ -1206,11 +1251,14 @@ impl Session {
                         end,
                     );
                 }
+                self.d.set_activity(&self.id, None);
                 if let Some(used) = self.context {
                     self.log_from(
                         Body::Context {
                             used,
                             max: self.max_context,
+                            compacts_at: None,
+                            parts: Vec::new(),
                         },
                         end,
                     );
@@ -1221,16 +1269,121 @@ impl Session {
                 self.control_later("get_context_usage", Ctl::ContextUsage);
                 self.end_turn_at(outcome, Some(end));
             }
-            Inbound::Compacted => {
+            Inbound::Compacted {
+                auto,
+                before,
+                after,
+            } => {
                 // What was counted before is gone; the turn's end asks
                 // for the new count.
                 self.context = None;
+                self.d.set_activity(&self.id, None);
                 self.log_from(
-                    Body::Notice {
-                        text: "Conversation compacted".into(),
+                    Body::Compacted {
+                        auto,
+                        before,
+                        after,
                     },
                     end,
                 )
+            }
+            Inbound::Compacting { on: true, .. } => self.d.set_activity(
+                &self.id,
+                Some(Activity::Compacting {
+                    since: crate::daemon::now_ms(),
+                }),
+            ),
+            Inbound::Compacting { on: false, failed } => {
+                self.d.set_activity(&self.id, None);
+                if let Some(why) = failed {
+                    self.log_from(
+                        Body::Notice {
+                            text: format!("Couldn't compact: {why}"),
+                        },
+                        end,
+                    );
+                }
+            }
+            Inbound::Retrying {
+                attempt,
+                max,
+                delay_ms,
+                error,
+            } => self.d.set_activity(
+                &self.id,
+                Some(Activity::Retrying {
+                    attempt,
+                    max,
+                    at: crate::daemon::now_ms() + delay_ms,
+                    error,
+                }),
+            ),
+            Inbound::CommandsChanged(v) => {
+                self.d.commands_changed(&self.id, claude::commands(&v));
+            }
+            Inbound::LocalCommand {
+                name,
+                args,
+                text,
+                outcome,
+                view,
+            } => {
+                // A refusal doesn't say which command; it's the one sent.
+                let sent = self
+                    .last
+                    .as_ref()
+                    .and_then(|(_, t, _)| t.strip_prefix('/'))
+                    .map(|t| {
+                        let (n, a) = t.split_once(char::is_whitespace).unwrap_or((t, ""));
+                        (n.to_string(), a.trim().to_string())
+                    });
+                let (name, args) = match (name, sent) {
+                    (Some(n), _) => (n, args),
+                    (None, Some((n, a))) => (n, a),
+                    (None, None) => (String::new(), args),
+                };
+                self.said = true;
+                self.log_from(
+                    Body::Command {
+                        name,
+                        args,
+                        text,
+                        outcome,
+                        view,
+                    },
+                    end,
+                );
+                // It may have changed a setting a command offers.
+                self.control_later("get_settings", Ctl::Settings);
+            }
+            Inbound::Notice(text) => self.log_from(Body::Notice { text }, end),
+            Inbound::Dialog {
+                request_id,
+                kind,
+                payload,
+            } => {
+                // A kind dent didn't declare is never answered: Claude Code
+                // takes its default.
+                if let Some((input, values)) = claude::dialog(&kind, &payload) {
+                    self.log_from(
+                        Body::Asked {
+                            id: request_id.clone(),
+                            tool: "AskUserQuestion".into(),
+                            input: input.to_string(),
+                            description: None,
+                        },
+                        end,
+                    );
+                    self.asked.insert(
+                        request_id,
+                        Pending {
+                            tool: "AskUserQuestion".into(),
+                            input,
+                            suggestions: Value::Null,
+                            dialog: Some(values),
+                        },
+                    );
+                }
             }
             Inbound::MessageStart { .. } | Inbound::TextDelta { .. } | Inbound::Other => {}
         }

@@ -146,6 +146,36 @@ pub enum Body {
         used: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max: Option<u64>,
+        /// Where the agent compacts on its own; absent when it won't.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compacts_at: Option<u64>,
+        /// What fills it, when the agent said.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        parts: Vec<Part>,
+    },
+    /// The agent summarised the conversation to make room.
+    Compacted {
+        /// It did so on its own as the context filled, not when asked.
+        #[serde(default)]
+        auto: bool,
+        /// Tokens in context before, and after when the agent said.
+        before: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<u64>,
+    },
+    /// A command the agent ran itself, with no model turn: its answer.
+    Command {
+        /// Without its `/`.
+        name: String,
+        #[serde(default)]
+        args: String,
+        /// What it said, as Markdown.
+        text: String,
+        #[serde(default)]
+        outcome: CommandOutcome,
+        /// The same answer as data, when there's a better way to show it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        view: Option<View>,
     },
     /// Account usage, as the agent last reported it.
     Limits {
@@ -186,6 +216,76 @@ pub enum Body {
         error: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_session: Option<String>,
+    },
+}
+
+/// How a command the agent ran itself went.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CommandOutcome {
+    #[default]
+    Done,
+    /// It works only in the agent's own terminal app.
+    TerminalOnly,
+    /// No such command; `suggestion` is the agent's guess, without `/`.
+    Unknown {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        suggestion: Option<String>,
+    },
+    Failed,
+}
+
+/// A command's answer as data.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum View {
+    /// Something filling up, in parts: the context window.
+    Meter {
+        used: u64,
+        max: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compacts_at: Option<u64>,
+        parts: Vec<Part>,
+    },
+    /// Usage against the account's limits.
+    Limits { bars: Vec<Bar> },
+}
+
+/// One limit and how much of it is used.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Bar {
+    /// Like "Current session" or "This week (Fable)".
+    pub label: String,
+    /// 0 to 1.
+    pub used: f64,
+    /// Unix seconds, or 0 when not known.
+    #[serde(default)]
+    pub resets_at: i64,
+}
+
+/// A share of a meter.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Part {
+    pub name: String,
+    pub tokens: u64,
+    /// Loaded only when used, so not counted against the window.
+    #[serde(default)]
+    pub deferred: bool,
+}
+
+/// What the agent is doing that isn't a message: short-lived, never logged.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Activity {
+    /// Summarising the conversation, since Unix milliseconds `since`.
+    Compacting { since: u64 },
+    /// A request failed and will be tried again at Unix milliseconds `at`.
+    Retrying {
+        attempt: u32,
+        max: u32,
+        at: u64,
+        /// What went wrong, in the agent's words.
+        error: String,
     },
 }
 
@@ -315,7 +415,7 @@ pub struct Model {
 }
 
 /// A slash command or skill the agent offers in a session's folder.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct Command {
     pub name: String,
     #[serde(default)]
@@ -323,6 +423,72 @@ pub struct Command {
     /// What goes after the name, like `<file>`.
     #[serde(default)]
     pub hint: String,
+    /// What it takes, read from the hint and filled in from what the agent
+    /// knows (its models, styles, settings), so a client can offer it.
+    #[serde(default, skip_serializing_if = "Args::is_none")]
+    pub args: Args,
+}
+
+/// What a command takes after its name.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Args {
+    /// Nothing: it just runs.
+    #[default]
+    None,
+    /// Words of your own, like instructions or a name.
+    Text {
+        /// What to write, like `custom summarization instructions`.
+        placeholder: String,
+        #[serde(default)]
+        optional: bool,
+    },
+    /// One of a set.
+    Choice {
+        options: Vec<Choice>,
+        #[serde(default)]
+        optional: bool,
+    },
+    /// `key=value` settings.
+    Settings { settings: Vec<Setting> },
+}
+
+impl Args {
+    pub fn is_none(&self) -> bool {
+        matches!(self, Args::None)
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct Choice {
+    /// What's written: a word, or empty for a value of your own (see
+    /// `placeholder`).
+    pub value: String,
+    /// How it's shown, when not the value itself.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub about: String,
+    /// A value of your own, like `tokens`: picking it leaves you typing.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub placeholder: String,
+    /// What's in effect now.
+    #[serde(default)]
+    pub current: bool,
+    /// What may follow it.
+    #[serde(default, skip_serializing_if = "Args::is_none")]
+    pub then: Args,
+}
+
+/// A setting the agent's `/config` takes.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct Setting {
+    pub key: String,
+    /// The values it takes; empty for any text.
+    pub values: Vec<String>,
+    /// Its value now, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
 }
 
 /// A session someone started with the agent in a terminal.
@@ -573,6 +739,18 @@ pub enum Out {
         text: String,
         #[serde(default)]
         reset: bool,
+    },
+    /// What the session's agent is doing besides talking, or `None` once
+    /// it's done.
+    Activity {
+        session: SessionId,
+        #[serde(default)]
+        activity: Option<Activity>,
+    },
+    /// The session's commands changed (a plugin or skill reloaded).
+    Commands {
+        session: SessionId,
+        commands: Vec<Command>,
     },
 }
 

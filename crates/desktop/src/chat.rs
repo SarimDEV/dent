@@ -650,22 +650,56 @@ impl Dent {
     fn working_line(&self, s: &Session) -> AnyElement {
         let t = self.t;
         let since = self.working_since.get(&s.id).copied();
+        // Compacting or retrying says so, in place of the work; each
+        // change of words eases in.
+        let (lead, detail) = match &s.activity {
+            Some(a) => crate::cards::activity_line(a, crate::cards::now_ms()),
+            None => (
+                match since {
+                    Some(at) if at.elapsed().as_secs() >= 1 => {
+                        format!("Working for {}", duration(at.elapsed().as_secs()))
+                    }
+                    _ => "Working".into(),
+                },
+                s.detail.clone(),
+            ),
+        };
+        let kind = match &s.activity {
+            Some(dent_protocol::Activity::Compacting { .. }) => "compacting",
+            Some(dent_protocol::Activity::Retrying { .. }) => "retrying",
+            None => "working",
+        };
+        let changed = self.changed_words(&s.id, kind, &detail);
+        let fade = if crate::reduce_motion() {
+            1.
+        } else {
+            anim::ease_out(anim::progress(changed, motion::BASE))
+        };
         div()
             .flex()
             .items_center()
             .gap(px(space::S2))
             .ty(UI)
             .text_color(t.quiet)
-            .child(status_square(Status::Working, &t))
-            .child(div().text_color(t.ink).child(match since {
-                Some(at) if at.elapsed().as_secs() >= 1 => {
-                    format!("Working for {}", duration(at.elapsed().as_secs()))
-                }
-                Some(_) => "Working".into(),
-                None => "Working".into(),
-            }))
+            .child(status_square(
+                if matches!(s.activity, Some(dent_protocol::Activity::Retrying { .. })) {
+                    Status::Waiting
+                } else {
+                    Status::Working
+                },
+                &t,
+            ))
+            .child(div().text_color(t.ink).child(lead))
             .child(div().text_color(t.faint).child("·"))
-            .child(div().flex_1().min_w_0().truncate().child(s.detail.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .opacity(fade)
+                    .ml(px((1. - fade) * motion::NUDGE))
+                    .child(detail),
+            )
             .into_any_element()
     }
 
@@ -679,6 +713,10 @@ impl Dent {
     ) -> AnyElement {
         let t = self.t;
         match item {
+            // A command, as it was run, until its answer comes.
+            Item::User { text, .. } if text.starts_with('/') && !text.contains('\n') => {
+                crate::cards::command_line(text, "terminal", t.quiet, &t).into_any_element()
+            }
             Item::User { id: msg, text, at } => {
                 let (atts, body): (Vec<&str>, Vec<&str>) =
                     text.lines().partition(|l| l.starts_with("› "));
@@ -1406,11 +1444,13 @@ impl Dent {
                                 }),
                             ))
                     }))
-                    .child(div().ty(LABEL).text_color(t.faint).child(if many {
-                        "Answer each one, or type an answer in the box"
-                    } else {
-                        "Or type your own answer in the box"
-                    }))
+                    .when(!questions.iter().any(|q| q.fixed), |d| {
+                        d.child(div().ty(LABEL).text_color(t.faint).child(if many {
+                            "Answer each one, or type an answer in the box"
+                        } else {
+                            "Or type your own answer in the box"
+                        }))
+                    })
                     .into_any_element()
             }
             Item::Note { icon: name, text } => div()
@@ -1449,6 +1489,18 @@ impl Dent {
                     },
                 )
                 .into_any_element(),
+            Item::Compacted {
+                auto,
+                before,
+                after,
+            } => self.compacted_line(ix, *auto, *before, *after),
+            Item::Command {
+                name,
+                args,
+                text,
+                outcome,
+                view,
+            } => self.command_card(s, ix, name, args, text, outcome, view.as_ref(), window, cx),
             Item::Changed { paths } => {
                 let (added, removed) = turn_counts(s, ix, paths);
                 let n = paths.len();
@@ -1868,22 +1920,7 @@ impl Dent {
                             .child(self.chip(Menu::SessionEffort, "gauge", &labels[2], false, cx))
                             .child(div().flex_1())
                             .when_some(s.context.filter(|_| fit.context), |d, (used, max)| {
-                                let max = max.unwrap_or(200_000).max(1);
-                                let pct = used as f32 / max as f32 * 100.;
-                                d.child(
-                                    div()
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .flex_shrink(2.)
-                                        .ty(LABEL)
-                                        .text_color(if pct > 90. { t.needs.0 } else { t.faint })
-                                        .child(if pct < 10. {
-                                            format!("context {pct:.1}% · ")
-                                        } else {
-                                            format!("context {pct:.0}% · ")
-                                        }),
-                                )
+                                d.child(self.context_meter(s, used, max, cx))
                             })
                             .when(fit.hint, |d| d.child(hint(hint_text, &t)))
                             .child(action),
@@ -2143,6 +2180,7 @@ impl Dent {
         let t = self.t;
         let c = self.completion(cx)?;
         let mention = c.token.kind == complete::Kind::Mention;
+        let arg = c.token.kind == complete::Kind::Arg;
         let n = c.items.len();
         let at = self.slash_ix.min(n.saturating_sub(1));
         // The highlighted row stays in view as the arrows move it.
@@ -2208,13 +2246,51 @@ impl Dent {
                                 .text_color(t.quiet)
                                 .child(parent.trim_end_matches('/').to_string()),
                         )
-                } else {
-                    // What it does, or failing that what it takes.
-                    let about = if item.description.is_empty() {
-                        item.hint.clone()
+                } else if arg {
+                    // A value: as written, what it means, which is in
+                    // effect; one of your own reads as an invitation.
+                    let name_el = if item.open {
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S1H))
+                            .ty(UI)
+                            .text_color(t.quiet)
+                            .child(icon("text-cursor-input", 13., t.quiet))
+                            .child(format!("Your own {}", item.label))
                     } else {
-                        item.description.clone()
+                        div()
+                            .flex_none()
+                            .max_w(relative(0.5))
+                            .truncate()
+                            .ty(CODE)
+                            .text_color(t.ink)
+                            .child(item.label.clone())
                     };
+                    row.child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_baseline()
+                            .gap(px(space::S2))
+                            .child(name_el)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .ty(UI)
+                                    .text_color(t.quiet)
+                                    .child(item.about.clone()),
+                            ),
+                    )
+                    .when(item.current, |d| d.child(icon("check", 13., t.ink)))
+                    .when(item.more && !item.current, |d| {
+                        d.child(icon("chevron-right", 12., t.faint))
+                    })
+                } else {
                     // The code face and the UI face share a baseline, not a
                     // centre line.
                     row.child(
@@ -2240,9 +2316,11 @@ impl Dent {
                                     .truncate()
                                     .ty(UI)
                                     .text_color(t.quiet)
-                                    .child(about),
+                                    .child(item.about.clone()),
                             ),
                     )
+                    // It opens its choices once picked.
+                    .when(item.more, |d| d.child(icon("chevron-right", 12., t.faint)))
                 };
                 row.child(probe(&self.probes, format!("slash-{i}")))
                     .into_any_element()
@@ -2282,6 +2360,16 @@ impl Dent {
                     // Clicks land on the menu, not on what's behind it,
                     // and the prompt keeps its caret.
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .children(c.title.clone().map(|title| {
+                        div()
+                            .px(px(space::S3))
+                            .pt(px(space::S1))
+                            .pb(px(space::S1H))
+                            .truncate()
+                            .ty(LABEL)
+                            .text_color(t.faint)
+                            .child(title)
+                    }))
                     .child(
                         div()
                             .id("slash-rows")

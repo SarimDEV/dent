@@ -2,7 +2,10 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use dent_protocol::{Answer, Block, Body, Event, Out, Outcome, Permission, Status, Task, Window};
+use dent_protocol::{
+    Activity, Answer, Block, Body, CommandOutcome, Event, Out, Outcome, Part, Permission, Status,
+    Task, View, Window,
+};
 use serde_json::Value;
 
 /// Every session the client knows, kept current from the daemon's feed.
@@ -38,6 +41,12 @@ pub struct SessionView {
     pub partial: String,
     /// Tokens in the context window, and its size when known.
     pub context: Option<(u64, Option<u64>)>,
+    /// What fills the context and where it compacts on its own, from the
+    /// agent's last full count.
+    pub context_parts: Vec<Part>,
+    pub compacts_at: Option<u64>,
+    /// What the agent is doing besides talking: compacting, retrying.
+    pub activity: Option<Activity>,
     pub background: Vec<Task>,
     /// Files the agent wrote that can be shown, with every version.
     pub made: Vec<Made>,
@@ -107,6 +116,20 @@ pub enum Entry {
     /// A turn ended having edited these files.
     Changed {
         paths: Vec<String>,
+    },
+    /// The conversation was summarised to make room.
+    Compacted {
+        auto: bool,
+        before: u64,
+        after: Option<u64>,
+    },
+    /// A command the agent ran itself, and its answer.
+    Command {
+        name: String,
+        args: String,
+        text: String,
+        outcome: CommandOutcome,
+        view: Option<View>,
     },
 }
 
@@ -250,6 +273,13 @@ impl Sessions {
                         s.partial.clear();
                     }
                     s.partial.push_str(text);
+                    vec![session.clone()]
+                }
+                None => Vec::new(),
+            },
+            Out::Activity { session, activity } => match self.list.get_mut(session) {
+                Some(s) => {
+                    s.activity = activity.clone();
                     vec![session.clone()]
                 }
                 None => Vec::new(),
@@ -456,6 +486,7 @@ impl SessionView {
                 self.turn_from = self.entries.len();
             }
             Body::TurnEnded { outcome } => {
+                self.activity = None;
                 self.working_since = None;
                 self.partial.clear();
                 // What the turn edited, to review in one place.
@@ -493,10 +524,45 @@ impl SessionView {
                     }),
                 }
             }
-            Body::Context { used, max } => {
+            Body::Context {
+                used,
+                max,
+                compacts_at,
+                parts,
+            } => {
                 let max = max.or(self.context.and_then(|c| c.1));
                 self.context = Some((*used, max));
+                // A count from a reply alone says nothing about its parts.
+                if !parts.is_empty() {
+                    self.context_parts = parts.clone();
+                    self.compacts_at = *compacts_at;
+                }
             }
+            Body::Compacted {
+                auto,
+                before,
+                after,
+            } => {
+                self.activity = None;
+                self.push(Entry::Compacted {
+                    auto: *auto,
+                    before: *before,
+                    after: *after,
+                });
+            }
+            Body::Command {
+                name,
+                args,
+                text,
+                outcome,
+                view,
+            } => self.push(Entry::Command {
+                name: name.clone(),
+                args: args.clone(),
+                text: text.clone(),
+                outcome: outcome.clone(),
+                view: view.clone(),
+            }),
             Body::Background { tasks } => self.background = tasks.clone(),
             Body::Status { status } => {
                 self.status = *status;

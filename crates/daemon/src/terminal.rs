@@ -294,8 +294,19 @@ pub fn import(path: &Path, media: &Path) -> Option<Imported> {
             continue;
         }
         if v["type"] == "system" && v["subtype"] == "compact_boundary" {
-            bodies.push(Body::Notice {
-                text: COMPACTED.into(),
+            let m = &v["compactMetadata"];
+            let m = if m.is_object() {
+                m
+            } else {
+                &v["compact_metadata"]
+            };
+            bodies.push(Body::Compacted {
+                auto: m["trigger"] == "auto",
+                before: m["preTokens"]
+                    .as_u64()
+                    .or(m["pre_tokens"].as_u64())
+                    .unwrap_or(0),
+                after: m["postTokens"].as_u64().or(m["post_tokens"].as_u64()),
             });
             continue;
         }
@@ -317,10 +328,9 @@ pub fn import(path: &Path, media: &Path) -> Option<Imported> {
             if let Some((text, attachments)) = said.prompt {
                 // Claude Code writes the summary before the /compact that
                 // asked for it; dent shows them the way they happened.
-                let compacted =
-                    matches!(bodies.last(), Some(Body::Notice { text }) if text == COMPACTED);
+                let compacted = matches!(bodies.last(), Some(Body::Compacted { .. }));
                 if text.starts_with("/compact") && compacted {
-                    bodies.pop();
+                    let marker = bodies.pop();
                     close(&mut bodies, &mut open, Outcome::Done);
                     bodies.push(Body::User {
                         id: v["uuid"].as_str().unwrap_or_default().to_string(),
@@ -329,9 +339,7 @@ pub fn import(path: &Path, media: &Path) -> Option<Imported> {
                         steer: false,
                         attachments,
                     });
-                    bodies.push(Body::Notice {
-                        text: COMPACTED.into(),
-                    });
+                    bodies.extend(marker);
                     continue;
                 }
                 close(&mut bodies, &mut open, Outcome::Done);
@@ -399,8 +407,6 @@ pub fn import(path: &Path, media: &Path) -> Option<Imported> {
         bodies,
     })
 }
-
-const COMPACTED: &str = "Conversation compacted";
 
 /// What a person's line in a transcript says.
 struct Said {
@@ -668,7 +674,7 @@ mod tests {
                 "start",
                 "end: Error { message: \"You've hit your limit\" }",
                 "you: /compact +0",
-                "note: Conversation compacted",
+                "Compacted { auto: false, before: 0, after: None }",
                 "you: /model +0",
                 "start",
                 "note: Set model to Opus",

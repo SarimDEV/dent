@@ -37,7 +37,8 @@ Usage is account-level and read from the provider through each agent's own CLI, 
 - **Signed out vs API key:** neither has plan limits; `claude auth status --json` and Codex's `account/read` tell them apart, and the status bar says which.
 - `get_usage` is undocumented, so it is covered by the per-version contract tests; if it breaks, the last `rate_limit_event` is the fallback.
 - The same short-lived process answers `initialize`, whose models and slash commands are kept as the ones every session starts with, so a new session offers `/` commands before its agent runs ([0043](decisions/0043-prompt-completion.md)). A session's own list replaces them once its agent starts.
-- A command the agent runs itself (`/context`, `/usage`) answers only in the turn's result; a turn that ends with no reply logs that result as its reply.
+- A command the agent runs itself answers as a `Command` event with a typed outcome and, when it has one, a view (a meter, limit bars) ([0046](decisions/0046-commands-by-type.md)). Commands are sent with typed arguments read from their hints; the probe also reads `/config`'s settings and `get_settings` (no session saved, hooks off).
+- After each turn and each compaction the daemon asks for `get_context_usage` and logs the count with the window size, the auto-compact threshold and what fills it. Compacting and retrying are short-lived `Activity` messages, not log events; a compaction is a `Compacted` event. `request_user_dialog` kinds dent shows are declared at `initialize` and become questions.
 
 ## Session event log
 

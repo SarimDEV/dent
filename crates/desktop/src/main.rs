@@ -8,6 +8,7 @@ mod anim;
 mod app;
 mod assets;
 mod bridge;
+mod cards;
 mod chat;
 mod complete;
 mod context;
@@ -204,6 +205,9 @@ impl Render for Dent {
         // The composer says what Enter will do in this session's state.
         let open = self.current().and_then(|s| {
             s.items.iter().rev().find_map(|i| match i {
+                data::Item::Question { questions, .. } if questions.iter().any(|q| q.fixed) => {
+                    Some("Pick one above")
+                }
                 data::Item::Question { .. } => Some("Type your own answer, or pick one above"),
                 data::Item::Plan { .. } => Some("What to change in the plan (optional)"),
                 data::Item::Approval { .. } => Some("Reason for denying (optional)"),
@@ -467,6 +471,7 @@ impl Render for Dent {
                     this.close_palette(window, cx);
                 } else if this.project_back(window, cx)
                     || this.menu.take().is_some()
+                    || std::mem::take(&mut this.meter_open)
                     || this.dismiss_completion(cx)
                     || select::clear(window)
                 {

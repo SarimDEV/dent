@@ -433,6 +433,15 @@ async fn subscribe(
                 },
             ));
         }
+        for (session, activity) in d.activities() {
+            let _ = tx.send(encode(
+                0,
+                &Out::Activity {
+                    session,
+                    activity: Some(activity),
+                },
+            ));
+        }
         loop {
             match rx.recv().await {
                 Ok(live) => {
@@ -455,6 +464,14 @@ async fn subscribe(
                             session: session.clone(),
                             text: text.clone(),
                             reset: *reset,
+                        },
+                        Live::Activity { session, activity } => Out::Activity {
+                            session: session.clone(),
+                            activity: activity.clone(),
+                        },
+                        Live::Commands { session, commands } => Out::Commands {
+                            session: session.clone(),
+                            commands: commands.clone(),
                         },
                     };
                     if tx.send(encode(0, &msg)).is_err() {

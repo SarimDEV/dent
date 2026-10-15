@@ -2,12 +2,14 @@
 //! or an `@file` anywhere in it. Pure text work, so the composer and the new
 //! session field share it and it can be tested without a window.
 
-use dent_protocol::Command;
+use dent_protocol::{Args, Command};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     Slash,
     Mention,
+    /// A word after a command's name: what the command takes.
+    Arg,
 }
 
 /// The word the caret is in, when it's one to complete.
@@ -19,6 +21,43 @@ pub struct Token {
     pub end: usize,
     /// What's typed after the sign, up to the caret.
     pub query: String,
+    /// For an argument: the command, and the words already given to it.
+    pub command: String,
+    pub before: Vec<String>,
+}
+
+/// One row of the prompt's menu.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Row {
+    /// What picking it writes (a command's name, a path, a value).
+    pub name: String,
+    /// How it's shown, when not its name.
+    pub label: String,
+    pub about: String,
+    /// What's in effect now.
+    pub current: bool,
+    /// A value of your own: picking it leaves you typing.
+    pub open: bool,
+    /// More follows it: picking it keeps the menu open for the next word.
+    pub more: bool,
+    /// Words of your own may follow it.
+    pub then_text: bool,
+}
+
+impl From<Command> for Row {
+    fn from(c: Command) -> Self {
+        Row {
+            // A command that takes a choice opens it once picked.
+            more: matches!(c.args, Args::Choice { .. } | Args::Settings { .. }),
+            about: if c.description.is_empty() {
+                c.hint
+            } else {
+                c.description
+            },
+            name: c.name,
+            ..Default::default()
+        }
+    }
 }
 
 /// The token around `caret`. A command only opens the message, since the
@@ -39,6 +78,28 @@ pub fn token(text: &str, caret: usize) -> Option<Token> {
         .map(|i| caret + i)
         .unwrap_or(text.len());
     let word = &text[start..caret];
+    // Past a command's name: its arguments.
+    if start > 0
+        && !word.starts_with('@')
+        && let Some(rest) = text.strip_prefix('/')
+    {
+        let name = rest.split(char::is_whitespace).next().unwrap_or_default();
+        if name.is_empty() || name.contains('/') {
+            return None;
+        }
+        let before: Vec<String> = text[1 + name.len()..start]
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        return Some(Token {
+            kind: Kind::Arg,
+            start,
+            end,
+            query: word.to_string(),
+            command: name.to_string(),
+            before,
+        });
+    }
     let (kind, query) = if let Some(q) = word.strip_prefix('/') {
         // `/Users/me` is a path, not a command.
         if start != 0 || text[start + 1..end].contains('/') {
@@ -53,7 +114,88 @@ pub fn token(text: &str, caret: usize) -> Option<Token> {
         start,
         end,
         query: query.to_string(),
+        command: String::new(),
+        before: Vec::new(),
     })
+}
+
+/// What a command takes at this point, given the words before: `None`
+/// when it takes words of its own here, or nothing.
+pub fn arg_rows(args: &Args, before: &[String], query: &str) -> Option<Vec<Row>> {
+    let mut at = args;
+    for w in before {
+        match at {
+            Args::Choice { options, .. } => {
+                let o = options
+                    .iter()
+                    .find(|o| !o.value.is_empty() && o.value == *w)?;
+                at = &o.then;
+            }
+            // Settings are one word each: `key=value`.
+            Args::Settings { .. } => {}
+            _ => return None,
+        }
+    }
+    let q = query.to_lowercase();
+    let rows: Vec<Row> = match at {
+        Args::Choice { options, .. } => options
+            .iter()
+            .filter(|o| {
+                q.is_empty()
+                    || o.value.to_lowercase().starts_with(&q)
+                    || o.label.to_lowercase().contains(&q)
+            })
+            .map(|o| Row {
+                name: o.value.clone(),
+                label: if o.label.is_empty() {
+                    o.value.clone()
+                } else {
+                    o.label.clone()
+                },
+                about: o.about.clone(),
+                current: o.current,
+                open: o.value.is_empty(),
+                more: matches!(o.then, Args::Choice { .. }),
+                then_text: matches!(o.then, Args::Text { .. }),
+            })
+            .collect(),
+        Args::Settings { settings } => match query.split_once('=') {
+            // A setting's values, once its key is typed.
+            Some((key, v)) => {
+                let s = settings.iter().find(|s| s.key == key)?;
+                let v = v.to_lowercase();
+                s.values
+                    .iter()
+                    .filter(|x| x.to_lowercase().starts_with(&v))
+                    .map(|x| Row {
+                        name: format!("{key}={x}"),
+                        label: x.clone(),
+                        current: s.current.as_deref() == Some(x.as_str()),
+                        ..Default::default()
+                    })
+                    .collect()
+            }
+            None => settings
+                .iter()
+                .filter(|s| q.is_empty() || s.key.to_lowercase().contains(&q))
+                .map(|s| Row {
+                    name: format!("{}=", s.key),
+                    label: s.key.clone(),
+                    about: match (&s.current, s.values.is_empty()) {
+                        (Some(c), _) => c.clone(),
+                        (None, true) => "your own value".into(),
+                        (None, false) => s.values.join(" · "),
+                    },
+                    more: !s.values.is_empty(),
+                    open: s.values.is_empty(),
+                    ..Default::default()
+                })
+                .collect(),
+        },
+        _ => return None,
+    };
+    // Typing past every choice is a value of your own.
+    (!rows.is_empty()).then_some(rows)
 }
 
 /// The text with the token replaced by `with`, and the caret's new place.
@@ -113,7 +255,7 @@ pub fn offered(agent: &[Command], in_session: bool) -> Vec<Command> {
             .map(|(name, description, _)| Command {
                 name: (*name).into(),
                 description: (*description).into(),
-                hint: String::new(),
+                ..Default::default()
             });
     let theirs = agent.iter().filter(|c| {
         // Internal ones start with `__`; ours replace theirs.
@@ -232,8 +374,7 @@ pub fn files(paths: &[String], query: &str) -> Vec<Command> {
         .take(FILES_SHOWN)
         .map(|(_, _, p)| Command {
             name: p.clone(),
-            description: String::new(),
-            hint: String::new(),
+            ..Default::default()
         })
         .collect()
 }
@@ -246,7 +387,7 @@ mod tests {
         Command {
             name: name.into(),
             description: description.into(),
-            hint: String::new(),
+            ..Default::default()
         }
     }
 
@@ -271,8 +412,22 @@ mod tests {
         assert!(token("/Users/me", 3).is_none());
         assert!(token("me@example.com", 5).is_none());
         assert!(token("hello", 5).is_none());
-        // Past the word, on a space, nothing is being typed.
-        assert!(token("/compact ", 9).is_none());
+        // Past a command's name: what it takes.
+        let t = token("/effort ultracode o", 19).unwrap();
+        assert_eq!(
+            (
+                t.kind,
+                t.command.as_str(),
+                t.before.as_slice(),
+                t.query.as_str()
+            ),
+            (Kind::Arg, "effort", &["ultracode".to_string()][..], "o")
+        );
+        assert_eq!(token("/compact ", 9).unwrap().kind, Kind::Arg);
+        // A mention there is still a mention.
+        assert_eq!(token("/review @sr", 11).unwrap().kind, Kind::Mention);
+        // Past a plain word, on a space, nothing is being typed.
+        assert!(token("hello ", 6).is_none());
         // Multibyte text before the caret is fine.
         let t = token("café @ré", 10).unwrap();
         assert_eq!(t.query, "ré");

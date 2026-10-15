@@ -3,6 +3,7 @@
 //!
 //! [decision 0008]: ../../../docs/decisions/0008-claude-code-stream-json.md
 
+pub mod commands;
 pub mod wire;
 
 use dent_protocol::{Block, Body, Model, Permission, Task, Window};
@@ -194,6 +195,7 @@ pub fn commands(init: &Value) -> Vec<dent_protocol::Command> {
                         name: c["name"].as_str()?.into(),
                         description: c["description"].as_str().unwrap_or_default().into(),
                         hint: c["argumentHint"].as_str().unwrap_or_default().into(),
+                        args: Default::default(),
                     })
                 })
                 .collect()
@@ -275,4 +277,162 @@ pub fn answers(input: &Value, picked: &[String]) -> Value {
     }
     out["answers"] = Value::Object(map);
     out
+}
+
+/// Output styles from `initialize`, with what each does when known.
+pub fn styles(init: &Value) -> (Vec<(String, String)>, Option<String>) {
+    let list = init["available_output_styles"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| Some((s.as_str()?.to_string(), String::new())))
+                .collect()
+        })
+        .unwrap_or_default();
+    (list, init["output_style"].as_str().map(str::to_string))
+}
+
+/// The questions Claude Code may put to the person through the host
+/// (`request_user_dialog`), which dent shows as it shows the agent's own
+/// questions.
+pub const DIALOGS: [&str; 3] = [
+    "refusal_fallback_prompt",
+    "fable_overage_consent_prompt",
+    "auto_mode_server_fallback",
+];
+
+/// A dialog as an agent question: the question tool's input, and for each
+/// option its label and the answer Claude Code wants back.
+pub fn dialog(kind: &str, p: &Value) -> Option<(Value, Vec<(String, String)>)> {
+    let name = |k: &str| {
+        p[k].as_str()
+            .map(model_name)
+            .unwrap_or_else(|| "another model".into())
+    };
+    let (header, question, options): (&str, String, Vec<(String, &str, &str)>) = match kind {
+        "refusal_fallback_prompt" => {
+            let fallback = name("fallbackModel");
+            let mut q = format!("{} declined to answer this.", name("originalModel"));
+            if let Some(g) = p["guidanceText"].as_str().filter(|g| !g.is_empty()) {
+                q = format!("{q} {g}");
+            }
+            (
+                "Declined",
+                q,
+                vec![
+                    (
+                        format!("Try with {fallback}"),
+                        "retry_fallback",
+                        "Send the same message to the other model",
+                    ),
+                    (
+                        "Edit my message".into(),
+                        "edit_prompt",
+                        "Change what you asked and send it again",
+                    ),
+                    ("Cancel".into(), "cancelled", ""),
+                ],
+            )
+        }
+        "fable_overage_consent_prompt" => {
+            let model = p["modelName"].as_str().unwrap_or("This model");
+            let q = if p["overagesEnabled"] == true {
+                format!("{model} uses usage credits once your plan's limit is reached.")
+            } else {
+                format!("{model} needs usage credits, which aren't turned on for this account.")
+            };
+            (
+                "Usage credits",
+                q,
+                vec![
+                    (
+                        format!("Use {model}"),
+                        "consent",
+                        "Draw on usage credits for it",
+                    ),
+                    (
+                        "Use the default model".into(),
+                        "switch_default",
+                        "Carry on without credits",
+                    ),
+                    ("Cancel".into(), "cancelled", ""),
+                ],
+            )
+        }
+        "auto_mode_server_fallback" => {
+            let mut q = p["title"]
+                .as_str()
+                .unwrap_or("Auto mode changed")
+                .to_string();
+            if let Some(paras) = p["paragraphs"].as_array() {
+                for para in paras.iter().filter_map(Value::as_str) {
+                    q = format!("{q}\n\n{para}");
+                }
+            }
+            (
+                "Auto mode",
+                q,
+                vec![
+                    ("Continue".into(), "continue", ""),
+                    ("Stop".into(), "interrupt", "End this turn"),
+                ],
+            )
+        }
+        _ => return None,
+    };
+    // The answers ride along, so a daemon that restarts mid-question
+    // still knows them.
+    let input = serde_json::json!({ "dent_dialog": options.iter().map(|(l, v, _)| [l.as_str(), *v]).collect::<Vec<_>>(), "questions": [{
+        "question": question,
+        "header": header,
+        "multiSelect": false,
+        "options": options.iter().map(|(label, _, about)| serde_json::json!({
+            "label": label, "description": about,
+        })).collect::<Vec<_>>(),
+    }]});
+    let values = options
+        .into_iter()
+        .map(|(label, value, _)| (label, value.to_string()))
+        .collect();
+    Some((input, values))
+}
+
+/// A dialog's labels and answers, from the question it became.
+pub fn dialog_values(input: &Value) -> Option<Vec<(String, String)>> {
+    input["dent_dialog"].as_array().map(|a| {
+        a.iter()
+            .filter_map(|p| Some((p[0].as_str()?.to_string(), p[1].as_str()?.to_string())))
+            .collect()
+    })
+}
+
+/// A model id as people say it: `claude-opus-5-5` is "Opus 5.5".
+pub fn model_name(id: &str) -> String {
+    let id = id.trim_start_matches("claude-");
+    let mut parts = id.split('-');
+    let Some(family) = parts.next() else {
+        return id.to_string();
+    };
+    let version: Vec<&str> = parts
+        .take_while(|p| p.len() <= 2 && p.chars().all(|c| c.is_ascii_digit()))
+        .collect();
+    let mut name: String = family
+        .chars()
+        .next()
+        .map(|c| c.to_uppercase().collect::<String>() + &family[c.len_utf8()..])
+        .unwrap_or_default();
+    if !version.is_empty() {
+        name = format!("{name} {}", version.join("."));
+    }
+    name
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn model_ids_read_as_names() {
+        assert_eq!(super::model_name("claude-opus-5-5"), "Opus 5.5");
+        assert_eq!(super::model_name("claude-haiku-4-5-20251001"), "Haiku 4.5");
+        assert_eq!(super::model_name("opus"), "Opus");
+    }
 }

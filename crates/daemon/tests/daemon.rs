@@ -433,7 +433,15 @@ fn a_command_the_agent_runs_itself_shows_its_answer_once() {
     c.subscribe(0);
     let s = c.create(&w.cwd(), Permission::Ask, "/context");
     c.wait(&s, "the command to end", is_done);
-    assert!(c.text(&s).contains("Context Usage"), "{}", c.text(&s));
+    // Its answer is the command's, with the meter as data, and only once.
+    let commands = |c: &Client| {
+        c.count(&s, |b| {
+            matches!(b, Body::Command { name, view: Some(dent_protocol::View::Meter { .. }), text, .. }
+                if name == "context" && text.contains("Context Usage"))
+        })
+    };
+    assert_eq!(commands(&c), 1, "{:#?}", c.events(&s));
+    assert_eq!(c.count(&s, |b| matches!(b, Body::Assistant { .. })), 0);
     // An ordinary reply isn't repeated from its result.
     let replies = |c: &Client| c.count(&s, |b| matches!(b, Body::Assistant { parent: None, .. }));
     let before = replies(&c);
@@ -1366,4 +1374,82 @@ fn a_side_question_about_no_session_is_refused() {
         Ok(Out::Error { .. }) | Err(_)
     );
     assert!(refused);
+}
+
+#[test]
+fn commands_compaction_retries_and_dialogs_arrive_by_kind() {
+    let w = World::new(&[]);
+    let mut c = w.client();
+    c.subscribe(0);
+    // A terminal-only command and an unknown one say which they are.
+    let s = c.create(&w.cwd(), Permission::Ask, "/theme");
+    c.wait(&s, "the refusal", |b| {
+        matches!(b, Body::Command { name, outcome: dent_protocol::CommandOutcome::TerminalOnly, .. } if name == "theme")
+    });
+    c.wait_turns(&s, 1);
+    c.say(&s, "m2", "/fooo", false);
+    c.wait(&s, "the suggestion", |b| {
+        matches!(b, Body::Command { name, outcome: dent_protocol::CommandOutcome::Unknown { suggestion: Some(x) }, .. }
+            if name == "fooo" && x == "compact")
+    });
+    c.wait_turns(&s, 2);
+    // Compacting: the marker with what it freed, and the new count after.
+    c.say(&s, "m3", "/compact", false);
+    c.wait(&s, "the marker", |b| {
+        matches!(b, Body::Compacted { auto: false, before, after: Some(2_100) } if *before > 4_200)
+    });
+    c.wait_turns(&s, 3);
+    c.wait(&s, "the new count", |b| {
+        matches!(b, Body::Context { used: 4_200, .. })
+    });
+    // Usage comes as labelled bars.
+    c.say(&s, "m4", "/usage", false);
+    c.wait(&s, "the limits", |b| {
+        matches!(b, Body::Command { view: Some(dent_protocol::View::Limits { bars }), .. }
+            if bars.len() == 3 && bars[2].label == "This week (Fable)")
+    });
+    c.wait_turns(&s, 4);
+    // Claude Code's own question is answered like the agent's.
+    c.say(&s, "m5", "declined", false);
+    let id = c.asked(&s);
+    c.call(Request::Answer {
+        session: s.clone(),
+        id,
+        answer: Answer::Choose {
+            answers: vec!["Try with Opus 5.5".into()],
+        },
+    })
+    .unwrap();
+    c.wait_turns(&s, 5);
+    assert!(
+        c.text(&s).contains("Answered with Opus 5.5"),
+        "{}",
+        c.text(&s)
+    );
+    // Commands carry what they take.
+    let commands = match c.call(Request::Commands {
+        session: Some(s.clone()),
+    }) {
+        Ok(Out::Reply {
+            reply: dent_protocol::Reply::Commands { commands },
+        }) => commands,
+        other => panic!("{other:?}"),
+    };
+    let args = |n: &str| {
+        commands
+            .iter()
+            .find(|c| c.name == n)
+            .map(|c| c.args.clone())
+    };
+    assert!(matches!(
+        args("autocompact"),
+        Some(dent_protocol::Args::Choice { optional: true, .. })
+    ));
+    match args("output-style") {
+        Some(dent_protocol::Args::Choice { options, .. }) => {
+            assert_eq!(options.len(), 4);
+            assert!(options[0].current);
+        }
+        other => panic!("{other:?}"),
+    }
 }

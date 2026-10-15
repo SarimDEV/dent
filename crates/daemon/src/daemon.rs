@@ -28,6 +28,14 @@ pub enum Live {
         text: String,
         reset: bool,
     },
+    Activity {
+        session: String,
+        activity: Option<dent_protocol::Activity>,
+    },
+    Commands {
+        session: String,
+        commands: Vec<dent_protocol::Command>,
+    },
 }
 
 pub struct Daemon {
@@ -49,6 +57,11 @@ pub struct Daemon {
     usage: tokio::sync::Mutex<Option<(Vec<dent_protocol::Window>, u64)>>,
     /// Slash commands by session, as each agent reported them.
     commands: Mutex<HashMap<String, Vec<dent_protocol::Command>>>,
+    /// What each session's agent knows that fills commands in; `EVERY`
+    /// holds what the usage probe read (the `/config` settings).
+    catalogs: Mutex<HashMap<String, crate::claude::commands::Catalog>>,
+    /// What each session's agent is doing besides talking.
+    activities: Mutex<HashMap<String, dent_protocol::Activity>>,
 }
 
 pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -86,6 +99,8 @@ impl Daemon {
             partials: Mutex::new(HashMap::new()),
             models: Mutex::new(models),
             commands: Mutex::new(HashMap::new()),
+            catalogs: Mutex::new(HashMap::new()),
+            activities: Mutex::new(HashMap::new()),
             usage: tokio::sync::Mutex::new(None),
         })
     }
@@ -174,16 +189,78 @@ impl Daemon {
         }
     }
 
-    /// A session's commands; before it has started, the ones every session
-    /// starts with (from the usage probe), or another session's.
+    /// A session's commands changed while it ran: clients get the new list.
+    pub fn commands_changed(&self, session: &str, commands: Vec<dent_protocol::Command>) {
+        self.set_commands(session, commands);
+        let _ = self.live.send(Arc::new(Live::Commands {
+            session: session.into(),
+            commands: self.commands(Some(session)),
+        }));
+    }
+
+    /// Change what a session's agent is known to offer.
+    pub fn catalog(&self, session: &str, f: impl FnOnce(&mut crate::claude::commands::Catalog)) {
+        f(lock(&self.catalogs).entry(session.into()).or_default());
+    }
+
+    /// A session's commands, each with what it takes; before it has
+    /// started, the ones every session starts with (from the usage probe),
+    /// or another session's.
     pub fn commands(&self, session: Option<&str>) -> Vec<dent_protocol::Command> {
-        let all = lock(&self.commands);
-        session
-            .and_then(|s| all.get(s))
-            .or_else(|| all.get(EVERY))
-            .or_else(|| all.values().next())
-            .cloned()
-            .unwrap_or_default()
+        let raw = {
+            let all = lock(&self.commands);
+            session
+                .and_then(|s| all.get(s))
+                .or_else(|| all.get(EVERY))
+                .or_else(|| all.values().next())
+                .cloned()
+                .unwrap_or_default()
+        };
+        let cat = {
+            let cats = lock(&self.catalogs);
+            let every = cats.get(EVERY).cloned().unwrap_or_default();
+            let mut cat = session
+                .and_then(|s| cats.get(s))
+                .cloned()
+                .unwrap_or_else(|| every.clone());
+            if cat.settings.is_empty() {
+                cat.settings = every.settings;
+            }
+            if cat.styles.is_empty() {
+                cat.styles = every.styles;
+                cat.style = cat.style.or(every.style);
+            }
+            if !cat.effective.is_object() {
+                cat.effective = every.effective;
+            }
+            cat.models = self.models();
+            cat
+        };
+        crate::claude::commands::typed(&raw, &cat)
+    }
+
+    /// What a session's agent is doing besides talking, for every client.
+    pub fn set_activity(&self, session: &str, activity: Option<dent_protocol::Activity>) {
+        let changed = {
+            let mut all = lock(&self.activities);
+            match &activity {
+                Some(a) => all.insert(session.into(), a.clone()).as_ref() != Some(a),
+                None => all.remove(session).is_some(),
+            }
+        };
+        if changed {
+            let _ = self.live.send(Arc::new(Live::Activity {
+                session: session.into(),
+                activity,
+            }));
+        }
+    }
+
+    pub fn activities(&self) -> Vec<(String, dent_protocol::Activity)> {
+        lock(&self.activities)
+            .iter()
+            .map(|(s, a)| (s.clone(), a.clone()))
+            .collect()
     }
 
     /// Account usage, read at most once a minute however many ask.
@@ -201,11 +278,14 @@ impl Daemon {
         })
         .await
         .ok();
-        let (windows, models, commands) = read
-            .map(|p| (p.windows, p.models, p.commands))
+        let (windows, models, commands, catalog) = read
+            .map(|p| (p.windows, p.models, p.commands, p.catalog))
             .unwrap_or_default();
         me.set_models(models);
         me.set_commands(EVERY, commands);
+        if !catalog.settings.is_empty() {
+            me.catalog(EVERY, |c| *c = catalog);
+        }
         let reading = (windows.unwrap_or_default(), now_ms());
         *cached = Some(reading.clone());
         reading

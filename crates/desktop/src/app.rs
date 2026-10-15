@@ -162,6 +162,15 @@ pub fn thought_key(text: &str) -> String {
     format!("thought:{}", text.chars().take(48).collect::<String>())
 }
 
+/// What keeps a command's answer opened or folded.
+pub fn command_key(name: &str, text: &str) -> String {
+    format!(
+        "command:{name}:{}:{}",
+        text.len(),
+        text.chars().take(48).collect::<String>()
+    )
+}
+
 /// Make a field one line: a typed or pasted line break becomes a space, and
 /// any Return submits. For names and searches.
 pub fn single_line(field: &Entity<TextareaState>, window: &mut Window, cx: &mut App) {
@@ -407,9 +416,11 @@ const EVERY: &str = "";
 /// What the prompt's menu offers for the word at its caret.
 pub struct Completion {
     pub token: complete::Token,
-    pub items: Vec<Command>,
+    pub items: Vec<complete::Row>,
     /// The list isn't here yet (the agent's commands, a folder's files).
     pub loading: bool,
+    /// For a command's arguments: what the command does, as a caption.
+    pub title: Option<String>,
 }
 
 /// What a request's reply is for.
@@ -606,6 +617,11 @@ pub struct Dent {
     /// Console errors per artifact version.
     pub errors: HashMap<(&'static str, usize), Vec<String>>,
     pub updated_at: HashMap<&'static str, Instant>,
+    /// Each session's working-line words and when they last changed, so
+    /// new words ease in.
+    pub live_words: std::cell::RefCell<HashMap<String, (String, Instant)>>,
+    /// The context meter's breakdown is open over the composer.
+    pub meter_open: bool,
     pub attachments: Vec<Attachment>,
     pub diff_file: HashMap<String, usize>,
     pub commenting: Option<(String, u32)>,
@@ -1034,6 +1050,8 @@ impl Dent {
             picking: false,
             errors: HashMap::new(),
             updated_at: HashMap::new(),
+            live_words: Default::default(),
+            meter_open: false,
             attachments: Vec::new(),
             diff_file: HashMap::new(),
             commenting: None,
@@ -1635,11 +1653,14 @@ impl Dent {
                                 && self.core.live
                             {
                                 self.fetch_changes(&e.session);
-                                if !self.commands.contains_key(&e.session) {
-                                    self.fetch_commands(&e.session);
-                                }
+                                // A command may have changed what's in
+                                // effect, which the menu marks.
+                                self.fetch_commands(&e.session);
                             }
                         }
+                    }
+                    if let Out::Commands { session, commands } = &out {
+                        self.commands.insert(session.clone(), commands.clone());
                     }
                     if let Out::Models { models } = &out {
                         self.models = models.clone();
@@ -2047,7 +2068,14 @@ impl Dent {
             let at = self.slash_ix.min(n - 1);
             let typed = &self.prompt().read(cx).value()[c.token.start..c.token.end];
             let slash = c.token.kind == complete::Kind::Slash;
-            let whole = slash && c.items.iter().any(|i| typed == format!("/{}", i.name));
+            let arg = c.token.kind == complete::Kind::Arg;
+            // Typed in full, Return sends what's typed.
+            let whole = slash && c.items.iter().any(|i| typed == format!("/{}", i.name))
+                || arg
+                    && !typed.is_empty()
+                    && c.items
+                        .iter()
+                        .any(|i| typed == i.name && !i.more && !i.open);
             let named = c.items[at]
                 .name
                 .to_lowercase()
@@ -2286,6 +2314,7 @@ impl Dent {
         if self.slash_dismissed == Some((token.kind, token.start)) {
             return None;
         }
+        let mut title = None;
         let (items, loading) = match token.kind {
             complete::Kind::Slash => {
                 // The agent's own list for this session, or the one every
@@ -2299,17 +2328,43 @@ impl Dent {
                     agent.map(Vec::as_slice).unwrap_or_default(),
                     self.current_rc().is_some(),
                 );
-                (complete::commands(&all, &token.query), agent.is_none())
+                let rows = complete::commands(&all, &token.query)
+                    .into_iter()
+                    .map(complete::Row::from)
+                    .collect();
+                (rows, agent.is_none())
             }
             complete::Kind::Mention => match self.mention_files() {
-                Some(files) => (complete::files(files, &token.query), false),
+                Some(files) => (
+                    complete::files(files, &token.query)
+                        .into_iter()
+                        .map(complete::Row::from)
+                        .collect(),
+                    false,
+                ),
                 None => (Vec::new(), true),
             },
+            // What the command takes here; words of its own open nothing.
+            complete::Kind::Arg => {
+                let cmd = self
+                    .selected
+                    .as_ref()
+                    .and_then(|s| self.commands.get(s))
+                    .or_else(|| self.commands.get(EVERY))?
+                    .iter()
+                    .find(|c| c.name == token.command)?;
+                title = Some(format!("/{} · {}", cmd.name, cmd.description));
+                (
+                    complete::arg_rows(&cmd.args, &token.before, &token.query)?,
+                    false,
+                )
+            }
         };
         Some(Completion {
             token,
             items,
             loading,
+            title,
         })
     }
 
@@ -2364,12 +2419,31 @@ impl Dent {
         };
         let field = self.prompt().clone();
         let text = field.read(cx).value().to_string();
+        let row = c
+            .items
+            .iter()
+            .find(|r| r.name == name)
+            .cloned()
+            .unwrap_or_default();
+        // A value of your own: the menu steps aside while you type it.
+        if c.token.kind == complete::Kind::Arg && row.open && !row.name.ends_with('=') {
+            self.slash_dismissed = Some((c.token.kind, c.token.start));
+            cx.notify();
+            return;
+        }
         let own =
             c.token.kind == complete::Kind::Slash && complete::OWN.iter().any(|(n, ..)| *n == name);
+        // A choice with nothing after it is the whole command: it runs.
+        let runs = c.token.kind == complete::Kind::Arg
+            && !row.more
+            && !row.then_text
+            && !row.name.ends_with('=');
         let (with, finished) = match c.token.kind {
             _ if own => (String::new(), false),
             complete::Kind::Slash => (format!("/{name}"), true),
             complete::Kind::Mention => (complete::mention(name), !name.ends_with('/')),
+            // `key=` stays in its word, for the value.
+            complete::Kind::Arg => (name.to_string(), !name.ends_with('=')),
         };
         let (value, caret) = complete::apply(&text, &c.token, &with, finished);
         field.update(cx, |f, cx| {
@@ -2380,8 +2454,19 @@ impl Dent {
         self.slash_ix = 0;
         if own {
             self.run_own(name, "", window, cx);
+        } else if runs {
+            self.submit_prompt(window, cx);
         }
         cx.notify();
+    }
+
+    /// Send what the prompt holds: into the open session, or as a new one.
+    pub fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.current_rc().is_some() {
+            self.send(window, cx);
+        } else {
+            self.start(window, cx);
+        }
     }
 
     /// Do one of dent's own commands, with what was typed after it.
@@ -2742,6 +2827,25 @@ impl Dent {
         cx.notify();
     }
 
+    /// Send a command to a session as if typed, leaving any draft alone.
+    pub fn run_command(
+        &mut self,
+        session: &str,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.live.send(Request::Send {
+            session: session.to_string(),
+            id: crate::message_id(),
+            text: text.to_string(),
+            steer: false,
+            attachments: Vec::new(),
+        });
+        self.follow();
+        cx.notify();
+    }
+
     /// Start a new session from the starter box with the chosen defaults.
     pub fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.starter.read(cx).value().trim().to_string();
@@ -2978,6 +3082,10 @@ impl Dent {
             .and_then(|p| p.iter().position(Option::is_none))
             .unwrap_or(0);
         if q >= questions.len() {
+            return false;
+        }
+        // Only its choices answer it; the words are kept for after.
+        if questions[q].fixed {
             return false;
         }
         self.answer(id, Some(&ask), q, text.to_string(), cx);
@@ -3664,6 +3772,20 @@ impl Dent {
             }
             Item::Note { text, .. } => fp(text, &mut h),
             Item::Changed { paths } => paths.hash(&mut h),
+            Item::Compacted {
+                auto,
+                before,
+                after,
+            } => (auto, before, after).hash(&mut h),
+            Item::Command {
+                name, args, text, ..
+            } => {
+                (name, args).hash(&mut h);
+                fp(text, &mut h);
+                self.expanded
+                    .contains(&command_key(name, text))
+                    .hash(&mut h);
+            }
         }
         h.finish()
     }
@@ -4078,6 +4200,48 @@ impl Dent {
                 .values()
                 .any(|t| t.elapsed() < Duration::from_secs(3))
             || self.dragging
+            || self.live_words.borrow().values().any(|(_, at)| {
+                at.elapsed() < Duration::from_millis(crate::ds::motion::BASE as u64 + 40)
+            })
+    }
+
+    /// When the working line's words for `session` last changed.
+    pub fn changed_words(&self, session: &str, kind: &str, words: &str) -> Instant {
+        let key = format!("{kind}\u{1f}{words}");
+        let mut all = self.live_words.borrow_mut();
+        match all.get(session) {
+            Some((k, at)) if *k == key => *at,
+            Some(_) => {
+                let now = Instant::now();
+                all.insert(session.to_string(), (key, now));
+                now
+            }
+            // The first words are just there.
+            None => {
+                let then = Instant::now() - Duration::from_secs(1);
+                all.insert(session.to_string(), (key, then));
+                then
+            }
+        }
+    }
+
+    /// Put a suggested command in the composer, ready to send.
+    pub fn suggest_command(
+        &mut self,
+        session: &str,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected.as_deref() != Some(session) {
+            return;
+        }
+        let text = format!("/{name} ");
+        self.composer.clone().update(cx, |f, cx| {
+            put(f, text.clone(), window, cx);
+            f.focus(window, cx);
+        });
+        cx.notify();
     }
 }
 

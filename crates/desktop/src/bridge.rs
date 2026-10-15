@@ -219,7 +219,15 @@ pub fn session(
                 at,
                 ..
             } => {
-                if *q {
+                // A command that answered as a command: its card says what
+                // was run, so the message isn't shown twice.
+                let answered = text.starts_with('/')
+                    && attachments.is_empty()
+                    && v.entries[start + k + 1..]
+                        .iter()
+                        .take_while(|n| !matches!(n, Entry::User { queued: false, .. }))
+                        .any(|n| matches!(n, Entry::Command { .. }));
+                if *q || answered {
                     // Waiting messages go last, below everything.
                 } else if attachments.is_empty() {
                     items.push(Item::User {
@@ -343,6 +351,33 @@ pub fn session(
                     items.push(Item::Changed { paths: rest });
                 }
             }
+            Entry::Compacted {
+                auto,
+                before,
+                after,
+            } => items.push(Item::Compacted {
+                auto: *auto,
+                before: *before,
+                after: *after,
+            }),
+            // The marker just above already says it compacted.
+            Entry::Command {
+                outcome: dent_protocol::CommandOutcome::Done,
+                ..
+            } if start + k > 0 && matches!(v.entries[start + k - 1], Entry::Compacted { .. }) => {}
+            Entry::Command {
+                name,
+                args,
+                text,
+                outcome,
+                view,
+            } => items.push(Item::Command {
+                name: name.clone(),
+                args: args.clone(),
+                text: text.clone(),
+                outcome: outcome.clone(),
+                view: view.clone(),
+            }),
             Entry::Note { note, text } => items.push(Item::Note {
                 icon: match note {
                     Note::Stopped => "square",
@@ -408,6 +443,9 @@ pub fn session(
         arts,
         diff: cx.diff.unwrap_or_default(),
         context: v.context,
+        context_parts: v.context_parts.clone(),
+        compacts_at: v.compacts_at,
+        activity: v.activity.clone(),
         asides: v.asides.clone(),
         checkpoints: v.checkpoints.clone(),
         servers: built.servers.iter().map(|(_, u)| u.clone()).collect(),
@@ -501,6 +539,15 @@ fn detail(v: &SessionView) -> String {
             _ => "Needs you".into(),
         },
         Wire::Working | Wire::New => {
+            match &v.activity {
+                Some(dent_protocol::Activity::Compacting { .. }) => {
+                    return "Compacting the conversation".into();
+                }
+                Some(dent_protocol::Activity::Retrying { error, .. }) => {
+                    return format!("Retrying · {error}");
+                }
+                None => {}
+            }
             if !v.partial.is_empty() {
                 return "Writing".into();
             }
@@ -820,6 +867,7 @@ fn ask(id: &str, tool: &str, input: &Value, description: Option<&str>, cwd: &Pat
                                         .collect()
                                 })
                                 .unwrap_or_default(),
+                            fixed: input.get("dent_dialog").is_some(),
                         })
                         .collect()
                 })

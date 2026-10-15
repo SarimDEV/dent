@@ -81,6 +81,9 @@ pub struct Artifact {
 pub struct Question {
     pub text: String,
     pub options: Vec<(String, String)>,
+    /// Only its choices answer it (Claude Code's own questions): no
+    /// answer of your own.
+    pub fixed: bool,
 }
 
 #[derive(Clone)]
@@ -140,6 +143,20 @@ pub enum Item {
     Changed {
         paths: Vec<String>,
     },
+    /// The conversation was summarised to make room: a divider.
+    Compacted {
+        auto: bool,
+        before: u64,
+        after: Option<u64>,
+    },
+    /// A command the agent ran itself, and its answer.
+    Command {
+        name: String,
+        args: String,
+        text: String,
+        outcome: dent_protocol::CommandOutcome,
+        view: Option<dent_protocol::View>,
+    },
 }
 
 impl Item {
@@ -157,6 +174,9 @@ impl Item {
             Item::Text(t) | Item::Note { text: t, .. } | Item::Plan { plan: t, .. } => {
                 Some(t.clone())
             }
+            Item::Command {
+                name, args, text, ..
+            } => Some(format!("/{name} {args}").trim_end().to_string() + "\n" + text),
             _ => None,
         }
     }
@@ -236,6 +256,11 @@ pub struct Session {
     pub checkpoints: std::collections::HashSet<String>,
     /// Tokens in context, and the window's size when known.
     pub context: Option<(u64, Option<u64>)>,
+    /// What fills the context, and where it compacts on its own.
+    pub context_parts: Vec<dent_protocol::Part>,
+    pub compacts_at: Option<u64>,
+    /// Compacting or retrying, while it lasts.
+    pub activity: Option<dent_protocol::Activity>,
     /// Side questions and their answers, kept out of the conversation.
     pub asides: Vec<dent_client_core::Aside>,
 }
@@ -263,6 +288,9 @@ impl Session {
             arts: Vec::new(),
             diff: Rc::default(),
             context: None,
+            context_parts: Vec::new(),
+            compacts_at: None,
+            activity: None,
             asides: Vec::new(),
             checkpoints: Default::default(),
             servers: Vec::new(),

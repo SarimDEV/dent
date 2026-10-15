@@ -24,6 +24,8 @@ pub struct Probe {
     /// The slash commands any session starts with: built-ins, the user's
     /// own commands and skills (not a project's, which need its folder).
     pub commands: Vec<dent_protocol::Command>,
+    /// What `/config` takes and what's set, for typing commands.
+    pub catalog: crate::claude::commands::Catalog,
 }
 
 /// Ask the CLI for the account's usage windows and its models.
@@ -32,11 +34,30 @@ pub fn probe(env: &AgentEnv) -> Probe {
         windows: None,
         models: Vec::new(),
         commands: Vec::new(),
+        catalog: Default::default(),
     };
-    let Some((init, usage)) = ask(env) else {
+    let Some(Answers {
+        init,
+        usage,
+        config,
+        settings,
+    }) = ask(env)
+    else {
         return none();
     };
+    let mut catalog = crate::claude::commands::Catalog::default();
+    if let Some(text) = config {
+        catalog.settings = crate::claude::commands::settings_from_usage(&text);
+    }
+    if let Some(s) = settings {
+        catalog.effective = s["effective"].clone();
+        catalog.applied = s["applied"].clone();
+    }
+    if let Some(init) = &init {
+        (catalog.styles, catalog.style) = crate::claude::styles(init);
+    }
     Probe {
+        catalog,
         windows: usage.as_ref().and_then(windows),
         models: init.as_ref().map(crate::claude::models).unwrap_or_default(),
         commands: init
@@ -46,8 +67,20 @@ pub fn probe(env: &AgentEnv) -> Probe {
     }
 }
 
-/// The `initialize` and `get_usage` answers, each `None` if it didn't come.
-fn ask(env: &AgentEnv) -> Option<(Option<Value>, Option<Value>)> {
+/// What the short-lived CLI answered; each `None` if it didn't.
+struct Answers {
+    init: Option<Value>,
+    usage: Option<Value>,
+    /// `/config`'s usage text: every setting it takes.
+    config: Option<String>,
+    settings: Option<Value>,
+}
+
+/// Ask the CLI: `initialize`, `get_usage`, `get_settings`, and `/config`
+/// with nothing after it, which the CLI answers itself with no model call.
+/// Nothing is saved (`--no-session-persistence`) and the person's hooks
+/// don't run for it.
+fn ask(env: &AgentEnv) -> Option<Answers> {
     let mut child = Command::new("/usr/bin/env")
         .args(["-u", "CLAUDECODE", "-u", "CLAUDE_CODE_ENTRYPOINT"])
         .arg(format!("PATH={}", env.path))
@@ -61,6 +94,8 @@ fn ask(env: &AgentEnv) -> Option<(Option<Value>, Option<Value>)> {
             "--verbose",
             "--no-session-persistence",
             "--strict-mcp-config",
+            "--settings",
+            r#"{"disableAllHooks":true}"#,
         ])
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::piped())
@@ -72,42 +107,57 @@ fn ask(env: &AgentEnv) -> Option<(Option<Value>, Option<Value>)> {
     for (id, sub, extra) in [
         ("u-init", "initialize", json!({})),
         ("u-usage", "get_usage", json!({ "skip_behaviors": true })),
+        ("u-settings", "get_settings", json!({})),
     ] {
         let mut req = json!({ "type": "control_request", "request_id": id, "request": extra });
         req["request"]["subtype"] = json!(sub);
         writeln!(stdin, "{req}").ok()?;
     }
+    let config = json!({
+        "type": "user",
+        "message": { "role": "user", "content": "/config" },
+        "parent_tool_use_id": null,
+        "session_id": "",
+    });
+    writeln!(stdin, "{config}").ok()?;
     let out = child.stdout.take()?;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         for line in BufReader::new(out).lines().map_while(Result::ok) {
-            if let Ok(v) = serde_json::from_str::<Value>(&line)
-                && v["type"] == "control_response"
-            {
+            let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if v["type"] == "control_response" {
                 let id = v["response"]["request_id"].as_str().unwrap_or_default();
-                let done = id == "u-usage";
                 let _ = tx.send((id.to_string(), v["response"]["response"].clone()));
-                if done {
-                    return;
-                }
+            } else if v["type"] == "result" {
+                let _ = tx.send(("config".into(), v["result"].clone()));
+                return;
             }
         }
     });
     let until = Instant::now() + Duration::from_secs(20);
-    let (mut init, mut usage) = (None, None);
-    while usage.is_none() {
+    let mut a = Answers {
+        init: None,
+        usage: None,
+        config: None,
+        settings: None,
+    };
+    while a.usage.is_none() || a.config.is_none() || a.settings.is_none() {
         let Ok((id, v)) = rx.recv_timeout(until.saturating_duration_since(Instant::now())) else {
             break;
         };
         match id.as_str() {
-            "u-init" => init = Some(v),
-            _ => usage = Some(v),
+            "u-init" => a.init = Some(v),
+            "u-usage" => a.usage = Some(v),
+            "u-settings" => a.settings = Some(v),
+            _ => a.config = Some(v.as_str().unwrap_or_default().to_string()),
         }
     }
     drop(stdin);
     let _ = child.kill();
     let _ = child.wait();
-    Some((init, usage))
+    Some(a)
 }
 
 fn windows(usage: &Value) -> Option<Vec<Window>> {
@@ -128,7 +178,7 @@ fn windows(usage: &Value) -> Option<Vec<Window>> {
 }
 
 /// Unix seconds from an RFC 3339 time like `2026-10-12T06:10:00.43+00:00`.
-fn unix(s: &str) -> Option<i64> {
+pub fn unix(s: &str) -> Option<i64> {
     let (date, rest) = s.split_once('T')?;
     let mut d = date.split('-').map(|x| x.parse::<i64>());
     let (y, m, day) = (d.next()?.ok()?, d.next()?.ok()?, d.next()?.ok()?);

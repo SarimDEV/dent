@@ -15,6 +15,12 @@
 //! - `fail`: the turn errors
 //! - `crash`: the process exits mid-turn
 //! - `your args`: replies with its command line
+//! - `retry`: the API fails twice and is retried before it answers
+//! - `declined`: the model declines; Claude Code asks whether to retry
+//! - `/compact`, `/context`, `/usage`, `/config`, `/autocompact`,
+//!   `/output-style`, `/advisor`: answered as Claude Code answers them
+//!   itself, with no model turn; `/theme` is terminal-only, and an unknown
+//!   command gets a suggestion
 //! - anything else: a short Markdown reply
 //!
 //! `FAKE_CLAUDE_SPEED` scales every pause (0 makes it instant).
@@ -193,7 +199,15 @@ impl Agent {
                             {"name": "color", "description": "Set the prompt bar color for this session", "argumentHint": ""},
                             {"name": "review", "description": "Review a pull request", "argumentHint": ""},
                             {"name": "deep-research", "description": "Research a question across many sources", "argumentHint": "<question>"},
+                            {"name": "autocompact", "description": "Configure the auto-compact window size", "argumentHint": "[auto|<tokens>]"},
+                            {"name": "config", "description": "Set a setting by key", "argumentHint": "key=value"},
+                            {"name": "output-style", "description": "List output styles or switch to one", "argumentHint": "[style]"},
+                            {"name": "advisor", "description": "Let Claude consult a stronger model at key moments", "argumentHint": "[fable|opus|sonnet|off]"},
+                            {"name": "usage", "description": "Show session cost, plan usage, and what's contributing to your limits", "argumentHint": ""},
+                            {"name": "theme", "description": "Change the theme", "argumentHint": ""},
                         ],
+                        "output_style": "default",
+                        "available_output_styles": ["default", "Concise", "Explanatory", "Learning"],
                         "agents": [],
                         // The shape Claude Code 2.1 sends: aliases first, then
                         // pinned older versions, each with its exact model.
@@ -224,8 +238,21 @@ impl Agent {
                         "five_hour": {"utilization": 18, "resets_at": "2030-01-01T00:00:00+00:00"},
                         "seven_day": {"utilization": 41, "resets_at": "2030-01-05T00:00:00+00:00"}}}),
                     "get_context_usage" => {
-                        json!({ "totalTokens": self.context, "maxTokens": 200_000, "percentage": self.context / 2000 })
+                        let messages = self.context.saturating_sub(15_400);
+                        json!({ "totalTokens": self.context, "maxTokens": 200_000, "percentage": self.context / 2000,
+                            "autoCompactThreshold": 167_000, "isAutoCompactEnabled": true,
+                            "categories": [
+                                {"name": "System prompt", "tokens": 3_200, "kind": "used"},
+                                {"name": "System tools", "tokens": 6_300, "kind": "used"},
+                                {"name": "Skills", "tokens": 5_900, "kind": "used"},
+                                {"name": "Messages", "tokens": messages, "kind": "used"},
+                                {"name": "MCP tools (deferred)", "tokens": 3_800, "kind": "deferred", "isDeferred": true},
+                                {"name": "Free space", "tokens": 200_000 - self.context, "kind": "free"},
+                                {"name": "Autocompact buffer", "tokens": 33_000, "kind": "buffer"}]})
                     }
+                    "get_settings" => json!({
+                        "effective": {"autoCompact": true, "theme": "dark", "outputStyle": "default"},
+                        "applied": {"model": self.model, "effort": null, "advisor": null}}),
                     _ => {
                         out(json!({"type": "control_response", "response": {
                             "subtype": "error", "request_id": id, "error": format!("Unsupported control request subtype: {sub}")}}));
@@ -472,13 +499,111 @@ impl Agent {
         }
     }
 
+    /// A command Claude Code runs itself: its answer as a synthetic
+    /// message, then a result with no turns.
+    fn local(&self, name: &str, args: &str, text: &str, extra: Value) {
+        let mut m = json!({"type": "assistant",
+            "message": {"model": "<synthetic>", "role": "assistant", "content": [{"type": "text", "text": text}],
+                "usage": {"input_tokens": 0, "output_tokens": 0}},
+            "local_command_source": format!("<local-command-stdout>{text}</local-command-stdout>")});
+        if name.is_empty() {
+            m["local_command_outcome"] = extra;
+        } else {
+            m["local_command_run"] = json!({"command": name, "args": args});
+            if let Value::Object(more) = extra {
+                for (k, v) in more {
+                    m[k] = v;
+                }
+            }
+        }
+        out(self.envelope(m, None));
+        out(self.envelope(
+            json!({"type": "result", "subtype": "success", "is_error": false, "num_turns": 0,
+                "result": text, "local_command": name.replace('-', "_"), "usage": self.usage()}),
+            None,
+        ));
+    }
+
+    fn command(&mut self, text: &str) -> Result<(), Cut> {
+        let rest = &text[1..];
+        let (name, args) = rest.split_once(' ').unwrap_or((rest, ""));
+        let args = args.trim();
+        match name {
+            "compact" => {
+                out(self.envelope(json!({"type": "system", "subtype": "status", "status": "compacting"}), None));
+                self.pause(2500)?;
+                let before = self.context;
+                self.context = 4_200;
+                out(self.envelope(json!({"type": "system", "subtype": "status", "status": null, "compact_result": "success"}), None));
+                out(self.envelope(json!({"type": "system", "subtype": "compact_boundary",
+                    "compact_metadata": {"trigger": "manual", "pre_tokens": before, "post_tokens": 2_100}}), None));
+                self.local("compact", args, "Compacted ", json!({}));
+            }
+            "context" => self.local("context", "",
+                "## Context Usage\n\n**Model:** claude-sonnet-5-5  \n**Tokens:** 18k / 200k (9%)\n\n| Category | Tokens |\n|---|---|\n| System prompt | 3.2k |\n| Messages | 2.6k |",
+                json!({"context_usage": {"model": "claude-sonnet-5-5", "total_tokens": self.context, "raw_max_tokens": 200_000,
+                    "percentage": 9, "categories": [
+                        {"name": "System prompt", "tokens": 3_200, "kind": "used"},
+                        {"name": "System tools", "tokens": 6_300, "kind": "used"},
+                        {"name": "Skills", "tokens": 5_900, "kind": "used"},
+                        {"name": "Messages", "tokens": self.context.saturating_sub(15_400), "kind": "used"},
+                        {"name": "MCP tools (deferred)", "tokens": 3_800, "kind": "deferred"},
+                        {"name": "Free space", "tokens": 150_000, "kind": "free"}]}})),
+            "usage" => self.local("usage", "",
+                "You are currently using your subscription to power your Claude Code usage\n\nCurrent session: 18% used\nCurrent week (all models): 41% used",
+                json!({"usage_report": {"rate_limits": {"limits": [
+                    {"kind": "session", "percent": 18, "resets_at": "2030-01-01T00:00:00+00:00", "scope": null},
+                    {"kind": "weekly_all", "percent": 41, "resets_at": "2030-01-05T00:00:00+00:00", "scope": null},
+                    {"kind": "weekly_scoped", "percent": 11, "resets_at": "2030-01-05T00:00:00+00:00", "scope": {"model": {"display_name": "Fable"}}}]}}})),
+            "config" if args.is_empty() => self.local("config", "",
+                "Usage: /config key=value [key=value ...]\n  autoCompact=true|false\n  theme=auto|dark|light\n  language=<value>", json!({})),
+            "config" => self.local("config", args, &format!("Set {}", args.replace('=', " to ")), json!({})),
+            "autocompact" if args.is_empty() => self.local("autocompact", "",
+                "Auto-compact window for Sonnet 5.5: 200k tokens (default for this model)\nAuto-compact summarizes the conversation when context usage approaches this limit.", json!({})),
+            "autocompact" => self.local("autocompact", args, &format!("Auto-compact window set to {args}"), json!({})),
+            "output-style" if args.is_empty() => self.local("output-style", "",
+                "Output style: default\n\nAvailable styles:\n- default (current)\n- Concise: Claude responds tersely\n\nUsage: /output-style <style>", json!({})),
+            "output-style" => self.local("output-style", args, &format!("Output style set to {args}"), json!({})),
+            "advisor" if args.is_empty() => self.local("advisor", "", "Advisor: off\nUsage: /advisor <fable|opus|sonnet|off>", json!({})),
+            "advisor" => self.local("advisor", args, &format!("Advisor set to {args}"), json!({})),
+            "theme" => self.local("", "", "/theme isn't available in this environment.", json!({"kind": "unavailable_headless"})),
+            _ => self.local("", "",
+                &format!("Unknown command: /{name}. Did you mean /compact?"),
+                json!({"kind": "unknown", "suggestion": "/compact"})),
+        }
+        Ok(())
+    }
+
     fn script(&mut self, text: &str) -> Result<(), Cut> {
         let lower = text.to_lowercase();
         let ask = self.mode == "default";
         self.pause(250)?;
-        // A command the agent runs itself answers only in its result.
-        if lower.starts_with("/context") {
-            self.end("## Context Usage\n\n**Tokens:** 3k / 1m (0%)", false);
+        if lower.starts_with('/') {
+            return self.command(text);
+        }
+        if lower.contains("retry") {
+            for (attempt, delay) in [(1, 1500), (2, 3000)] {
+                out(self.envelope(
+                    json!({"type": "system", "subtype": "api_retry", "attempt": attempt, "max_retries": 10,
+                        "retry_delay_ms": delay, "error_status": 529, "error": "Overloaded"}),
+                    None,
+                ));
+                self.pause(delay)?;
+            }
+            self.say("Back now; the API was busy for a moment.", None)?;
+            self.end("done", false);
+            return Ok(());
+        }
+        if lower.contains("declined") {
+            let resp = self.request(json!({"subtype": "request_user_dialog", "dialog_kind": "refusal_fallback_prompt",
+                "payload": {"originalModel": "claude-fable-5-1", "fallbackModel": "claude-opus-5-5"}}))?;
+            let said = match resp["result"].as_str() {
+                Some("retry_fallback") => "Answered with Opus 5.5 instead.",
+                Some("edit_prompt") => "Edit your message and send it again.",
+                _ => "Left it there.",
+            };
+            self.say(said, None)?;
+            self.end(said, false);
             return Ok(());
         }
         if lower.contains("crash") {
