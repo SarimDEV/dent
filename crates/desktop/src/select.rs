@@ -248,6 +248,16 @@ thread_local! {
     static LEAD: RefCell<Option<SharedString>> = const { RefCell::new(None) };
 }
 
+/// Where every link drawn now points, for walkthroughs.
+pub fn drawn_links() -> Vec<String> {
+    with(|s| {
+        s.placed
+            .iter()
+            .flat_map(|p| p.links.iter().map(|(_, u)| u.clone()))
+            .collect()
+    })
+}
+
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     STATE.with(|s| f(&mut s.borrow_mut()))
 }
@@ -1145,6 +1155,30 @@ impl Text {
     /// open in its default app.
     pub fn links(mut self, links: Vec<(Range<usize>, String)>) -> Self {
         self.links = Rc::new(links);
+        self
+    }
+
+    /// Links in plain text (no runs of its own) underlined as a reply's are,
+    /// in the face it inherits.
+    pub fn underline_links(mut self, t: &Theme) -> Self {
+        let marks = self
+            .links
+            .iter()
+            .map(|(r, _)| {
+                (
+                    r.clone(),
+                    HighlightStyle {
+                        underline: Some(UnderlineStyle {
+                            thickness: px(1.),
+                            color: Some(t.quiet.opacity(0.6)),
+                            wavy: false,
+                        }),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        self.styled = StyledText::new(self.text.clone()).with_highlights(marks);
         self
     }
 

@@ -999,11 +999,21 @@ impl Dent {
                                     div()
                                         .ty(if command { CODE } else { READING })
                                         .text_color(t.ink)
-                                        .child(crate::select::text(
-                                            SharedString::from(format!("user-text-{ix}")),
-                                            shown,
-                                            &t,
-                                        )),
+                                        .child({
+                                            // Addresses and files you named open
+                                            // as they do in a reply.
+                                            let links = crate::markdown::plain_links(
+                                                &shown,
+                                                Some(std::path::Path::new(&s.cwd)),
+                                            );
+                                            crate::select::text(
+                                                SharedString::from(format!("user-text-{ix}")),
+                                                shown,
+                                                &t,
+                                            )
+                                            .links(links)
+                                            .underline_links(&t)
+                                        }),
                                 )
                                 .when(long, |d| {
                                     d.child(

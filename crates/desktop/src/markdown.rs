@@ -523,22 +523,66 @@ type TableState = (Vec<Inline>, Vec<Vec<Inline>>, Vec<Inline>, Vec<Alignment>);
 
 /// Text with bare web addresses made into links.
 fn push_linking(cur: &mut Inline, s: &str, st: Style) {
-    let mut rest = s;
-    while let Some(at) = rest.find("https://").or_else(|| rest.find("http://")) {
-        cur.push(&rest[..at], st);
-        let tail = &rest[at..];
+    let mut at = 0;
+    for r in url_spans(s) {
+        cur.push(&s[at..r.start], st);
+        cur.href = Some(s[r.clone()].to_string());
+        cur.push(&s[r.clone()], Style { link: true, ..st });
+        cur.href = None;
+        at = r.end;
+    }
+    cur.push(&s[at..], st);
+}
+
+/// Where the bare web addresses are in `s`.
+fn url_spans(s: &str) -> Vec<std::ops::Range<usize>> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(at) = s[from..]
+        .find("https://")
+        .or_else(|| s[from..].find("http://"))
+    {
+        let start = from + at;
+        let tail = &s[start..];
         let mut end = tail.find(char::is_whitespace).unwrap_or(tail.len());
         // Trailing punctuation belongs to the sentence, not the address.
         while end > 0 && tail[..end].ends_with(['.', ',', ')', ';', ':', '!', '?', '"', '\'']) {
             end -= 1;
         }
-        let url = &tail[..end];
-        cur.href = Some(url.to_string());
-        cur.push(url, Style { link: true, ..st });
-        cur.href = None;
-        rest = &tail[end..];
+        out.push(start..start + end);
+        from = start + end.max(1);
     }
-    cur.push(rest, st);
+    out
+}
+
+/// The links in plain text, like a message you wrote: web addresses, and
+/// words that name a file (`src/app.rs:42`), found from `base`.
+pub fn plain_links(
+    s: &str,
+    base: Option<&std::path::Path>,
+) -> Vec<(std::ops::Range<usize>, String)> {
+    let urls = url_spans(s);
+    let mut out: Vec<_> = urls
+        .iter()
+        .map(|r| (r.clone(), s[r.clone()].to_string()))
+        .collect();
+    let mut at = 0;
+    for word in s.split_whitespace() {
+        let start = at + s[at..].find(word).unwrap_or(0);
+        at = start + word.len();
+        let trimmed = word.trim_matches(|c: char| "()[]<>\"'`,;!?".contains(c));
+        let trimmed = trimmed.trim_end_matches('.');
+        let lead = word.find(trimmed).unwrap_or(0);
+        let r = start + lead..start + lead + trimmed.len();
+        if !trimmed.is_empty()
+            && looks_like_path(trimmed)
+            && !urls.iter().any(|u| u.start <= r.start && r.end <= u.end)
+        {
+            out.push((r, resolve(trimmed, base)));
+        }
+    }
+    out.sort_by_key(|(r, _)| r.start);
+    out
 }
 
 /// Single-dollar maths is only maths when it looks like TeX. In real agent
@@ -2248,6 +2292,25 @@ fn checkbox(done: bool, t: &Theme) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{Block, Callout, is_price, parse, resolve};
+
+    #[test]
+    fn your_own_words_link_addresses_and_files() {
+        use super::plain_links;
+        let base = std::path::Path::new("/p");
+        let s = "See https://a.example/x, then (src/app.rs:42) and notes.";
+        let links = plain_links(s, Some(base));
+        let found: Vec<(&str, &str)> = links
+            .iter()
+            .map(|(r, u)| (&s[r.clone()], u.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("https://a.example/x", "https://a.example/x"),
+                ("src/app.rs:42", "/p/src/app.rs:42")
+            ]
+        );
+    }
 
     #[test]
     fn a_file_and_line_in_code_is_a_link() {

@@ -3643,12 +3643,25 @@ fn files_attached(d: &Dent) -> Vec<String> {
 /// A file and line named in a reply opens in the viewer at that line; one
 /// that isn't there says so.
 fn file_links() -> Vec<(f32, Act)> {
-    let mut v = new_session("Narrate as you go");
+    let mut v = new_session("Narrate as you go from src/lib.rs:60 (see https://example.com/notes)");
     v.extend([
         (
             0.1,
             Until("it finishes", |d, _| done_saying(d, "All done"), 20.),
         ),
+        (
+            0.,
+            Until(
+                "the file and address in your own message are links",
+                |_, _| {
+                    let links = crate::select::drawn_links();
+                    links.iter().any(|l| l.ends_with("/src/lib.rs:60"))
+                        && links.iter().any(|l| l == "https://example.com/notes")
+                },
+                3.,
+            ),
+        ),
+        (0.2, Shot("own-links")),
         (
             0.,
             Call(|_, w, cx| {
