@@ -362,15 +362,15 @@ impl Dent {
     }
 }
 
-/// `words` as a Markdown quote: each line behind "> ", blank lines kept as
-/// ">" so the quote holds together.
+/// `words` as a Markdown quote: each line behind "> ", paragraphs apart as
+/// they were.
 pub fn quote_block(words: &str) -> String {
     words
         .trim()
         .lines()
         .map(|l| {
             if l.trim().is_empty() {
-                ">".to_string()
+                String::new()
             } else {
                 format!("> {l}")
             }
@@ -383,7 +383,7 @@ pub fn quote_block(words: &str) -> String {
 mod tests {
     #[test]
     fn quotes_keep_their_lines() {
-        assert_eq!(super::quote_block(" a\n\nb \n"), "> a\n>\n> b");
+        assert_eq!(super::quote_block(" a\n\nb \n"), "> a\n\n> b");
         assert_eq!(super::quote_block("  "), "");
     }
 }

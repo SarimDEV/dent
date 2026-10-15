@@ -3734,12 +3734,23 @@ fn file_links() -> Vec<(f32, Act)> {
                 3.,
             ),
         ),
+        (
+            0.,
+            Call(|_, _, _| {
+                // The file the tool row read, so its menu is whole.
+                let f = in_project("src/handler.rs");
+                let _ = std::fs::create_dir_all(f.parent().unwrap_or(&f));
+                let _ = std::fs::write(f, "fn handle() {}\n");
+            }),
+        ),
         (0.2, RightClick("tool-row")),
         (
             0.1,
             Until(
-                "right-clicking a file's tool row offers its path",
-                |d, _| menu_has(d, "Copy Path"),
+                "right-clicking a file's tool row opens it, shows it in Finder or copies its path",
+                |d, _| {
+                    menu_has(d, "Open") && menu_has(d, "Show in Finder") && menu_has(d, "Copy Path")
+                },
                 3.,
             ),
         ),
@@ -3882,7 +3893,8 @@ fn file_links() -> Vec<(f32, Act)> {
             Call(|_, w, cx| {
                 let src = in_project("src/lib.rs");
                 let _ = std::fs::create_dir_all(src.parent().unwrap_or(&src));
-                let body: String = (1..=80).map(|n| format!("// line {n}\n")).collect();
+                // Line n reads "// line n", so the still checks itself.
+                let body: String = (2..=81).map(|n| format!("// line {n}\n")).collect();
                 let _ = std::fs::write(&src, format!("fn handler() {{}}\n{body}"));
                 crate::select::open_link(&format!("{}:60", src.display()), w, cx);
             }),
@@ -3927,6 +3939,14 @@ fn file_links() -> Vec<(f32, Act)> {
             ),
         ),
         (0.3, Shot("file-missing")),
+        // Leave nothing over the next scene.
+        (
+            0.,
+            Call(|d, _, cx| {
+                d.toast = None;
+                cx.notify();
+            }),
+        ),
     ]);
     v
 }
@@ -4047,12 +4067,13 @@ fn attaching() -> Vec<(f32, Act)> {
         (
             0.1,
             Until(
-                "⌘K in your terminal clears it, and search stays shut",
+                "⌘K in your terminal clears what came before, and search stays shut",
+                // What's typed and not yet run stays, as in Terminal.
                 |d, _| {
                     d.palette.is_none()
                         && current(d)
                             .and_then(|s| d.shells.get(&s.id))
-                            .is_some_and(|sh| !sh.text().contains("my notes.txt"))
+                            .is_some_and(|sh| !sh.text().contains("Last login"))
                 },
                 5.,
             ),

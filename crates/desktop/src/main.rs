@@ -259,8 +259,15 @@ impl Render for Dent {
         let room = w - self.sidebar_w - viewer::CHAT_MIN;
         self.sidebar_hidden = (self.sidebar_off && !self.sidebar_forced)
             || wants_panel && room < viewer::MIN_WIDTH && !self.sidebar_forced;
-        // Folding away takes keyboard focus with it, to the window.
-        if self.sidebar_hidden && self.inbox_focus.is_focused(window) {
+        // Folding away takes keyboard focus with it, to the window. So does
+        // your terminal going out of sight (the viewer showing a file
+        // instead): focus left on what isn't drawn reaches no shortcut.
+        let shell_gone = self.term_focus.is_focused(window)
+            && !(self.panel_open && self.current().is_some_and(|s| self.tab(s) == Tab::Terminal));
+        if self.sidebar_hidden && self.inbox_focus.is_focused(window)
+            || shell_gone
+            || window.focused(cx).is_none()
+        {
             window.focus(&self.focus, cx);
         }
         let side = if self.sidebar_hidden {
@@ -307,13 +314,14 @@ impl Render for Dent {
                 };
                 div()
                     .absolute()
-                    .bottom(px(size::STATUS + space::S2))
                     .w(px(self.sidebar_w - space::S4))
+                    // Over the sidebar; with it folded, under the header,
+                    // clear of the reply box and its send button.
                     .map(|d| {
                         if self.sidebar_hidden {
-                            d.left(px(space::S4))
+                            d.left(px(space::S4)).top(px(size::HEADER + space::S2))
                         } else {
-                            d.left(px(space::S2))
+                            d.left(px(space::S2)).bottom(px(size::STATUS + space::S2))
                         }
                     })
                     .child(

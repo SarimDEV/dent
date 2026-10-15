@@ -319,6 +319,7 @@ impl Dent {
                     format!("Show {more} more lines")
                 };
                 crate::ui::ghost(SharedString::from(fold.clone()), label, &t)
+                    .self_start()
                     .relative()
                     .ml(px(-space::S2))
                     .on_press(cx.listener(move |this, _, _, cx| {
@@ -2415,7 +2416,8 @@ impl Dent {
                                 d.child(div().ty(LABEL).text_color(t.faint).child("·"))
                             })
                             .when(fit.hint, |d| d.child(hint(hint_text, &t)))
-                            .child(action),
+                            // At the right even when the row wraps.
+                            .child(div().ml_auto().child(action)),
                     )
                     .child(probe(&self.probes, "composer"))
                     .children(self.slash_menu(false, cx))

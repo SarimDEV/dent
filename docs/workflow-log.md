@@ -104,6 +104,11 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 
 ## Done
 
+### A design review caught what the walkthroughs passed
+- Seen: 2026-10-15, batch 2. Every new check passed, yet the reviewer found two blockers (showing the sidebar by hand squeezed the chat below its minimum; Send fell to its own row) and five should-fixes. And the full suite found a real bug no scene of its own showed: focus left on the terminal after the viewer switched away, so every shortcut went dead.
+- Fix: review stills before landing, not after; run the full suite before calling a batch done, since scenes leave state for the next one.
+- Result: all fixed in the same pass; full suite 308 checks, 0 failed, 3 m 28 s.
+
 ### Walkthroughs passed when stills failed, and stills could catch the wrong moment
 - Seen: 2026-10-15, new Mac. Without Screen Recording permission every shot printed "could not create image from window" and the run still said "13 checks, 0 failed". Stills were also taken on a background thread while the scene moved on, so the narrow `drop-hint` still showed the state after the drop.
 - Fix: a `Shot` step now waits until its picture is saved, and an unsaved still is a failed check ("the still was saved").

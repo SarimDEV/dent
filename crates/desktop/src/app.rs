@@ -5105,12 +5105,14 @@ impl Dent {
     }
 
     /// Hide the sidebar, or bring it back: hidden by hand it stays hidden;
-    /// brought back over a narrow window it shows over the viewer, as its
-    /// button does.
+    /// brought back, the viewer closes to make room, as the header's
+    /// sidebar button does.
     pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         if self.sidebar_hidden {
             self.sidebar_off = false;
             self.sidebar_forced = true;
+            // Short of room, the viewer gives way, so the chat keeps its width.
+            self.panel_open = false;
         } else {
             self.sidebar_off = true;
             self.sidebar_forced = false;

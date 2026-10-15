@@ -346,6 +346,14 @@ impl Dent {
                                 .ty(LABEL)
                                 .text_color(gpui_kit::white().opacity(0.86))
                                 .child(caption)
+                                // A hairline sets the actions apart from
+                                // what the picture is.
+                                .child(
+                                    div()
+                                        .w(px(1.))
+                                        .h(px(14.))
+                                        .bg(gpui_kit::white().opacity(0.25)),
+                                )
                                 .child(
                                     band_action(
                                         "lightbox-copy",
@@ -497,9 +505,14 @@ fn round(
 fn band_action(id: &'static str, label: &'static str) -> Stateful<Div> {
     div()
         .id(id)
+        .px(px(space::S2))
+        .py(px(space::HALF))
+        .rounded(px(radius::SM))
+        .ty(crate::ds::UI)
         .cursor_pointer()
-        .text_color(gpui_kit::white().opacity(0.7))
-        .hover(|d| d.text_color(gpui_kit::white()))
+        .text_color(gpui_kit::white().opacity(0.9))
+        .hover(|d| d.bg(gpui_kit::white().opacity(0.14)))
+        .active(|d| d.bg(gpui_kit::white().opacity(0.22)))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(label)
 }

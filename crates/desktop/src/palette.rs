@@ -177,7 +177,7 @@ impl Dent {
                     .rounded(px(radius::MD))
                     .flex()
                     .items_center()
-                    .gap(px(space::S3))
+                    .gap(px(space::S2))
                     .cursor_pointer()
                     .when(on, |d| d.bg(t.selected()))
                     .when(!on, |d| {
