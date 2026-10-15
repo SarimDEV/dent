@@ -69,6 +69,17 @@ Never run nightly-tier suites (screenshots, fuzzing, real agents) on your own.
 
 Speed of iteration beats coverage, especially now. Early on, test only what protects data and sessions (event log, persistence, session-holder). Screenshot/fuzz/perf suites switch on per area once it stops changing daily.
 
+## Improving how we work
+
+The owner is often away from the machine doing the work, so the workflow has to improve itself. Treat slowness, rework and weak output as bugs in the process, and record them in [docs/workflow-log.md](docs/workflow-log.md) (what counts, and the entry format, are at its top).
+
+- **Notice:** time builds, verify, tests and walkthroughs. Log anything over ~2 min, anything run when nothing it covers changed, every correction from the owner, and output you wouldn't be proud to show.
+- **Record, don't detour:** add the entry and carry on with the task. Fix a process problem unasked only when it's small and blocking the current work. Say in one line at the end of the turn which entries you added.
+- **Speak up:** if something is costing a lot right now (a suite run repeatedly, a step waiting on the owner), suggest the fix in chat as well as logging it.
+- **Measure:** every entry carries numbers, and every fix is re-measured. "Feels faster" isn't a result.
+- **Work the log when asked:** take the open entries highest cost first, fix, re-measure, and move each to Done with before and after numbers.
+- **Be honest about output:** say what you checked and what you didn't. Describe behaviour only after reading the code or running it.
+
 ## Definition of done
 
 1. `just verify` passes.
