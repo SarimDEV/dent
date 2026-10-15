@@ -766,6 +766,11 @@ pub struct Dent {
     pub row_born: HashMap<usize, (Instant, f32)>,
     /// The diff draws only the lines on screen.
     pub diff_list: ListState,
+    /// A text file's lines, and which file and version they're for.
+    pub text_list: ListState,
+    pub text_key: Option<(&'static str, usize)>,
+    /// The line a link pointed at in each text file.
+    pub marked_line: HashMap<&'static str, u32>,
     /// Side chat's place.
     pub aside_scroll: ScrollHandle,
     /// Each document's scroll, so each keeps its own place.
@@ -1223,6 +1228,9 @@ impl Dent {
             transcript_sigs: (None, Vec::new()),
             row_born: HashMap::new(),
             diff_list: ListState::new(0, ListAlignment::Top, px(400.)),
+            text_list: ListState::new(0, ListAlignment::Top, px(400.)),
+            text_key: None,
+            marked_line: HashMap::new(),
             aside_scroll: ScrollHandle::new(),
             doc_scrolls: HashMap::new(),
             diff_key: 0,
@@ -1432,6 +1440,28 @@ impl Dent {
     /// other document, page or picture opens as a tab of its own that
     /// follows the file on disk. With no session open, it opens in its app.
     pub fn open_file(&mut self, path: &str, cx: &mut Context<Self>) {
+        self.open_file_at(path, None, cx);
+    }
+
+    /// Show a file from a link, at `line` when it names one. A path that
+    /// isn't there says so; a folder opens in Finder.
+    pub fn open_file_at(&mut self, path: &str, line: Option<u32>, cx: &mut Context<Self>) {
+        let target = std::path::Path::new(path);
+        if !target.exists() {
+            // Named as the reply named it: from the session's folder.
+            let shown = self
+                .current()
+                .and_then(|s| target.strip_prefix(&s.cwd).ok())
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| crate::picker::tilde(path));
+            self.toast(ToastAction::Info, format!("Can't find {shown}"));
+            cx.notify();
+            return;
+        }
+        if target.is_dir() {
+            crate::open::open(path, cx);
+            return;
+        }
         let Some(s) = self.current().cloned() else {
             crate::open::open(path, cx);
             return;
@@ -1448,16 +1478,21 @@ impl Dent {
                     .is_some_and(|f| f == target)
             });
         if let Some(a) = known {
+            self.mark_line(a, line);
             self.open_art(a, None, cx);
             return;
         }
-        if crate::data::Kind::of(path).is_none() {
+        let shown = std::fs::read(path)
+            .ok()
+            .and_then(|b| crate::data::Kind::opened(path, &b));
+        if shown.is_none() {
             crate::open::open(path, cx);
             return;
         }
         match self.load_opened(&s.id, path) {
             Some(id) => {
                 self.save_prefs();
+                self.mark_line(id, line);
                 self.open_art(id, None, cx);
             }
             None => {
@@ -1469,8 +1504,8 @@ impl Dent {
 
     /// Read a file into a viewer tab of `session`'s; its id, if it could.
     fn load_opened(&mut self, session: &str, path: &str) -> Option<&'static str> {
-        let kind = crate::data::Kind::of(path)?;
         let bytes = std::fs::read(path).ok()?;
+        let kind = crate::data::Kind::opened(path, &bytes)?;
         let id = crate::data::intern(&format!("{session}/open/{path}"));
         let name = std::path::Path::new(path)
             .file_name()
@@ -1493,6 +1528,20 @@ impl Dent {
             list.push(id);
         }
         Some(id)
+    }
+
+    /// The line a link named in a text file: scrolled to and marked when
+    /// the file next shows. Other kinds ignore it.
+    fn mark_line(&mut self, art: &'static str, line: Option<u32>) {
+        match line {
+            Some(l) => {
+                self.marked_line.insert(art, l);
+                self.text_key = None;
+            }
+            None => {
+                self.marked_line.remove(art);
+            }
+        }
     }
 
     /// Whether the opened file showing in the viewer changed on disk.

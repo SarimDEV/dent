@@ -147,6 +147,14 @@ impl Walk {
                 v.extend(find());
                 v
             }
+            "links" => {
+                let mut v = vec![(
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                )];
+                v.extend(file_links());
+                v
+            }
             "attach" => {
                 let mut v = vec![(
                     0.,
@@ -1843,6 +1851,7 @@ fn checks() -> Vec<(f32, Act)> {
     ]);
     // Daily use, after the scenes that lean on files written at the start
     // still being fresh.
+    v.extend(file_links());
     v.extend(recall());
     v.extend(find());
     v.extend(find_viewer());
@@ -3631,6 +3640,69 @@ fn files_attached(d: &Dent) -> Vec<String> {
 /// Attaching: a session keeps what you attached while you look elsewhere,
 /// the paperclip is there, a drag says where it lands, a drop on the
 /// terminal types the paths, and clipped tool output opens in full.
+/// A file and line named in a reply opens in the viewer at that line; one
+/// that isn't there says so.
+fn file_links() -> Vec<(f32, Act)> {
+    let mut v = new_session("Narrate as you go");
+    v.extend([
+        (
+            0.1,
+            Until("it finishes", |d, _| done_saying(d, "All done"), 20.),
+        ),
+        (
+            0.,
+            Call(|_, w, cx| {
+                let src = in_project("src/lib.rs");
+                let _ = std::fs::create_dir_all(src.parent().unwrap_or(&src));
+                let body: String = (1..=80).map(|n| format!("// line {n}\n")).collect();
+                let _ = std::fs::write(&src, format!("fn handler() {{}}\n{body}"));
+                crate::select::open_link(&format!("{}:60", src.display()), w, cx);
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "src/lib.rs:60 opens the file in the viewer",
+                |d, _| drawn(d, "text-view").is_some(),
+                3.,
+            ),
+        ),
+        (
+            0.,
+            Until(
+                "at line 60, marked",
+                |d, _| {
+                    d.marked_line.values().any(|&l| l == 60)
+                        && d.text_list.logical_scroll_top().item_ix > 40
+                },
+                3.,
+            ),
+        ),
+        (0.3, Shot("file-at-line")),
+        (
+            0.,
+            Call(|_, w, cx| {
+                let gone = in_project("src/gone.rs");
+                crate::select::open_link(&format!("{}:9", gone.display()), w, cx);
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "a file that isn't there says so",
+                |d, _| {
+                    d.toast
+                        .as_ref()
+                        .is_some_and(|t| t.text.starts_with("Can't find"))
+                },
+                3.,
+            ),
+        ),
+        (0.3, Shot("file-missing")),
+    ]);
+    v
+}
+
 fn attaching() -> Vec<(f32, Act)> {
     let mut v = new_session("Narrate as you go");
     v.extend([

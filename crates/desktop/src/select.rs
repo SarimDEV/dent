@@ -1290,26 +1290,45 @@ impl Element for Text {
 
 thread_local! {
     /// A file a link asked dent to show, for the app to open on its next draw.
-    static OPEN: RefCell<Option<String>> = const { RefCell::new(None) };
+    static OPEN: RefCell<Option<(String, Option<u32>)>> = const { RefCell::new(None) };
 }
 
 /// Follow a link: web addresses in the browser; a file dent can show (a
 /// document, page or picture) in the viewer; any other file in its app.
 pub fn open_link(url: &str, window: &mut Window, cx: &mut App) {
     if url.starts_with('/') {
-        if crate::data::Kind::of(url).is_some() {
-            OPEN.with(|o| *o.borrow_mut() = Some(url.to_string()));
-            window.refresh();
-        } else if std::path::Path::new(url).exists() {
-            crate::open::open(url, cx);
-        }
+        // The window decides where it shows, and says so when it can't.
+        OPEN.with(|o| *o.borrow_mut() = Some(at_line(url)));
+        window.refresh();
     } else if !url.starts_with('#') {
         cx.open_url(url);
     }
 }
 
-/// The file a link asked to show, once.
-pub fn take_open() -> Option<String> {
+/// A path and the line it names, from `src/app.rs:42` or `src/app.rs:42:7`
+/// (the column is let go). A path that really ends that way stays whole.
+pub fn at_line(path: &str) -> (String, Option<u32>) {
+    if std::path::Path::new(path).exists() {
+        return (path.to_string(), None);
+    }
+    let mut rest = path;
+    let mut nums = Vec::new();
+    while let Some((head, n)) = rest.rsplit_once(':')
+        && nums.len() < 2
+        && !n.is_empty()
+        && n.chars().all(|c| c.is_ascii_digit())
+    {
+        nums.push(n);
+        rest = head;
+    }
+    match nums.last().and_then(|n| n.parse().ok()) {
+        Some(line) => (rest.to_string(), Some(line)),
+        None => (path.to_string(), None),
+    }
+}
+
+/// The file a link asked to show, and the line, once.
+pub fn take_open() -> Option<(String, Option<u32>)> {
     OPEN.with(|o| o.borrow_mut().take())
 }
 
@@ -1345,6 +1364,21 @@ fn paint_range(layout: &TextLayout, range: Range<usize>, color: Hsla, window: &m
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_link_names_a_line() {
+        use super::at_line;
+        assert_eq!(
+            at_line("/nowhere/a.rs:42"),
+            ("/nowhere/a.rs".into(), Some(42))
+        );
+        assert_eq!(
+            at_line("/nowhere/a.rs:42:7"),
+            ("/nowhere/a.rs".into(), Some(42))
+        );
+        assert_eq!(at_line("/nowhere/a.rs"), ("/nowhere/a.rs".into(), None));
+        assert_eq!(at_line("/nowhere/a.rs:"), ("/nowhere/a.rs:".into(), None));
+    }
+
     use super::{Key, Piece, SAME_LINE, Sel, Spot, shape, word_at};
     use std::ops::Range;
     use std::rc::Rc;

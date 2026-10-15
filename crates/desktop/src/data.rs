@@ -37,6 +37,8 @@ pub enum Kind {
     Image,
     /// A dev server the agent started.
     Server,
+    /// Any other text file you opened from a link: shown read-only, by line.
+    Text,
 }
 
 impl Kind {
@@ -49,6 +51,15 @@ impl Kind {
             _ => return None,
         })
     }
+    /// How a file you open is shown: as its kind, else as text when it reads
+    /// as text (no NUL in its start, valid UTF-8) and isn't huge.
+    pub fn opened(path: &str, bytes: &[u8]) -> Option<Kind> {
+        Kind::of(path).or_else(|| {
+            let head = &bytes[..bytes.len().min(8192)];
+            (bytes.len() <= 8 << 20 && !head.contains(&0) && std::str::from_utf8(bytes).is_ok())
+                .then_some(Kind::Text)
+        })
+    }
     /// Shown live in the web view.
     pub fn is_page(self) -> bool {
         matches!(self, Kind::Html | Kind::Server)
@@ -59,6 +70,7 @@ impl Kind {
             Kind::Doc => "file-text",
             Kind::Image => "image",
             Kind::Server => "globe",
+            Kind::Text => "file-code",
         }
     }
 }
@@ -499,6 +511,15 @@ pub fn machine_shown(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn opened_files_show_as_text_unless_binary() {
+        use super::Kind;
+        assert_eq!(Kind::opened("a.rs", b"fn main() {}\n"), Some(Kind::Text));
+        assert_eq!(Kind::opened("a.md", b"# Hi"), Some(Kind::Doc));
+        assert_eq!(Kind::opened("a.bin", b"\x00\x01\x02"), None);
+        assert_eq!(Kind::of("a.rs"), None);
+    }
+
     use super::*;
 
     #[test]

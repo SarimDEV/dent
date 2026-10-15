@@ -153,8 +153,8 @@ impl Render for Dent {
         ui::FRAME.store(self.frames, std::sync::atomic::Ordering::Relaxed);
         self.drain_page(window, cx);
         // A link asked to show a file.
-        if let Some(path) = select::take_open() {
-            self.open_file(&path, cx);
+        if let Some((path, line)) = select::take_open() {
+            self.open_file_at(&path, line, cx);
         }
         // A file you opened in the viewer follows its changes on disk.
         if let Some(Tab::Art(a)) = self.current().map(|s| self.tab(s))

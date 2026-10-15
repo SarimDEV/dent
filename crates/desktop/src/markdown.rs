@@ -975,6 +975,16 @@ fn looks_like_path(c: &str) -> bool {
     if c.contains(char::is_whitespace) || c.len() > 300 || c.contains("://") {
         return false;
     }
+    // `src/app.rs:42` and `src/app.rs:42:7` name a line of the file.
+    let mut c = c;
+    for _ in 0..2 {
+        if let Some((head, n)) = c.rsplit_once(':')
+            && !n.is_empty()
+            && n.bytes().all(|b| b.is_ascii_digit())
+        {
+            c = head;
+        }
+    }
     let last = c.rsplit('/').next().unwrap_or(c);
     let ext_ok = last.rsplit_once('.').is_some_and(|(stem, ext)| {
         !stem.is_empty()
@@ -2238,6 +2248,18 @@ fn checkbox(done: bool, t: &Theme) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{Block, Callout, is_price, parse, resolve};
+
+    #[test]
+    fn a_file_and_line_in_code_is_a_link() {
+        let blocks = parse("See `src/app.rs:42`, `lib.rs:3:7` and `notes:12`.");
+        let Block::Para(p) = &blocks[0] else { panic!() };
+        let urls: Vec<&str> = p.links.iter().map(|(_, u)| u.as_str()).collect();
+        assert_eq!(urls, ["src/app.rs:42"]);
+        assert_eq!(
+            resolve("src/app.rs:42", Some(std::path::Path::new("/p"))),
+            "/p/src/app.rs:42"
+        );
+    }
 
     #[test]
     fn links_and_bare_addresses_are_found() {
