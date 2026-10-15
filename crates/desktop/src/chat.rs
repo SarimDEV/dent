@@ -162,9 +162,15 @@ impl Dent {
                     icon_button("show-sidebar", "panel-left-open", &t)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_press(cx.listener(|this, _, _, cx| {
-                            this.sidebar_forced = true;
-                            this.panel_open = false;
-                            cx.notify();
+                            // Hidden by hand, it comes back as it was;
+                            // folded for room, it shows over the viewer.
+                            if this.sidebar_off {
+                                this.toggle_sidebar(cx);
+                            } else {
+                                this.sidebar_forced = true;
+                                this.panel_open = false;
+                                cx.notify();
+                            }
                         }))
                         .with_tip(tip("Show sessions", None, t)),
                 )
@@ -838,6 +844,7 @@ impl Dent {
                 .into_any_element()
         };
         div()
+            .key_context("Chat")
             .flex_1()
             .min_w_0()
             .h_full()

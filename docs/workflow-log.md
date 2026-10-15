@@ -83,6 +83,19 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 - Fix: use the editor tool (it refuses non-unique anchors) for anything but mechanical renames; when scripting, anchor on whole lines and assert the line number.
 - Check: misfired edits per batch.
 
+### Walkthroughs need an unlocked screen, and no one is there to unlock it
+- Seen: 2026-10-15, about 13:45. The screen locked while the owner was away. Locked, macOS draws no windows, so walkthroughs (mine and another session's in `dent-chat-polish`) stopped dead with no message. Two runs hung for 10+ minutes before I found why; a third went to a wrong theory (windows covering each other).
+- Cost: about 30 minutes, and every UI check stops until the owner is back.
+- Fixed in part: `walk.sh` now refuses to start on a locked screen and says so, keeps the display awake while it runs (`caffeinate -d`), and a still that doesn't come back in 15 s fails instead of waiting forever.
+- Still open: the display sleeping and locking whenever the owner steps away. Options: keep-awake for the length of a work session, or a setting that doesn't lock on display sleep; both the owner's call.
+- Check: walk runs lost to a locked screen per week.
+
+### Two sessions on the same repo at once
+- Seen: 2026-10-15. Another session works in `~/Documents/projects/active/dent-chat-polish` on branch `chat-polish`, cut from `316f679`, while this one lands batch 2 on main; both edit `crates/desktop/src/chat.rs`.
+- Cost: merge conflicts later, and walkthroughs from both competing for the screen.
+- Fix: one writer per area at a time; the second session works from the first's latest main, or waits.
+- Check: conflicts per merge.
+
 ### `walk.rs` is one 3,939-line file
 - Seen: 2026-10-15. Every walkthrough scene lives in `crates/desktop/src/walk.rs`.
 - Cost: each edit means reading or searching a large file, which costs agent time and tokens and makes conflicts likelier.

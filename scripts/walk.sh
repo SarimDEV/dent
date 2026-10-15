@@ -29,6 +29,16 @@ cat > "$root/home/.claude/projects/-proj/22222222-3333-4444-8555-666666666666.js
 {"type":"ai-title","aiTitle":"README cleanup"}
 JSONL
 touch -t 202601010000 "$root/home/.claude/projects/-proj/"*.jsonl
+# A locked or sleeping screen draws no windows, so a walk would stop dead
+# with nothing to say why: say so now. While it runs, the display stays awake.
+if [[ "$(uname)" == Darwin ]]; then
+  session=$(ioreg -n Root -d1 || true)
+  if [[ "$session" == *'"CGSSessionScreenIsLocked"=Yes'* ]]; then
+    echo "walk: the screen is locked; unlock it first (windows draw nothing while it is)" >&2
+    exit 2
+  fi
+  caffeinate -d -w $$ &
+fi
 cargo build -q -p dent-desktop -p dent-daemon -p dent-session-holder -p dent-fake-claude
 bin=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug
 if [[ "$name" == "real" ]]; then

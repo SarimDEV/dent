@@ -64,6 +64,11 @@ actions!(
         ShowAll,
         Minimize,
         Zoom,
+        ToggleSidebar,
+        ChatPageUp,
+        ChatPageDown,
+        ChatTop,
+        ChatBottom,
     ]
 );
 
@@ -119,6 +124,7 @@ pub fn set_menus(cx: &mut App) {
         gpui_kit::Menu {
             name: "View".into(),
             items: vec![
+                MenuItem::action("Show or Hide Sidebar", ToggleSidebar),
                 MenuItem::action("Show or Hide Viewer", TogglePanel),
                 MenuItem::action("Changes", ShowChanges),
                 MenuItem::action("Terminal", ShowTerminal),
@@ -163,6 +169,19 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-z", UndoClose, Some("Dent")),
         KeyBinding::new("cmd-j", NextNeedsYou, None),
         KeyBinding::new("cmd-\\", TogglePanel, None),
+        KeyBinding::new("ctrl-cmd-s", ToggleSidebar, None),
+        // The chat scrolls by page and to its ends from the reply box, as a
+        // Mac document does (the field's own binding for these moves the
+        // caret, which a short box doesn't need); your terminal and the
+        // viewer keep these keys.
+        KeyBinding::new("pageup", ChatPageUp, Some("Chat")),
+        KeyBinding::new("pagedown", ChatPageDown, Some("Chat")),
+        KeyBinding::new("home", ChatTop, Some("Chat")),
+        KeyBinding::new("end", ChatBottom, Some("Chat")),
+        KeyBinding::new("pageup", ChatPageUp, Some("Chat > Input")),
+        KeyBinding::new("pagedown", ChatPageDown, Some("Chat > Input")),
+        KeyBinding::new("home", ChatTop, Some("Chat > Input")),
+        KeyBinding::new("end", ChatBottom, Some("Chat > Input")),
         KeyBinding::new("cmd-1", ShowFirst, None),
         KeyBinding::new("cmd-2", ShowChanges, None),
         KeyBinding::new("cmd-3", ShowTerminal, None),
@@ -691,6 +710,8 @@ pub struct Dent {
     /// This frame's chat column width.
     pub chat_w: f32,
     pub sidebar_hidden: bool,
+    /// You hid it by hand; it stays hidden whatever the width.
+    pub sidebar_off: bool,
     /// The person opened the sidebar over a narrow window.
     pub sidebar_forced: bool,
     pub dragging: bool,
@@ -1204,6 +1225,7 @@ impl Dent {
             panel_w: 600.,
             chat_w: 800.,
             sidebar_hidden: false,
+            sidebar_off: prefs.sidebar_off,
             sidebar_forced: false,
             dragging: false,
             tabs: HashMap::new(),
@@ -3317,6 +3339,7 @@ impl Dent {
             effort: self.defaults.effort.clone(),
             panel_width: Some(self.panel_width),
             sidebar_width: Some(self.sidebar_w),
+            sidebar_off: self.sidebar_off,
             appearance: self.appearance,
             pinned: self.pinned.clone(),
             open_with: crate::open::chosen(),
@@ -5052,6 +5075,39 @@ impl Dent {
         cx.notify();
     }
 
+    /// Hide the sidebar, or bring it back: hidden by hand it stays hidden;
+    /// brought back over a narrow window it shows over the viewer, as its
+    /// button does.
+    pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar_hidden {
+            self.sidebar_off = false;
+            self.sidebar_forced = true;
+        } else {
+            self.sidebar_off = true;
+            self.sidebar_forced = false;
+        }
+        self.save_prefs();
+        cx.notify();
+    }
+
+    /// Page Up, Page Down, Home and End in the chat.
+    pub fn scroll_chat(&mut self, by: ChatScroll, cx: &mut Context<Self>) {
+        let page = (self.window_h - crate::ds::size::HEADER - 160.).max(120.) * 0.9;
+        match by {
+            ChatScroll::Up => {
+                self.transcript.set_follow_mode(FollowMode::Normal);
+                self.transcript.scroll_by(px(-page));
+            }
+            ChatScroll::Down => self.transcript.scroll_by(px(page)),
+            ChatScroll::Top => {
+                self.transcript.set_follow_mode(FollowMode::Normal);
+                self.transcript.scroll_to(ListOffset::default());
+            }
+            ChatScroll::Bottom => self.follow(),
+        }
+        cx.notify();
+    }
+
     /// Keep the newest line in view while following the conversation.
     fn follow(&mut self) {
         self.transcript.set_follow_mode(FollowMode::Tail);
@@ -5234,4 +5290,13 @@ const ARRIVE_AT_ONCE: usize = 3;
 pub enum DropTarget {
     Message,
     Shell,
+}
+
+/// Where the chat scrolls to by key.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChatScroll {
+    Up,
+    Down,
+    Top,
+    Bottom,
 }

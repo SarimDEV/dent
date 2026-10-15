@@ -622,7 +622,15 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
             if let Some(dir) = dir {
                 let path = dir.join(format!("{name}.png"));
                 let asked = SHOT_ASKED.with(|a| a.get());
+                let stuck = SHOT_SINCE
+                    .with(|t| t.get())
+                    .is_some_and(|t| t.elapsed() > Duration::from_secs(15));
                 match SHOT.load(SeqCst) {
+                    // A capture that never comes back fails, not the walk.
+                    TAKING if asked && stuck => {
+                        SHOT_ASKED.with(|a| a.set(false));
+                        note(&me, cx, "the still was saved", false);
+                    }
                     TAKING => advance = false,
                     TAKEN if asked => {
                         SHOT_ASKED.with(|a| a.set(false));
@@ -634,6 +642,7 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
                         let _ = std::fs::create_dir_all(&dir);
                         let _ = std::fs::remove_file(&path);
                         SHOT_ASKED.with(|a| a.set(true));
+                        SHOT_SINCE.with(|t| t.set(Some(Instant::now())));
                         still(path);
                         advance = false;
                     }
@@ -955,6 +964,11 @@ fn kill_daemon(_: &mut Dent, _: &mut Window, _: &mut Context<Dent>) {
 fn outside_page() -> &'static str {
     let dir = std::env::var("DENT_WALK_OUTSIDE").unwrap_or_else(|_| "/nonexistent".into());
     leak(format!("write {dir}/page.html with assets"))
+}
+
+thread_local! {
+    /// Whether the sidebar showed before a scene toggled it.
+    static SIDEBAR_WAS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Whether the open right-click menu has a row saying `label`.
@@ -4049,6 +4063,69 @@ fn attaching() -> Vec<(f32, Act)> {
         (0.5, Shot("output-all")),
         (
             0.2,
+            Call(|d, w, cx| d.composer.update(cx, |c, cx| c.focus(w, cx))),
+        ),
+        (0.2, Key("home")),
+        (
+            0.1,
+            Until(
+                "Home goes to the start of the chat",
+                |d, _| {
+                    let top = d.transcript.logical_scroll_top();
+                    top.item_ix == 0 && top.offset_in_item == px(0.)
+                },
+                3.,
+            ),
+        ),
+        (0.2, Key("pagedown")),
+        (
+            0.1,
+            Until(
+                "Page Down moves down a page",
+                |d, _| {
+                    let top = d.transcript.logical_scroll_top();
+                    top.item_ix > 0 || top.offset_in_item > px(200.)
+                },
+                3.,
+            ),
+        ),
+        (0.2, Key("end")),
+        (
+            0.1,
+            Until(
+                "End goes back to the newest",
+                |d, _| {
+                    let n = current(d).map_or(0, |s| s.items.len());
+                    n > 0 && d.transcript.bounds_for_item(n - 1).is_some()
+                },
+                3.,
+            ),
+        ),
+        (
+            0.2,
+            Call(|d, _, _| SIDEBAR_WAS.with(|w| w.set(d.sidebar_hidden))),
+        ),
+        (0.2, Key("ctrl-cmd-s")),
+        (
+            0.1,
+            Until(
+                "⌃⌘S shows or hides the sidebar",
+                |d, _| d.sidebar_hidden != SIDEBAR_WAS.with(|w| w.get()),
+                3.,
+            ),
+        ),
+        (0.3, Shot("sidebar-toggled")),
+        (0.2, Key("ctrl-cmd-s")),
+        (
+            0.1,
+            Until(
+                "and again puts it back",
+                |d, _| d.sidebar_hidden == SIDEBAR_WAS.with(|w| w.get()),
+                3.,
+            ),
+        ),
+        (
+            0.2,
             Until(
                 "and a press shows all of it",
                 |d, _| d.expanded.iter().any(|k| k.starts_with("call-out-all-")),
@@ -4418,6 +4495,8 @@ const TAKEN: u8 = 2;
 thread_local! {
     /// A `Shot` step asked for the still in flight (a sweep's own don't count).
     static SHOT_ASKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// When it asked.
+    static SHOT_SINCE: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
 }
 
 /// The window only, never what's around it: by window number when the

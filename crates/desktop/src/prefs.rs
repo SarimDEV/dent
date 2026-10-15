@@ -13,6 +13,8 @@ pub struct Prefs {
     pub effort: Option<String>,
     pub panel_width: Option<f32>,
     pub sidebar_width: Option<f32>,
+    /// You hid the sidebar (View › Hide Sidebar, ⌃⌘S); it stays hidden.
+    pub sidebar_off: bool,
     /// Light, dark, or as the Mac is.
     pub appearance: Appearance,
     /// The text size you chose with ⌘+ and ⌘−, as a factor.
