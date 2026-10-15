@@ -44,4 +44,4 @@ Everything degrades to text. If the hint can't be read, the command takes text. 
 
 - After /compact, the meter used to keep its old reading, and it measured every model against 200k. Both are fixed by asking for `get_context_usage`.
 - The question card's "type your own answer" is hidden for questions only choices can answer.
-- `/mcp`, `/status`, `/skills`, `/memory`, `/hooks` and `/permissions` work, as sheets. Editing permission rules waits on the daemon's own rule store, which `/permissions` will then edit.
+- `/mcp`, `/status`, `/skills`, `/memory`, `/hooks` and `/permissions` work, as sheets. Permission rules live in Claude Code's own settings: an approval's "Always in this project" saves Claude Code's suggested rule to `localSettings` (the project's uncommitted `.claude/settings.local.json`), and `/permissions` lists them with the rest. dent keeps no rule store of its own, so nothing can drift from what Claude Code enforces.

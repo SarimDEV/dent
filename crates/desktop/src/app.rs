@@ -343,6 +343,18 @@ pub struct Toast {
     pub at: Instant,
 }
 
+/// How far an approval reaches.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Scope {
+    /// This call.
+    Once,
+    /// This kind of call, for the rest of the session.
+    Session,
+    /// This kind of call from now on in the project, saved where the agent
+    /// keeps its rules.
+    Project,
+}
+
 /// One of your messages brought back with ↑.
 pub struct Recall {
     pub session: String,
@@ -2271,10 +2283,13 @@ impl Dent {
             && let Some(item @ (Item::Approval { .. } | Item::Plan { .. })) = self.open_ask(&id)
         {
             let plan = matches!(item, Item::Plan { .. });
+            let keeps = matches!(item, Item::Approval { keeps: true, .. });
+            // The keys follow the buttons, left to right.
             match (k.key.as_str(), plan) {
-                ("enter" | "1", _) => self.allow(&id, None, false, cx),
-                ("2", false) => self.allow(&id, None, true, cx),
-                ("2", true) | ("3", false) => self.deny(&id, None, window, cx),
+                ("enter" | "1", _) => self.allow(&id, None, Scope::Once, cx),
+                ("2", false) => self.allow(&id, None, Scope::Session, cx),
+                ("3", false) if keeps => self.allow(&id, None, Scope::Project, cx),
+                ("2", true) | ("4", false) => self.deny(&id, None, window, cx),
                 _ => return false,
             }
             return true;
@@ -2582,6 +2597,28 @@ impl Dent {
     }
 
     /// The newest usage reading, from the provider or a session's stream.
+    /// A usage limit that's used up: what it's called and when it starts
+    /// over (Unix seconds). With several, the one that ends last.
+    pub fn limit_hit(&self) -> Option<(&'static str, i64)> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        self.limits()
+            .iter()
+            .filter(|w| w.used >= 0.995 && w.resets_at > now)
+            .max_by_key(|w| w.resets_at)
+            .map(|w| {
+                let name = if w.name == "five_hour" {
+                    "5-hour limit"
+                } else if w.name.starts_with("seven_day") {
+                    "weekly limit"
+                } else {
+                    "usage limit"
+                };
+                (name, w.resets_at)
+            })
+    }
+
     pub fn limits(&self) -> Vec<dent_protocol::Window> {
         let stream = self.core.limits.as_ref();
         match (&self.usage, stream) {
@@ -3240,7 +3277,7 @@ impl Dent {
 
     pub fn stop(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(s) = self.session(id) else { return };
-        if !matches!(s.status, Status::Working | Status::Needs) {
+        if !s.running() {
             return;
         }
         // Twice before it has stopped would bring the queued text back twice.
@@ -3368,11 +3405,16 @@ impl Dent {
         }
     }
 
-    pub fn allow(&mut self, id: &str, ask: Option<&str>, always: bool, cx: &mut Context<Self>) {
+    pub fn allow(&mut self, id: &str, ask: Option<&str>, scope: Scope, cx: &mut Context<Self>) {
         if let Some(Item::Approval { id: ask, .. } | Item::Plan { id: ask, .. }) =
             self.ask_for(id, ask)
         {
-            self.reply_to_ask(id, ask, Answer::Allow { always }, cx);
+            let (always, project) = match scope {
+                Scope::Once => (false, false),
+                Scope::Session => (true, false),
+                Scope::Project => (true, true),
+            };
+            self.reply_to_ask(id, ask, Answer::Allow { always, project }, cx);
         }
     }
 

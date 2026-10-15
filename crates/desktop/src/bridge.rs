@@ -310,11 +310,12 @@ pub fn session(
                 tool,
                 input,
                 description,
+                keeps,
                 answer,
             } => {
                 let input: Value = serde_json::from_str(input).unwrap_or(Value::Null);
                 match answer {
-                    None => items.push(ask(id, tool, &input, description.as_deref(), cwd)),
+                    None => items.push(ask(id, tool, &input, description.as_deref(), *keeps, cwd)),
                     // The answer reads before what it let happen.
                     Some(a) => {
                         let note = answered(tool, &input, a, cwd);
@@ -845,7 +846,14 @@ fn summary(calls: &[Call], cwd: &Path) -> String {
     out
 }
 
-fn ask(id: &str, tool: &str, input: &Value, description: Option<&str>, cwd: &Path) -> Item {
+fn ask(
+    id: &str,
+    tool: &str,
+    input: &Value,
+    description: Option<&str>,
+    keeps: bool,
+    cwd: &Path,
+) -> Item {
     match tool {
         "AskUserQuestion" => Item::Question {
             id: id.into(),
@@ -899,6 +907,7 @@ fn ask(id: &str, tool: &str, input: &Value, description: Option<&str>, cwd: &Pat
                 command,
                 why: description.unwrap_or_default().into(),
                 diff: change.is_some() && tool != "Write",
+                keeps,
             }
         }
     }
@@ -962,11 +971,17 @@ fn answered(tool: &str, input: &Value, a: &Answer, cwd: &Path) -> Item {
         }
     };
     let (icon, text) = match a {
-        Answer::Allow { always: false } if tool == "ExitPlanMode" => {
+        Answer::Allow { always: false, .. } if tool == "ExitPlanMode" => {
             ("check", "Approved the plan".to_string())
         }
-        Answer::Allow { always: false } => ("check", format!("Allowed {short}")),
-        Answer::Allow { always: true } => ("check", format!("Allowed {short} for this session")),
+        Answer::Allow { project: true, .. } => (
+            "check",
+            format!("Allowed {short} in this project from now on"),
+        ),
+        Answer::Allow { always: false, .. } => ("check", format!("Allowed {short}")),
+        Answer::Allow { always: true, .. } => {
+            ("check", format!("Allowed {short} for this session"))
+        }
         Answer::Deny { message } if tool == "ExitPlanMode" => {
             ("corner-down-right", format!("Kept planning: {message}"))
         }

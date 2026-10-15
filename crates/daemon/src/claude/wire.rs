@@ -577,22 +577,34 @@ fn image_block(path: &str) -> Option<Value> {
     }))
 }
 
+/// Whether the agent offered a rule it can save for this kind of call.
+pub fn keeps(suggestions: &Value) -> bool {
+    suggestions
+        .as_array()
+        .is_some_and(|a| a.iter().any(|s| s["type"] == "addRules"))
+}
+
 /// Allow a tool call. With `always`, the agent's own suggestions (or a rule
 /// for the tool) are sent back so the same kind of call is allowed for the
-/// rest of the session.
+/// rest of the session. With `project` too, its suggestions go to the
+/// project's local settings, where Claude Code keeps, lists and enforces
+/// them from now on.
 pub fn allow(
     request_id: &str,
     tool: &str,
     input: &Value,
     always: bool,
+    project: bool,
     suggestions: &Value,
 ) -> Value {
+    let always = always || project;
     let mut r = json!({
         "behavior": "allow",
         "updatedInput": input,
         "decisionClassification": if always { "user_permanent" } else { "user_temporary" },
     });
     if always {
+        let destination = if project { "localSettings" } else { "session" };
         let rules: Vec<Value> = suggestions
             .as_array()
             .map(|a| {
@@ -600,7 +612,7 @@ pub fn allow(
                     .filter(|s| s["type"] == "addRules")
                     .map(|s| {
                         let mut s = s.clone();
-                        s["destination"] = json!("session");
+                        s["destination"] = json!(destination);
                         s
                     })
                     .collect()

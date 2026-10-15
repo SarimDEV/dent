@@ -601,7 +601,10 @@ fn approvals_allow_deny_and_questions() {
     c.call(Request::Answer {
         session: s.clone(),
         id: id.clone(),
-        answer: Answer::Allow { always: false },
+        answer: Answer::Allow {
+            always: false,
+            project: false,
+        },
     })
     .unwrap();
     // Answering twice is refused, never sent twice.
@@ -609,7 +612,10 @@ fn approvals_allow_deny_and_questions() {
         c.call(Request::Answer {
             session: s.clone(),
             id,
-            answer: Answer::Allow { always: false },
+            answer: Answer::Allow {
+                always: false,
+                project: false,
+            },
         })
         .is_err()
     );

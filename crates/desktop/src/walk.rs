@@ -179,6 +179,14 @@ impl Walk {
                 v.extend(pins());
                 v
             }
+            "fail" => {
+                let mut v = vec![(
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                )];
+                v.extend(failures());
+                v
+            }
             "recall" => {
                 let mut v = vec![(
                     0.,
@@ -852,13 +860,6 @@ fn checks() -> Vec<(f32, Act)> {
         ),
     )];
     v.extend(typing());
-    v.extend(recall());
-    v.extend(find());
-    v.extend(answer_keys());
-    v.extend(reply_actions());
-    v.extend(switching());
-    v.extend(view_choices());
-    v.extend(pins());
     v.extend([
         (0.3, Key("cmd-n")),
         (
@@ -1689,6 +1690,16 @@ fn checks() -> Vec<(f32, Act)> {
             ),
         ),
     ]);
+    // Daily use, after the scenes that lean on files written at the start
+    // still being fresh.
+    v.extend(recall());
+    v.extend(find());
+    v.extend(answer_keys());
+    v.extend(reply_actions());
+    v.extend(switching());
+    v.extend(view_choices());
+    v.extend(pins());
+    v.extend(failures());
     v
 }
 
@@ -2262,6 +2273,63 @@ fn answer_keys() -> Vec<(f32, Act)> {
     v.extend(new_session("run it, please"));
     v.extend([
         (0.1, Until("a third approval", |d, _| waiting(d), 10.)),
+        (0.1, Key("escape")),
+        (0.2, Key("3")),
+        (
+            0.1,
+            Until(
+                "3 allows it in this project from now on",
+                |d, _| {
+                    status_is(d, Status::Done)
+                        && noted(d, "Allowed echo hello > hello.txt in this project")
+                        && std::fs::read_to_string(in_project(".claude/settings.local.json"))
+                            .is_ok_and(|s| s.contains("Bash(echo hello > hello.txt)"))
+                },
+                10.,
+            ),
+        ),
+    ]);
+    v.extend(new_session("run it once more"));
+    v.extend([
+        (
+            0.1,
+            Until(
+                "and a later session runs it without asking",
+                |d, _| done_saying(d, "Ran it") && !has(d, |i| matches!(i, Item::Approval { .. })),
+                10.,
+            ),
+        ),
+        // Leave the project as it was, so later checks are asked again.
+        (
+            0.1,
+            Call(|_, _, _| {
+                let _ = std::fs::remove_file(in_project(".claude/settings.local.json"));
+            }),
+        ),
+    ]);
+    v.extend(new_session("write keep.md please"));
+    v.extend([
+        (0.1, Until("a write waits", |d, _| waiting(d), 10.)),
+        (0.1, Key("escape")),
+        (0.2, Key("3")),
+        (
+            0.3,
+            Until(
+                "with no rule to save, 3 does nothing and says why on hover",
+                |d, _| waiting(d) && drawn(d, "allow-project").is_some(),
+                1.,
+            ),
+        ),
+        (0.2, Shot("allow-project-off")),
+        (0.8, Key("1")),
+        (
+            0.1,
+            Until("it's written", |d, _| status_is(d, Status::Done), 10.),
+        ),
+    ]);
+    v.extend(new_session("run it, please"));
+    v.extend([
+        (0.1, Until("a fourth approval", |d, _| waiting(d), 10.)),
         (
             0.1,
             Until(
@@ -2275,11 +2343,11 @@ fn answer_keys() -> Vec<(f32, Act)> {
             0.1,
             Until("and Esc takes it to the card", |d, _| d.ask_keyed, 1.),
         ),
-        (0.2, Key("3")),
+        (0.2, Key("4")),
         (
             0.1,
             Until(
-                "3 denies",
+                "4 denies",
                 |d, _| status_is(d, Status::Done) && noted(d, "Denied"),
                 10.,
             ),
@@ -2709,6 +2777,51 @@ fn pins() -> Vec<(f32, Act)> {
             ),
         ),
         (0.3, Shot("open-with")),
+    ]);
+    v
+}
+
+/// Something that went wrong can be tried again, unless a used-up limit
+/// means it would only fail again.
+fn failures() -> Vec<(f32, Act)> {
+    let mut v = new_session("crash halfway please");
+    v.extend([
+        (
+            0.1,
+            Until(
+                "when Claude Code stops unexpectedly, the note offers Try again",
+                |d, _| {
+                    has(d, |i| matches!(i, Item::Note { icon: "circle-alert", text } if text.contains("stopped unexpectedly")))
+                        && (drawn(d, "retry-1").is_some() || drawn(d, "retry-2").is_some())
+                },
+                15.,
+            ),
+        ),
+    ]);
+    v.extend(new_session("hit the limit now"));
+    v.extend([
+        (
+            0.1,
+            Until(
+                "a used-up limit says which and when it resets, and Try again waits for it",
+                |d, _| {
+                    !current(d).is_some_and(|s| s.running())
+                        && d.limit_hit().is_some_and(|(w, _)| w == "5-hour limit")
+                        && has(d, |i| {
+                            matches!(
+                                i,
+                                Item::Note {
+                                    icon: "circle-alert",
+                                    ..
+                                }
+                            )
+                        })
+                },
+                10.,
+            ),
+        ),
+        (0.4, Shot("limit")),
+        (0.8, Wait),
     ]);
     v
 }

@@ -14,6 +14,7 @@
 //! - `dev server`: serves a page on a free port and prints its address
 //! - `long`: a long reply, for stopping halfway
 //! - `fail`: the turn errors
+//! - `hit the limit`: the 5-hour usage limit is used up and the turn fails
 //! - `crash`: the process exits mid-turn
 //! - `your args`: replies with its command line
 //! - `retry`: the API fails twice and is retried before it answers
@@ -160,6 +161,31 @@ fn main() {
             Err(_) => a.stdin_open = false,
         }
     }
+}
+
+/// Where Claude Code keeps a project's own rules, not committed.
+fn local_settings() -> std::path::PathBuf {
+    std::path::Path::new(".claude").join("settings.local.json")
+}
+
+/// The allow rules saved in the project's local settings.
+fn local_rules() -> Vec<String> {
+    std::fs::read(local_settings())
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| v["permissions"]["allow"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| r.as_str().map(String::from))
+        .collect()
+}
+
+fn save_local_rules(rules: &[String]) {
+    let _ = std::fs::create_dir_all(".claude");
+    let _ = std::fs::write(
+        local_settings(),
+        serde_json::to_vec_pretty(&json!({"permissions": {"allow": rules}})).unwrap_or_default(),
+    );
 }
 
 fn new_id() -> String {
@@ -357,11 +383,14 @@ impl Agent {
                             {"event": "PreToolUse", "matcher": "Bash", "source": "projectSettings", "sourceLabel": "Project settings (.claude/settings.json)", "type": "command", "displayText": "./scripts/check-command.sh"},
                             {"event": "Stop", "matcher": "", "source": "userSettings", "sourceLabel": "User settings (~/.claude/settings.json)", "type": "command", "displayText": "say done"}],
                         "eventCatalog": [], "policy": {"allDisabled": false, "disabledByPolicy": false}}),
-                    "list_permission_rules" => json!({"state": {"rules": [
-                        {"behavior": "allow", "rule": "Bash(cargo test:*)", "source": "projectSettings", "editability": "editable"},
-                        {"behavior": "allow", "rule": "WebFetch(domain:docs.rs)", "source": "userSettings", "editability": "editable"},
-                        {"behavior": "deny", "rule": "Bash(rm -rf:*)", "source": "userSettings", "editability": "editable"}],
-                        "workspaceDirectories": [], "managedOnly": false}}),
+                    "list_permission_rules" => {
+                        json!({"state": {"rules": local_rules().into_iter().map(|r| json!(
+                        {"behavior": "allow", "rule": r, "source": "localSettings", "editability": "editable"})).chain([
+                        json!({"behavior": "allow", "rule": "Bash(cargo test:*)", "source": "projectSettings", "editability": "editable"}),
+                        json!({"behavior": "allow", "rule": "WebFetch(domain:docs.rs)", "source": "userSettings", "editability": "editable"}),
+                        json!({"behavior": "deny", "rule": "Bash(rm -rf:*)", "source": "userSettings", "editability": "editable"})]).collect::<Vec<_>>(),
+                        "workspaceDirectories": [], "managedOnly": false}})
+                    }
                     "get_settings" => json!({
                         "effective": {"autoCompact": true, "theme": "dark", "outputStyle": "default"},
                         "applied": {"model": self.model, "effort": null, "advisor": null}}),
@@ -421,11 +450,17 @@ impl Agent {
         }
     }
 
-    /// Ask for permission and wait for the answer.
+    /// Ask for permission and wait for the answer. A command comes with a
+    /// rule it could save, as Claude Code suggests one; other tools don't.
     fn permission(&mut self, tool: &str, tool_id: &str, input: &Value) -> Result<Value, Cut> {
+        let suggestions = match input["command"].as_str() {
+            Some(cmd) if tool == "Bash" => json!([{"type": "addRules", "behavior": "allow",
+                "destination": "session", "rules": [{"toolName": "Bash", "ruleContent": cmd}]}]),
+            _ => json!([]),
+        };
         self.request(json!({
             "subtype": "can_use_tool", "tool_name": tool, "display_name": tool, "input": input,
-            "description": input["description"], "permission_suggestions": [], "tool_use_id": tool_id}))
+            "description": input["description"], "permission_suggestions": suggestions, "tool_use_id": tool_id}))
     }
 
     /// Send a control request to the host and wait for its answer.
@@ -540,12 +575,33 @@ impl Agent {
     /// Runs a tool that may need permission. Returns the denial, if any.
     fn guarded(&mut self, name: &str, input: Value, needs: bool) -> Result<Option<String>, Cut> {
         let id = self.tool(name, input.clone(), None);
-        if needs {
+        // A rule saved in the project's settings allows it without asking.
+        let ruled = input["command"]
+            .as_str()
+            .is_some_and(|c| local_rules().contains(&format!("{name}({c})")));
+        if needs && !ruled {
             let resp = self.permission(name, &id, &input)?;
             if resp["behavior"] != "allow" {
                 let why = resp["message"].as_str().unwrap_or("Denied").to_string();
                 self.result(&id, &why, true, None);
                 return Ok(Some(why));
+            }
+            // Rules meant to last go to the project's local settings.
+            for u in resp["updatedPermissions"].as_array().into_iter().flatten() {
+                if u["destination"] == "localSettings" {
+                    let mut rules = local_rules();
+                    for r in u["rules"].as_array().into_iter().flatten() {
+                        let rule = format!(
+                            "{}({})",
+                            r["toolName"].as_str().unwrap_or_default(),
+                            r["ruleContent"].as_str().unwrap_or_default()
+                        );
+                        if !rules.contains(&rule) {
+                            rules.push(rule);
+                        }
+                    }
+                    save_local_rules(&rules);
+                }
             }
         }
         self.pause(300)?;
@@ -799,6 +855,20 @@ impl Agent {
             let text = args.join(" ");
             self.say(&text, None)?;
             self.end(&text, false);
+            return Ok(());
+        }
+        if lower.contains("hit the limit") {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            out(
+                json!({"type": "rate_limit_event", "session_id": self.session, "rate_limit_info": {
+                "status": "rejected", "unifiedWindows": {
+                    "five_hour": {"utilization": 1.0, "resetsAt": now + 2 * 3600 + 600},
+                    "seven_day": {"utilization": 0.62, "resetsAt": now + 4 * 86400}}}}),
+            );
+            self.end("You've hit your limit · resets later", true);
             return Ok(());
         }
         if lower.contains("fail") {

@@ -915,14 +915,15 @@ impl Session {
             }
             (Answer::Deny { .. }, Some(_)) => wire::dialog_answer(&id, None),
             (answer, _) => match answer {
-                Answer::Allow { always } => {
-                    wire::allow(&id, &p.tool, &p.input, *always, &p.suggestions)
+                Answer::Allow { always, project } => {
+                    wire::allow(&id, &p.tool, &p.input, *always, *project, &p.suggestions)
                 }
                 Answer::Deny { message } => wire::deny(&id, message),
                 Answer::Choose { answers } => wire::allow(
                     &id,
                     &p.tool,
                     &claude::answers(&p.input, answers),
+                    false,
                     false,
                     &Value::Null,
                 ),
@@ -1154,6 +1155,7 @@ impl Session {
                         tool: tool_name.clone(),
                         input: input.to_string(),
                         description,
+                        keeps: wire::keeps(&suggestions),
                     },
                     end,
                 );
@@ -1532,6 +1534,7 @@ impl Session {
                             tool: "AskUserQuestion".into(),
                             input: input.to_string(),
                             description: None,
+                            keeps: false,
                         },
                         end,
                     );

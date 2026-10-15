@@ -121,6 +121,9 @@ pub enum Item {
         why: String,
         /// The command is an edit: its lines read as removed and added.
         diff: bool,
+        /// The agent has a rule it could save, so it can be allowed for
+        /// good in this project.
+        keeps: bool,
     },
     /// The agent's plan, waiting for a go-ahead.
     Plan {
@@ -274,6 +277,12 @@ pub struct Session {
 }
 
 impl Session {
+    /// A turn is under way: working, or waiting on you mid-turn. A turn that
+    /// ended in an error also needs you, but nothing is running to stop.
+    pub fn running(&self) -> bool {
+        self.status == Status::Working || self.working_since.is_some()
+    }
+
     /// Stands in for a session while it's being rebuilt.
     pub fn placeholder(id: &str) -> Self {
         Session {

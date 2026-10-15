@@ -132,6 +132,10 @@ pub enum Body {
         input: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
+        /// The agent has a rule it could save for this kind of call, so
+        /// it can be allowed for good in this project.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        keeps: bool,
     },
     Answered {
         id: String,
@@ -398,6 +402,10 @@ pub enum Answer {
         /// Allow this kind of call for the rest of the session.
         #[serde(default)]
         always: bool,
+        /// Allow it from now on in this project: the agent saves its rule
+        /// to the project's own settings, where it lists and enforces it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        project: bool,
     },
     Deny {
         /// Reaches the agent verbatim.
@@ -1004,6 +1012,7 @@ mod tests {
                 tool: "Bash".into(),
                 input: "{}".into(),
                 description: None,
+                keeps: false,
             },
         };
         let line = serde_json::to_string(&e).unwrap();

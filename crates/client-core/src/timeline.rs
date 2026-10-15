@@ -102,6 +102,8 @@ pub enum Entry {
         tool: String,
         input: String,
         description: Option<String>,
+        /// It can be allowed for good in this project.
+        keeps: bool,
         answer: Option<Answer>,
     },
     /// The agent wrote a file worth showing.
@@ -494,11 +496,13 @@ impl SessionView {
                 tool,
                 input,
                 description,
+                keeps,
             } => self.push(Entry::Ask {
                 id: id.clone(),
                 tool: tool.clone(),
                 input: input.clone(),
                 description: description.clone(),
+                keeps: *keeps,
                 answer: None,
             }),
             Body::Answered { id, answer } => {
@@ -549,9 +553,16 @@ impl SessionView {
                 }
                 match outcome {
                     Outcome::Done => {}
-                    Outcome::Interrupted { reason } => self.push(Entry::Note {
+                    // You stopped it.
+                    Outcome::Interrupted { reason: None } => self.push(Entry::Note {
                         note: Note::Stopped,
-                        text: reason.clone().unwrap_or_else(|| "Stopped".into()),
+                        text: "Stopped".into(),
+                    }),
+                    // Something else did (the agent crashed, dent restarted
+                    // under it): that went wrong, and can be tried again.
+                    Outcome::Interrupted { reason: Some(r) } => self.push(Entry::Note {
+                        note: Note::Error,
+                        text: r.clone(),
                     }),
                     Outcome::Error { message } => self.push(Entry::Note {
                         note: Note::Error,

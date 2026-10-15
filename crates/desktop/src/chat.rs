@@ -1,6 +1,7 @@
 //! The main column: a session's conversation and composer, or the new-session
 //! page where you start by typing.
 
+use crate::app::Scope;
 use crate::ui::Tipped;
 use crate::ui::{Arrive, From};
 use gpui_kit::base::input::Textarea;
@@ -513,11 +514,7 @@ impl Dent {
                 }
             )
         });
-        let can_try = latest
-            && !errored
-            && !s.closed
-            && !matches!(s.status, Status::Working | Status::Needs)
-            && start > 0;
+        let can_try = latest && !errored && !s.closed && !s.running() && start > 0;
         let asking = can_try && self.trying_again.as_deref() == Some(s.id.as_str());
         let when = if took >= 1000 {
             format!(
@@ -906,7 +903,7 @@ impl Dent {
                     .rewinding
                     .as_ref()
                     .is_some_and(|(sid, m)| *sid == s.id && m == msg);
-                let busy = matches!(s.status, Status::Working | Status::Needs);
+                let busy = s.running();
                 let has_files = s.checkpoints.contains(msg);
                 let group = SharedString::from(format!("user-{ix}"));
                 let (m1, m2, m3, sid) = (msg.clone(), msg.clone(), msg.clone(), s.id.clone());
@@ -1431,6 +1428,7 @@ impl Dent {
                 command,
                 why,
                 diff,
+                keeps,
             } => {
                 let (a, a2, d) = (s.id.clone(), s.id.clone(), s.id.clone());
                 let (k1, k2, k3) = (ask.clone(), ask.clone(), ask.clone());
@@ -1476,7 +1474,7 @@ impl Dent {
                                 button("allow", "Allow once", true, &t)
                                     .relative()
                                     .on_press(cx.listener(move |this, _, _, cx| {
-                                        this.allow(&a, Some(&k1), false, cx)
+                                        this.allow(&a, Some(&k1), Scope::Once, cx)
                                     }))
                                     .child(probe(&self.probes, "allow")),
                             )
@@ -1484,10 +1482,37 @@ impl Dent {
                                 button("allow-session", "Allow for this session", false, &t)
                                     .relative()
                                     .on_press(cx.listener(move |this, _, _, cx| {
-                                        this.allow(&a2, Some(&k2), true, cx)
+                                        this.allow(&a2, Some(&k2), Scope::Session, cx)
                                     }))
                                     .child(probe(&self.probes, "allow-session")),
                             )
+                            .child({
+                                let el = button(
+                                    "allow-project",
+                                    "Always in this project",
+                                    false,
+                                    &t,
+                                )
+                                .relative()
+                                .child(probe(&self.probes, "allow-project"));
+                                if *keeps {
+                                    let (a3, k4) = (s.id.clone(), ask.clone());
+                                    el.with_tip(tip(
+                                        "Saved to the project's own settings, where Claude Code keeps its rules",
+                                        None,
+                                        t,
+                                    ))
+                                    .on_press(cx.listener(move |this, _, _, cx| {
+                                        this.allow(&a3, Some(&k4), Scope::Project, cx)
+                                    }))
+                                } else {
+                                    crate::ui::off(
+                                        el,
+                                        "Claude Code has no rule it can save for this",
+                                        &t,
+                                    )
+                                }
+                            })
                             .child(
                                 button("deny", "Deny", false, &t)
                                     .relative()
@@ -1499,8 +1524,12 @@ impl Dent {
                     )
                     .child(ask_keys(
                         keyed,
-                        "↩ or 1 allows once · 2 for this session · 3 denies",
-                        "Esc, then 1–3, to answer by key",
+                        if *keeps {
+                            "↩ or 1 allows once · 2 for this session · 3 in this project · 4 denies"
+                        } else {
+                            "↩ or 1 allows once · 2 for this session · 4 denies"
+                        },
+                        "Esc, then a number, to answer by key",
                         &t,
                     ))
                     .into_any_element()
@@ -1544,7 +1573,7 @@ impl Dent {
                                 button("plan-go", "Start building", true, &t)
                                     .relative()
                                     .on_press(cx.listener(move |this, _, _, cx| {
-                                        this.allow(&a, Some(&k1), false, cx)
+                                        this.allow(&a, Some(&k1), Scope::Once, cx)
                                     }))
                                     .child(probe(&self.probes, "plan-go")),
                             )
@@ -1716,42 +1745,82 @@ impl Dent {
                     .child(div().ty(LABEL).text_color(t.faint).child(hint))
                     .into_any_element()
             }
-            Item::Note { icon: name, text } => div()
-                .flex()
-                .items_start()
-                .gap(px(space::S2))
-                .ty(UI)
-                .text_color(t.quiet)
-                .child(
-                    div()
-                        .h(px(20.))
-                        .flex()
-                        .items_center()
-                        .child(icon(name, 13., t.quiet)),
-                )
-                .child(div().flex_1().min_w_0().child(crate::select::text(
-                    SharedString::from(format!("note-{ix}")),
-                    text.clone(),
-                    &t,
-                )))
-                // The last thing that went wrong can be tried again.
-                .when(
-                    *name == "circle-alert"
-                        && s.status != Status::Working
-                        && !s.items[ix + 1..]
-                            .iter()
-                            .any(|i| matches!(i, Item::User { .. })),
-                    |d| {
-                        let sid = s.id.clone();
-                        d.child(
-                            ghost(SharedString::from(format!("retry-{ix}")), "Try again", &t)
-                                .relative()
-                                .on_press(cx.listener(move |this, _, _, cx| this.retry(&sid, cx)))
-                                .child(probe(&self.probes, format!("retry-{ix}"))),
-                        )
-                    },
-                )
-                .into_any_element(),
+            Item::Note { icon: name, text } => {
+                // The latest failure, while a usage limit is used up, says
+                // which and when it starts over, in plain words.
+                let latest_failure = *name == "circle-alert"
+                    && !s.items[ix + 1..]
+                        .iter()
+                        .any(|i| matches!(i, Item::User { .. }));
+                let limit =
+                    latest_failure
+                        .then(|| self.limit_hit())
+                        .flatten()
+                        .map(|(which, at)| {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_or(0, |d| d.as_secs() as i64);
+                            format!(
+                                "Your {which} is used up. It resets at {}, in {}.",
+                                crate::data::clock(at as u64 * 1000),
+                                crate::data::span((at - now).max(0) as u64)
+                            )
+                        });
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(space::S2))
+                    .ty(UI)
+                    .text_color(t.quiet)
+                    .child(
+                        div()
+                            .h(px(20.))
+                            .flex()
+                            .items_center()
+                            .child(icon(name, 13., t.quiet)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(crate::select::text(
+                                SharedString::from(format!("note-{ix}")),
+                                text.clone(),
+                                &t,
+                            ))
+                            .when_some(limit, |d, l| d.child(div().text_color(t.ink).child(l))),
+                    )
+                    // The last thing that went wrong can be tried again: once
+                    // the limit it hit starts over, if it hit one.
+                    .when(
+                        *name == "circle-alert"
+                            && s.status != Status::Working
+                            && !s.items[ix + 1..]
+                                .iter()
+                                .any(|i| matches!(i, Item::User { .. })),
+                        |d| {
+                            let sid = s.id.clone();
+                            let retry =
+                                ghost(SharedString::from(format!("retry-{ix}")), "Try again", &t)
+                                    .relative()
+                                    .child(probe(&self.probes, format!("retry-{ix}")));
+                            match self.limit_hit() {
+                                Some((_, at)) => d.child(crate::ui::off_owned(
+                                    retry,
+                                    format!(
+                                        "Once it resets, at {}",
+                                        crate::data::clock(at as u64 * 1000)
+                                    ),
+                                    &t,
+                                )),
+                                None => d.child(retry.on_press(
+                                    cx.listener(move |this, _, _, cx| this.retry(&sid, cx)),
+                                )),
+                            }
+                        },
+                    )
+                    .into_any_element()
+            }
             Item::Compacted {
                 auto,
                 before,
@@ -2023,7 +2092,7 @@ impl Dent {
         let t = self.t;
         let text = self.composer.read(cx).value();
         let empty = text.trim().is_empty() && self.attachments.is_empty();
-        let working = matches!(s.status, Status::Working | Status::Needs);
+        let working = s.running();
         let settling = self
             .just_sent
             .is_some_and(|at| at.elapsed().as_secs_f32() < 1.);
