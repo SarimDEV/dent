@@ -405,7 +405,10 @@ fn a_reply_streams_is_kept_and_catches_up_from_any_point() {
         )
     });
     assert!(c.count(&s, |b| matches!(b, Body::Limits { .. })) == 1);
-    assert!(c.count(&s, |b| matches!(b, Body::Context { .. })) >= 1);
+    // The agent's own count, with its window size, follows the turn.
+    c.wait(&s, "the context count", |b| {
+        matches!(b, Body::Context { max: Some(_), .. })
+    });
 
     // A second client sees the same history, and from a midpoint only what
     // came after.

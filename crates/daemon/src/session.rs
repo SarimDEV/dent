@@ -118,6 +118,8 @@ struct Pending {
 enum Ctl {
     Initialize,
     Interrupt,
+    /// How full the context is, by the agent's own count.
+    ContextUsage,
     Other,
 }
 
@@ -792,6 +794,16 @@ impl Session {
         self.d.holder().await?.write(&p.id, &line).await
     }
 
+    /// A control request sent once the current output is handled, for
+    /// places that can't wait on the write.
+    fn control_later(&mut self, subtype: &str, kind: Ctl) {
+        self.next_ctl += 1;
+        let id = format!("dent-{}", self.next_ctl);
+        self.controls.insert(id.clone(), kind);
+        self.outbox
+            .push(wire::control_request(&id, subtype, json!({})));
+    }
+
     async fn control(&mut self, subtype: &str, extra: Value, kind: Ctl) -> Result<()> {
         self.next_ctl += 1;
         let id = format!("dent-{}", self.next_ctl);
@@ -1085,8 +1097,26 @@ impl Session {
                     self.start_by = None;
                     self.d.set_models(claude::models(&body));
                     self.d.set_commands(&self.id, claude::commands(&body));
+                    // A resumed conversation is as full as it was: say so
+                    // before the first reply rather than after it.
+                    if self.agent_started {
+                        self.control_later("get_context_usage", Ctl::ContextUsage);
+                    }
                 }
-                (Some(Ctl::Interrupt), _) | (Some(Ctl::Other), true) | (None, _) => {}
+                (Some(Ctl::ContextUsage), true) => {
+                    if let Some(used) = body["totalTokens"].as_u64() {
+                        self.context = Some(used);
+                        self.max_context = body["maxTokens"].as_u64().or(self.max_context);
+                        self.log_from(
+                            Body::Context {
+                                used,
+                                max: self.max_context,
+                            },
+                            end,
+                        );
+                    }
+                }
+                (Some(Ctl::Interrupt | Ctl::ContextUsage), _) | (Some(Ctl::Other), true) | (None, _) => {}
                 (Some(_), false) => self.log_from(
                     Body::Notice {
                         text: format!(
@@ -1185,14 +1215,23 @@ impl Session {
                         end,
                     );
                 }
+                // The agent's own count, with its real window size; after
+                // a command that changed the context (/compact, /clear)
+                // it's the only one.
+                self.control_later("get_context_usage", Ctl::ContextUsage);
                 self.end_turn_at(outcome, Some(end));
             }
-            Inbound::Compacted => self.log_from(
-                Body::Notice {
-                    text: "Conversation compacted".into(),
-                },
-                end,
-            ),
+            Inbound::Compacted => {
+                // What was counted before is gone; the turn's end asks
+                // for the new count.
+                self.context = None;
+                self.log_from(
+                    Body::Notice {
+                        text: "Conversation compacted".into(),
+                    },
+                    end,
+                )
+            }
             Inbound::MessageStart { .. } | Inbound::TextDelta { .. } | Inbound::Other => {}
         }
     }
