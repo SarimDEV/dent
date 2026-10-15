@@ -21,7 +21,7 @@ use dent_protocol::Permission;
 
 use crate::data::{Item, Kind, Session};
 use crate::ds::{
-    CODE, DISPLAY, DISPLAY_COMPACT, LABEL, READING, Typed, UI, motion, radius, size, space,
+    CODE, DISPLAY, DISPLAY_COMPACT, INSET, LABEL, READING, Typed, UI, motion, radius, size, space,
 };
 use crate::markdown;
 use crate::theme::{self, Status, status_square};
@@ -268,15 +268,18 @@ impl Dent {
         &self,
         s: &Session,
         key: &str,
+        call: &str,
         d: &crate::data::CallDetail,
         cx: &mut Context<Self>,
     ) -> Div {
         let t = self.t;
         const MAX: usize = 60;
-        // Long text shows its start; the rest is a line saying how much.
+        // Long text shows its start, and a button for the rest.
+        let all_key = format!("all-{call}");
+        let all = self.expanded.contains(&all_key);
         let clip = |text: &str| -> (String, usize) {
             let n = text.lines().count();
-            if n <= MAX {
+            if all || n <= MAX {
                 (text.trim_end().to_string(), 0)
             } else {
                 (
@@ -286,6 +289,20 @@ impl Dent {
             }
         };
         let block = |id: String, text: String, ink: Hsla| code_lines(id, text, d.edits, ink, &t);
+        let show_all = |more: usize, part: &str| {
+            let k = all_key.clone();
+            div().flex().ml(px(-space::S2)).child(
+                ghost(
+                    SharedString::from(format!("call-all-{part}-{key}")),
+                    format!("Show {more} more lines"),
+                    &t,
+                )
+                .on_press(cx.listener(move |this, _, _, cx| {
+                    this.expanded.insert(k.clone());
+                    cx.notify();
+                })),
+            )
+        };
         let mut col = div()
             .flex()
             .flex_col()
@@ -301,13 +318,7 @@ impl Dent {
             let (text, more) = clip(&d.input);
             col = col
                 .child(block(format!("call-in-{key}"), text, t.ink))
-                .when(more > 0, |c| {
-                    c.child(
-                        div()
-                            .text_color(t.faint)
-                            .child(format!("… {more} more lines")),
-                    )
-                });
+                .when(more > 0, |c| c.child(show_all(more, "in")));
         }
         if let Some((failed, out)) = &d.output
             && !out.trim().is_empty()
@@ -316,19 +327,14 @@ impl Dent {
             let (text, more) = clip(out);
             col = col
                 .child(
+                    // Signal colours are fills; failing is said in ink.
                     div()
                         .ty(LABEL)
-                        .text_color(if *failed { t.needs.0 } else { t.faint })
+                        .text_color(if *failed { t.ink } else { t.quiet })
                         .child(if *failed { "Failed" } else { "Output" }),
                 )
                 .child(block(format!("call-out-{key}"), text, t.quiet))
-                .when(more > 0, |c| {
-                    c.child(
-                        div()
-                            .text_color(t.faint)
-                            .child(format!("… {more} more lines")),
-                    )
-                });
+                .when(more > 0, |c| c.child(show_all(more, "out")));
         }
         // Its file: shown in dent when it can be, and its changes.
         let in_diff = d.path.as_ref().and_then(|p| {
@@ -858,33 +864,31 @@ impl Dent {
         } else {
             anim::ease_out(anim::progress(changed, motion::BASE))
         };
-        div()
-            .flex()
-            .items_center()
-            .gap(px(space::S2))
-            .ty(UI)
-            .text_color(t.quiet)
-            .child(status_square(
+        // One of the transcript's quiet lines; only its lead word is ink.
+        crate::cards::quiet_line(
+            status_square(
                 if matches!(s.activity, Some(dent_protocol::Activity::Retrying { .. })) {
                     Status::Waiting
                 } else {
                     Status::Working
                 },
                 &t,
-            ))
-            .child(div().text_color(t.ink).child(lead))
-            .when_some(detail, |d, detail| {
-                d.child(div().text_color(t.faint).child("·")).child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .opacity(fade)
-                        .ml(px((1. - fade) * motion::NUDGE))
-                        .child(detail),
-                )
-            })
-            .into_any_element()
+            ),
+            &t,
+        )
+        .child(div().text_color(t.ink).child(lead))
+        .when_some(detail, |d, detail| {
+            d.child(div().text_color(t.faint).child("·")).child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .opacity(fade)
+                    .ml(px((1. - fade) * motion::NUDGE))
+                    .child(detail),
+            )
+        })
+        .into_any_element()
     }
 
     fn item(
@@ -1182,7 +1186,12 @@ impl Dent {
                     }
                 }
             }
-            Item::Tools { summary, lines } => {
+            Item::Tools {
+                summary,
+                icon: kind,
+                lines,
+            } => {
+                use crate::cards::{STEP, glyph, quiet_line};
                 // A lone call opens straight to what it did; a group opens
                 // to its calls, each of which opens in turn.
                 let lone = lines.len() == 1 && lines[0].detail.is_some();
@@ -1202,13 +1211,8 @@ impl Dent {
                     .flex()
                     .flex_col()
                     .child(
-                        div()
+                        quiet_line(glyph(kind, &t), &t)
                             .id(SharedString::from(format!("tools-{ix}")))
-                            .flex()
-                            .items_center()
-                            .gap(px(space::S2))
-                            .ty(CODE)
-                            .text_color(t.quiet)
                             .when(more, |d| {
                                 d.cursor_pointer().hover(|d| d.text_color(t.ink)).on_press(
                                     cx.listener(move |this, _, _, cx| {
@@ -1224,38 +1228,15 @@ impl Dent {
                                     }),
                                 )
                             })
-                            // A lone call sits flush with the text above.
-                            .when(more, |d| {
-                                d.child(
-                                    div()
-                                        .w(px(space::S4))
-                                        .flex_none()
-                                        .flex()
-                                        .justify_center()
-                                        .child(crate::ui::disclosure(
-                                            "fold",
-                                            open,
-                                            12.,
-                                            t.quiet.opacity(0.7),
-                                        )),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .child(summary.clone()),
-                            ),
+                            .child(div().min_w_0().truncate().child(summary.clone()))
+                            .when(more, |d| d.child(fold_mark(open, &t))),
                     )
                     .when(open && lone, |d| {
                         let detail = lines[0].detail.clone();
                         d.children(detail.map(|dt| {
-                            self.call_detail(s, &format!("{ix}-0"), &dt, cx)
-                                .ml(px(space::S4))
-                                .mt(px(space::S1))
+                            self.call_detail(s, &format!("{ix}-0"), &lines[0].id, &dt, cx)
+                                .ml(px(STEP))
+                                .my(px(space::S1))
                         }))
                     })
                     .when(open && !lone, |d| {
@@ -1268,29 +1249,32 @@ impl Dent {
                             })
                             .collect();
                         let depths: Vec<usize> = shown.iter().map(|(_, l)| l.depth).collect();
+                        // The rails are drawn from the text size, so they meet
+                        // each glyph's middle at any size.
+                        let line = CODE.zoomed().line;
+                        let mid = crate::cards::LEAD / 2.;
+                        let rail = t.quiet.opacity(0.35);
                         let rows: Vec<AnyElement> = shown
                             .iter()
                             .enumerate()
                             .map(|(i, &(n, l))| {
-                                // Each level gets a column: a rule while that
-                                // level carries on below, then this row's branch.
-                                // The rails are drawn, so they join from row to
-                                // row whatever each row's height.
-                                let mut row = div().flex().ty(CODE).text_color(t.quiet);
-                                let rail = t.quiet.opacity(0.35);
+                                // Each level gets a column: a rail under its
+                                // parent's glyph while that level carries on
+                                // below, then this row's branch to its glyph.
+                                let mut row = div().flex();
                                 for k in 0..=l.depth {
                                     let more = continues(&depths, i, k);
                                     let own = k == l.depth;
                                     row = row.child(
                                         div()
-                                            .w(px(space::S4))
+                                            .w(px(STEP))
                                             .flex_none()
                                             .relative()
                                             .when(more || own, |d| {
                                                 d.child(
                                                     div()
                                                         .absolute()
-                                                        .left(px(5.))
+                                                        .left(px(mid - 0.5))
                                                         .top_0()
                                                         .w(px(1.))
                                                         .bg(rail)
@@ -1298,7 +1282,7 @@ impl Dent {
                                                             if more {
                                                                 d.bottom_0()
                                                             } else {
-                                                                d.h(px(size::LINE / 2.))
+                                                                d.h(px(line / 2.))
                                                             }
                                                         }),
                                                 )
@@ -1307,9 +1291,9 @@ impl Dent {
                                                 d.child(
                                                     div()
                                                         .absolute()
-                                                        .left(px(5.))
-                                                        .top(px(size::LINE / 2.))
-                                                        .w(px(7.))
+                                                        .left(px(mid - 0.5))
+                                                        .top(px(line / 2.))
+                                                        .w(px(STEP - mid - space::HALF))
                                                         .h(px(1.))
                                                         .bg(rail),
                                                 )
@@ -1319,46 +1303,36 @@ impl Dent {
                                 if let Some((key, hidden)) = l.opens.clone() {
                                     let opened = self.expanded.contains(&key);
                                     let steps = if hidden == 1 { "step" } else { "steps" };
-                                    return row
-                                        .child(
-                                            div()
-                                                .id(SharedString::from(format!("steps-{ix}-{n}")))
-                                                .relative()
-                                                .min_w_0()
-                                                .truncate()
-                                                .text_color(t.faint)
-                                                .cursor_pointer()
-                                                .hover(|d| d.text_color(t.ink))
-                                                .on_press(cx.listener(move |this, _, _, cx| {
-                                                    if !this.expanded.remove(&key) {
-                                                        this.expanded.insert(key.clone());
-                                                    }
-                                                    cx.notify();
-                                                }))
-                                                .child(if opened {
-                                                    format!("Hide {hidden} earlier {steps}")
-                                                } else {
-                                                    format!("{hidden} earlier {steps}")
-                                                })
-                                                .child(probe(
-                                                    &self.probes,
-                                                    format!("steps-{ix}-{n}"),
-                                                )),
-                                        )
-                                        .into_any_element();
+                                    let body = quiet_line(glyph("ellipsis", &t), &t)
+                                        .id(SharedString::from(format!("steps-{ix}-{n}")))
+                                        .relative()
+                                        .min_w_0()
+                                        .cursor_pointer()
+                                        .hover(|d| d.text_color(t.ink))
+                                        .on_press(cx.listener(move |this, _, _, cx| {
+                                            if !this.expanded.remove(&key) {
+                                                this.expanded.insert(key.clone());
+                                            }
+                                            cx.notify();
+                                        }))
+                                        .child(div().min_w_0().truncate().child(if opened {
+                                            format!("Hide {hidden} earlier {steps}")
+                                        } else {
+                                            format!("{hidden} earlier {steps}")
+                                        }))
+                                        .child(fold_mark(opened, &t))
+                                        .child(probe(&self.probes, format!("steps-{ix}-{n}")));
+                                    return row.child(body).into_any_element();
                                 }
-                                match &l.report {
+                                let body = match &l.report {
                                     None => {
                                         let call = l.id.clone();
                                         let opened = self.open_calls.contains(&call);
                                         let detail = l.detail.clone().filter(|_| opened);
-                                        let line = div()
+                                        let opens = l.detail.is_some();
+                                        let line = quiet_line(glyph(l.icon, &t), &t)
                                             .id(SharedString::from(format!("tool-line-{ix}-{n}")))
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
-                                            .text_ellipsis()
-                                            .when(l.detail.is_some(), |d| {
+                                            .when(opens, |d| {
                                                 d.cursor_pointer()
                                                     .hover(|d| d.text_color(t.ink))
                                                     .on_press(cx.listener(move |this, _, _, cx| {
@@ -1368,32 +1342,32 @@ impl Dent {
                                                         cx.notify();
                                                     }))
                                             })
-                                            .child(l.text.clone());
+                                            .child(div().min_w_0().truncate().child(l.text.clone()))
+                                            .when(opens, |d| d.child(fold_mark(opened, &t)));
                                         // Opened, its details sit in the row, so the
                                         // tree's rails run on beside them.
-                                        row.child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .flex()
-                                                .flex_col()
-                                                .child(line)
-                                                .children(detail.map(|dt| {
-                                                    self.call_detail(
-                                                        s,
-                                                        &format!("{ix}-{n}"),
-                                                        &dt,
-                                                        cx,
-                                                    )
-                                                    .my(px(space::S1))
-                                                })),
-                                        )
-                                        .into_any_element()
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .flex_col()
+                                            .child(line)
+                                            .children(detail.map(|dt| {
+                                                self.call_detail(
+                                                    s,
+                                                    &format!("{ix}-{n}"),
+                                                    &l.id,
+                                                    &dt,
+                                                    cx,
+                                                )
+                                                .ml(px(STEP))
+                                                .my(px(space::S1))
+                                            }))
+                                            .into_any_element()
                                     }
-                                    Some(report) => row
-                                        .child(self.report(s, ix, &l.id, report, window, cx))
-                                        .into_any_element(),
-                                }
+                                    Some(report) => self.report(s, ix, &l.id, report, window, cx),
+                                };
+                                row.child(body).into_any_element()
                             })
                             .collect();
                         d.children(rows)
@@ -1409,13 +1383,8 @@ impl Dent {
                     .flex_col()
                     .gap(px(space::S1))
                     .child(
-                        div()
+                        crate::cards::quiet_line(crate::cards::glyph("brain", &t), &t)
                             .id(SharedString::from(format!("thought-{ix}")))
-                            .flex()
-                            .items_center()
-                            .gap(px(space::S2))
-                            .ty(CODE)
-                            .text_color(t.quiet)
                             .cursor_pointer()
                             .hover(|d| d.text_color(t.ink))
                             .on_press(cx.listener(move |this, _, _, cx| {
@@ -1424,29 +1393,16 @@ impl Dent {
                                 }
                                 cx.notify();
                             }))
-                            .child(
-                                div()
-                                    .w(px(space::S4))
-                                    .flex_none()
-                                    .flex()
-                                    .justify_center()
-                                    .child(crate::ui::disclosure(
-                                        "fold",
-                                        open,
-                                        12.,
-                                        t.quiet.opacity(0.7),
-                                    )),
-                            )
-                            .child(format!("Thought · {words} words")),
+                            .child(format!("Thought · {words} words"))
+                            .child(fold_mark(open, &t)),
                     )
                     .when(open, |d| {
+                        // Set in from the line, quieter and smaller than
+                        // the answer, as a subagent's report is.
                         d.child(
                             div()
-                                .ml(px(space::S4))
-                                .pl(px(space::S3))
-                                .border_l_2()
-                                .border_color(t.hairline)
-                                .ty(READING)
+                                .ml(px(crate::cards::STEP))
+                                .ty(INSET)
                                 .text_color(t.quiet)
                                 .child(crate::select::text(
                                     SharedString::from(format!("thought-text-{ix}")),
@@ -1806,19 +1762,7 @@ impl Dent {
                                 crate::data::span((at - now).max(0) as u64)
                             )
                         });
-                div()
-                    .flex()
-                    .items_start()
-                    .gap(px(space::S2))
-                    .ty(UI)
-                    .text_color(t.quiet)
-                    .child(
-                        div()
-                            .h(px(20.))
-                            .flex()
-                            .items_center()
-                            .child(icon(name, 13., t.quiet)),
-                    )
+                crate::cards::quiet_line(crate::cards::glyph(name, &t), &t)
                     .child(
                         div()
                             .flex_1()
@@ -1889,21 +1833,7 @@ impl Dent {
                         _ => None,
                     })
                     .filter(|m| s.checkpoints.contains(m));
-                div()
-                    .id(SharedString::from(format!("changed-{ix}")))
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .gap(px(space::S2))
-                    .ty(CODE)
-                    .text_color(t.quiet)
-                    .cursor_pointer()
-                    .hover(|d| d.text_color(t.ink))
-                    // Opens Changes on just this turn, at its first file.
-                    .on_press(cx.listener(move |this, _, _, cx| {
-                        this.review_turn(&sid, turn.clone(), Some(first.clone()), cx)
-                    }))
-                    .child(icon("git-compare", 13., t.quiet))
+                crate::cards::quiet_line(crate::cards::glyph("git-compare", &t), &t)
                     // The files are named just above, by the steps
                     // that changed them; this sums the turn up.
                     .child(if n == 1 {
@@ -1918,8 +1848,17 @@ impl Dent {
                                 .child(format!("+{added} −{removed}")),
                         )
                     })
-                    .child(div().ty(UI).child("Review"))
-                    .child(probe(&self.probes, format!("changed-{ix}")))
+                    // Opens Changes on just this turn, at its first file.
+                    .child(
+                        div().h(px(CODE.zoomed().line)).flex().items_center().child(
+                            ghost(SharedString::from(format!("changed-{ix}")), "Review", &t)
+                                .relative()
+                                .on_press(cx.listener(move |this, _, _, cx| {
+                                    this.review_turn(&sid, turn.clone(), Some(first.clone()), cx)
+                                }))
+                                .child(probe(&self.probes, format!("changed-{ix}"))),
+                        ),
+                    )
                     .into_any_element()
             }
             Item::Queued { id: msg, text } => {
@@ -3748,6 +3687,23 @@ fn needs_title(text: &str, t: &theme::Theme) -> Div {
 /// What rode along with a message, shown above its text.
 /// Whether level `k` of the tree carries on below row `i`: another row at
 /// that level comes before the tree steps out past it.
+/// What a quiet line that opens shows after its words: the fold's
+/// chevron, sized to sit on the line's middle.
+fn fold_mark(open: bool, t: &theme::Theme) -> Div {
+    div()
+        .h(px(CODE.zoomed().line))
+        .flex_none()
+        .flex()
+        .items_center()
+        .ml(px(-space::S1))
+        .child(crate::ui::disclosure(
+            "fold",
+            open,
+            12.,
+            t.quiet.opacity(0.7),
+        ))
+}
+
 fn continues(depths: &[usize], i: usize, k: usize) -> bool {
     for &d in &depths[i + 1..] {
         if d < k {
@@ -3795,26 +3751,24 @@ impl Dent {
             bg: t.surface,
             base: Some(std::path::PathBuf::from(&s.cwd)),
         };
-        // Inside the tool, quieter than the answer: as an opened thought.
-        let body = markdown::render_with(blocks, &t, false, true, &mut r);
+        // Inside the tool, quieter and smaller than the answer.
+        let body = markdown::render_inset(blocks, &t, &mut r);
+        // A line like the tree's others, its words set in from it.
+        let step = crate::cards::STEP;
         div()
             .flex_1()
             .min_w_0()
-            .my(px(space::S1))
+            .pb(px(space::S1))
             .flex()
             .flex_col()
-            .gap(px(space::S1))
-            .child(div().ty(LABEL).text_color(t.quiet).child("REPORT"))
             .child(
-                div()
-                    .pl(px(space::S3))
-                    .border_l_2()
-                    .border_color(t.hairline)
-                    .child(body),
+                crate::cards::quiet_line(crate::cards::glyph("scroll-text", &t), &t)
+                    .child("Report"),
             )
+            .child(div().ml(px(step)).mt(px(space::S1)).child(body))
             .when(long, |d| {
                 d.child(
-                    div().flex().child(
+                    div().flex().ml(px(step - space::S2)).child(
                         ghost(
                             SharedString::from(format!("report-{ix}-{call}")),
                             if open {
@@ -3824,7 +3778,6 @@ impl Dent {
                             },
                             &t,
                         )
-                        .ml(px(-space::S2))
                         .on_press(fold),
                     ),
                 )
@@ -3915,18 +3868,20 @@ pub fn code_lines(id: String, text: String, diff: bool, ink: Hsla, t: &crate::th
     let text = text.trim_end_matches('\n').to_string();
     let mut runs = Vec::new();
     for l in text.split_inclusive('\n') {
-        let color = if diff && l.starts_with("- ") {
-            t.needs.0
+        // An edit's lines are tinted as the Changes diff tints them; the
+        // words stay in the ink.
+        let tint = if diff && l.starts_with("- ") {
+            Some(t.removed)
         } else if diff && l.starts_with("+ ") {
-            t.done.0
+            Some(t.added)
         } else {
-            ink
+            None
         };
         runs.push(TextRun {
             len: l.len(),
             font: font(crate::theme::mono()),
-            color,
-            background_color: None,
+            color: ink,
+            background_color: tint,
             underline: None,
             strikethrough: None,
         });

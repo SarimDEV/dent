@@ -2078,14 +2078,8 @@ impl Dent {
             );
             let answer = match &a.answer {
                 // Working, as the chat's working line says it.
-                None => div()
-                    .flex()
-                    .items_center()
-                    .gap(px(space::S2))
-                    .ty(UI)
-                    .text_color(t.ink)
-                    .child(status_square(Status::Working, &t))
-                    .child("Working")
+                None => crate::cards::quiet_line(status_square(Status::Working, &t), &t)
+                    .child(div().text_color(t.ink).child("Working"))
                     .into_any_element(),
                 Some((text, true, _)) => div()
                     .flex()

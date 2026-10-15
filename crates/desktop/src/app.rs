@@ -4476,7 +4476,7 @@ impl Dent {
                 fp(t, &mut h);
                 self.open_calls.contains(&thought_key(t)).hash(&mut h);
             }
-            Item::Tools { lines, summary } => {
+            Item::Tools { lines, summary, .. } => {
                 (lines, summary).hash(&mut h);
                 lines
                     .first()
@@ -4484,6 +4484,9 @@ impl Dent {
                     .hash(&mut h);
                 for l in lines.iter().filter(|l| l.detail.is_some()) {
                     self.open_calls.contains(&l.id).hash(&mut h);
+                    self.expanded
+                        .contains(&format!("all-{}", l.id))
+                        .hash(&mut h);
                 }
                 for l in lines.iter().filter(|l| l.report.is_some()) {
                     self.expanded

@@ -111,6 +111,14 @@ pub const READING: Type = Type {
     line: 24.,
     zooms: true,
 };
+/// Prose set inside something else (a subagent's report, a thought): the
+/// reading face a step smaller, so it never competes with the answer.
+pub const INSET: Type = Type {
+    family: body,
+    size: 13.,
+    line: 20.,
+    zooms: true,
+};
 pub const UI: Type = Type {
     family: sans,
     size: 13.,

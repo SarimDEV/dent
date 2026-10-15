@@ -77,30 +77,53 @@ pub fn activity_line(a: &Activity, now_ms: u64) -> Option<(String, String)> {
     })
 }
 
-/// A command as it was run: a glyph, then what was typed in the code
-/// face. A sent command looks like this until its answer comes, so the
-/// answer lands under it rather than replacing a message.
-pub fn command_line(typed: &str, glyph: &str, color: Hsla, t: &Theme) -> Div {
+/// The lead column every quiet line in the transcript starts with (a
+/// tool call, a thought, a note, a command, the working line): one glyph,
+/// centred on the first line of text. Text starts [`STEP`] in, and each
+/// level of a tool's tree steps in by the same, so a child's glyph sits
+/// under its parent's words.
+pub const LEAD: f32 = space::S4;
+pub const STEP: f32 = space::S6;
+
+pub fn lead(glyph: impl IntoElement) -> Div {
     div()
+        .w(px(LEAD))
+        .h(px(CODE.zoomed().line))
+        .flex_none()
         .flex()
         .items_center()
-        .gap(px(space::S2))
-        .child(
-            div()
-                .w(px(space::S4))
-                .flex_none()
-                .flex()
-                .justify_center()
-                .child(icon(glyph, 13., color)),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .ty(CODE)
-                .text_color(t.quiet)
-                .child(typed.to_string()),
-        )
+        .justify_center()
+        .child(glyph)
+}
+
+/// A line's glyph by name: an icon, or for a stopped session the idle
+/// status square, as the sidebar shows it. Empty is none.
+pub fn glyph(name: &str, t: &Theme) -> AnyElement {
+    match name {
+        "" => div().into_any_element(),
+        "square" => crate::theme::status_square(crate::theme::Status::Idle, t).into_any_element(),
+        n => icon(n, 13., t.quiet).into_any_element(),
+    }
+}
+
+/// A quiet line: its glyph in the lead column, then the caller's words,
+/// in the code face. The caller adds the words, and anything after them.
+pub fn quiet_line(glyph: impl IntoElement, t: &Theme) -> Div {
+    div()
+        .flex()
+        .items_start()
+        .gap(px(STEP - LEAD))
+        .ty(CODE)
+        .text_color(t.quiet)
+        .child(lead(glyph))
+}
+
+/// A command as it was run: a glyph, then what was typed. A sent command
+/// looks like this until its answer comes, so the answer lands under it
+/// rather than replacing a message.
+pub fn command_line(typed: &str, glyph: &str, color: Hsla, t: &Theme) -> Div {
+    quiet_line(icon(glyph, 13., color), t)
+        .child(div().min_w_0().truncate().child(typed.to_string()))
 }
 
 /// The parts of a meter, darkest first, in the ink: a share of the whole

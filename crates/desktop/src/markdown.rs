@@ -21,7 +21,9 @@ use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
 use ratex_types::display_item::DisplayList;
 
 use crate::diagram;
-use crate::ds::{CODE, DISPLAY, DISPLAY_COMPACT, LABEL, READING, Type, Typed, UI, radius, space};
+use crate::ds::{
+    CODE, DISPLAY, DISPLAY_COMPACT, INSET, LABEL, READING, Type, Typed, UI, radius, space,
+};
 use crate::math;
 use crate::theme::{self, Theme};
 
@@ -1084,6 +1086,25 @@ pub fn render_with(blocks: &[Block], t: &Theme, doc: bool, quiet: bool, r: &mut 
 }
 
 thread_local! {
+    /// The type prose is set in: the reading size, or [`INSET`] inside
+    /// something else.
+    static PROSE: std::cell::Cell<Type> = const { std::cell::Cell::new(READING) };
+}
+
+fn prose() -> Type {
+    PROSE.with(|p| p.get())
+}
+
+/// Blocks set inside something else, like a subagent's report: quiet ink,
+/// headings included, a step smaller than the answer.
+pub fn render_inset(blocks: &[Block], t: &Theme, r: &mut R) -> Div {
+    let prev = PROSE.with(|p| p.replace(INSET));
+    let out = render_with(blocks, t, false, true, r);
+    PROSE.with(|p| p.set(prev));
+    out
+}
+
+thread_local! {
     /// What each copied line inside the blocks being laid out starts with:
     /// a list item's indent, a quote's `> `.
     static COPY_PREFIX: RefCell<String> = const { RefCell::new(String::new()) };
@@ -1135,28 +1156,28 @@ fn render_in(
                 let (ty, family) = match (doc, level) {
                     (true, 1) => (DISPLAY, theme::serif()),
                     (true, 2) => (DISPLAY_COMPACT, theme::serif()),
-                    (true, _) => (READING, reading),
+                    (true, _) => (prose(), reading),
                     // In chat, headings are the interface face, so they
                     // read as structure rather than another paragraph.
-                    (false, _) => (READING, theme::sans()),
+                    (false, _) => (prose(), theme::sans()),
                 };
                 let weight = if !doc || *level > 2 {
                     FontWeight::MEDIUM
                 } else {
                     FontWeight::NORMAL
                 };
-                let f = face(ty, family, t.ink).weighted(weight);
+                let f = face(ty, family, ink).weighted(weight);
                 div()
                     .when(*level > 1 || !doc, |d| d.pt(px(space::S3)))
                     .ty(ty)
-                    .text_color(t.ink)
+                    .text_color(ink)
                     .child(i.element(&key, t, f, None, &r.md, r.window))
                     .into_any_element()
             }
             Block::Para(i) => {
-                let f = face(READING, reading, ink);
+                let f = face(prose(), reading, ink);
                 div()
-                    .ty(READING)
+                    .ty(prose())
                     .text_color(ink)
                     .child(i.element(&key, t, f, None, &r.md, r.window))
                     .into_any_element()
@@ -1167,12 +1188,12 @@ fn render_in(
                     let marker: AnyElement = match (item.task, item.number) {
                         (Some(done), _) => checkbox(done, t).into_any_element(),
                         (None, Some(n)) => div()
-                            .ty(READING)
+                            .ty(prose())
                             .text_color(t.quiet)
                             .child(format!("{n}."))
                             .into_any_element(),
                         (None, None) => div()
-                            .ty(READING)
+                            .ty(prose())
                             .text_color(t.faint)
                             .child("–")
                             .into_any_element(),
@@ -1205,13 +1226,13 @@ fn render_in(
                         div()
                             .relative()
                             .pl(px(24.))
-                            .ty(READING)
+                            .ty(prose())
                             .child(
                                 div()
                                     .absolute()
                                     .left_0()
                                     .top_0()
-                                    .h(px(READING.zoomed().line))
+                                    .h(px(prose().zoomed().line))
                                     .flex()
                                     .items_center()
                                     .child(marker),

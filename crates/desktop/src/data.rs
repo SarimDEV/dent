@@ -104,6 +104,8 @@ pub enum Item {
     /// Tool calls folded to one line, expandable.
     Tools {
         summary: String,
+        /// The kind of work the folded line sums up, as an icon.
+        icon: &'static str,
         lines: Vec<ToolLine>,
     },
     /// The agent wrote a viewable file: a card that opens it.
@@ -198,6 +200,8 @@ impl Item {
 #[derive(Clone, Debug, PartialEq, Hash)]
 pub struct ToolLine {
     pub text: String,
+    /// What kind of call it is, as an icon; empty for none.
+    pub icon: &'static str,
     pub depth: usize,
     /// A finished subagent's report, in Markdown, shown under its steps.
     pub report: Option<String>,

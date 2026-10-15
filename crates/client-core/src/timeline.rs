@@ -191,8 +191,12 @@ impl Call {
             "WebFetch" => v["url"].as_str().map(|u| first_line(u, 80)),
             "WebSearch" => v["query"].as_str().map(|q| first_line(q, 80)),
             "Task" | "Agent" => v["description"].as_str().map(|d| first_line(d, 80)),
-            "TodoWrite" => Some("updated the plan".into()),
-            _ => None,
+            "TodoWrite" => Some("the plan".into()),
+            // A tool from a server reads as its name, from that server.
+            other => other.strip_prefix("mcp__").map(|rest| match rest.split_once("__") {
+                Some((server, tool)) => format!("{tool} from {server}"),
+                None => rest.to_string(),
+            }),
         };
         let verb = match self.name.as_str() {
             "Bash" => match &self.result {
@@ -209,10 +213,10 @@ impl Call {
             "WebSearch" => "Searched the web for",
             "Task" | "Agent" => "Subagent:",
             "TodoWrite" => "Updated",
+            n if n.starts_with("mcp__") => "Used",
             other => other,
         };
         match what {
-            Some(w) if self.name == "TodoWrite" => format!("{verb} {w}"),
             Some(w) => format!("{verb} {w}"),
             None => verb.to_string(),
         }

@@ -54,11 +54,13 @@ Five sizes, two weights, three inks. Line heights sit on the 4 px grid.
 | `type.display` | Instrument Serif | 28 / 32, compact 20 / 24 | Session title, doc title, palette query |
 | `type.reading` | Literata | 15 / 24 | Agent replies, user messages, docs body, composer |
 | `type.ui` | IBM Plex Sans | 13 / 20 | Sidebar titles, buttons, menus |
+| `type.inset` | Literata | 13 / 20 | Prose inside something else: a subagent's report, a thought |
 | `type.code` | Commit Mono | 12 / 20 | Code, diffs, tool lines, commands |
 | `type.label` | Commit Mono | 11 / 16 | Metadata and section labels |
 
 - **Text size (⌘+ / ⌘−) scales `type.reading` and `type.code` only**, lines rounded to whole pixels; display, UI and label sizes, and every control and gutter, stay as designed. Anything measured from those two types reads them through `Type::zoomed()`.
 - **Hierarchy comes from ink and weight before size.** Inks: `ink` (content), `quiet` (secondary, metadata), `faint` (line numbers, placeholders, separators). Weights: regular and medium only.
+- **Sentences are read, so they're set in `type.ui` and `quiet`** ("Queued · sends when this reply finishes", a card's hint). Mono is for keys, paths, counts and times; `faint` only for separators and line numbers.
 - **Uppercase is for section labels only** (`PROJECTS`, `NEEDS YOU`). Inline metadata (`claude · mac-mini · 100,003 events`) stays lowercase.
 - **Numbers that change** (usage, counts, timers) are set in Commit Mono so every digit is the same width and nothing shifts as they update.
 - `·` separates metadata, in `faint`.
@@ -181,6 +183,19 @@ With the system's reduce-motion setting on (read at launch and whenever the wind
 - The dither is a grid of flat quads, so it is for small surfaces only. Across a whole window it measured far over budget, which is why the theme switch is a colour tween.
 - Only the working square repaints a quiet window, at 8 fps, and only while a session is working and visible.
 - Every new motion is measured with the frame-timing bench before it lands (Reliability requirements).
+
+## Quiet lines
+
+Everything in the transcript that isn't the conversation (a tool call, a thought, a note, a command, the files a turn changed, the working line) is one kind of line (`cards::quiet_line`): a 16 pt lead column with the line's own glyph, an 8 pt gap, then `type.code` in `quiet`. Each kind keeps its own glyph (a terminal for commands, a file for reads, a bot for subagents, the idle square for Stopped); the column, face and indent are shared, so all their words start 24 pt in. Only the working line's lead word is `ink`.
+
+- **Folding:** a line that opens ends with its chevron, after its words.
+- **Trees:** each level steps in 24 pt, so a child's glyph sits under its parent's words; the rail (1 px, `quiet` at 35%) runs under the parent's glyph and branches to each child's, at the middle of a code line at the current text size.
+- **What's inside:** an opened call is a raised card at the text's edge. A subagent's report is a line of its own ("Report") with its prose under it in `type.inset`, quiet, headings included, so nothing inside a tool is as loud as the answer.
+- **Inline actions** (Show full report, Show 40 more lines, Review, Open) are ghost buttons; their words line up with the text above.
+
+## Choices
+
+A row of choices (an approval, a plan, going back, trying again, discarding) puts the main choice first as a primary button, the others after it as outlined buttons, and Cancel last as a ghost, as the agent itself asks. Inline actions everywhere else are ghost buttons; a state word (Showing, Running, In use) is quiet text and never looks pressable.
 
 ## Lists of things you act on
 

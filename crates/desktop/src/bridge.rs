@@ -295,15 +295,21 @@ pub fn session(
                 }
                 let mut lines = tree(&calls, cwd);
                 let mut summary = summary(&calls, cwd);
+                let mut icon = group_icon(&calls);
                 // One call at the top: the folded line is that call, so its
                 // line doesn't repeat it, and what's under it moves up.
                 if lines.iter().filter(|l| l.depth == 0).count() == 1 && lines.len() > 1 {
-                    summary = lines.remove(0).text;
+                    let first = lines.remove(0);
+                    (summary, icon) = (first.text, first.icon);
                     for l in &mut lines {
                         l.depth -= 1;
                     }
                 }
-                items.push(Item::Tools { summary, lines });
+                items.push(Item::Tools {
+                    summary,
+                    icon,
+                    lines,
+                });
             }
             Entry::Ask {
                 id,
@@ -727,6 +733,7 @@ fn branch(calls: &[Call], parent: Option<&str>, depth: usize, cwd: &Path, out: &
         }
         out.push(ToolLine {
             text,
+            icon: kind_icon(&c.name),
             depth,
             report: None,
             id: c.id.clone(),
@@ -754,6 +761,7 @@ fn branch(calls: &[Call], parent: Option<&str>, depth: usize, cwd: &Path, out: &
                 from,
                 ToolLine {
                     text: String::new(),
+                    icon: "ellipsis",
                     depth: depth + 1,
                     report: None,
                     id: c.id.clone(),
@@ -767,6 +775,7 @@ fn branch(calls: &[Call], parent: Option<&str>, depth: usize, cwd: &Path, out: &
             // While it works, what it last said.
             (None, Some(said)) => out.push(ToolLine {
                 text: format!("“{}”", first_line(said)),
+                icon: "",
                 depth: depth + 1,
                 report: None,
                 id: c.id.clone(),
@@ -775,7 +784,8 @@ fn branch(calls: &[Call], parent: Option<&str>, depth: usize, cwd: &Path, out: &
                 opens: None,
             }),
             (Some((false, report)), _) if !report.trim().is_empty() => out.push(ToolLine {
-                text: String::new(),
+                text: "Report".into(),
+                icon: "scroll-text",
                 depth: depth + 1,
                 report: Some(report.trim().to_string()),
                 id: c.id.clone(),
@@ -863,6 +873,33 @@ fn line(c: &Call, cwd: &Path) -> String {
 
 /// A group's folded line, like "Read 3 files, changed 2 files, and ran a
 /// command": the two biggest kinds of work, the rest counted together.
+/// Each kind of call has its own icon, in the lead column of its line.
+pub fn kind_icon(tool: &str) -> &'static str {
+    match tool.trim_start_matches("waiting:") {
+        "Bash" => "square-terminal",
+        "Read" => "file-text",
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => "file-pen-line",
+        "Grep" | "Glob" => "text-search",
+        "LS" => "folder",
+        "WebFetch" | "WebSearch" => "globe",
+        "Task" | "Agent" => "bot",
+        "TodoWrite" => "list-todo",
+        _ => "plug",
+    }
+}
+
+/// A group's icon: its calls' kind when they share one, else a stack.
+fn group_icon(calls: &[Call]) -> &'static str {
+    let mut kinds = calls
+        .iter()
+        .filter(|c| c.parent.is_none())
+        .map(|c| kind_icon(&c.name));
+    match kinds.next() {
+        Some(k) if kinds.all(|x| x == k) => k,
+        _ => "layers",
+    }
+}
+
 fn summary(calls: &[Call], cwd: &Path) -> String {
     let top: Vec<&Call> = calls.iter().filter(|c| c.parent.is_none()).collect();
     if top.len() == 1 {
