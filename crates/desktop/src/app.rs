@@ -518,6 +518,13 @@ pub struct Dent {
     pub changes: HashMap<String, Rc<Vec<FileDiff>>>,
     /// Choices made so far on a question, by question id.
     pub picks: HashMap<String, Vec<Option<String>>>,
+    /// Choices ticked so far in a question that takes several, by
+    /// `ask/question`.
+    pub ticks: HashMap<String, Vec<String>>,
+    /// A choice just picked, shown chosen for a moment before it goes.
+    pub flash: Option<(String, usize, String)>,
+    /// The question card, when the keyboard is on it.
+    pub ask_focus: FocusHandle,
     /// Sessions started in a terminal that could carry on here.
     pub recent: Vec<RecentSession>,
     /// The account's usage, as the provider last reported it, and when.
@@ -933,6 +940,9 @@ impl Dent {
             selected: None,
             focus: cx.focus_handle(),
             inbox_focus: cx.focus_handle(),
+            ask_focus: cx.focus_handle(),
+            ticks: HashMap::new(),
+            flash: None,
             shells: HashMap::new(),
             shell_tx,
             term_focus: cx.focus_handle(),
@@ -2033,12 +2043,12 @@ impl Dent {
             self.step_selection(if k.key == "up" { -1 } else { 1 }, false, window, cx);
             return true;
         }
-        // A question's options answer to their number keys while the
-        // composer is empty.
+        // A question's options answer to their number keys, but only while
+        // the keyboard isn't in a text field: there a number is a number,
+        // so an answer like "2 days" types.
         if plain
-            && in_composer
+            && field.is_none()
             && k.key.len() == 1
-            && self.composer.read(cx).value().is_empty()
             && let Some(d) = k.key.chars().next().and_then(|c| c.to_digit(10))
             && d > 0
             && let Some(id) = self.selected.clone()
@@ -2050,7 +2060,23 @@ impl Dent {
                 .unwrap_or(0);
             if let Some((label, _)) = questions.get(q).and_then(|q| q.options.get(d as usize - 1)) {
                 let label = label.clone();
-                self.answer(&id, Some(&ask), q, label, cx);
+                self.pick_option(&id, &ask, q, label, cx);
+                return true;
+            }
+        }
+        // On the card, Return finishes a question that takes several.
+        if plain
+            && k.key == "enter"
+            && self.ask_focus.is_focused(window)
+            && let Some(id) = self.selected.clone()
+            && let Some(Item::Question { id: ask, questions }) = self.open_ask(&id)
+        {
+            let picks = self.picks.get(&ask).cloned().unwrap_or_default();
+            if let Some(q) = (0..questions.len())
+                .find(|q| picks.get(*q).is_none_or(Option::is_none))
+                .filter(|q| questions[*q].multi)
+            {
+                self.finish_ticks(&id, &ask, q, cx);
                 return true;
             }
         }
@@ -2968,7 +2994,7 @@ impl Dent {
     }
 
     /// The session's open question or approval, by id.
-    fn open_ask(&self, id: &str) -> Option<Item> {
+    pub fn open_ask(&self, id: &str) -> Option<Item> {
         self.session(id)?
             .items
             .iter()
@@ -3069,6 +3095,74 @@ impl Dent {
             self.reply_to_ask(id, ask, Answer::Choose { answers }, cx);
         }
         cx.notify();
+    }
+
+    /// A choice picked by click or number key. One of several is ticked or
+    /// unticked; a single answer shows as chosen for a moment, then goes.
+    pub fn pick_option(
+        &mut self,
+        id: &str,
+        ask: &str,
+        q: usize,
+        option: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Item::Question { questions, .. }) = self.ask_for(id, Some(ask)) else {
+            return;
+        };
+        if questions.get(q).is_some_and(|q| q.multi) {
+            let ticks = self.ticks.entry(format!("{ask}/{q}")).or_default();
+            match ticks.iter().position(|t| *t == option) {
+                Some(i) => {
+                    ticks.remove(i);
+                }
+                None => ticks.push(option),
+            }
+            cx.notify();
+            return;
+        }
+        // A second pick while one is showing waits for it.
+        if self.flash.is_some() {
+            return;
+        }
+        self.flash = Some((ask.to_string(), q, option.clone()));
+        cx.notify();
+        let (id, ask) = (id.to_string(), ask.to_string());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(200))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.flash = None;
+                this.answer(&id, Some(&ask), q, option, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// The ticked choices answer a question that takes several, in the
+    /// order they're listed.
+    pub fn finish_ticks(&mut self, id: &str, ask: &str, q: usize, cx: &mut Context<Self>) {
+        let Some(Item::Question { questions, .. }) = self.ask_for(id, Some(ask)) else {
+            return;
+        };
+        let ticked = self
+            .ticks
+            .get(&format!("{ask}/{q}"))
+            .cloned()
+            .unwrap_or_default();
+        if ticked.is_empty() {
+            return;
+        }
+        let answer = questions[q]
+            .options
+            .iter()
+            .filter(|(label, _)| ticked.contains(label))
+            .map(|(label, _)| label.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.ticks.remove(&format!("{ask}/{q}"));
+        self.answer(id, Some(ask), q, answer, cx);
     }
 
     /// Typed text answers the next unanswered question.

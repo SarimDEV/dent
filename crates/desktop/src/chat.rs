@@ -1366,9 +1366,41 @@ impl Dent {
             Item::Question { id: ask, questions } => {
                 let picked = self.picks.get(ask).cloned().unwrap_or_default();
                 let many = questions.len() > 1;
+                // The question the number keys go to: the first unanswered.
+                let next = (0..questions.len())
+                    .find(|q| picked.get(*q).is_none_or(Option::is_none))
+                    .unwrap_or(0);
+                let keyed = self.ask_focus.is_focused(window);
+                let fixed = questions.iter().any(|q| q.fixed);
+                let n = questions.get(next).map_or(0, |q| q.options.len().min(9));
+                let multi = questions.get(next).is_some_and(|q| q.multi);
+                let hint = match (keyed, multi, fixed, many) {
+                    (true, true, ..) => format!("Press 1–{n} to tick, ↩ to continue"),
+                    (true, false, ..) => format!("Press 1–{n} to pick"),
+                    (false, _, true, _) => "Esc, then a number key, to pick".to_string(),
+                    (false, _, false, true) => {
+                        "Answer each one, or type an answer in the box".to_string()
+                    }
+                    (false, _, false, false) => {
+                        "Or type your own answer in the box · Esc to pick by number".to_string()
+                    }
+                };
                 needs_card(&t)
+                    .id(SharedString::from(format!("ask-{ask}")))
+                    .track_focus(&self.ask_focus)
                     .children(questions.iter().enumerate().map(|(qi, q)| {
                         let chosen = picked.get(qi).cloned().flatten();
+                        let ticked = self
+                            .ticks
+                            .get(&format!("{ask}/{qi}"))
+                            .cloned()
+                            .unwrap_or_default();
+                        let flashing = self
+                            .flash
+                            .as_ref()
+                            .filter(|(a, fq, _)| a == ask && *fq == qi)
+                            .map(|(.., o)| o.clone());
+                        let (sid_go, ask_go) = (s.id.clone(), ask.clone());
                         div()
                             .flex()
                             .flex_col()
@@ -1390,7 +1422,9 @@ impl Dent {
                             .child(div().flex().flex_col().gap(px(space::S1)).children(
                                 q.options.iter().enumerate().map(|(i, (label, desc))| {
                                     let (sid, o2, k) = (s.id.clone(), label.clone(), ask.clone());
-                                    let on = chosen.as_deref() == Some(label.as_str());
+                                    let on = chosen.as_deref() == Some(label.as_str())
+                                        || flashing.as_deref() == Some(label.as_str())
+                                        || ticked.contains(label);
                                     let key = format!("opt-{qi}-{i}");
                                     div()
                                         .id(SharedString::from(key.clone()))
@@ -1408,7 +1442,7 @@ impl Dent {
                                         .cursor_pointer()
                                         .hover(|d| d.border_color(t.ink.opacity(0.3)))
                                         .on_press(cx.listener(move |this, _, _, cx| {
-                                            this.answer(&sid, Some(&k), qi, o2.clone(), cx)
+                                            this.pick_option(&sid, &k, qi, o2.clone(), cx)
                                         }))
                                         .flex()
                                         .items_start()
@@ -1443,14 +1477,41 @@ impl Dent {
                                         .child(probe(&self.probes, key))
                                 }),
                             ))
+                            // Several can be ticked; this sends them.
+                            .when(q.multi && chosen.is_none(), |d| {
+                                let none = ticked.is_empty();
+                                d.child(
+                                    div().flex().child(
+                                        button(
+                                            SharedString::from(format!("ticks-{qi}")),
+                                            if none {
+                                                "Pick one or more".to_string()
+                                            } else {
+                                                format!("Continue with {}", ticked.len())
+                                            },
+                                            !none,
+                                            &t,
+                                        )
+                                        .relative()
+                                        .map(|b| {
+                                            if none {
+                                                b.opacity(0.5).cursor_not_allowed().with_tip(tip(
+                                                    "Tick at least one choice first",
+                                                    None,
+                                                    t,
+                                                ))
+                                            } else {
+                                                b.on_press(cx.listener(move |this, _, _, cx| {
+                                                    this.finish_ticks(&sid_go, &ask_go, qi, cx)
+                                                }))
+                                            }
+                                        })
+                                        .child(probe(&self.probes, format!("ticks-{qi}"))),
+                                    ),
+                                )
+                            })
                     }))
-                    .when(!questions.iter().any(|q| q.fixed), |d| {
-                        d.child(div().ty(LABEL).text_color(t.faint).child(if many {
-                            "Answer each one, or type an answer in the box"
-                        } else {
-                            "Or type your own answer in the box"
-                        }))
-                    })
+                    .child(div().ty(LABEL).text_color(t.faint).child(hint))
                     .into_any_element()
             }
             Item::Note { icon: name, text } => div()

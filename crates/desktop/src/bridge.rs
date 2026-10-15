@@ -868,6 +868,7 @@ fn ask(id: &str, tool: &str, input: &Value, description: Option<&str>, cwd: &Pat
                                 })
                                 .unwrap_or_default(),
                             fixed: input.get("dent_dialog").is_some(),
+                            multi: q["multiSelect"] == true,
                         })
                         .collect()
                 })

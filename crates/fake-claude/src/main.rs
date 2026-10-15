@@ -6,7 +6,7 @@
 //! What it does depends on words in the message:
 //!
 //! - `run` or `approve`: a Bash call that needs approval
-//! - `ask`: a question with choices
+//! - `ask`: a question with choices (`ask several`: more than one answer)
 //! - `write <path>`: writes the file in its directory (asks first in Ask mode)
 //! - `background`: starts background work, ends the turn, then follows up
 //! - `subagent`: a Task call whose steps nest under it
@@ -721,10 +721,19 @@ impl Agent {
             return Ok(());
         }
         if lower.contains("ask") {
-            let input = json!({"questions": [{"question": "Which database should the cache use?", "header": "Cache",
-                "multiSelect": false, "options": [
-                    {"label": "SQLite", "description": "One file, no server"},
-                    {"label": "Redis", "description": "Shared between machines"}]}]});
+            // `ask several`: a question that takes more than one answer.
+            let input = if lower.contains("several") {
+                json!({"questions": [{"question": "Which platforms should the build cover?", "header": "Platforms",
+                    "multiSelect": true, "options": [
+                        {"label": "macOS", "description": "Apple silicon and Intel"},
+                        {"label": "Linux", "description": "x86_64 and arm64"},
+                        {"label": "Windows", "description": "x86_64"}]}]})
+            } else {
+                json!({"questions": [{"question": "Which database should the cache use?", "header": "Cache",
+                    "multiSelect": false, "options": [
+                        {"label": "SQLite", "description": "One file, no server"},
+                        {"label": "Redis", "description": "Shared between machines"}]}]})
+            };
             let id = self.tool("AskUserQuestion", input.clone(), None);
             let resp = self.permission("AskUserQuestion", &id, &input)?;
             let picked = resp["updatedInput"]["answers"]

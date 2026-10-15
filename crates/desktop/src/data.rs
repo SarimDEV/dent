@@ -84,6 +84,8 @@ pub struct Question {
     /// Only its choices answer it (Claude Code's own questions): no
     /// answer of your own.
     pub fixed: bool,
+    /// Several of its choices can be picked together.
+    pub multi: bool,
 }
 
 #[derive(Clone)]
