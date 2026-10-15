@@ -35,6 +35,14 @@ pub enum Do {
     Pin(String),
     /// Open a file with this app from now on (`None`: the Mac's default).
     OpenWith(String, Option<String>),
+    /// Put text on the clipboard: a link, a command, what's selected.
+    Copy(String),
+    /// Follow a link as a click would.
+    OpenLink(String),
+    /// Open a file in its app (your pick for its kind, else the Mac's).
+    OpenInApp(String),
+    /// Type a command into your terminal, for you to run.
+    RunInTerminal(String),
 }
 
 const WIDTH: f32 = 200.;
@@ -52,7 +60,7 @@ impl Dent {
         cx.notify();
     }
 
-    fn run_context(&mut self, what: Do, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn run_context(&mut self, what: Do, window: &mut Window, cx: &mut Context<Self>) {
         self.context = None;
         match what {
             Do::Separator => {}
@@ -80,8 +88,76 @@ impl Dent {
                 crate::open::open_with(&path, app, cx);
                 self.save_prefs();
             }
+            Do::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            Do::OpenLink(url) => crate::select::open_link(&url, window, cx),
+            Do::OpenInApp(path) => crate::open::open(&path, cx),
+            Do::RunInTerminal(command) => {
+                self.open_shell(window, cx);
+                if let Some(sh) = self.current().and_then(|s| self.shells.get(&s.id)) {
+                    sh.paste(&command);
+                }
+            }
         }
         cx.notify();
+    }
+
+    /// Right-click in the chat: what's under the pointer decides. A link
+    /// offers to open or copy it (a file: also Finder and its app); a
+    /// selection offers Copy. Elsewhere, nothing.
+    pub fn chat_context(&mut self, at: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
+        let mut items: Vec<(&str, Do)> = Vec::new();
+        if let Some(url) = crate::select::link_at(at, window) {
+            if url.starts_with('/') {
+                let (path, _) = crate::select::at_line(&url);
+                items.push(("Open", Do::OpenLink(url.clone())));
+                items.push(("Open in App", Do::OpenInApp(path.clone())));
+                items.push(("Show in Finder", Do::Reveal(path.clone())));
+                items.push(("Copy Path", Do::CopyPath(path)));
+            } else {
+                items.push(("Open Link", Do::OpenLink(url.clone())));
+                items.push(("Copy Link", Do::Copy(url)));
+            }
+        }
+        if crate::select::has_selection() {
+            if !items.is_empty() {
+                items.push(("", Do::Separator));
+            }
+            items.push(("Copy", Do::Copy(crate::select::copied())));
+        }
+        if !items.is_empty() {
+            self.open_context(at, items, cx);
+        }
+    }
+
+    /// Right-click on a tool row: a command copies or goes to your
+    /// terminal; a file opens, shows in Finder or copies its path.
+    pub fn tool_context(
+        &mut self,
+        at: Point<Pixels>,
+        line: &crate::data::ToolLine,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(detail) = line.detail.as_ref() else {
+            return;
+        };
+        let mut items: Vec<(&str, Do)> = Vec::new();
+        if line.text.starts_with("$ ") {
+            items.push(("Copy Command", Do::Copy(detail.input.clone())));
+            items.push((
+                "Run in My Terminal",
+                Do::RunInTerminal(detail.input.clone()),
+            ));
+        }
+        if let Some(path) = &detail.path {
+            if std::path::Path::new(path).exists() {
+                items.push(("Open", Do::OpenLink(path.clone())));
+                items.push(("Show in Finder", Do::Reveal(path.clone())));
+            }
+            items.push(("Copy Path", Do::CopyPath(path.clone())));
+        }
+        if !items.is_empty() {
+            self.open_context(at, items, cx);
+        }
     }
 
     /// The open menu, over everything, kept inside the window.

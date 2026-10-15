@@ -729,7 +729,14 @@ impl Dent {
             .relative()
             .flex_1()
             .min_h_0()
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                    this.chat_context(e.position, window, cx)
+                }),
+            )
             .child(transcript)
+            .child(probe(&self.probes, "transcript"))
             .children(find)
             // A drag past the top or bottom scrolls the chat under it.
             .child(crate::select::region(
@@ -1239,6 +1246,18 @@ impl Dent {
                             .gap(px(space::S2))
                             .ty(CODE)
                             .text_color(t.quiet)
+                            .relative()
+                            .child(probe(&self.probes, "tool-row"))
+                            .when(lone, |d| {
+                                let line = lines[0].clone();
+                                d.on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        this.tool_context(e.position, &line, cx)
+                                    }),
+                                )
+                            })
                             .when(more, |d| {
                                 d.cursor_pointer().hover(|d| d.text_color(t.ink)).on_press(
                                     cx.listener(move |this, _, _, cx| {
@@ -1384,6 +1403,15 @@ impl Dent {
                                         let detail = l.detail.clone().filter(|_| opened);
                                         let line = div()
                                             .id(SharedString::from(format!("tool-line-{ix}-{n}")))
+                                            .on_mouse_down(MouseButton::Right, {
+                                                let line = l.clone();
+                                                cx.listener(
+                                                    move |this, e: &MouseDownEvent, _, cx| {
+                                                        cx.stop_propagation();
+                                                        this.tool_context(e.position, &line, cx)
+                                                    },
+                                                )
+                                            })
                                             .min_w_0()
                                             .overflow_hidden()
                                             .whitespace_nowrap()

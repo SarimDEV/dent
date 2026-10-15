@@ -34,6 +34,8 @@ pub enum Field {
 pub enum Act {
     Wait,
     Click(&'static str),
+    /// Right-click it: a press and release of the other button.
+    RightClick(&'static str),
     /// Click it if it's on screen; some controls exist only on some platforms.
     ClickIfShown(&'static str),
     Key(&'static str),
@@ -352,6 +354,43 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
                 );
             }
         }
+        RightClick(name) => match center(&me, name, cx) {
+            Some(at) => {
+                window.dispatch_event(
+                    PlatformInput::MouseMove(MouseMoveEvent {
+                        position: at,
+                        pressed_button: None,
+                        modifiers: Modifiers::default(),
+                    }),
+                    cx,
+                );
+                for down in [true, false] {
+                    let ev = if down {
+                        PlatformInput::MouseDown(MouseDownEvent {
+                            button: MouseButton::Right,
+                            position: at,
+                            modifiers: Modifiers::default(),
+                            click_count: 1,
+                            first_mouse: false,
+                        })
+                    } else {
+                        PlatformInput::MouseUp(MouseUpEvent {
+                            button: MouseButton::Right,
+                            position: at,
+                            modifiers: Modifiers::default(),
+                            click_count: 1,
+                        })
+                    };
+                    window.dispatch_event(ev, cx);
+                }
+            }
+            None => note(
+                &me,
+                cx,
+                leak(format!("right-click target “{name}” on screen")),
+                false,
+            ),
+        },
         Wheel(name, dy) => match center(&me, name, cx) {
             Some(at) => {
                 window.dispatch_event(
@@ -916,6 +955,13 @@ fn kill_daemon(_: &mut Dent, _: &mut Window, _: &mut Context<Dent>) {
 fn outside_page() -> &'static str {
     let dir = std::env::var("DENT_WALK_OUTSIDE").unwrap_or_else(|_| "/nonexistent".into());
     leak(format!("write {dir}/page.html with assets"))
+}
+
+/// Whether the open right-click menu has a row saying `label`.
+fn menu_has(d: &Dent, label: &str) -> bool {
+    d.context
+        .as_ref()
+        .is_some_and(|m| m.items.iter().any(|(l, _)| l.as_ref() == label))
 }
 
 fn new_session(text: &'static str) -> Vec<(f32, Act)> {
@@ -3662,6 +3708,60 @@ fn file_links() -> Vec<(f32, Act)> {
             ),
         ),
         (0.2, Shot("own-links")),
+        (0.2, RightClick("tool-row")),
+        (
+            0.1,
+            Until(
+                "right-clicking a file's tool row offers its path",
+                |d, _| menu_has(d, "Copy Path"),
+                3.,
+            ),
+        ),
+        (0.3, Shot("menu-tool")),
+        (0.1, Key("escape")),
+        (
+            0.1,
+            Call(|d, w, _| {
+                if let Some(s) = current(d) {
+                    let area = crate::select::area(&format!("chat/{}", s.id));
+                    crate::select::select_all(area, w);
+                }
+            }),
+        ),
+        (0.2, RightClick("transcript")),
+        (
+            0.1,
+            Until(
+                "with words selected, the chat's menu copies them",
+                |d, _| menu_has(d, "Copy"),
+                3.,
+            ),
+        ),
+        (0.3, Shot("menu-chat")),
+        (0.1, Key("escape")),
+        (
+            0.1,
+            Call(|d, w, cx| {
+                crate::select::clear(w);
+                d.run_context(
+                    crate::context::Do::RunInTerminal("echo from-dent".into()),
+                    w,
+                    cx,
+                )
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "Run in My Terminal types the command there, not run",
+                |d, _| {
+                    current(d)
+                        .and_then(|s| d.shells.get(&s.id))
+                        .is_some_and(|sh| sh.text().contains("echo from-dent"))
+                },
+                5.,
+            ),
+        ),
         (
             0.,
             Call(|_, w, cx| {

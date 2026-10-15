@@ -248,6 +248,20 @@ thread_local! {
     static LEAD: RefCell<Option<SharedString>> = const { RefCell::new(None) };
 }
 
+/// Where the link under `p` points, if one is.
+pub fn link_at(p: Point<Pixels>, window: &Window) -> Option<String> {
+    let win = window.window_handle().window_id();
+    let (spot, link) = hit(p, win, window)?;
+    let ix = link?;
+    with(|s| {
+        s.placed
+            .iter()
+            .rev()
+            .find(|x| x.key == spot.key)
+            .and_then(|x| x.links.get(ix).map(|(_, u)| u.clone()))
+    })
+}
+
 /// Where every link drawn now points, for walkthroughs.
 pub fn drawn_links() -> Vec<String> {
     with(|s| {
