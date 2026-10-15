@@ -181,6 +181,14 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             d.command(&session, Op::Unqueue { id }).await?;
             Reply::Ok
         }
+        Request::Requeue {
+            session,
+            id,
+            before,
+        } => {
+            d.command(&session, Op::Requeue { id, before }).await?;
+            Reply::Ok
+        }
         Request::Interrupt { session } => {
             d.command(&session, Op::Interrupt).await?;
             Reply::Ok

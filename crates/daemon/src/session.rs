@@ -67,6 +67,10 @@ pub enum Op {
     Unqueue {
         id: String,
     },
+    Requeue {
+        id: String,
+        before: Option<String>,
+    },
     Rewind {
         to: String,
         files: bool,
@@ -302,6 +306,9 @@ impl Session {
                 Body::Delivered { id } | Body::Unqueued { id } => {
                     self.held.retain(|(h, _, _)| *h != id);
                 }
+                Body::Requeued { id, before } => {
+                    requeue(&mut self.held, &id, before.as_deref());
+                }
                 Body::Asked {
                     id, tool, input, ..
                 } => {
@@ -445,6 +452,13 @@ impl Session {
                     bail!("that message has already gone to the agent");
                 }
                 self.log(Body::Unqueued { id });
+                Ok(())
+            }
+            Op::Requeue { id, before } => {
+                if !requeue(&mut self.held, &id, before.as_deref()) {
+                    bail!("that message has already gone to the agent");
+                }
+                self.log(Body::Requeued { id, before });
                 Ok(())
             }
             Op::Interrupt => self.interrupt().await,
@@ -1653,6 +1667,26 @@ impl Session {
     }
 }
 
+/// Move held message `id` to just before `before`, or to the end. False
+/// when `id` isn't waiting any more. A `before` that has gone means the end.
+fn requeue(
+    held: &mut VecDeque<(String, String, Vec<String>)>,
+    id: &str,
+    before: Option<&str>,
+) -> bool {
+    let Some(at) = held.iter().position(|(h, _, _)| h == id) else {
+        return false;
+    };
+    let Some(m) = held.remove(at) else {
+        return false;
+    };
+    let to = before
+        .and_then(|b| held.iter().position(|(h, _, _)| h == b))
+        .unwrap_or(held.len());
+    held.insert(to, m);
+    true
+}
+
 /// The last thing the agent said before `events` end: where a rewound
 /// conversation picks up. `None` when it hadn't said anything yet.
 fn resume_point(events: &[dent_protocol::Event]) -> Option<String> {
@@ -1684,5 +1718,34 @@ fn settled(outcome: &Outcome) -> Status {
         Outcome::Done => Status::Done,
         Outcome::Interrupted { .. } => Status::Interrupted,
         Outcome::Error { .. } => Status::Error,
+    }
+}
+
+#[cfg(test)]
+mod requeue_tests {
+    use super::*;
+
+    fn q(ids: &[&str]) -> VecDeque<(String, String, Vec<String>)> {
+        ids.iter()
+            .map(|i| (i.to_string(), String::new(), Vec::new()))
+            .collect()
+    }
+
+    fn ids(h: &VecDeque<(String, String, Vec<String>)>) -> Vec<&str> {
+        h.iter().map(|(i, _, _)| i.as_str()).collect()
+    }
+
+    #[test]
+    fn a_waiting_message_moves_before_another_or_to_the_end() {
+        let mut h = q(&["a", "b", "c"]);
+        assert!(requeue(&mut h, "c", Some("a")));
+        assert_eq!(ids(&h), ["c", "a", "b"]);
+        assert!(requeue(&mut h, "c", None));
+        assert_eq!(ids(&h), ["a", "b", "c"]);
+        // One already gone can't move; one it's put before that's gone
+        // means the end.
+        assert!(!requeue(&mut h, "x", None));
+        assert!(requeue(&mut h, "a", Some("x")));
+        assert_eq!(ids(&h), ["b", "c", "a"]);
     }
 }

@@ -3820,6 +3820,20 @@ impl Dent {
         cx.notify();
     }
 
+    /// Move a waiting message to just before another waiting one (or to the
+    /// end): the order they'll go in.
+    pub fn requeue(&mut self, id: &str, msg: &str, before: Option<String>, cx: &mut Context<Self>) {
+        if self.pressed_again(format!("requeue/{id}/{msg}")) {
+            return;
+        }
+        self.live.send(Request::Requeue {
+            session: id.to_string(),
+            id: msg.to_string(),
+            before,
+        });
+        cx.notify();
+    }
+
     /// A waiting message goes into the running turn now instead.
     pub fn steer_queued(&mut self, id: &str, msg: &str, text: &str, cx: &mut Context<Self>) {
         if self.pressed_again(format!("queued/{msg}")) {

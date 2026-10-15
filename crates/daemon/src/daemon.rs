@@ -559,6 +559,7 @@ impl Daemon {
                 | Body::Checkpoint { .. }
                 | Body::Delivered { .. }
                 | Body::Unqueued { .. }
+                | Body::Requeued { .. }
                 | Body::Background { .. }
                 | Body::Limits { .. }
                 | Body::Aside { .. }

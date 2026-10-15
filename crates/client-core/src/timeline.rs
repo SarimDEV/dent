@@ -435,6 +435,19 @@ impl SessionView {
                     self.reindex(ix);
                 }
             }
+            // Waiting messages show in the order they sit; moving one moves
+            // its entry to just before the other, or after everything.
+            Body::Requeued { id, before } => {
+                if let Some(ix) = self.user_ix(id) {
+                    let entry = self.entries.remove(ix);
+                    let to = before
+                        .as_deref()
+                        .and_then(|b| self.user_ix(b))
+                        .unwrap_or(self.entries.len());
+                    self.entries.insert(to, entry);
+                    self.reindex(ix.min(to));
+                }
+            }
             Body::Assistant { parent, blocks, .. } => {
                 for b in blocks {
                     match (b, parent) {
@@ -927,6 +940,47 @@ mod tests {
             })
             .collect();
         assert_eq!(ids, ["a", "text", "b"]);
+    }
+
+    #[test]
+    fn waiting_messages_move_in_the_queue() {
+        let user = |id: &str, queued| Body::User {
+            id: id.into(),
+            text: id.into(),
+            queued,
+            steer: false,
+            attachments: Vec::new(),
+        };
+        let order = |s: &Sessions| -> Vec<String> {
+            s.list["s"]
+                .entries
+                .iter()
+                .filter_map(|e| match e {
+                    Entry::User { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let s = feed(vec![
+            user("a", false),
+            user("b", true),
+            user("c", true),
+            user("d", true),
+            Body::Requeued {
+                id: "d".into(),
+                before: Some("b".into()),
+            },
+        ]);
+        assert_eq!(order(&s), ["a", "d", "b", "c"]);
+        let s = feed(vec![
+            user("b", true),
+            user("c", true),
+            Body::Requeued {
+                id: "b".into(),
+                before: None,
+            },
+        ]);
+        assert_eq!(order(&s), ["c", "b"]);
     }
 
     #[test]

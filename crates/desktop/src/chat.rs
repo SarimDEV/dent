@@ -1871,6 +1871,12 @@ impl Dent {
                     .into_any_element()
             }
             Item::Queued { id: msg, text } => {
+                // The waiting message before this one, which it can go ahead of.
+                let ahead = ix.checked_sub(1).and_then(|p| match s.items.get(p) {
+                    Some(Item::Queued { id, .. }) => Some(id.clone()),
+                    _ => None,
+                });
+                let (sid3, msg3) = (s.id.clone(), msg.clone());
                 let (sid, msg, back) = (s.id.clone(), msg.clone(), text.clone());
                 let (sid2, msg2, now) = (s.id.clone(), msg.clone(), text.clone());
                 div()
@@ -1900,8 +1906,26 @@ impl Dent {
                                 div()
                                     .ty(LABEL)
                                     .text_color(t.faint)
-                                    .child("Queued · sends when this reply finishes"),
+                                    .child(if ahead.is_some() {
+                                        "Queued · sends after the one above"
+                                    } else {
+                                        "Queued · sends when this reply finishes"
+                                    }),
                             )
+                            .when_some(ahead, |d, before| {
+                                d.child(
+                                    ghost(
+                                        SharedString::from(format!("move-up-{ix}")),
+                                        "Move up",
+                                        &t,
+                                    )
+                                    .relative()
+                                    .on_press(cx.listener(move |this, _, _, cx| {
+                                        this.requeue(&sid3, &msg3, Some(before.clone()), cx)
+                                    }))
+                                    .child(probe(&self.probes, format!("move-up-{ix}"))),
+                                )
+                            })
                             .child(
                                 ghost(SharedString::from(format!("unqueue-{ix}")), "Edit", &t)
                                     .relative()

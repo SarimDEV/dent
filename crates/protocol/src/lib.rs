@@ -81,6 +81,13 @@ pub enum Body {
     Unqueued {
         id: String,
     },
+    /// A held message moved in the queue: to just before held message
+    /// `before`, or to the end.
+    Requeued {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+    },
     /// A complete assistant message. Text streams first as [`Out::Delta`];
     /// this is what history keeps.
     Assistant {
@@ -692,6 +699,14 @@ pub enum Request {
     Unqueue {
         session: SessionId,
         id: String,
+    },
+    /// Move a waiting message to just before another waiting one, or (with
+    /// no `before`) to the end of the queue.
+    Requeue {
+        session: SessionId,
+        id: String,
+        #[serde(default)]
+        before: Option<String>,
     },
     /// Stop the current turn. The session stays and takes the next message.
     Interrupt {
