@@ -16,7 +16,7 @@ Each agent sits behind one `AgentDriver` trait: start a session, send a user mes
 - Model availability depends on the account: a ChatGPT sign-in rejects some models (for example the user's configured default), so the model picker comes from `model/list`, and a rejected model is shown as such rather than as a generic turn failure.
 - Use the agents' own credentials and login flows. The daemon never reads or reuses their tokens.
 - Agents keep their own transcripts. On restart the daemon resumes the agent's session by id (`--resume` for Claude Code, thread resume for Codex) and reconciles against its own event log. dent names Claude Code's session up front with `--session-id`.
-- Messages sent while the agent works wait in the daemon until the turn ends and can be taken back; **Send now** steers one into the running turn. Stop interrupts, then stops the process after 2 seconds if the turn hasn't ended ([0038](decisions/0038-local-core.md)).
+- Messages sent while the agent works wait in the daemon until the turn ends and can be taken back; **Send now** steers one into the running turn. Stop interrupts, then stops the process after 2 seconds if the turn hasn't ended ([0038](decisions/0038-local-core.md)). A stop request says what asked ("the Stop button", "⌘."), and the daemon logs it, so a stop no one remembers can be traced.
 - Clients on the same machine connect over a Unix socket only the user can open; other machines use the WebSocket from [0033](decisions/0033-direct-websocket-hub-on-hold.md).
 - The third driver is the Agent Client Protocol (ACP), which now has session resume, usage updates and a 1.0 Rust SDK ([updates](https://agentclientprotocol.com/updates)). One ACP driver brings in every agent that speaks it.
 

@@ -2234,9 +2234,11 @@ impl Dent {
         let text = self.composer.read(cx).value();
         let empty = text.trim().is_empty() && self.attachments.is_empty();
         let working = s.running();
+        // Long enough for a second press meant for Send (one at 11:24 on
+        // 15 Oct came 2 s after a send); ⌘. still stops at once.
         let settling = self
             .just_sent
-            .is_some_and(|at| at.elapsed().as_secs_f32() < 1.);
+            .is_some_and(|at| at.elapsed().as_secs_f32() < 2.5);
         let id = s.id.clone();
         // While it works and nothing is typed, the button stops it. Right after
         // sending it stays inert, so a double press never lands on Stop.
@@ -2263,7 +2265,9 @@ impl Dent {
                         .active(|d| d.bg(t.press()))
                 })
                 .cursor_pointer()
-                .on_press(cx.listener(move |this, _, window, cx| this.stop(&id, window, cx)))
+                .on_press(cx.listener(move |this, _, window, cx| {
+                    this.stop(&id, "the Stop button", window, cx)
+                }))
                 .with_tip(tip("Stop", Some("⌘ ."), t))
                 .child(
                     div()

@@ -474,7 +474,7 @@ impl Render for Dent {
             )
             .on_action(cx.listener(|this, _: &StopSession, window, cx| {
                 if let Some(id) = this.selected.clone() {
-                    this.stop(&id, window, cx);
+                    this.stop(&id, "⌘.", window, cx);
                 }
             }))
             // Esc reaches the app before a text field swallows it.

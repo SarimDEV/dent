@@ -3549,7 +3549,7 @@ impl Dent {
         cx.notify();
     }
 
-    pub fn stop(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn stop(&mut self, id: &str, by: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(s) = self.session(id) else { return };
         if !s.running() {
             return;
@@ -3582,6 +3582,7 @@ impl Dent {
         // The header offers Resume once it has stopped.
         self.live.send(Request::Interrupt {
             session: id.to_string(),
+            by: Some(by.to_string()),
         });
         cx.notify();
     }
