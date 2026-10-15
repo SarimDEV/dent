@@ -825,18 +825,19 @@ impl Dent {
             .into_any_element()
     }
 
-    /// The last line while the agent works: what it's doing, and for how long.
+    /// The last line while the agent works: for how long. What it's doing
+    /// is the transcript just above, so the line doesn't repeat it.
+    /// Compacting or retrying says so after a dot, since nothing above
+    /// shows it; each change of words eases in.
     fn working_line(&self, s: &Session) -> AnyElement {
         let t = self.t;
         let since = self.working_since.get(&s.id).copied();
-        // Compacting or retrying says so, in place of the work; each
-        // change of words eases in.
         let special = s
             .activity
             .as_ref()
             .and_then(|a| crate::cards::activity_line(a, crate::cards::now_ms()));
         let (lead, detail) = match special {
-            Some(line) => line,
+            Some((lead, detail)) => (lead, Some(detail)),
             None => (
                 match since {
                     Some(at) if at.elapsed().as_secs() >= 1 => {
@@ -844,7 +845,7 @@ impl Dent {
                     }
                     _ => "Working".into(),
                 },
-                s.detail.clone(),
+                None,
             ),
         };
         let kind = match &s.activity {
@@ -852,7 +853,7 @@ impl Dent {
             Some(dent_protocol::Activity::Retrying { .. }) => "retrying",
             Some(dent_protocol::Activity::Preparing { .. }) | None => "working",
         };
-        let changed = self.changed_words(&s.id, kind, &detail);
+        let changed = self.changed_words(&s.id, kind, detail.as_deref().unwrap_or(""));
         let fade = if crate::reduce_motion() {
             1.
         } else {
@@ -873,16 +874,17 @@ impl Dent {
                 &t,
             ))
             .child(div().text_color(t.ink).child(lead))
-            .child(div().text_color(t.faint).child("·"))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .opacity(fade)
-                    .ml(px((1. - fade) * motion::NUDGE))
-                    .child(detail),
-            )
+            .when_some(detail, |d, detail| {
+                d.child(div().text_color(t.faint).child("·")).child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .opacity(fade)
+                        .ml(px((1. - fade) * motion::NUDGE))
+                        .child(detail),
+                )
+            })
             .into_any_element()
     }
 
