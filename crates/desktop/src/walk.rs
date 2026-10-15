@@ -102,6 +102,8 @@ enum SweepStep {
     /// Scroll the conversation to its first item that matches.
     ScrollTo(fn(&Item) -> bool),
     Still(String),
+    /// Open every group that holds a subagent.
+    OpenAgents,
     Frame,
     /// Stills are taken off the main thread: give one time to finish.
     Until(Instant),
@@ -559,6 +561,10 @@ fn sweep_step(me: &Entity<Dent>, window: &mut Window, cx: &mut App) -> bool {
                     SweepStep::ScrollTo(|i| matches!(i, Item::User { text, .. } if text.contains("Attached"))),
                     SweepStep::Frame,
                     SweepStep::Still(format!("session-{n}-picture")),
+                    SweepStep::OpenAgents,
+                    SweepStep::ScrollTo(has_agent),
+                    SweepStep::Frame,
+                    SweepStep::Still(format!("session-{n}-agents")),
                 ]);
             }
         }
@@ -630,6 +636,26 @@ fn sweep_step(me: &Entity<Dent>, window: &mut Window, cx: &mut App) -> bool {
             });
             false
         }
+        Some(SweepStep::OpenAgents) => {
+            me.update(cx, |this, cx| {
+                let keys: Vec<String> = this
+                    .current()
+                    .map(|s| {
+                        s.items
+                            .iter()
+                            .filter(|i| has_agent(i))
+                            .filter_map(|i| match i {
+                                Item::Tools { lines, .. } => lines.first().map(|l| l.id.clone()),
+                                _ => None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                this.open_tools.extend(keys);
+                cx.notify();
+            });
+            false
+        }
         Some(SweepStep::Frame) => {
             me.update(cx, |_, cx| cx.notify());
             false
@@ -667,6 +693,11 @@ fn sweep_step(me: &Entity<Dent>, window: &mut Window, cx: &mut App) -> bool {
             true
         }
     }
+}
+
+fn has_agent(i: &Item) -> bool {
+    matches!(i, Item::Tools { summary, lines } if summary.starts_with("Subagent")
+        || lines.iter().any(|l| l.text.starts_with("Subagent")))
 }
 
 fn leak(s: String) -> &'static str {
@@ -3441,6 +3472,51 @@ fn narration() -> Vec<(f32, Act)> {
                         && times_said(d, "arrive.Now") == 0
                 },
                 0.1,
+            ),
+        ),
+    ]);
+    v.extend(new_session("Research it in parallel"));
+    v.extend([
+        (
+            0.,
+            Until(
+                "a background subagent stays at work after the turn ends",
+                |d, _| {
+                    status_is(d, Status::Waiting)
+                        && has(d, |i| {
+                            matches!(i, Item::Tools { summary, .. }
+                                if summary.starts_with("Subagent working: Survey competitors"))
+                        })
+                },
+                15.,
+            ),
+        ),
+        (
+            0.,
+            Until(
+                "and the line says what it's doing",
+                |d, _| {
+                    current(d).is_some_and(|s| {
+                        s.detail == "Subagent: Survey competitors · Searched the web for Monarch free trial"
+                    })
+                },
+                10.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "once done, its report is what it found, not the launch receipt",
+                |d, _| {
+                    done_saying(d, "The research is in")
+                        && has(d, |i| {
+                            matches!(i, Item::Tools { summary, lines }
+                                if summary.starts_with("Subagent: Survey competitors")
+                                    && lines.iter().any(|l| l.report.as_deref() == Some("Monarch starts everyone on a trial before linking."))
+                                    && !lines.iter().any(|l| l.report.as_deref().is_some_and(|r| r.contains("Async"))))
+                        })
+                },
+                20.,
             ),
         ),
     ]);

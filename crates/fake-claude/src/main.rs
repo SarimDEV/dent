@@ -1073,6 +1073,52 @@ impl Agent {
             self.end("done", false);
             return Ok(());
         }
+        // A subagent sent to the background, as the real agent sends one:
+        // a launch receipt now, its work and its end later.
+        if lower.contains("in parallel") {
+            let task = self.tool(
+                "Agent",
+                json!({"description": "Survey competitors", "prompt": "Find out how they onboard", "run_in_background": true}),
+                None,
+            );
+            out(self.envelope(
+                json!({"type": "system", "subtype": "background_tasks_changed",
+                "tasks": [{"task_id": "a1", "description": "Survey competitors"}]}),
+                None,
+            ));
+            self.result(
+                &task,
+                "Async agent launched successfully. (This tool result is internal metadata.)\nagentId: a1 (internal ID)\nThe agent is working in the background.",
+                false,
+                None,
+            );
+            self.say(
+                "It's researching in the background; I'll write it up when it's done.",
+                None,
+            )?;
+            self.end("done", false);
+            self.pause(600)?;
+            let id = self.tool(
+                "WebSearch",
+                json!({"query": "Monarch free trial"}),
+                Some(&task),
+            );
+            self.pause(2500)?;
+            self.result(&id, "Monarch: 7-day trial", false, Some(&task));
+            self.say(
+                "Monarch starts everyone on a trial before linking.",
+                Some(&task),
+            )?;
+            self.pause(600)?;
+            out(self.envelope(
+                json!({"type": "system", "subtype": "background_tasks_changed", "tasks": []}),
+                None,
+            ));
+            self.init();
+            self.say("The research is in.", None)?;
+            self.end("done", false);
+            return Ok(());
+        }
         if lower.contains("background") {
             let id = self.tool(
                 "Bash",

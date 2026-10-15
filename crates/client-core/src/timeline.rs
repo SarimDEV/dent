@@ -61,6 +61,9 @@ pub struct SessionView {
     changed_from: Option<usize>,
     /// Where each tool call lives: entry index and position in it.
     calls: HashMap<String, (usize, usize)>,
+    /// Subagents working in the background: the agent's id, and the call
+    /// that started it, which finishes when the agent leaves `background`.
+    agents: HashMap<String, String>,
 }
 
 /// A side question and, once it's in, its answer.
@@ -214,6 +217,16 @@ impl Call {
             None => verb.to_string(),
         }
     }
+}
+
+/// The agent's id, when a subagent's call came back saying it went to the
+/// background.
+fn launched(output: &str) -> Option<String> {
+    if !output.starts_with("Async agent launched") {
+        return None;
+    }
+    let id = output.split("agentId:").nth(1)?.split_whitespace().next()?;
+    Some(id.to_string())
 }
 
 fn first_line(s: &str, max: usize) -> String {
@@ -493,6 +506,15 @@ impl SessionView {
                 output,
                 ..
             } => {
+                // A subagent sent to the background: its call goes on until
+                // the agent finishes, and the receipt isn't its report.
+                if let Some(agent) = launched(output)
+                    && let Some(&(ix, _)) = self.calls.get(tool)
+                {
+                    self.agents.insert(agent, tool.clone());
+                    self.touch(ix);
+                    return;
+                }
                 if let Some(&(ix, at)) = self.calls.get(tool) {
                     let mut made = None;
                     if let Some(Entry::Tools { calls }) = self.entries.get_mut(ix)
@@ -628,9 +650,19 @@ impl SessionView {
                 outcome: outcome.clone(),
                 view: view.clone(),
             }),
-            Body::Background { tasks } => self.background = tasks.clone(),
+            Body::Background { tasks } => {
+                self.background = tasks.clone();
+                self.finish_agents(|agent| tasks.iter().any(|t| t.id == agent));
+            }
             Body::Status { status } => {
                 self.status = *status;
+                // Nothing runs any more: no subagent is still at work.
+                if !matches!(
+                    status,
+                    Status::Working | Status::NeedsYou | Status::Background
+                ) {
+                    self.finish_agents(|_| false);
+                }
                 if !matches!(status, Status::Working | Status::NeedsYou) {
                     self.working_since = None;
                 }
@@ -692,6 +724,31 @@ impl SessionView {
                 for (at, c) in calls.iter().enumerate() {
                     self.calls.insert(c.id.clone(), (ix, at));
                 }
+            }
+        }
+    }
+
+    /// Background subagents that have stopped: each one's report is the
+    /// last thing it said.
+    fn finish_agents(&mut self, running: impl Fn(&str) -> bool) {
+        let done: Vec<String> = self
+            .agents
+            .keys()
+            .filter(|a| !running(a))
+            .cloned()
+            .collect();
+        for agent in done {
+            let Some(tool) = self.agents.remove(&agent) else {
+                continue;
+            };
+            if let Some(&(ix, at)) = self.calls.get(&tool) {
+                if let Some(Entry::Tools { calls }) = self.entries.get_mut(ix)
+                    && let Some(c) = calls.get_mut(at)
+                    && c.result.is_none()
+                {
+                    c.result = Some((false, c.said.clone().unwrap_or_default()));
+                }
+                self.touch(ix);
             }
         }
     }
@@ -870,6 +927,61 @@ mod tests {
             Entry::Tools { calls } => assert_eq!(calls[0].line(), "Running cargo test…"),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A subagent sent to the background works on past its launch receipt
+    /// and the turn's end; it finishes when it leaves the background list,
+    /// with what it last said as its report.
+    #[test]
+    fn background_subagents_run_until_they_leave() {
+        let task = |id: &str| dent_protocol::Task {
+            id: id.into(),
+            description: "Research".into(),
+        };
+        let receipt = Body::ToolResult {
+            tool: "t".into(),
+            error: false,
+            output: "Async agent launched successfully. (internal)\nagentId: a6094 (internal ID)\nThe agent is working in the background.".into(),
+            parent: None,
+        };
+        let mut s = feed(vec![
+            tool("t", "Agent", r#"{"description":"Research"}"#, None),
+            Body::Background {
+                tasks: vec![task("a6094")],
+            },
+            receipt,
+            tool("w", "WebSearch", r#"{"query":"plaid"}"#, Some("t")),
+            Body::TurnEnded {
+                outcome: Outcome::Done,
+            },
+            Body::Status {
+                status: Status::Background,
+            },
+        ]);
+        let agent = |s: &Sessions| match &s.list["s"].entries[0] {
+            Entry::Tools { calls } => calls[0].clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(agent(&s).result, None, "still at work");
+        s.apply(&Out::Events {
+            events: vec![
+                ev(
+                    20,
+                    Body::Assistant {
+                        parent: Some("t".into()),
+                        blocks: vec![Block::Text {
+                            text: "Plaid charges per Item.".into(),
+                        }],
+                        uuid: None,
+                    },
+                ),
+                ev(21, Body::Background { tasks: vec![] }),
+            ],
+        });
+        assert_eq!(
+            agent(&s).result,
+            Some((false, "Plaid charges per Item.".into()))
+        );
     }
 
     /// Each message streams from empty: what streamed before its final

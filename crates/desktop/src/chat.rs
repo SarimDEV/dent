@@ -1262,11 +1262,19 @@ impl Dent {
                         }))
                     })
                     .when(open && !lone, |d| {
-                        let depths: Vec<usize> = lines.iter().map(|l| l.depth).collect();
-                        let rows: Vec<AnyElement> = lines
+                        // A subagent's earlier steps stay folded until asked for.
+                        let shown: Vec<(usize, &crate::data::ToolLine)> = lines
                             .iter()
                             .enumerate()
-                            .map(|(i, l)| {
+                            .filter(|(_, l)| {
+                                l.fold.as_ref().is_none_or(|k| self.expanded.contains(k))
+                            })
+                            .collect();
+                        let depths: Vec<usize> = shown.iter().map(|(_, l)| l.depth).collect();
+                        let rows: Vec<AnyElement> = shown
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &(n, l))| {
                                 // Each level gets a column: a rule while that
                                 // level carries on below, then this row's branch.
                                 // The rails are drawn, so they join from row to
@@ -1311,13 +1319,44 @@ impl Dent {
                                             }),
                                     );
                                 }
+                                if let Some((key, hidden)) = l.opens.clone() {
+                                    let opened = self.expanded.contains(&key);
+                                    let steps = if hidden == 1 { "step" } else { "steps" };
+                                    return row
+                                        .child(
+                                            div()
+                                                .id(SharedString::from(format!("steps-{ix}-{n}")))
+                                                .relative()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_color(t.faint)
+                                                .cursor_pointer()
+                                                .hover(|d| d.text_color(t.ink))
+                                                .on_press(cx.listener(move |this, _, _, cx| {
+                                                    if !this.expanded.remove(&key) {
+                                                        this.expanded.insert(key.clone());
+                                                    }
+                                                    cx.notify();
+                                                }))
+                                                .child(if opened {
+                                                    format!("Hide {hidden} earlier {steps}")
+                                                } else {
+                                                    format!("{hidden} earlier {steps}")
+                                                })
+                                                .child(probe(
+                                                    &self.probes,
+                                                    format!("steps-{ix}-{n}"),
+                                                )),
+                                        )
+                                        .into_any_element();
+                                }
                                 match &l.report {
                                     None => {
                                         let call = l.id.clone();
                                         let opened = self.open_calls.contains(&call);
                                         let detail = l.detail.clone().filter(|_| opened);
                                         let line = div()
-                                            .id(SharedString::from(format!("tool-line-{ix}-{i}")))
+                                            .id(SharedString::from(format!("tool-line-{ix}-{n}")))
                                             .min_w_0()
                                             .overflow_hidden()
                                             .whitespace_nowrap()
@@ -1345,7 +1384,7 @@ impl Dent {
                                                 .children(detail.map(|dt| {
                                                     self.call_detail(
                                                         s,
-                                                        &format!("{ix}-{i}"),
+                                                        &format!("{ix}-{n}"),
                                                         &dt,
                                                         cx,
                                                     )

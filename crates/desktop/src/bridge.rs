@@ -528,6 +528,24 @@ fn todos(v: &SessionView) -> Vec<(String, String, String)> {
         .unwrap_or_default()
 }
 
+/// The latest step of any subagent still at work, after its task.
+fn agent_step(v: &SessionView) -> Option<String> {
+    v.entries.iter().rev().find_map(|e| {
+        let Entry::Tools { calls } = e else {
+            return None;
+        };
+        let running = |id: &str| {
+            calls.iter().find(|c| {
+                c.id == id && c.result.is_none() && matches!(c.name.as_str(), "Task" | "Agent")
+            })
+        };
+        calls.iter().rev().find_map(|step| {
+            let agent = running(step.parent.as_deref()?)?;
+            Some(format!("{} · {}", agent.line(), step.line()))
+        })
+    })
+}
+
 /// A call still being written out, which for a long file takes minutes.
 fn preparing(tool: &str, what: Option<&str>) -> String {
     let file = what.map(|p| p.rsplit('/').next().unwrap_or(p));
@@ -608,13 +626,16 @@ fn detail(v: &SessionView) -> String {
                 _ => step.unwrap_or_else(|| "Thinking".into()),
             }
         }
-        Wire::Background => format!(
-            "Waiting on {}",
-            v.background
-                .first()
-                .map(|t| t.description.clone())
-                .unwrap_or_else(|| "background work".into())
-        ),
+        // A subagent at work says how far it got.
+        Wire::Background => agent_step(v).unwrap_or_else(|| {
+            format!(
+                "Waiting on {}",
+                v.background
+                    .first()
+                    .map(|t| t.description.clone())
+                    .unwrap_or_else(|| "background work".into())
+            )
+        }),
         Wire::Interrupted => "Stopped".into(),
         Wire::Error => v
             .entries
@@ -657,6 +678,9 @@ fn first_line(s: &str) -> String {
     out
 }
 
+/// How many of a subagent's steps show before the rest fold away.
+const LATEST_STEPS: usize = 5;
+
 /// The group's calls as a tree: each call, then what any subagent it
 /// started did, a level deeper.
 fn tree(calls: &[Call], cwd: &Path) -> Vec<ToolLine> {
@@ -683,17 +707,23 @@ fn branch(calls: &[Call], parent: Option<&str>, depth: usize, cwd: &Path, out: &
                 .iter()
                 .filter(|x| x.parent.as_deref() == Some(c.id.as_str()))
                 .count();
-            // Finished is the usual case and says nothing; the others do.
+            // Finished is the usual case and says nothing; the others do,
+            // up front, where a long task can't push them out of sight.
             let state = match &c.result {
-                None => " · working",
-                Some((true, _)) => " · failed",
-                Some((false, _)) => "",
+                None => "Subagent working:",
+                Some((true, _)) => "Subagent failed:",
+                Some((false, _)) => "Subagent:",
             };
+            let task = c.line();
+            text = format!("{state}{}", task.strip_prefix("Subagent:").unwrap_or(&task));
             text = match steps {
-                0 => format!("{text}{state}"),
-                1 => format!("{text}{state} · 1 step"),
-                n => format!("{text}{state} · {n} steps"),
+                0 => text,
+                1 => format!("{text} · 1 step"),
+                n => format!("{text} · {n} steps"),
             };
+            if let Some((true, why)) = &c.result {
+                text = format!("{text} · {}", first_line(why));
+            }
         }
         out.push(ToolLine {
             text,
@@ -701,11 +731,38 @@ fn branch(calls: &[Call], parent: Option<&str>, depth: usize, cwd: &Path, out: &
             report: None,
             id: c.id.clone(),
             detail: (!agent).then(|| Rc::new(call_detail(c, cwd))),
+            fold: None,
+            opens: None,
         });
         if !agent || depth > 8 {
             continue;
         }
+        let from = out.len();
         branch(calls, Some(&c.id), depth + 1, cwd, out);
+        // A long-running subagent can take a hundred steps: its latest few
+        // show, and a line opens the rest.
+        let steps: Vec<usize> = (from..out.len())
+            .filter(|&i| out[i].depth == depth + 1)
+            .collect();
+        if steps.len() > LATEST_STEPS {
+            let hidden = steps.len() - LATEST_STEPS;
+            let key = format!("steps-{}", c.id);
+            for l in &mut out[from..steps[hidden]] {
+                l.fold.get_or_insert_with(|| key.clone());
+            }
+            out.insert(
+                from,
+                ToolLine {
+                    text: String::new(),
+                    depth: depth + 1,
+                    report: None,
+                    id: c.id.clone(),
+                    detail: None,
+                    fold: None,
+                    opens: Some((key, hidden)),
+                },
+            );
+        }
         match (&c.result, &c.said) {
             // While it works, what it last said.
             (None, Some(said)) => out.push(ToolLine {
@@ -714,6 +771,8 @@ fn branch(calls: &[Call], parent: Option<&str>, depth: usize, cwd: &Path, out: &
                 report: None,
                 id: c.id.clone(),
                 detail: None,
+                fold: None,
+                opens: None,
             }),
             (Some((false, report)), _) if !report.trim().is_empty() => out.push(ToolLine {
                 text: String::new(),
@@ -721,6 +780,8 @@ fn branch(calls: &[Call], parent: Option<&str>, depth: usize, cwd: &Path, out: &
                 report: Some(report.trim().to_string()),
                 id: c.id.clone(),
                 detail: None,
+                fold: None,
+                opens: None,
             }),
             _ => {}
         }
@@ -811,7 +872,9 @@ fn summary(calls: &[Call], cwd: &Path) -> String {
     let mut kinds: Vec<(u8, &str, usize)> = Vec::new();
     let mut changed: Vec<String> = Vec::new();
     for c in &top {
+        let agent = matches!(c.name.as_str(), "Task" | "Agent");
         let kind = match c.name.trim_start_matches("waiting:") {
+            _ if agent && c.result.is_none() => (0, "working"),
             "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => {
                 let p = c.path().unwrap_or_default();
                 if changed.contains(&p) {
@@ -847,6 +910,7 @@ fn summary(calls: &[Call], cwd: &Path) -> String {
             "ran" => format!("ran {n} {}", s("command")),
             "read" => format!("read {n} {}", s("file")),
             "subagents" => format!("ran {n} {}", s("subagent")),
+            "working" => format!("{n} {} working", s("subagent")),
             "used" => format!("used {n} {}", s("tool")),
             l if n == 1 => l.to_string(),
             l => format!("{l} {n} times"),

@@ -205,6 +205,10 @@ pub struct ToolLine {
     pub id: String,
     /// Everything about the call, for when the line is opened.
     pub detail: Option<std::rc::Rc<CallDetail>>,
+    /// A subagent's earlier step: shown only once this fold is opened.
+    pub fold: Option<String>,
+    /// The line that opens a fold, and how many steps it holds.
+    pub opens: Option<(String, usize)>,
 }
 
 /// What a tool call did in full: what it was given, what came back, and

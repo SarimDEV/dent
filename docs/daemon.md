@@ -149,6 +149,8 @@ The browser runs on the agent's machine, so it works the same for remote and eph
 Subagent output is kept as a tree, not flattened into the parent's stream.
 
 - Each subagent has its own status, tool calls and result, nested under the step that started it.
+- A subagent sent to the background answers its call at once with a launch receipt, which is not its result: it stays working past the turn's end until it leaves the agent's background tasks, and its report is the last thing it said.
+- In the chat, a subagent's row leads with its state ("Subagent working:"), shows its latest five steps with a line that opens the earlier ones, and the working line and sidebar name its current step.
 - A single subagent can be stopped without stopping its parent, where the agent supports it.
 
 ## Turn status and notifications
