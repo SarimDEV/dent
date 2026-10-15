@@ -56,6 +56,7 @@ pub const SHEET: &[(&str, &[(&str, &str)])] = &[
             ("Show or hide the viewer", "⌘ \\"),
             ("Changes", "⌘ 2"),
             ("Your terminal", "⌘ 3"),
+            ("Clear your terminal (in it)", "⌘ K"),
             ("Ask on the side", "⌘ ;"),
             ("This sheet", "⌘ /"),
         ],

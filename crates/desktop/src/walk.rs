@@ -4030,6 +4030,21 @@ fn attaching() -> Vec<(f32, Act)> {
                 5.,
             ),
         ),
+        // The terminal has the keyboard after the drop: ⌘K clears it there.
+        (0.3, Key("cmd-k")),
+        (
+            0.1,
+            Until(
+                "⌘K in your terminal clears it, and search stays shut",
+                |d, _| {
+                    d.palette.is_none()
+                        && current(d)
+                            .and_then(|s| d.shells.get(&s.id))
+                            .is_some_and(|sh| !sh.text().contains("my notes.txt"))
+                },
+                5.,
+            ),
+        ),
         (
             0.,
             Call(|d, _, cx| {

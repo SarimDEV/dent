@@ -65,6 +65,7 @@ actions!(
         Minimize,
         Zoom,
         ToggleSidebar,
+        ClearTerminal,
         ChatPageUp,
         ChatPageDown,
         ChatTop,
@@ -190,6 +191,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-.", StopSession, None),
         KeyBinding::new("cmd-enter", SteerSend, None),
         KeyBinding::new("cmd-k", Search, None),
+        // In your terminal ⌘K clears it, as in Terminal.
+        KeyBinding::new("cmd-k", ClearTerminal, Some("Terminal")),
         KeyBinding::new("cmd-f", FindInSession, None),
         KeyBinding::new("cmd-g", FindNext, None),
         KeyBinding::new("shift-cmd-g", FindPrev, None),

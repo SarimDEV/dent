@@ -231,6 +231,19 @@ impl Shell {
         let _ = self.sender.send(Msg::Shutdown);
     }
 
+    /// ⌘K: the screen and everything scrolled past go, as in Terminal;
+    /// the shell redraws its prompt.
+    pub fn clear(&self) {
+        let alt = {
+            let mut term = self.term.lock();
+            term.grid_mut().clear_history();
+            term.mode().contains(TermMode::ALT_SCREEN)
+        };
+        if !alt {
+            self.type_bytes(b"\x0c".to_vec());
+        }
+    }
+
     /// The screen as text, for checks.
     pub fn text(&self) -> String {
         let term = self.term.lock();
@@ -746,7 +759,14 @@ impl Dent {
         };
         div()
             .id("shell")
+            .key_context("Terminal")
             .track_focus(&self.term_focus)
+            .on_action(cx.listener(|this, _: &crate::app::ClearTerminal, _, cx| {
+                if let Some(sh) = this.current().and_then(|s| this.shells.get(&s.id)) {
+                    sh.clear();
+                }
+                cx.notify();
+            }))
             .relative()
             .flex_1()
             .min_h_0()
@@ -831,6 +851,16 @@ impl Dent {
                     window.focus(&this.term_focus, cx);
                     let mut term = term_b.lock();
                     let (point, side) = point_at(e.position, origin_b.get(), &term);
+                    // ⌘-click opens a web address or a file, as Terminal does.
+                    if e.modifiers.platform {
+                        let line = row_text(&term, point.line);
+                        let base = this.current().map(|s| std::path::PathBuf::from(&s.cwd));
+                        drop(term);
+                        if let Some(url) = link_at_column(&line, point.column.0, base.as_deref()) {
+                            crate::select::open_link(&url, window, cx);
+                        }
+                        return;
+                    }
                     let ty = match e.click_count {
                         2 => SelectionType::Semantic,
                         3 => SelectionType::Lines,
@@ -944,5 +974,43 @@ mod tests {
         assert_eq!(shell_quote("/tmp/my file.txt"), "'/tmp/my file.txt'");
         assert_eq!(shell_quote("/tmp/it's"), "'/tmp/it'\\''s'");
         assert_eq!(shell_quote(""), "''");
+    }
+}
+
+/// One line of the terminal as text, a character per column.
+fn row_text(term: &Term<Listener>, line: alacritty_terminal::index::Line) -> String {
+    let row = &term.grid()[line];
+    (0..term.columns())
+        .map(|c| row[Column(c)].c)
+        .collect::<String>()
+}
+
+/// The link at column `col` of `line`: a web address, or a file named
+/// there (found from `base`).
+fn link_at_column(line: &str, col: usize, base: Option<&std::path::Path>) -> Option<String> {
+    let at = line.char_indices().nth(col).map(|(i, _)| i)?;
+    crate::markdown::plain_links(line, base)
+        .into_iter()
+        .find(|(r, _)| r.contains(&at))
+        .map(|(_, url)| url)
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::link_at_column;
+
+    #[test]
+    fn a_click_finds_the_link_under_it() {
+        let line = "see https://x.dev/a and src/app.rs:4 here";
+        assert_eq!(
+            link_at_column(line, 6, None).as_deref(),
+            Some("https://x.dev/a")
+        );
+        let base = std::path::Path::new("/p");
+        assert_eq!(
+            link_at_column(line, 26, Some(base)).as_deref(),
+            Some("/p/src/app.rs:4")
+        );
+        assert_eq!(link_at_column(line, 1, None), None);
     }
 }
