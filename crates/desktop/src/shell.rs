@@ -753,10 +753,6 @@ impl Dent {
             .overflow_hidden()
             .bg(t.panel)
             .cursor(CursorStyle::IBeam)
-            .children(
-                cx.has_active_drag()
-                    .then(|| crate::ui::drop_hint("Drop to type the paths here", &t)),
-            )
             .child(
                 canvas(
                     move |bounds, window, _| {
@@ -890,6 +886,19 @@ impl Dent {
                 cx.notify();
             }))
             .child(probe(&self.probes, "shell"))
+            // Last, so it covers the terminal's text; inset so its border
+            // clears the pane's edges.
+            .children(
+                (self.drop_target(cx) == Some(crate::app::DropTarget::Shell)).then(|| {
+                    crate::ui::drop_hint(
+                        "Drop to type the paths here",
+                        &self.probes,
+                        "drop-shell",
+                        space::S2,
+                        &t,
+                    )
+                }),
+            )
             .into_any_element()
     }
 }

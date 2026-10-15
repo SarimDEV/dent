@@ -492,6 +492,10 @@ impl Render for Dent {
             .on_drag_move(
                 cx.listener(|this, e: &DragMoveEvent<ExternalPaths>, _, cx| {
                     this.dragging_files = Some(e.drag(cx).paths().to_vec());
+                    if this.drag_at != Some(e.event.position) {
+                        this.drag_at = Some(e.event.position);
+                        cx.notify();
+                    }
                 }),
             )
             .child({

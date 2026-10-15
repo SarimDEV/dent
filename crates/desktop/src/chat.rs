@@ -312,19 +312,15 @@ impl Dent {
                 } else {
                     format!("Show {more} more lines")
                 };
-                div()
-                    .id(SharedString::from(fold.clone()))
+                crate::ui::ghost(SharedString::from(fold.clone()), label, &t)
                     .relative()
-                    .text_color(t.faint)
-                    .cursor_pointer()
-                    .hover(|d| d.text_color(t.ink))
+                    .ml(px(-space::S2))
                     .on_press(cx.listener(move |this, _, _, cx| {
                         if !this.expanded.remove(&fold) {
                             this.expanded.insert(fold.clone());
                         }
                         cx.notify();
                     }))
-                    .child(label)
                     .child(probe(&self.probes, format!("call-{which}-all")))
                     .into_any_element()
             })
@@ -2345,17 +2341,22 @@ impl Dent {
                             // order: the default's "Default ·", then effort's
                             // label, then permission's; each keeps its icon
                             // and says what it is on hover. The model's name
-                            // always shows.
+                            // always shows: with no room even for that, the
+                            // row wraps instead of squeezing.
+                            .when(!fit.fits, |d| d.flex_wrap())
                             .child(self.attach_button(cx))
-                            .child(self.chip(Menu::SessionModel, "claude", &labels[0], false, cx))
-                            .child(self.chip(
-                                Menu::SessionPermission,
-                                "shield",
-                                &labels[1],
-                                false,
-                                cx,
+                            .child(keep(
+                                !fit.fits,
+                                self.chip(Menu::SessionModel, "claude", &labels[0], false, cx),
                             ))
-                            .child(self.chip(Menu::SessionEffort, "gauge", &labels[2], false, cx))
+                            .child(keep(
+                                !fit.fits,
+                                self.chip(Menu::SessionPermission, "shield", &labels[1], false, cx),
+                            ))
+                            .child(keep(
+                                !fit.fits,
+                                self.chip(Menu::SessionEffort, "gauge", &labels[2], false, cx),
+                            ))
                             .child(div().flex_1())
                             .when_some(s.context.filter(|_| fit.context), |d, (used, max)| {
                                 d.child(self.context_meter(s, used, max, cx))
@@ -2370,8 +2371,17 @@ impl Dent {
                     .child(probe(&self.probes, "composer"))
                     .children(self.slash_menu(false, cx))
                     .children(
-                        cx.has_active_drag()
-                            .then(|| crate::ui::drop_hint("Drop to attach to your message", &t)),
+                        (self.drop_target(cx) == Some(crate::app::DropTarget::Message)).then(
+                            || {
+                                crate::ui::drop_hint(
+                                    "Drop to attach to your message",
+                                    &self.probes,
+                                    "drop-message",
+                                    0.,
+                                    &t,
+                                )
+                            },
+                        ),
                     ),
             )
     }
@@ -3008,9 +3018,18 @@ impl Dent {
                             )
                             .child(probe(&self.probes, "starter"))
                             .children(self.slash_menu(true, cx))
-                            .children(cx.has_active_drag().then(|| {
-                                crate::ui::drop_hint("Drop to attach to your message", &t)
-                            })),
+                            .children(
+                                (self.drop_target(cx) == Some(crate::app::DropTarget::Message))
+                                    .then(|| {
+                                        crate::ui::drop_hint(
+                                            "Drop to attach to your message",
+                                            &self.probes,
+                                            "drop-message",
+                                            0.,
+                                            &t,
+                                        )
+                                    }),
+                            ),
                     )
                     .child(chips)
                     .children(self.terminal_sessions(cx)),
@@ -4039,6 +4058,9 @@ pub struct Fit {
     pub labels: [String; 3],
     pub context: bool,
     pub hint: bool,
+    /// False when even the tightest layout is too wide: the row wraps
+    /// rather than letting chips run under the send button.
+    pub fits: bool,
 }
 
 /// Fit chips (each with its full and short label; an empty short label is
@@ -4087,6 +4109,7 @@ pub fn fit_footer(room: f32, chips: [(String, String); 3], context: bool, hint: 
                 labels,
                 context: *ctx && context,
                 hint: *h,
+                fits: true,
             };
         }
     }
@@ -4103,6 +4126,7 @@ pub fn fit_footer(room: f32, chips: [(String, String); 3], context: bool, hint: 
         }),
         context: false,
         hint: false,
+        fits: false,
     }
 }
 
@@ -4134,4 +4158,14 @@ pub fn turn_end_after(items: &[Item], ix: usize) -> Option<(u64, u64, bool)> {
         }
     }
     None
+}
+
+/// A chip held at its natural width when `whole`, so a wrapping row moves
+/// it to the next line rather than cutting its label short.
+fn keep(whole: bool, chip: AnyElement) -> AnyElement {
+    if whole {
+        div().flex_none().child(chip).into_any_element()
+    } else {
+        chip
+    }
 }

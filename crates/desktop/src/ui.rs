@@ -79,21 +79,31 @@ pub fn disclosure(id: &'static str, open: bool, px_size: f32, color: Hsla) -> im
 
 /// While files are dragged over the window: what dropping them here does,
 /// over the area it applies to. It takes no pointer, so the drop lands.
-pub fn drop_hint(text: &'static str, t: &Theme) -> AnyElement {
+pub fn drop_hint(
+    text: &'static str,
+    probes: &Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
+    name: &'static str,
+    inset: f32,
+    t: &Theme,
+) -> AnyElement {
     div()
         .absolute()
-        .inset_0()
+        .top(px(inset))
+        .bottom(px(inset))
+        .left(px(inset))
+        .right(px(inset))
         .rounded(px(radius::XL))
         .border_2()
         .border_dashed()
         .border_color(t.ink.opacity(0.5))
-        .bg(t.raised.opacity(0.92))
+        .bg(t.raised)
         .flex()
         .items_center()
         .justify_center()
         .ty(UI)
         .text_color(t.ink)
         .child(text)
+        .child(probe(probes, name))
         .into_any_element()
 }
 

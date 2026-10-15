@@ -559,6 +559,8 @@ pub struct Dent {
     pub attached: HashMap<Option<String>, Vec<Attachment>>,
     /// Files being dragged in from another app, until they're let go.
     pub dragging_files: Option<Vec<std::path::PathBuf>>,
+    /// Where those files are over the window, last we heard.
+    pub drag_at: Option<Point<Pixels>>,
     /// The appearance you chose, and one a flag forces for this run.
     pub appearance: crate::prefs::Appearance,
     /// Sessions pinned to the top of the sidebar.
@@ -1211,6 +1213,7 @@ impl Dent {
             attachments: Vec::new(),
             attached: HashMap::new(),
             dragging_files: None,
+            drag_at: None,
             diff_file: HashMap::new(),
             commenting: None,
             review: Vec::new(),
@@ -4030,26 +4033,40 @@ impl Dent {
         cx.notify();
     }
 
-    /// Dragged files let go: on your terminal they're typed as paths, as
-    /// in any terminal; anywhere else they ride along with the message.
-    pub fn drop_files(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(paths) = self.dragging_files.take() else {
-            return;
-        };
+    /// Whether `at` is over the terminal drawn this frame.
+    fn over_shell(&self, at: Point<Pixels>) -> bool {
         let frame = crate::ui::FRAME.load(std::sync::atomic::Ordering::Relaxed);
-        let on_shell = crate::ui::PROBE_FRAME
+        crate::ui::PROBE_FRAME
             .with(|f| f.borrow().get("shell").copied())
             .is_some_and(|f| f + 1 >= frame)
             && self
                 .probes
                 .borrow()
                 .get("shell")
-                .is_some_and(|b| b.contains(&at));
+                .is_some_and(|b| b.contains(&at))
+    }
+
+    /// Where files being dragged would go if let go now: the terminal under
+    /// the pointer, else the message. Only that one says so.
+    pub fn drop_target(&self, cx: &App) -> Option<DropTarget> {
+        cx.has_active_drag().then(|| match self.drag_at {
+            Some(at) if self.over_shell(at) => DropTarget::Shell,
+            _ => DropTarget::Message,
+        })
+    }
+
+    /// Dragged files let go: on your terminal they're typed as paths, as
+    /// in any terminal; anywhere else they ride along with the message.
+    pub fn drop_files(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        self.drag_at = None;
+        let Some(paths) = self.dragging_files.take() else {
+            return;
+        };
         let shell = self
             .selected
             .as_ref()
             .and_then(|id| self.shells.get(id))
-            .filter(|_| on_shell);
+            .filter(|_| self.over_shell(at));
         match shell {
             Some(sh) => {
                 let typed: Vec<String> = paths
@@ -5109,3 +5126,10 @@ fn with_attachments(text: &str, atts: &[Attachment]) -> String {
 
 /// More items than this landing at once (history arriving) just appear.
 const ARRIVE_AT_ONCE: usize = 3;
+
+/// Where dragged files would land.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DropTarget {
+    Message,
+    Shell,
+}
