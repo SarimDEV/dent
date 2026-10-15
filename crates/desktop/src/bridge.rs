@@ -528,6 +528,23 @@ fn todos(v: &SessionView) -> Vec<(String, String, String)> {
         .unwrap_or_default()
 }
 
+/// A call still being written out, which for a long file takes minutes.
+fn preparing(tool: &str, what: Option<&str>) -> String {
+    let file = what.map(|p| p.rsplit('/').next().unwrap_or(p));
+    match (tool, file) {
+        ("Write", Some(f)) => format!("Writing {f}"),
+        ("Write", None) => "Writing a file".into(),
+        ("Edit" | "MultiEdit" | "NotebookEdit", Some(f)) => format!("Editing {f}"),
+        ("Edit" | "MultiEdit" | "NotebookEdit", None) => "Preparing an edit".into(),
+        ("Task" | "Agent", _) => match what {
+            Some(w) => format!("Briefing a subagent: {w}"),
+            None => "Briefing a subagent".into(),
+        },
+        ("Bash", _) => "Writing a command".into(),
+        (t, _) => format!("Preparing {t}"),
+    }
+}
+
 /// What it's doing or wants, for the inbox row and the working line.
 fn detail(v: &SessionView) -> String {
     match v.status {
@@ -551,24 +568,43 @@ fn detail(v: &SessionView) -> String {
                 Some(dent_protocol::Activity::Retrying { error, .. }) => {
                     return format!("Retrying · {error}");
                 }
+                Some(dent_protocol::Activity::Preparing { tool, what }) => {
+                    return preparing(tool, what.as_deref());
+                }
                 None => {}
             }
             if !v.partial.is_empty() {
                 return "Writing".into();
             }
-            // The plan's current step says it best; then the latest call.
+            // The plan's current step says it best; then the call still
+            // running, else the latest.
             let step = todos(v)
                 .into_iter()
                 .find(|(st, ..)| st == "in_progress")
                 .map(|(_, what, doing)| if doing.is_empty() { what } else { doing });
             match v.entries.last() {
-                Some(Entry::Tools { calls }) => calls
-                    .iter()
-                    .rev()
-                    .find(|c| c.parent.is_none() && c.name != "TodoWrite")
-                    .map(|c| c.line())
+                Some(Entry::Tools { calls }) => {
+                    let top = |c: &&Call| c.parent.is_none() && c.name != "TodoWrite";
+                    let call = calls
+                        .iter()
+                        .rev()
+                        .filter(top)
+                        .find(|c| c.result.is_none())
+                        .or_else(|| calls.iter().rev().find(top));
+                    call.map(|c| {
+                        // A subagent at work: its latest step too.
+                        let step = calls
+                            .iter()
+                            .rev()
+                            .find(|s| c.result.is_none() && s.parent.as_ref() == Some(&c.id));
+                        match step {
+                            Some(s) => format!("{} · {}", c.line(), s.line()),
+                            None => c.line(),
+                        }
+                    })
                     .or(step)
-                    .unwrap_or_else(|| "Working".into()),
+                    .unwrap_or_else(|| "Working".into())
+                }
                 _ => step.unwrap_or_else(|| "Thinking".into()),
             }
         }

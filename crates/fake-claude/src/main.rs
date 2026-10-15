@@ -540,6 +540,64 @@ impl Agent {
         Ok(())
     }
 
+    /// One message as the real agent streams it: words, then a call whose
+    /// input streams slowly, as writing a long file does.
+    fn say_and_call(&mut self, text: &str, name: &str, input: Value) -> Result<String, Cut> {
+        self.context += text.len() as u64 / 3 + 200;
+        self.next += 1;
+        let msg_id = format!("msg_fake_n{}", new_id());
+        let id = format!("toolu_fake_{}", new_id());
+        let ev = |e: Value| json!({"type": "stream_event", "event": e});
+        out(self.envelope(
+            ev(json!({"type": "message_start", "message": {
+                "id": msg_id, "role": "assistant", "content": [], "usage": self.usage()}})),
+            None,
+        ));
+        out(self.envelope(
+            ev(json!({"type": "content_block_start", "index": 0,
+                "content_block": {"type": "text", "text": ""}})),
+            None,
+        ));
+        for chunk in text.split_inclusive(' ').collect::<Vec<_>>().chunks(3) {
+            out(self.envelope(
+                ev(json!({"type": "content_block_delta", "index": 0,
+                    "delta": {"type": "text_delta", "text": chunk.concat()}})),
+                None,
+            ));
+            self.pause(40)?;
+        }
+        out(self.envelope(
+            json!({"type": "assistant", "message": {"id": msg_id, "role": "assistant", "model": self.model,
+                "content": [{"type": "text", "text": text}], "usage": self.usage()}}),
+            None,
+        ));
+        out(self.envelope(ev(json!({"type": "content_block_stop", "index": 0})), None));
+        out(self.envelope(
+            ev(json!({"type": "content_block_start", "index": 1,
+                "content_block": {"type": "tool_use", "id": id, "name": name, "input": {}}})),
+            None,
+        ));
+        let json = input.to_string();
+        let chars: Vec<char> = json.chars().collect();
+        for chunk in chars.chunks(12) {
+            out(self.envelope(
+                ev(json!({"type": "content_block_delta", "index": 1,
+                    "delta": {"type": "input_json_delta", "partial_json": chunk.iter().collect::<String>()}})),
+                None,
+            ));
+            self.pause(60)?;
+        }
+        out(self.envelope(
+            json!({"type": "assistant", "message": {"id": msg_id, "role": "assistant", "model": self.model,
+                "content": [{"type": "tool_use", "id": id, "name": name, "input": input}],
+                "usage": self.usage()}}),
+            None,
+        ));
+        out(self.envelope(ev(json!({"type": "content_block_stop", "index": 1})), None));
+        out(self.envelope(ev(json!({"type": "message_stop"})), None));
+        Ok(id)
+    }
+
     /// A thinking block, whole, as the agent sends one before acting.
     fn think(&mut self, text: &str) {
         out(self.envelope(
@@ -993,6 +1051,25 @@ impl Agent {
                 "The subagent found that the database tests are the slow ones.",
                 None,
             )?;
+            self.end("done", false);
+            return Ok(());
+        }
+        if lower.contains("narrate") {
+            let id = self.say_and_call(
+                "First I'll read the handler to see how requests arrive.",
+                "Read",
+                json!({"file_path": "src/handler.rs"}),
+            )?;
+            self.result(&id, "fn handle() {}", false, None);
+            let notes = "Notes on the handler.\n".repeat(40);
+            let id = self.say_and_call(
+                "Now I'll write up what I found.",
+                "Write",
+                json!({"file_path": "notes/handler-notes.md", "content": notes}),
+            )?;
+            self.pause(400)?;
+            self.result(&id, "File created", false, None);
+            self.say("All done: the notes are in `handler-notes.md`.", None)?;
             self.end("done", false);
             return Ok(());
         }

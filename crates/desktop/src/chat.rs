@@ -831,8 +831,12 @@ impl Dent {
         let since = self.working_since.get(&s.id).copied();
         // Compacting or retrying says so, in place of the work; each
         // change of words eases in.
-        let (lead, detail) = match &s.activity {
-            Some(a) => crate::cards::activity_line(a, crate::cards::now_ms()),
+        let special = s
+            .activity
+            .as_ref()
+            .and_then(|a| crate::cards::activity_line(a, crate::cards::now_ms()));
+        let (lead, detail) = match special {
+            Some(line) => line,
             None => (
                 match since {
                     Some(at) if at.elapsed().as_secs() >= 1 => {
@@ -846,7 +850,7 @@ impl Dent {
         let kind = match &s.activity {
             Some(dent_protocol::Activity::Compacting { .. }) => "compacting",
             Some(dent_protocol::Activity::Retrying { .. }) => "retrying",
-            None => "working",
+            Some(dent_protocol::Activity::Preparing { .. }) | None => "working",
         };
         let changed = self.changed_words(&s.id, kind, &detail);
         let fade = if crate::reduce_motion() {

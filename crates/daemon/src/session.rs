@@ -183,6 +183,9 @@ struct Session {
     /// The agent replied in this turn. A slash command the agent runs
     /// itself (`/context`, `/usage`) replies only in the turn's result.
     said: bool,
+    /// The call the agent is writing out: its name, and its input so far
+    /// until its target shows (`None` after).
+    preparing: Option<(String, Option<String>)>,
     background: Vec<Task>,
     asked: HashMap<String, Pending>,
     /// Client message ids already logged, so a resend never runs twice.
@@ -238,6 +241,7 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
         held: VecDeque::new(),
         steered: false,
         said: false,
+        preparing: None,
         background: Vec::new(),
         asked: HashMap::new(),
         seen: HashSet::new(),
@@ -1098,10 +1102,44 @@ impl Session {
             }
             Inbound::MessageStart { parent: None } => {
                 // A reply is coming: any retry worked.
+                self.preparing = None;
                 self.d.set_activity(&self.id, None);
                 self.d.clear_partial(&self.id);
             }
             Inbound::TextDelta { parent: None, text } => self.d.delta(&self.id, &text, false),
+            // Writing a long file streams nothing else for minutes: say so.
+            Inbound::ToolStart { parent: None, name } => {
+                self.d.set_activity(
+                    &self.id,
+                    Some(Activity::Preparing {
+                        tool: name.clone(),
+                        what: None,
+                    }),
+                );
+                self.preparing = Some((name, Some(String::new())));
+            }
+            Inbound::InputDelta { parent: None, json } => {
+                if let Some((tool, input)) = &mut self.preparing
+                    && let Some(head) = input
+                {
+                    head.push_str(&json);
+                    // The target comes first, if at all.
+                    let what = claude::target(tool, head);
+                    if what.is_some() || head.len() > 4096 {
+                        *input = None;
+                    }
+                    if let Some(what) = what {
+                        let tool = tool.clone();
+                        self.d.set_activity(
+                            &self.id,
+                            Some(Activity::Preparing {
+                                tool,
+                                what: Some(what),
+                            }),
+                        );
+                    }
+                }
+            }
             // The turn's result says the same thing, as an error.
             Inbound::Assistant {
                 synthetic: true, ..
@@ -1121,6 +1159,9 @@ impl Session {
                 let blocks = claude::blocks(blocks);
                 if parent.is_none() {
                     self.said = true;
+                    if self.preparing.take().is_some() {
+                        self.d.set_activity(&self.id, None);
+                    }
                 }
                 if !blocks.is_empty() {
                     self.log_from(
@@ -1563,7 +1604,11 @@ impl Session {
                     );
                 }
             }
-            Inbound::MessageStart { .. } | Inbound::TextDelta { .. } | Inbound::Other => {}
+            Inbound::MessageStart { .. }
+            | Inbound::TextDelta { .. }
+            | Inbound::ToolStart { .. }
+            | Inbound::InputDelta { .. }
+            | Inbound::Other => {}
         }
     }
 
@@ -1572,6 +1617,9 @@ impl Session {
     }
 
     fn end_turn_at(&mut self, outcome: Outcome, end: Option<u64>) {
+        if self.preparing.take().is_some() {
+            self.d.set_activity(&self.id, None);
+        }
         self.stop_at = None;
         self.start_by = None;
         // Approvals still open belonged to the turn that just ended.

@@ -45,7 +45,7 @@ Usage is account-level and read from the provider through each agent's own CLI, 
 Every session is an append-only log of typed events in SQLite: user message, assistant text delta, tool call, tool result, approval requested, approval answered, file changed, status change, usage update, error. Each event gets a monotonic sequence number per daemon.
 
 - Clients subscribe with "everything after sequence N" and receive a live stream afterwards; reconnecting is the same call.
-- Streaming deltas are coalesced into a final message event when a turn completes, so history stays compact while live views stay smooth.
+- Streaming deltas are never logged: each message's final event replaces what streamed of it, and clients drop the stream when it arrives, so history stays compact while live views stay smooth. A call whose input is still streaming (a long file being written) is a live activity, named by its target once that has streamed.
 - Session status (working, blocked on approval, idle, done, errored) is derived from events and indexed, so every client can show it without replaying logs.
 - SQLite runs in WAL mode with one writer task per daemon; reads never block writes.
 

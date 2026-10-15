@@ -31,6 +31,16 @@ pub enum Inbound {
         parent: Option<String>,
         text: String,
     },
+    /// A tool call starts streaming its input.
+    ToolStart {
+        parent: Option<String>,
+        name: String,
+    },
+    /// More of that call's input, as raw JSON text.
+    InputDelta {
+        parent: Option<String>,
+        json: String,
+    },
     /// A complete assistant message.
     Assistant {
         parent: Option<String>,
@@ -243,6 +253,16 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
                 (Some("content_block_delta"), Some("text_delta")) => Inbound::TextDelta {
                     parent: parent(&v),
                     text: s(&e["delta"], "text"),
+                },
+                (Some("content_block_start"), _) if e["content_block"]["type"] == "tool_use" => {
+                    Inbound::ToolStart {
+                        parent: parent(&v),
+                        name: s(&e["content_block"], "name"),
+                    }
+                }
+                (Some("content_block_delta"), Some("input_json_delta")) => Inbound::InputDelta {
+                    parent: parent(&v),
+                    json: s(&e["delta"], "partial_json"),
                 },
                 _ => Inbound::Other,
             }

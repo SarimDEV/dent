@@ -39,9 +39,11 @@ fn trim(s: String) -> String {
 }
 
 /// What the working line says for an activity: the lead, and what follows
-/// the dot.
-pub fn activity_line(a: &Activity, now_ms: u64) -> (String, String) {
-    match a {
+/// the dot. `None` when the work goes on as usual and only the detail says
+/// what it is.
+pub fn activity_line(a: &Activity, now_ms: u64) -> Option<(String, String)> {
+    Some(match a {
+        Activity::Preparing { .. } => return None,
         Activity::Compacting { since } => {
             let secs = now_ms.saturating_sub(*since) / 1000;
             (
@@ -72,7 +74,7 @@ pub fn activity_line(a: &Activity, now_ms: u64) -> (String, String) {
             };
             (lead, format!("{error} · {count}"))
         }
-    }
+    })
 }
 
 /// A command as it was run: a glyph, then what was typed in the code
@@ -1090,11 +1092,11 @@ mod tests {
         };
         assert_eq!(
             activity_line(&a, 6_500),
-            (
+            Some((
                 "Retrying in 4s".into(),
                 "Claude is overloaded · attempt 2 of 10".into()
-            )
+            ))
         );
-        assert_eq!(activity_line(&a, 10_500).0, "Retrying now");
+        assert_eq!(activity_line(&a, 10_500).unwrap().0, "Retrying now");
     }
 }

@@ -449,6 +449,11 @@ impl SessionView {
                 }
             }
             Body::Assistant { parent, blocks, .. } => {
+                // The finished message takes the place of what streamed;
+                // the next one streams from empty.
+                if parent.is_none() {
+                    self.partial.clear();
+                }
                 for b in blocks {
                     match (b, parent) {
                         (Block::Text { text }, None) if !text.trim().is_empty() => {
@@ -865,6 +870,44 @@ mod tests {
             Entry::Tools { calls } => assert_eq!(calls[0].line(), "Running cargo test…"),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// Each message streams from empty: what streamed before its final
+    /// message never shows twice, nor runs into the next message.
+    #[test]
+    fn a_final_message_replaces_its_stream() {
+        let mut s = feed(vec![Body::TurnStarted]);
+        let delta = |text: &str| Out::Delta {
+            session: "s".into(),
+            text: text.into(),
+            reset: false,
+        };
+        let said = |seq, text: &str| Out::Events {
+            events: vec![ev(
+                seq,
+                Body::Assistant {
+                    parent: None,
+                    blocks: vec![Block::Text { text: text.into() }],
+                    uuid: None,
+                },
+            )],
+        };
+        s.apply(&delta("First part."));
+        assert_eq!(s.list["s"].partial, "First part.");
+        s.apply(&said(10, "First part."));
+        assert_eq!(s.list["s"].partial, "");
+        s.apply(&delta("Second."));
+        assert_eq!(s.list["s"].partial, "Second.");
+        s.apply(&said(11, "Second."));
+        let v = &s.list["s"];
+        assert_eq!(v.partial, "");
+        assert_eq!(
+            v.entries
+                .iter()
+                .filter(|e| matches!(e, Entry::Text { .. }))
+                .count(),
+            2
+        );
     }
 
     #[test]

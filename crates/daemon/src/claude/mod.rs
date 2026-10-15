@@ -223,6 +223,31 @@ pub fn default_models() -> Vec<Model> {
     .into()
 }
 
+/// What a call being written out works on, once its input has streamed
+/// that far: the file, or a subagent's task.
+pub fn target(tool: &str, head: &str) -> Option<String> {
+    let key = match tool {
+        "Write" | "Edit" | "MultiEdit" | "Read" => "file_path",
+        "NotebookEdit" => "notebook_path",
+        "Task" | "Agent" => "description",
+        _ => return None,
+    };
+    // `"key": "value"`, the value complete.
+    let at = head.find(&format!("\"{key}\""))? + key.len() + 2;
+    let rest = head[at..].trim_start().strip_prefix(':')?.trim_start();
+    let body = rest.strip_prefix('"')?;
+    let mut escaped = false;
+    for (i, c) in body.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '"' => return serde_json::from_str(&rest[..i + 2]).ok(),
+            _ => {}
+        }
+    }
+    None
+}
+
 pub fn blocks(blocks: Vec<AssistantBlock>) -> Vec<Block> {
     blocks
         .into_iter()
@@ -435,5 +460,21 @@ mod tests {
         assert_eq!(super::model_name("claude-opus-5-5"), "Opus 5.5");
         assert_eq!(super::model_name("claude-haiku-4-5-20251001"), "Haiku 4.5");
         assert_eq!(super::model_name("opus"), "Opus");
+    }
+
+    #[test]
+    fn a_call_names_its_target_once_streamed() {
+        use super::target;
+        assert_eq!(target("Write", r#"{"file_pa"#), None);
+        assert_eq!(target("Write", r#"{"file_path": "/x/no"#), None);
+        assert_eq!(
+            target("Write", r#"{"file_path": "/x/a \"b\".md", "content": "hi"#).as_deref(),
+            Some(r#"/x/a "b".md"#)
+        );
+        assert_eq!(
+            target("Agent", r#"{"description":"Survey the paywall","prompt":"#).as_deref(),
+            Some("Survey the paywall")
+        );
+        assert_eq!(target("Bash", r#"{"command":"ls"}"#), None);
     }
 }

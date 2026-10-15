@@ -384,6 +384,14 @@ pub enum Activity {
         /// What went wrong, in the agent's words.
         error: String,
     },
+    /// Writing out a call, which can take minutes for a long file: `tool`
+    /// is its name, `what` its target (a path, a command, a subagent's
+    /// task) once that much has streamed.
+    Preparing {
+        tool: String,
+        #[serde(default)]
+        what: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -864,6 +872,8 @@ pub enum Out {
     },
     /// Streaming text not yet in an [`Body::Assistant`] event. `text` is
     /// appended to the session's partial reply; `reset` clears it first.
+    /// The message's own event replaces it: clients clear the partial
+    /// reply on any top-level `Assistant` event.
     Delta {
         session: SessionId,
         text: String,
