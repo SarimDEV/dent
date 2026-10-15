@@ -3738,7 +3738,36 @@ fn file_links() -> Vec<(f32, Act)> {
             ),
         ),
         (0.3, Shot("menu-chat")),
-        (0.1, Key("escape")),
+        (
+            0.1,
+            Call(|d, w, cx| {
+                let quote = d.context.as_ref().and_then(|m| {
+                    m.items
+                        .iter()
+                        .find(|(l, _)| l.as_ref() == "Quote in Reply")
+                        .map(|(_, what)| what.clone())
+                });
+                if let Some(what) = quote {
+                    d.run_context(what, w, cx);
+                }
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "Quote in Reply puts the words in the reply box as a quote",
+                |d, cx| {
+                    let v = d.composer.read(cx).value().to_string();
+                    v.starts_with("> Narrate as you go") && v.ends_with("\n\n")
+                },
+                3.,
+            ),
+        ),
+        (0.3, Shot("quoted")),
+        (
+            0.,
+            Call(|d, w, cx| d.composer.update(cx, |c, cx| c.set_value("", w, cx))),
+        ),
         (
             0.1,
             Call(|d, w, cx| {

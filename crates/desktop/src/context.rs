@@ -43,6 +43,8 @@ pub enum Do {
     OpenInApp(String),
     /// Type a command into your terminal, for you to run.
     RunInTerminal(String),
+    /// Put words into the reply box as a quote, under what's there.
+    Quote(String),
 }
 
 const WIDTH: f32 = 200.;
@@ -91,6 +93,7 @@ impl Dent {
             Do::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             Do::OpenLink(url) => crate::select::open_link(&url, window, cx),
             Do::OpenInApp(path) => crate::open::open(&path, cx),
+            Do::Quote(words) => self.quote(&words, window, cx),
             Do::RunInTerminal(command) => {
                 self.open_shell(window, cx);
                 if let Some(sh) = self.current().and_then(|s| self.shells.get(&s.id)) {
@@ -99,6 +102,27 @@ impl Dent {
             }
         }
         cx.notify();
+    }
+
+    /// Words from the chat into your reply as a Markdown quote, after
+    /// anything you've written, with the caret on a fresh line below it.
+    pub fn quote(&mut self, words: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let quoted = quote_block(words);
+        if quoted.is_empty() {
+            return;
+        }
+        let draft = self.composer.read(cx).value().to_string();
+        let text = if draft.trim().is_empty() {
+            format!("{quoted}\n\n")
+        } else {
+            format!("{}\n\n{quoted}\n\n", draft.trim_end())
+        };
+        let caret = text.len();
+        self.composer.update(cx, |c, cx| {
+            crate::app::put_at(c, text, caret, window, cx);
+            c.focus(window, cx);
+        });
+        crate::select::clear(window);
     }
 
     /// Right-click in the chat: what's under the pointer decides. A link
@@ -122,7 +146,11 @@ impl Dent {
             if !items.is_empty() {
                 items.push(("", Do::Separator));
             }
-            items.push(("Copy", Do::Copy(crate::select::copied())));
+            let words = crate::select::copied();
+            items.push(("Copy", Do::Copy(words.clone())));
+            if self.current().is_some() {
+                items.push(("Quote in Reply", Do::Quote(words)));
+            }
         }
         if !items.is_empty() {
             self.open_context(at, items, cx);
@@ -331,5 +359,31 @@ impl Dent {
                     }),
                 ),
             )
+    }
+}
+
+/// `words` as a Markdown quote: each line behind "> ", blank lines kept as
+/// ">" so the quote holds together.
+pub fn quote_block(words: &str) -> String {
+    words
+        .trim()
+        .lines()
+        .map(|l| {
+            if l.trim().is_empty() {
+                ">".to_string()
+            } else {
+                format!("> {l}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn quotes_keep_their_lines() {
+        assert_eq!(super::quote_block(" a\n\nb \n"), "> a\n>\n> b");
+        assert_eq!(super::quote_block("  "), "");
     }
 }
