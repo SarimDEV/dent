@@ -1839,6 +1839,16 @@ impl Dent {
                 let (added, removed) = turn_counts(s, ix, paths);
                 let n = paths.len();
                 let (sid, first) = (s.id.clone(), paths[0].clone());
+                // The turn it ends: your message before it, if there's a
+                // snapshot from just before it to compare with.
+                let turn = s.items[..ix]
+                    .iter()
+                    .rev()
+                    .find_map(|i| match i {
+                        Item::User { id, .. } => Some(id.clone()),
+                        _ => None,
+                    })
+                    .filter(|m| s.checkpoints.contains(m));
                 div()
                     .id(SharedString::from(format!("changed-{ix}")))
                     .relative()
@@ -1849,8 +1859,10 @@ impl Dent {
                     .text_color(t.quiet)
                     .cursor_pointer()
                     .hover(|d| d.text_color(t.ink))
-                    // Opens Changes at the file this turn changed.
-                    .on_press(cx.listener(move |this, _, _, cx| this.review(&sid, &first, cx)))
+                    // Opens Changes on just this turn, at its first file.
+                    .on_press(cx.listener(move |this, _, _, cx| {
+                        this.review_turn(&sid, turn.clone(), Some(first.clone()), cx)
+                    }))
                     .child(icon("git-compare", 13., t.quiet))
                     // The files are named just above, by the steps
                     // that changed them; this sums the turn up.

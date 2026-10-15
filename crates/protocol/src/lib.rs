@@ -770,9 +770,23 @@ pub enum Request {
     /// Exit so a newer daemon can take over. Agents keep running in the
     /// session holder, and the client starts the new daemon.
     Restart,
-    /// What the session's directory has changed, against its last commit.
+    /// What the session's directory has changed, against its last commit;
+    /// with `turn` (one of your messages), only what that turn changed.
     Changes {
         session: SessionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn: Option<String>,
+    },
+    /// Put a changed file back as it was (or, with `hunk`, one hunk of it,
+    /// counted from 0): as at the last commit, or with `turn` as before
+    /// that turn. Only the working tree as it is now can be put back.
+    Discard {
+        session: SessionId,
+        path: String,
+        #[serde(default)]
+        hunk: Option<u32>,
+        #[serde(default)]
+        turn: Option<String>,
     },
     /// Files in the session's directory, for @ mentions: tracked and
     /// untracked, ignoring what git ignores, at most a few thousand.

@@ -865,7 +865,13 @@ fn changes_files_and_settings() {
     let s = c.create(&w.cwd(), Permission::Edits, "write notes.md please");
     c.wait_turns(&s, 1);
     assert_eq!(c.count(&s, |b| matches!(b, Body::Asked { .. })), 0);
-    match c.call(Request::Changes { session: s.clone() }).unwrap() {
+    match c
+        .call(Request::Changes {
+            session: s.clone(),
+            turn: None,
+        })
+        .unwrap()
+    {
         Out::Reply {
             reply: dent_protocol::Reply::Changes { files },
         } => {

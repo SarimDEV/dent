@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use dent_protocol::{BATCH_BYTES, Envelope, Out, PROTOCOL, Reply, Request, b64, encode};
+use dent_protocol::{BATCH_BYTES, Body, Envelope, Out, PROTOCOL, Reply, Request, b64, encode};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
@@ -309,11 +309,50 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
         Request::Commands { session } => Reply::Commands {
             commands: d.commands(session.as_deref()),
         },
-        Request::Changes { session } => {
+        Request::Changes { session, turn } => {
             let cwd = cwd_of(d, &session)?;
-            let files =
-                tokio::task::spawn_blocking(move || crate::git::changes(Path::new(&cwd))).await?;
+            let span = match &turn {
+                Some(msg) => Some(turn_span(d, &session, msg)?),
+                None => None,
+            };
+            let files = tokio::task::spawn_blocking(move || match span {
+                Some((from, to)) => {
+                    crate::git::changes_between(Path::new(&cwd), &from, to.as_deref())
+                }
+                None => crate::git::changes(Path::new(&cwd)),
+            })
+            .await?;
             Reply::Changes { files }
+        }
+        Request::Discard {
+            session,
+            path,
+            hunk,
+            turn,
+        } => {
+            let cwd = cwd_of(d, &session)?;
+            let base = match &turn {
+                Some(msg) => match turn_span(d, &session, msg)? {
+                    (from, None) => Some(from),
+                    (_, Some(_)) => {
+                        bail!(
+                            "a later turn has built on this one; discard from the latest, or from all changes"
+                        )
+                    }
+                },
+                None => None,
+            };
+            tokio::task::spawn_blocking(move || {
+                crate::git::discard(
+                    Path::new(&cwd),
+                    base.as_deref(),
+                    &path,
+                    hunk.map(|h| h as usize),
+                )
+            })
+            .await?
+            .map_err(|e| anyhow::anyhow!(e))?;
+            Reply::Ok
         }
         Request::Files { session } => {
             let cwd = cwd_of(d, &session)?;
@@ -385,6 +424,22 @@ async fn project_list(d: &Daemon) -> Result<Vec<dent_protocol::Project>> {
         tokio::task::spawn_blocking(move || crate::projects::list(&recent, &added, &hidden))
             .await?,
     )
+}
+
+/// One turn's span: the snapshot from just before message `msg`, and the
+/// one before the next message, if there is a next one (else it runs to
+/// the working tree now).
+fn turn_span(d: &Daemon, session: &str, msg: &str) -> Result<(String, Option<String>)> {
+    let events = d.store().session_events(session)?;
+    let mut checkpoints = events.iter().filter_map(|e| match &e.body {
+        Body::Checkpoint { id, commit } => Some((id.clone(), commit.clone())),
+        _ => None,
+    });
+    let from = checkpoints
+        .find(|(id, _)| id == msg)
+        .map(|(_, c)| c)
+        .context("there's no snapshot of the files from before that turn")?;
+    Ok((from, checkpoints.next().map(|(_, c)| c)))
 }
 
 fn cwd_of(d: &Daemon, session: &str) -> Result<String> {

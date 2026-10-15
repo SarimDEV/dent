@@ -494,7 +494,10 @@ pub enum Waiting {
     Usage,
     Commands(String),
     Projects,
-    Changes(String),
+    /// A session's changes: all of them, or one turn's.
+    Changes(String, Option<String>),
+    /// Putting back a file or hunk, in this session.
+    Discard(String),
     Create,
     /// The folders for a typed path, as typed.
     Folders(String),
@@ -777,6 +780,12 @@ pub struct Dent {
     pub copied_at: Option<Instant>,
     /// A message's or reply's Copy just pressed, by key: it says "Copied".
     pub copied_key: Option<(String, Instant)>,
+    /// The turn (your message's id) Changes shows for a session; none: all.
+    pub changes_turn: HashMap<String, String>,
+    /// A file to show once a session's changes arrive.
+    pub diff_want: HashMap<String, String>,
+    /// A file, or a hunk of one, waiting for you to confirm putting it back.
+    pub discarding: Option<(String, String, Option<usize>)>,
     /// Try again asked whether to undo the last turn's file changes too.
     pub trying_again: Option<String>,
     /// A message to send again once its session has gone back to before it:
@@ -1188,6 +1197,9 @@ impl Dent {
             image_actual: false,
             copied_at: None,
             copied_key: None,
+            changes_turn: HashMap::new(),
+            diff_want: HashMap::new(),
+            discarding: None,
             trying_again: None,
             resend: None,
             pending_select: None,
@@ -1973,15 +1985,26 @@ impl Dent {
                 self.relight_menu(cx);
             }
             (
-                Waiting::Changes(id),
+                Waiting::Changes(id, turn),
                 Out::Reply {
                     reply: Reply::Changes { files },
                 },
-            ) => {
+            ) if self.changes_turn.get(&id) == turn.as_ref() => {
                 let diff: Vec<FileDiff> = files
                     .iter()
                     .map(|f| crate::data::parse_diff(&f.path, f.added, f.removed, &f.diff))
                     .collect();
+                // Nothing left of the turn: back to all changes.
+                if turn.is_some() && diff.is_empty() {
+                    self.changes_turn.remove(&id);
+                    self.fetch_changes(&id);
+                    return;
+                }
+                // A file asked for before the changes came: show it now.
+                let want = self.diff_want.remove(&id);
+                if let Some(i) = want.and_then(|p| diff.iter().position(|f| f.path == p)) {
+                    self.diff_file.insert(id.clone(), i);
+                }
                 self.changes.insert(id.clone(), Rc::new(diff));
                 self.rebuild(&id);
             }
@@ -2002,6 +2025,9 @@ impl Dent {
                 self.adopting = None;
                 self.toast(ToastAction::Info, message);
             }
+            // Put back: what Changes shows is read again.
+            (Waiting::Discard(id), Out::Reply { .. }) => self.fetch_changes(&id),
+            (Waiting::Discard(_), Out::Error { message }) => self.toast(ToastAction::Info, message),
             // Going back failed: nothing is sent again.
             (Waiting::Rewind(id), Out::Error { message }) => {
                 if self.resend.as_ref().is_some_and(|r| r.0 == id) {
@@ -2016,10 +2042,76 @@ impl Dent {
     }
 
     fn fetch_changes(&mut self, id: &str) {
+        let turn = self.changes_turn.get(id).cloned();
         let n = self.live.send(Request::Changes {
             session: id.to_string(),
+            turn: turn.clone(),
         });
-        self.waiting.insert(n, Waiting::Changes(id.to_string()));
+        self.waiting
+            .insert(n, Waiting::Changes(id.to_string(), turn));
+    }
+
+    /// Review one turn's changes (its message's id), or with `None` all of
+    /// them, opening `path` once they're here.
+    pub fn review_turn(
+        &mut self,
+        session: &str,
+        turn: Option<String>,
+        path: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        match turn {
+            Some(t) => self.changes_turn.insert(session.to_string(), t),
+            None => self.changes_turn.remove(session),
+        };
+        self.discarding = None;
+        if let Some(p) = path {
+            self.diff_want.insert(session.to_string(), p);
+        }
+        self.fetch_changes(session);
+        self.show_tab(Tab::Changes, cx);
+    }
+
+    /// Whether what Changes shows can be put back: everything, or the
+    /// latest turn's, and not while the agent is working on the files.
+    pub fn can_discard(&self, s: &Session) -> Result<(), &'static str> {
+        if s.running() {
+            return Err("Wait for the turn to finish");
+        }
+        match self.changes_turn.get(&s.id) {
+            Some(t)
+                if s.items.iter().rev().find_map(|i| match i {
+                    Item::User { id, .. } => Some(id),
+                    _ => None,
+                }) != Some(t) =>
+            {
+                Err("A later turn built on this one; discard from all changes")
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Put a file (or one hunk of it) back, after you've said so in place.
+    pub fn discard(
+        &mut self,
+        session: &str,
+        path: &str,
+        hunk: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pressed_again(format!("discard/{session}/{path}/{hunk:?}")) {
+            return;
+        }
+        self.discarding = None;
+        let n = self.live.send(Request::Discard {
+            session: session.to_string(),
+            path: path.to_string(),
+            hunk: hunk.map(|h| h as u32),
+            turn: self.changes_turn.get(session).cloned(),
+        });
+        self.waiting
+            .insert(n, Waiting::Discard(session.to_string()));
+        cx.notify();
     }
 
     /// Keys the app handles before any text field or binding sees them:

@@ -1,5 +1,7 @@
 //! What a session's directory has changed: `git diff` against HEAD, plus
-//! untracked files shown as wholly added. Reads only, through the git CLI
+//! untracked files shown as wholly added, or what one turn changed between
+//! its checkpoints. Writes only to put back what you discard (a file or one
+//! hunk), the checkpoints and a rewind's restore; all through the git CLI
 //! ([decision 0003]).
 //!
 //! [decision 0003]: ../../docs/decisions/0003-git-through-cli.md
@@ -291,6 +293,316 @@ pub fn restore(dir: &Path, commit: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err("couldn't write the checkpoint's files".into())
+    }
+}
+
+/// What changed from snapshot `from` to snapshot `to`, or to the working
+/// tree as it is now: one turn's work, between the checkpoints either side
+/// of it.
+pub fn changes_between(dir: &Path, from: &str, to: Option<&str>) -> Vec<FileChange> {
+    let now;
+    let to = match to {
+        Some(t) => t,
+        None => {
+            let Some(s) = snapshot(dir) else {
+                return Vec::new();
+            };
+            now = s;
+            &now
+        }
+    };
+    let diff = git(
+        dir,
+        &[
+            "diff",
+            from,
+            to,
+            "--no-color",
+            "--no-ext-diff",
+            "-M",
+            "--relative",
+        ],
+    )
+    .unwrap_or_default();
+    split(&diff)
+}
+
+/// What `base` is when none is given: the last commit, or nothing yet.
+fn head_or_empty(dir: &Path) -> String {
+    if git(dir, &["rev-parse", "--verify", "-q", "HEAD"]).is_some() {
+        "HEAD".into()
+    } else {
+        EMPTY_TREE.into()
+    }
+}
+
+/// Put a file back as it was at `base` (the last commit when `None`): a
+/// file that wasn't there then goes. With `hunk`, only that hunk (counted
+/// from 0 in the file's diff) goes back, and only if the file still reads
+/// as the diff showed it.
+pub fn discard(
+    dir: &Path,
+    base: Option<&str>,
+    path: &str,
+    hunk: Option<usize>,
+) -> Result<(), String> {
+    git(dir, &["rev-parse", "--is-inside-work-tree"]).ok_or("not a git repository")?;
+    if path.split('/').any(|p| p == "..") || path.starts_with('/') {
+        return Err("that file isn't in this folder".into());
+    }
+    let base = base.map_or_else(|| head_or_empty(dir), str::to_string);
+    let file = dir.join(path);
+    let existed = git(dir, &["cat-file", "-e", &format!("{base}:./{path}")]).is_some();
+    let Some(n) = hunk else {
+        if existed {
+            git(
+                dir,
+                &[
+                    "restore",
+                    &format!("--source={base}"),
+                    "--worktree",
+                    "--",
+                    path,
+                ],
+            )
+            .ok_or("couldn't put the file back")?;
+        } else if file.exists() {
+            std::fs::remove_file(&file).map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    };
+    // One hunk: what it reads now gives way to what it read before.
+    let then = if existed {
+        git(dir, &["show", &format!("{base}:./{path}")])
+            .ok_or("couldn't read the file as it was")?
+    } else {
+        String::new()
+    };
+    let now = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
+    let diff = unified(&then, &now, path);
+    let hunks = hunks(&diff);
+    let h = hunks.get(n).ok_or("that change has already gone")?;
+    let mut lines: Vec<&str> = now.split_inclusive('\n').collect();
+    let start = h.new_start.saturating_sub(1);
+    let expect: Vec<&str> = h.new_lines.iter().map(String::as_str).collect();
+    if lines.get(start..start + expect.len()) != Some(&expect[..]) {
+        return Err("the file has changed since; look again".into());
+    }
+    lines.splice(
+        start..start + expect.len(),
+        h.old_lines.iter().map(String::as_str),
+    );
+    std::fs::write(&file, lines.concat()).map_err(|e| e.to_string())
+}
+
+/// A diff of two texts, as git writes it, through `git diff --no-index`.
+fn unified(old: &str, new: &str, path: &str) -> String {
+    let tmp = std::env::temp_dir().join(format!(
+        "dent-discard-{}-{}",
+        std::process::id(),
+        path.replace('/', "_")
+    ));
+    let _ = std::fs::create_dir_all(&tmp);
+    let (a, b) = (tmp.join("a"), tmp.join("b"));
+    let _ = std::fs::write(&a, old);
+    let _ = std::fs::write(&b, new);
+    let out = Command::new("git")
+        .args(["diff", "--no-index", "--no-color", "--no-ext-diff"])
+        .arg(&a)
+        .arg(&b)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&tmp);
+    out
+}
+
+/// A hunk: where it starts in the new text, and its lines old and new.
+struct Hunk {
+    new_start: usize,
+    old_lines: Vec<String>,
+    new_lines: Vec<String>,
+}
+
+fn hunks(diff: &str) -> Vec<Hunk> {
+    let mut out: Vec<Hunk> = Vec::new();
+    // The kind of the last line read, for a "no newline" note after it.
+    let mut last: Option<char> = None;
+    for line in diff.split_inclusive('\n') {
+        if let Some(rest) = line.strip_prefix("@@ ") {
+            // @@ -a,b +c,d @@
+            let new_start = rest
+                .split_whitespace()
+                .find_map(|p| p.strip_prefix('+'))
+                .and_then(|p| p.split(',').next())
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(1);
+            out.push(Hunk {
+                new_start: new_start.max(1),
+                old_lines: Vec::new(),
+                new_lines: Vec::new(),
+            });
+            continue;
+        }
+        let Some(h) = out.last_mut() else { continue };
+        if line.starts_with('\\') {
+            // "\ No newline at end of file": the line before it has none,
+            // on whichever side it was.
+            let strip = |v: &mut Vec<String>| {
+                if let Some(l) = v.last_mut() {
+                    l.truncate(l.trim_end_matches('\n').len());
+                }
+            };
+            match last {
+                Some('-') => strip(&mut h.old_lines),
+                Some('+') => strip(&mut h.new_lines),
+                _ => {
+                    strip(&mut h.old_lines);
+                    strip(&mut h.new_lines);
+                }
+            }
+            continue;
+        }
+        match line.split_at_checked(1) {
+            Some((" ", rest)) => {
+                h.old_lines.push(rest.into());
+                h.new_lines.push(rest.into());
+                last = Some(' ');
+            }
+            Some(("-", rest)) => {
+                h.old_lines.push(rest.into());
+                last = Some('-');
+            }
+            Some(("+", rest)) => {
+                h.new_lines.push(rest.into());
+                last = Some('+');
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod discard_tests {
+    use super::*;
+
+    fn repo(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("dent-discard-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let g = |a: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(a)
+                .output()
+                .unwrap();
+        };
+        g(&["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n").unwrap();
+        g(&["add", "."]);
+        g(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "init",
+        ]);
+        dir
+    }
+
+    #[test]
+    fn a_file_goes_back_and_a_new_one_goes() {
+        let dir = repo("file");
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "new\n").unwrap();
+        discard(&dir, None, "a.txt", None).unwrap();
+        discard(&dir, None, "new.txt", None).unwrap();
+        assert!(
+            std::fs::read_to_string(dir.join("a.txt"))
+                .unwrap()
+                .starts_with("1\n2\n")
+        );
+        assert!(!dir.join("new.txt").exists());
+        assert!(discard(&dir, None, "../x", None).is_err());
+    }
+
+    #[test]
+    fn one_hunk_goes_back_and_the_other_stays() {
+        let dir = repo("hunk");
+        std::fs::write(
+            dir.join("a.txt"),
+            "1\nTWO\n3\n4\n5\n6\n7\n8\n9\n10\nELEVEN\n12\n",
+        )
+        .unwrap();
+        assert_eq!(changes(&dir).len(), 1);
+        discard(&dir, None, "a.txt", Some(1)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "1\nTWO\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n"
+        );
+        discard(&dir, None, "a.txt", Some(0)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n"
+        );
+        assert!(
+            discard(&dir, None, "a.txt", Some(0)).is_err(),
+            "nothing left to discard"
+        );
+    }
+
+    #[test]
+    fn a_last_line_without_a_newline_goes_back_too() {
+        let dir = repo("eol");
+        std::fs::write(dir.join("b.txt"), "x\ny").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["add", "."])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "b",
+            ])
+            .output()
+            .unwrap();
+        std::fs::write(dir.join("b.txt"), "x\nY").unwrap();
+        discard(&dir, None, "b.txt", Some(0)).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "x\ny");
+    }
+
+    #[test]
+    fn a_turn_is_what_changed_after_its_checkpoint() {
+        let dir = repo("turn");
+        std::fs::write(dir.join("before.txt"), "mine\n").unwrap();
+        let c = checkpoint(&dir, "s/1").unwrap();
+        std::fs::write(dir.join("a.txt"), "agent\n").unwrap();
+        let turn = changes_between(&dir, &c, None);
+        let paths: Vec<&str> = turn.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["a.txt"],
+            "only what the turn did, not what was there before it"
+        );
+        discard(&dir, Some(&c), "a.txt", None).unwrap();
+        assert!(changes_between(&dir, &c, None).is_empty());
+        assert!(
+            dir.join("before.txt").exists(),
+            "what was there before the turn stays"
+        );
     }
 }
 

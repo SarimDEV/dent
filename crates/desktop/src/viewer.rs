@@ -891,7 +891,7 @@ impl Dent {
                 .border_b_1()
                 .border_color(t.hairline)
                 .bg(t.selected())
-                .child(icon("history", 13., t.quiet))
+                .child(icon("rotate-ccw-clock", 13., t.quiet))
                 .child(
                     div()
                         .flex_1()
@@ -1541,11 +1541,43 @@ impl Dent {
                         .child(probe(&self.probes, "send-review")),
                 )
         });
+        // Showing one turn: says so, with the way back to everything.
+        let turn_strip =
+            self.changes_turn.contains_key(&s.id).then(|| {
+                let sid = s.id.clone();
+                div()
+                    .flex_none()
+                    .h(px(size::CONTROL + space::S1))
+                    .px(px(space::S3))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S2))
+                    .border_b_1()
+                    .border_color(t.hairline)
+                    .bg(t.raised)
+                    .child(icon("rotate-ccw-clock", 13., t.quiet))
+                    .child(
+                        div()
+                            .flex_1()
+                            .ty(UI)
+                            .text_color(t.ink)
+                            .child("What this turn changed"),
+                    )
+                    .child(
+                        ghost("all-changes", "Show all changes", &t)
+                            .relative()
+                            .on_press(cx.listener(move |this, _, _, cx| {
+                                this.review_turn(&sid, None, None, cx)
+                            }))
+                            .child(probe(&self.probes, "all-changes")),
+                    )
+            });
         div()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
+            .children(turn_strip)
             .child(
                 div()
                     .flex_1()
@@ -1609,6 +1641,7 @@ impl Dent {
                                         let full = std::path::Path::new(&s.cwd).join(&file.path);
                                         self.open_button("open-file", full, cx)
                                     })
+                                    .child(self.discard_file(s, &file.path, cx))
                                     .child(div().ty(LABEL).text_color(t.faint).child(
                                         match (compact, file.lines.is_empty()) {
                                             (true, _) => {
@@ -1759,6 +1792,13 @@ impl Dent {
                 };
                 let path = file.path.clone();
                 let commentable = l.kind != Line::Hunk;
+                // Which hunk this header starts, counted from 0.
+                let hunk = (l.kind == Line::Hunk).then(|| {
+                    file.lines[..i]
+                        .iter()
+                        .filter(|x| x.kind == Line::Hunk)
+                        .count()
+                });
                 div()
                     .id(SharedString::from(format!("line-{i}")))
                     .group("line")
@@ -1845,6 +1885,9 @@ impl Dent {
                                 .into_any_element()
                             }),
                     )
+                    .when_some(hunk, |d, h| {
+                        d.child(self.discard_hunk(s, &file.path, h, cx))
+                    })
                     .into_any_element()
             }
             Some(Row::Note(k)) => match comments.get(*k) {
@@ -2167,5 +2210,145 @@ fn bytes(n: u64) -> String {
         0..1024 => format!("{n} bytes"),
         1024..1_048_576 => format!("{:.1} KB", n as f64 / 1024.),
         _ => format!("{:.1} MB", n as f64 / 1_048_576.),
+    }
+}
+
+impl Dent {
+    /// A file's Discard: asks in place, then puts the file back as it was
+    /// (before this turn, or at the last commit). Off, saying why, when
+    /// what's shown can't be put back.
+    fn discard_file(&self, s: &Session, path: &str, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.t;
+        let asking = self
+            .discarding
+            .as_ref()
+            .is_some_and(|(sid, p, h)| *sid == s.id && p == path && h.is_none());
+        let (sid, p) = (s.id.clone(), path.to_string());
+        if asking {
+            return div()
+                .flex()
+                .items_center()
+                .gap(px(space::S1))
+                // The Mac order: the destructive choice leads, Cancel trails.
+                .child(
+                    crate::ui::button("discard-file-yes", "Discard changes", false, &t)
+                        .relative()
+                        .on_press(
+                            cx.listener(move |this, _, _, cx| this.discard(&sid, &p, None, cx)),
+                        )
+                        .child(probe(&self.probes, "discard-file-yes")),
+                )
+                .child(
+                    ghost("discard-file-cancel", "Cancel", &t).on_press(cx.listener(
+                        |this, _, _, cx| {
+                            this.discarding = None;
+                            cx.notify();
+                        },
+                    )),
+                )
+                .into_any_element();
+        }
+        let el = ghost("discard-file", "Discard", &t)
+            .relative()
+            .child(probe(&self.probes, "discard-file"));
+        match self.can_discard(s) {
+            Ok(()) => el
+                .with_tip(crate::ui::tip_owned(
+                    if self.changes_turn.contains_key(&s.id) {
+                        "Put this file back as it was before this turn"
+                    } else {
+                        "Put this file back as it was at the last commit"
+                    },
+                    t,
+                ))
+                .on_press(cx.listener(move |this, _, _, cx| {
+                    this.discarding = Some((sid.clone(), p.clone(), None));
+                    cx.notify();
+                }))
+                .into_any_element(),
+            Err(why) => crate::ui::off(el, why, &t).into_any_element(),
+        }
+    }
+}
+
+impl Dent {
+    /// A hunk's Discard, at the right of what's in view on its header row:
+    /// shown on hover, it asks in place, then puts just that hunk back.
+    fn discard_hunk(
+        &self,
+        s: &Session,
+        path: &str,
+        hunk: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.t;
+        let asking = self
+            .discarding
+            .as_ref()
+            .is_some_and(|(sid, p, h)| *sid == s.id && p == path && *h == Some(hunk));
+        let (sid, p) = (s.id.clone(), path.to_string());
+        let control = if asking {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::S1))
+                .child(
+                    ghost(
+                        SharedString::from(format!("discard-hunk-yes-{hunk}")),
+                        "Discard this change",
+                        &t,
+                    )
+                    .relative()
+                    .text_color(t.ink)
+                    .on_press(
+                        cx.listener(move |this, _, _, cx| this.discard(&sid, &p, Some(hunk), cx)),
+                    )
+                    .child(probe(&self.probes, format!("discard-hunk-yes-{hunk}"))),
+                )
+                .child(
+                    ghost(
+                        SharedString::from(format!("discard-hunk-cancel-{hunk}")),
+                        "Cancel",
+                        &t,
+                    )
+                    .on_press(cx.listener(|this, _, _, cx| {
+                        this.discarding = None;
+                        cx.notify();
+                    })),
+                )
+                .into_any_element()
+        } else {
+            match self.can_discard(s) {
+                Ok(()) => ghost(
+                    SharedString::from(format!("discard-hunk-{hunk}")),
+                    "Discard",
+                    &t,
+                )
+                .relative()
+                .invisible()
+                .group_hover("line", |d| d.visible())
+                .with_tip(crate::ui::tip("Put this change back as it was", None, t))
+                .on_press(cx.listener(move |this, _, _, cx| {
+                    this.discarding = Some((sid.clone(), p.clone(), Some(hunk)));
+                    cx.notify();
+                }))
+                .child(probe(&self.probes, format!("discard-hunk-{hunk}")))
+                .into_any_element(),
+                // Off: the file's Discard says why; nothing here.
+                Err(_) => div().into_any_element(),
+            }
+        };
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .w(px(self.diff_view_w))
+            .h_full()
+            .flex()
+            .justify_end()
+            .items_center()
+            .pr(px(space::S2))
+            .child(control)
+            .into_any_element()
     }
 }
