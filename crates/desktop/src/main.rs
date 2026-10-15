@@ -234,6 +234,7 @@ impl Render for Dent {
         self.ask_keyed = self.ask_focus.is_focused(window);
         self.composer_keyed = self.composer.read(cx).focus_handle(cx).is_focused(window);
         self.sync_draft(cx);
+        self.take_resend(cx);
         if self.menu.is_none() && !self.dragging && !self.dragging_sidebar && self.walk.is_none() {
             self.save_prefs();
         }

@@ -431,7 +431,7 @@ impl Agent {
     /// Send a control request to the host and wait for its answer.
     fn request(&mut self, request: Value) -> Result<Value, Cut> {
         self.next += 1;
-        let id = format!("fake-req-{}", self.next);
+        let id = format!("fake-req-{}", new_id());
         out(json!({"type": "control_request", "request_id": id, "request": request}));
         loop {
             match self.rx.recv() {
@@ -517,7 +517,9 @@ impl Agent {
 
     fn tool(&mut self, name: &str, input: Value, parent: Option<&str>) -> String {
         self.next += 1;
-        let id = format!("toolu_fake_{}", self.next);
+        // Unique across processes, as real ids are: a resumed session's new
+        // process never repeats an id the old one used.
+        let id = format!("toolu_fake_{}", new_id());
         out(self.envelope(
             json!({"type": "assistant", "message": {"id": format!("msg_fake_t{}", self.next), "role": "assistant",
                 "model": self.model, "content": [{"type": "tool_use", "id": id, "name": name, "input": input}],

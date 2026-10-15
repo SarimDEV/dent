@@ -251,6 +251,10 @@ pub fn session(
                 }
             }
             Entry::Text { text } => items.push(Item::Text(text.clone())),
+            Entry::TurnEnd { at, took } => items.push(Item::TurnEnd {
+                at: *at,
+                took: *took,
+            }),
             Entry::Thinking { text } => items.push(Item::Thinking(text.clone())),
             Entry::Tools { calls } => {
                 // The plan belongs with the composer, and questions and plans

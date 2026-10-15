@@ -117,6 +117,11 @@ pub enum Entry {
     Changed {
         paths: Vec<String>,
     },
+    /// A turn finished: when, and how long it worked (both in milliseconds).
+    TurnEnd {
+        at: u64,
+        took: u64,
+    },
     /// The conversation was summarised to make room.
     Compacted {
         auto: bool,
@@ -516,6 +521,7 @@ impl SessionView {
             }
             Body::TurnEnded { outcome } => {
                 self.activity = None;
+                let took = self.working_since.map_or(0, |s| e.at.saturating_sub(s));
                 self.working_since = None;
                 self.partial.clear();
                 // What the turn edited, to review in one place.
@@ -552,6 +558,7 @@ impl SessionView {
                         text: message.clone(),
                     }),
                 }
+                self.push(Entry::TurnEnd { at: e.at, took });
             }
             Body::Context {
                 used,

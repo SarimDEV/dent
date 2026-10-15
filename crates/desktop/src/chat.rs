@@ -6,6 +6,7 @@ use crate::ui::{Arrive, From};
 use gpui_kit::base::input::Textarea;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use std::time::{Duration, Instant};
 
 use crate::ui::Press;
 use std::rc::Rc;
@@ -445,6 +446,172 @@ impl Dent {
             .child(half("mine-next", false, next, cx))
     }
 
+    /// A Copy that says "Copied" for a moment. `text` runs only when
+    /// pressed.
+    fn copy_ghost(
+        &self,
+        key: String,
+        text: impl Fn() -> String + 'static,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let copied = self
+            .copied_key
+            .as_ref()
+            .is_some_and(|(k, at)| *k == key && at.elapsed() < Duration::from_millis(1300));
+        ghost(
+            SharedString::from(key.clone()),
+            if copied { "Copied" } else { "Copy" },
+            &self.t,
+        )
+        .relative()
+        .child(probe(&self.probes, key.clone()))
+        .on_press(cx.listener(move |this, _, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(text()));
+            this.copied_key = Some((key.clone(), Instant::now()));
+            cx.notify();
+            // Back to "Copy" once "Copied" has been read.
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(1300))
+                    .await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }))
+    }
+
+    /// The last reply of a turn, with the turn's time and actions under
+    /// it: shown on hover, and always on the latest turn.
+    fn with_reply_footer(
+        &mut self,
+        s: &Session,
+        ix: usize,
+        (at, took, latest): (u64, u64, bool),
+        body: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.t;
+        let group = SharedString::from(format!("reply-{ix}"));
+        // Everything the agent said in the turn, as Markdown.
+        let start = s.items[..ix]
+            .iter()
+            .rposition(|i| matches!(i, Item::User { .. }))
+            .map_or(0, |u| u + 1);
+        let said: Vec<String> = s.items[start..=ix]
+            .iter()
+            .filter_map(|i| match i {
+                Item::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        let errored = s.items[ix..].iter().any(|i| {
+            matches!(
+                i,
+                Item::Note {
+                    icon: "circle-alert",
+                    ..
+                }
+            )
+        });
+        let can_try = latest
+            && !errored
+            && !s.closed
+            && !matches!(s.status, Status::Working | Status::Needs)
+            && start > 0;
+        let asking = can_try && self.trying_again.as_deref() == Some(s.id.as_str());
+        let when = if took >= 1000 {
+            format!(
+                "{} · took {}",
+                crate::data::clock(at),
+                duration(took / 1000)
+            )
+        } else {
+            crate::data::clock(at)
+        };
+        let footer = if asking {
+            let (s1, s2) = (s.id.clone(), s.id.clone());
+            div()
+                .mt(px(space::S2))
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(space::S2))
+                .child(
+                    div()
+                        .ty(UI)
+                        .text_color(t.ink)
+                        .child("It changed files. Undo those too before trying again?"),
+                )
+                .child(div().flex_1())
+                // The Mac order: the destructive choice leads, the default
+                // trails, so Return never lands on it.
+                .child(
+                    button("try-again-files", "Undo them and try again", false, &t)
+                        .relative()
+                        .on_press(
+                            cx.listener(move |this, _, _, cx| this.try_again(&s1, Some(true), cx)),
+                        )
+                        .child(probe(&self.probes, "try-again-files")),
+                )
+                .child(
+                    ghost("try-again-cancel", "Cancel", &t).on_press(cx.listener(
+                        |this, _, _, cx| {
+                            this.trying_again = None;
+                            cx.notify();
+                        },
+                    )),
+                )
+                .child(
+                    button("try-again-keep", "Try again", true, &t)
+                        .relative()
+                        .on_press(
+                            cx.listener(move |this, _, _, cx| this.try_again(&s2, Some(false), cx)),
+                        )
+                        .child(probe(&self.probes, "try-again-keep")),
+                )
+        } else {
+            let sid = s.id.clone();
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::S1))
+                .mt(px(space::S1))
+                .h(px(size::CONTROL_SM))
+                .when(!latest, |d| d.reveal_on_hover(group.clone()))
+                // In line with the reply's text.
+                .child(
+                    div()
+                        .pr(px(space::S2))
+                        .ty(LABEL)
+                        .text_color(t.quiet)
+                        .child(when),
+                )
+                .child(self.copy_ghost(format!("copy-reply-{ix}"), move || said.join("\n\n"), cx))
+                .when(can_try, |d| {
+                    d.child(
+                        ghost("try-again", "Try again", &t)
+                            .relative()
+                            .with_tip(tip(
+                                "Go back to before your last message and send it again",
+                                None,
+                                t,
+                            ))
+                            .on_press(
+                                cx.listener(move |this, _, _, cx| this.try_again(&sid, None, cx)),
+                            )
+                            .child(probe(&self.probes, "try-again")),
+                    )
+                })
+        };
+        div()
+            .group(group)
+            .flex()
+            .flex_col()
+            .child(body)
+            .child(footer)
+            .into_any_element()
+    }
+
     fn chat(&mut self, s: &Session, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.t;
         self.sync_transcript(s);
@@ -477,6 +644,13 @@ impl Dent {
                 } else {
                     body
                 };
+                // The last reply in a turn carries the turn's time and actions.
+                let body = match turn_end_after(&s.items, ix) {
+                    Some(end) => this.with_reply_footer(&s, ix, end, body, cx),
+                    None => body,
+                };
+                let ends_turn = turn_end_after(&s.items, ix).is_some();
+                let marker = matches!(s.items.get(ix), Some(Item::TurnEnd { .. }));
                 // Just landed: it rises the last few pixels into place.
                 let arrive = (!crate::reduce_motion())
                     .then(|| this.row_born.get(&ix))
@@ -501,7 +675,11 @@ impl Dent {
                             })
                             .pb(px(if ix + 1 == count {
                                 space::S8
-                            } else if matches!(s.items.get(ix), Some(Item::User { .. })) {
+                            } else if marker {
+                                0.
+                            } else if ends_turn
+                                || matches!(s.items.get(ix), Some(Item::User { .. }))
+                            {
                                 // The time and actions below your message
                                 // take the rest of the gap.
                                 space::S1
@@ -916,6 +1094,14 @@ impl Dent {
                                                 .ty(LABEL)
                                                 .text_color(t.quiet)
                                                 .child(crate::data::clock(*at)),
+                                        )
+                                    })
+                                    .child({
+                                        let words = body.join("\n");
+                                        self.copy_ghost(
+                                            format!("copy-mine-{ix}"),
+                                            move || words.clone(),
+                                            cx,
                                         )
                                     })
                                     .child(
@@ -1578,6 +1764,8 @@ impl Dent {
                 outcome,
                 view,
             } => self.command_card(s, ix, name, args, text, outcome, view.as_ref(), window, cx),
+            // Its time and actions sit under the turn's last reply.
+            Item::TurnEnd { .. } => div().into_any_element(),
             Item::Changed { paths } => {
                 let (added, removed) = turn_counts(s, ix, paths);
                 let n = paths.len();
@@ -3724,4 +3912,25 @@ fn ask_keys(keyed: bool, on: &'static str, off: &'static str, t: &theme::Theme) 
         .ty(LABEL)
         .text_color(if keyed { t.ink } else { t.quiet })
         .child(if keyed { on } else { off })
+}
+
+/// For the last reply of a turn that has finished: when it finished, how
+/// long it took (ms), and whether it's the session's latest turn.
+pub fn turn_end_after(items: &[Item], ix: usize) -> Option<(u64, u64, bool)> {
+    if !matches!(items.get(ix), Some(Item::Text(_))) {
+        return None;
+    }
+    for (j, i) in items.iter().enumerate().skip(ix + 1) {
+        match i {
+            Item::Text(_) | Item::User { .. } | Item::Queued { .. } => return None,
+            Item::TurnEnd { at, took } => {
+                let latest = !items[j + 1..]
+                    .iter()
+                    .any(|i| matches!(i, Item::TurnEnd { .. } | Item::User { .. }));
+                return Some((*at, *took, latest));
+            }
+            _ => {}
+        }
+    }
+    None
 }

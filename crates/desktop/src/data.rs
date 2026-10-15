@@ -141,6 +141,12 @@ pub enum Item {
         id: String,
         text: String,
     },
+    /// A turn finished: when and how long it took, both in milliseconds.
+    /// Drawn as the footer under the turn's last reply, not a row of its own.
+    TurnEnd {
+        at: u64,
+        took: u64,
+    },
     /// Files a turn edited; opens Changes.
     Changed {
         paths: Vec<String>,

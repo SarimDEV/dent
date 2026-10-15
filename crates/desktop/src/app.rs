@@ -458,6 +458,8 @@ pub enum Waiting {
     /// The folders for a typed path, as typed.
     Folders(String),
     ProjectMade,
+    /// Going back for Try again, in this session.
+    Rewind(String),
 }
 
 /// The home folder, as a path string.
@@ -721,6 +723,13 @@ pub struct Dent {
     pub toolbar_hint: Option<&'static str>,
     pub image_actual: bool,
     pub copied_at: Option<Instant>,
+    /// A message's or reply's Copy just pressed, by key: it says "Copied".
+    pub copied_key: Option<(String, Instant)>,
+    /// Try again asked whether to undo the last turn's file changes too.
+    pub trying_again: Option<String>,
+    /// A message to send again once its session has gone back to before it:
+    /// the session, the message it went back to, and its text.
+    pub resend: Option<(String, String, String)>,
     /// A session the daemon just created, to open once its events arrive.
     pub pending_select: Option<String>,
     /// A scripted walkthrough, when running one.
@@ -1153,6 +1162,9 @@ impl Dent {
             toolbar_hint: None,
             image_actual: false,
             copied_at: None,
+            copied_key: None,
+            trying_again: None,
+            resend: None,
             pending_select: None,
             walk: None,
             last_frame: Instant::now(),
@@ -1924,6 +1936,13 @@ impl Dent {
             (Waiting::Create, Out::Error { message }) => {
                 self.creating = false;
                 self.adopting = None;
+                self.toast(ToastAction::Info, message);
+            }
+            // Going back failed: nothing is sent again.
+            (Waiting::Rewind(id), Out::Error { message }) => {
+                if self.resend.as_ref().is_some_and(|r| r.0 == id) {
+                    self.resend = None;
+                }
                 self.toast(ToastAction::Info, message);
             }
             (_, Out::Error { message }) => self.toast(ToastAction::Info, message),
@@ -3392,28 +3411,21 @@ impl Dent {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<String> {
+        let (words, files) = message_parts(text, cwd, false);
         let mut added = Vec::new();
-        for p in text.lines().filter_map(|l| l.strip_prefix("› Attached · ")) {
-            let full = if p.starts_with('/') {
-                std::path::PathBuf::from(p)
-            } else {
-                std::path::Path::new(cwd).join(p)
-            };
-            let path = full.display().to_string();
-            if full.exists()
-                && !self
-                    .attachments
-                    .iter()
-                    .any(|a| matches!(a, Attachment::File { path: p } if *p == path))
+        for path in files {
+            if !self
+                .attachments
+                .iter()
+                .any(|a| matches!(a, Attachment::File { path: p } if *p == path))
             {
                 self.attachments
                     .push(Attachment::File { path: path.clone() });
                 added.push(path);
             }
         }
-        let words: Vec<&str> = text.lines().filter(|l| !l.starts_with("› ")).collect();
         self.composer.update(cx, |c, cx| {
-            put(c, words.join("\n"), window, cx);
+            put(c, words, window, cx);
             c.focus(window, cx);
         });
         added
@@ -3522,35 +3534,79 @@ impl Dent {
             })
         });
         if let Some(text) = last {
-            // The same message again: attached files go as attachments,
-            // and comments or picked elements stay in its text, as sent.
-            let cwd = self.session(id).map(|s| s.cwd.clone()).unwrap_or_default();
-            let mut files = Vec::new();
-            let mut words = Vec::new();
-            for l in text.lines() {
-                match l.strip_prefix("› Attached · ") {
-                    Some(p) => {
-                        let full = if p.starts_with('/') {
-                            std::path::PathBuf::from(p)
-                        } else {
-                            std::path::Path::new(&cwd).join(p)
-                        };
-                        if full.exists() {
-                            files.push(full.display().to_string());
-                        }
-                    }
-                    None => words.push(l),
-                }
-            }
-            self.live.send(Request::Send {
-                session: id.to_string(),
-                id: crate::message_id(),
-                text: words.join("\n"),
-                steer: false,
-                attachments: files,
-            });
-            cx.notify();
+            self.send_again(id, &text, cx);
         }
+    }
+
+    /// Try again on a reply that went fine: back to before your last
+    /// message, and send it again. When the turn changed files, it first
+    /// asks whether to undo them too (`files` is the answer).
+    pub fn try_again(&mut self, id: &str, files: Option<bool>, cx: &mut Context<Self>) {
+        let Some(s) = self.session(id) else { return };
+        let Some((msg, text)) = s.items.iter().rev().find_map(|i| match i {
+            Item::User { id, text, .. } => Some((id.clone(), text.clone())),
+            _ => None,
+        }) else {
+            return;
+        };
+        let changed = s.checkpoints.contains(&msg)
+            && s.items
+                .iter()
+                .rev()
+                .take_while(|i| !matches!(i, Item::User { .. }))
+                .any(|i| matches!(i, Item::Changed { .. } | Item::Made { .. }));
+        let files = match files {
+            Some(f) => f,
+            None if changed => {
+                self.trying_again = Some(id.to_string());
+                cx.notify();
+                return;
+            }
+            None => false,
+        };
+        if self.pressed_again(format!("try-again/{id}/{msg}")) {
+            return;
+        }
+        self.trying_again = None;
+        let n = self.live.send(Request::Rewind {
+            session: id.to_string(),
+            to: msg.clone(),
+            files,
+        });
+        self.waiting.insert(n, Waiting::Rewind(id.to_string()));
+        self.resend = Some((id.to_string(), msg, text));
+        cx.notify();
+    }
+
+    /// Once a session has gone back for Try again, its message goes again.
+    pub fn take_resend(&mut self, cx: &mut Context<Self>) {
+        let Some((id, msg, text)) = self.resend.clone() else {
+            return;
+        };
+        let back = self.session(&id).is_some_and(|s| {
+            !s.items
+                .iter()
+                .any(|i| matches!(i, Item::User { id, .. } if *id == msg))
+        });
+        if back {
+            self.resend = None;
+            self.send_again(&id, &text, cx);
+        }
+    }
+
+    /// A message of yours sent again as it was: attached files go as
+    /// attachments, and comments or picked elements stay in its text.
+    fn send_again(&mut self, id: &str, text: &str, cx: &mut Context<Self>) {
+        let cwd = self.session(id).map(|s| s.cwd.clone()).unwrap_or_default();
+        let (words, files) = message_parts(text, &cwd, true);
+        self.live.send(Request::Send {
+            session: id.to_string(),
+            id: crate::message_id(),
+            text: words,
+            steer: false,
+            attachments: files,
+        });
+        cx.notify();
     }
 
     /// A waiting message goes into the running turn now instead.
@@ -4096,6 +4152,7 @@ impl Dent {
             }
             Item::Note { text, .. } => fp(text, &mut h),
             Item::Changed { paths } => paths.hash(&mut h),
+            Item::TurnEnd { at, took } => (at, took).hash(&mut h),
             Item::Compacted {
                 auto,
                 before,
@@ -4567,6 +4624,32 @@ impl Dent {
         });
         cx.notify();
     }
+}
+
+/// A message as sent, split back into its words and the files attached to
+/// it that are still there. Other attachment lines (comments, picked
+/// elements) stay in the words when it's sent again as it was (`notes`),
+/// and are left out when it comes back to the box to edit.
+fn message_parts(text: &str, cwd: &str, notes: bool) -> (String, Vec<String>) {
+    let mut files = Vec::new();
+    let mut words = Vec::new();
+    for l in text.lines() {
+        match l.strip_prefix("› Attached · ") {
+            Some(p) => {
+                let full = if p.starts_with('/') {
+                    std::path::PathBuf::from(p)
+                } else {
+                    std::path::Path::new(cwd).join(p)
+                };
+                if full.exists() {
+                    files.push(full.display().to_string());
+                }
+            }
+            None if !notes && l.starts_with("› ") => {}
+            None => words.push(l),
+        }
+    }
+    (words.join("\n"), files)
 }
 
 fn with_attachments(text: &str, atts: &[Attachment]) -> String {
