@@ -5,6 +5,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use crate::ui::Press;
+use crate::ui::Tipped;
 use crate::ui::{Arrive, From};
 
 use crate::app::Dent;
@@ -14,7 +15,7 @@ use crate::theme::Theme;
 #[derive(Clone)]
 pub struct ContextMenu {
     pub at: Point<Pixels>,
-    pub items: Vec<(&'static str, Do)>,
+    pub items: Vec<(SharedString, Do)>,
 }
 
 /// What a row does.
@@ -30,6 +31,10 @@ pub enum Do {
     Fork(String),
     CloseSession(String),
     Reopen(String),
+    /// Pin to the top of the sidebar, or unpin.
+    Pin(String),
+    /// Open a file with this app from now on (`None`: the Mac's default).
+    OpenWith(String, Option<String>),
 }
 
 const WIDTH: f32 = 200.;
@@ -38,10 +43,11 @@ impl Dent {
     pub fn open_context(
         &mut self,
         at: Point<Pixels>,
-        items: Vec<(&'static str, Do)>,
+        items: Vec<(impl Into<SharedString>, Do)>,
         cx: &mut Context<Self>,
     ) {
         self.menu = None;
+        let items = items.into_iter().map(|(l, d)| (l.into(), d)).collect();
         self.context = Some(ContextMenu { at, items });
         cx.notify();
     }
@@ -69,6 +75,11 @@ impl Dent {
                 self.close(&id, window, cx);
             }
             Do::Reopen(id) => self.reopen(&id, cx),
+            Do::Pin(id) => self.toggle_pin(&id, cx),
+            Do::OpenWith(path, app) => {
+                crate::open::open_with(&path, app, cx);
+                self.save_prefs();
+            }
         }
         cx.notify();
     }
@@ -168,5 +179,81 @@ impl Dent {
                 )
                 .into_any_element(),
         )
+    }
+}
+
+impl Dent {
+    /// A file's Open, and beside it Open with: the apps that can open it,
+    /// your pick for its kind ticked; picking one opens it there from now
+    /// on.
+    pub fn open_button(
+        &self,
+        id: &'static str,
+        full: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let t = self.t;
+        let path = full.display().to_string();
+        let opens_in = crate::open::app_for(&path).map(|a| crate::open::app_name(&a));
+        let p1 = path.clone();
+        div()
+            .flex()
+            .items_center()
+            .child(
+                crate::ui::ghost(id, "Open", &t)
+                    .relative()
+                    .child(crate::ui::probe(&self.probes, id))
+                    .on_press(move |_, _, cx| crate::open::open(&p1, cx))
+                    .with_tip(crate::ui::tip_owned(
+                        match &opens_in {
+                            Some(app) => format!("Open in {app}"),
+                            None => "Open in its app".to_string(),
+                        },
+                        t,
+                    )),
+            )
+            .child(
+                crate::ui::icon_button(
+                    SharedString::from(format!("{id}-with")),
+                    "chevron-down",
+                    &t,
+                )
+                .size(px(crate::ds::size::CONTROL_SM))
+                .relative()
+                .child(crate::ui::probe(&self.probes, format!("{id}-with")))
+                .with_tip(crate::ui::tip("Open with…", None, t))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        let apps = crate::open::apps(&path);
+                        let chosen = crate::open::app_for(&path);
+                        let mut items: Vec<(String, Do)> = apps
+                            .iter()
+                            .enumerate()
+                            .map(|(i, a)| {
+                                let name = crate::open::app_name(a);
+                                let label = match (chosen.as_deref() == Some(a.as_str()), i) {
+                                    (true, _) => format!("✓ {name}"),
+                                    (false, 0) => format!("{name} (default)"),
+                                    _ => name,
+                                };
+                                (label, Do::OpenWith(path.clone(), Some(a.clone())))
+                            })
+                            .collect();
+                        if apps.is_empty() {
+                            items.push(("No app can open this".to_string(), Do::Separator));
+                        }
+                        if chosen.is_some() {
+                            items.push((String::new(), Do::Separator));
+                            items.push((
+                                "Use the Mac's default".to_string(),
+                                Do::OpenWith(path.clone(), None),
+                            ));
+                        }
+                        this.open_context(e.position, items, cx);
+                    }),
+                ),
+            )
     }
 }

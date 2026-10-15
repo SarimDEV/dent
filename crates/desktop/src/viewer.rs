@@ -1245,13 +1245,7 @@ impl Dent {
                             }))
                     })
                     .when_some(art_file(&a), |d, full| {
-                        d.child(
-                            ghost("open-doc", "Open", &t)
-                                .on_press(move |_, _, cx| {
-                                    cx.open_url(&format!("file://{}", full.display()))
-                                })
-                                .with_tip(tip("Open in its app", None, t)),
-                        )
+                        d.child(self.open_button("open-doc", full, cx))
                     }),
             )
             .child(
@@ -1613,11 +1607,7 @@ impl Dent {
                                     )
                                     .child({
                                         let full = std::path::Path::new(&s.cwd).join(&file.path);
-                                        ghost("open-file", "Open", &t)
-                                            .on_press(move |_, _, cx| {
-                                                cx.open_url(&format!("file://{}", full.display()))
-                                            })
-                                            .with_tip(tip("Open in its app", None, t))
+                                        self.open_button("open-file", full, cx)
                                     })
                                     .child(div().ty(LABEL).text_color(t.faint).child(
                                         match (compact, file.lines.is_empty()) {
@@ -1733,7 +1723,7 @@ impl Dent {
             let id = window.text_system().resolve_font(&font);
             self.code_em = window
                 .text_system()
-                .em_advance(id, px(CODE.size))
+                .em_advance(id, px(CODE.zoomed().size))
                 .map(|p| p.as_f32())
                 .unwrap_or(7.2);
         }

@@ -48,6 +48,15 @@ actions!(
         FindInSession,
         FindNext,
         FindPrev,
+        SwitchNext,
+        SwitchPrev,
+        TextBigger,
+        TextSmaller,
+        TextActual,
+        LookSystem,
+        LookLight,
+        LookDark,
+        ShowKeys,
         Quit,
         Hide,
         HideOthers,
@@ -112,6 +121,14 @@ pub fn set_menus(cx: &mut App) {
                 MenuItem::action("Changes", ShowChanges),
                 MenuItem::action("Terminal", ShowTerminal),
                 MenuItem::action("Side Chat", SideChat),
+                MenuItem::separator(),
+                MenuItem::action("Bigger Text", TextBigger),
+                MenuItem::action("Smaller Text", TextSmaller),
+                MenuItem::action("Actual Text Size", TextActual),
+                MenuItem::separator(),
+                MenuItem::action("Match the Mac's Appearance", LookSystem),
+                MenuItem::action("Light Appearance", LookLight),
+                MenuItem::action("Dark Appearance", LookDark),
             ],
             disabled: false,
         },
@@ -121,6 +138,11 @@ pub fn set_menus(cx: &mut App) {
                 MenuItem::action("Minimize", Minimize),
                 MenuItem::action("Zoom", Zoom),
             ],
+            disabled: false,
+        },
+        gpui_kit::Menu {
+            name: "Help".into(),
+            items: vec![MenuItem::action("Keyboard Shortcuts", ShowKeys)],
             disabled: false,
         },
     ]);
@@ -148,6 +170,13 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-f", FindInSession, None),
         KeyBinding::new("cmd-g", FindNext, None),
         KeyBinding::new("shift-cmd-g", FindPrev, None),
+        KeyBinding::new("ctrl-tab", SwitchNext, None),
+        KeyBinding::new("cmd-=", TextBigger, None),
+        KeyBinding::new("cmd-+", TextBigger, None),
+        KeyBinding::new("cmd--", TextSmaller, None),
+        KeyBinding::new("cmd-0", TextActual, None),
+        KeyBinding::new("cmd-/", ShowKeys, None),
+        KeyBinding::new("ctrl-shift-tab", SwitchPrev, None),
         KeyBinding::new("cmd-;", SideChat, None),
         KeyBinding::new("alt-cmd-up", SelectPrev, None),
         KeyBinding::new("alt-cmd-down", SelectNext, None),
@@ -495,6 +524,11 @@ pub struct Dent {
     /// The session whose name is being edited in the header.
     pub renaming: Option<String>,
     pub drafts: HashMap<String, String>,
+    /// The appearance you chose, and one a flag forces for this run.
+    pub appearance: crate::prefs::Appearance,
+    /// Sessions pinned to the top of the sidebar.
+    pub pinned: Vec<String>,
+    pub forced_dark: Option<bool>,
     /// A message of yours brought back to the composer with ↑, while it's
     /// shown as it came back: ↑ and ↓ step on through them.
     pub recall: Option<Recall>,
@@ -515,6 +549,12 @@ pub struct Dent {
     /// ⌘F's field, and what it found.
     pub find_input: Entity<TextareaState>,
     pub find: Option<crate::find::Find>,
+    /// Sessions you opened, most recent first, and Ctrl+Tab's list while
+    /// Ctrl is held.
+    pub lately: Vec<String>,
+    pub switcher: Option<crate::switcher::Switcher>,
+    /// The keyboard shortcuts sheet is up.
+    pub keys_open: bool,
     pub project_mode: crate::picker::Mode,
     /// A project being made or cloned, said in the picker meanwhile.
     pub project_busy: Option<String>,
@@ -738,13 +778,17 @@ pub struct Dent {
 }
 
 impl Dent {
-    pub fn new(dark: Option<bool>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // Follows the Mac's appearance unless --dark asks for Carbon.
+    pub fn new(forced: Option<bool>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let prefs = crate::prefs::load();
+        crate::ds::set_zoom(prefs.zoom.unwrap_or(1.));
+        crate::open::load(prefs.open_with.clone());
+        // Follows the Mac's appearance unless you chose one (or --dark or
+        // --light asks).
         let system_dark = matches!(
             window.appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         );
-        let t = if dark.unwrap_or(system_dark) {
+        let t = if forced.or(prefs.appearance.dark()).unwrap_or(system_dark) {
             Theme::carbon()
         } else {
             Theme::paper()
@@ -851,16 +895,6 @@ impl Dent {
         single_line(&search, window, cx);
         // Only edits redraw the window: watching the fields themselves would
         // redraw on every caret blink, even after they lose focus.
-        for input in [
-            &composer,
-            &starter,
-            &comment_input,
-            &aside_input,
-            &search,
-            &rename_input,
-        ] {
-            crate::style_input(input, &t, cx);
-        }
         cx.subscribe_in(
             &composer,
             window,
@@ -901,34 +935,8 @@ impl Dent {
             }
         })
         .detach();
-        if dark.is_none() {
-            cx.observe_window_appearance(window, |this, window, cx| {
-                let dark = matches!(
-                    window.appearance(),
-                    WindowAppearance::Dark | WindowAppearance::VibrantDark
-                );
-                if dark != this.t.dark {
-                    this.t = if dark {
-                        Theme::carbon()
-                    } else {
-                        Theme::paper()
-                    };
-                    for input in [
-                        &this.composer,
-                        &this.starter,
-                        &this.comment_input,
-                        &this.aside_input,
-                        &this.search,
-                        &this.rename_input,
-                    ] {
-                        crate::style_input(input, &this.t, cx);
-                    }
-                    this.md.clear();
-                    cx.notify();
-                }
-            })
+        cx.observe_window_appearance(window, |this, window, cx| this.apply_theme(window, cx))
             .detach();
-        }
         cx.observe_window_activation(window, |this, window, _| {
             this.window_active = window.is_window_active();
         })
@@ -983,7 +991,6 @@ impl Dent {
             }
         })
         .detach();
-        let prefs = crate::prefs::load();
         // Usage moves however the account is used: look again every few minutes.
         cx.spawn(async move |this, cx| {
             loop {
@@ -1022,6 +1029,9 @@ impl Dent {
             rename_input: rename_input.clone(),
             renaming: None,
             drafts: prefs.drafts.clone().into_iter().collect(),
+            appearance: prefs.appearance,
+            pinned: prefs.pinned.clone(),
+            forced_dark: forced,
             recall: None,
             defaults: Defaults {
                 project: prefs.project.clone(),
@@ -1037,6 +1047,9 @@ impl Dent {
             menu_query,
             find_input,
             find: None,
+            lately: Vec::new(),
+            switcher: None,
+            keys_open: false,
             lightbox: None,
             project_mode: crate::picker::Mode::Pick,
             project_busy: None,
@@ -1170,6 +1183,9 @@ impl Dent {
             last_frame: Instant::now(),
         };
         this.mdv = crate::markdown::Md::new(this.probes.clone());
+        for input in this.fields() {
+            crate::style_input(input, &this.t, cx);
+        }
         // Files you had opened come back as tabs, if they're still there.
         for (sid, paths) in &prefs.opened {
             for p in paths {
@@ -1235,8 +1251,41 @@ impl Dent {
     /// the pointer is over the sidebar, rows hold the places they had, so
     /// a session that finishes doesn't jump away from a click on its way;
     /// new sessions still come in, and closed ones still go.
+    /// Pin a session to the top of the sidebar, or let it go back to its
+    /// status's section.
+    pub fn toggle_pin(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.pinned.iter().any(|p| p == id) {
+            self.pinned.retain(|p| p != id);
+        } else {
+            self.pinned.push(id.to_string());
+        }
+        self.save_prefs();
+        cx.notify();
+    }
+
+    /// Pinned sessions that are still open, in the order pinned.
+    pub fn pinned_sessions(&self) -> Vec<Rc<Session>> {
+        self.pinned
+            .iter()
+            .filter_map(|id| self.sessions.iter().find(|s| s.id == *id && !s.closed))
+            .cloned()
+            .collect()
+    }
+
+    /// The sidebar's sections below Pinned: what needs you, what's done,
+    /// what's working. Pinned sessions sit in Pinned instead, though they
+    /// still count as needing you for ⌘J and the status bar.
     pub fn shown_sections(&self) -> [Vec<Rc<Session>>; 3] {
-        let fresh = [self.needs(), self.done(), self.working()];
+        let unpinned = |list: Vec<Rc<Session>>| -> Vec<Rc<Session>> {
+            list.into_iter()
+                .filter(|s| !self.pinned.contains(&s.id))
+                .collect()
+        };
+        let fresh = [
+            unpinned(self.needs()),
+            unpinned(self.done()),
+            unpinned(self.working()),
+        ];
         let Some(hold) = &self.inbox_hold else {
             return fresh;
         };
@@ -1313,7 +1362,7 @@ impl Dent {
     /// follows the file on disk. With no session open, it opens in its app.
     pub fn open_file(&mut self, path: &str, cx: &mut Context<Self>) {
         let Some(s) = self.current().cloned() else {
-            cx.open_url(&format!("file://{path}"));
+            crate::open::open(path, cx);
             return;
         };
         let target = std::path::Path::new(path);
@@ -1332,7 +1381,7 @@ impl Dent {
             return;
         }
         if crate::data::Kind::of(path).is_none() {
-            cx.open_url(&format!("file://{path}"));
+            crate::open::open(path, cx);
             return;
         }
         match self.load_opened(&s.id, path) {
@@ -1497,6 +1546,9 @@ impl Dent {
             && let Some(s) = self.current_rc()
         {
             self.defaults.project = self.project_for(&s.cwd);
+        }
+        if let Some(id) = &id {
+            self.used(id);
         }
         // Find belongs to the session it searched.
         if self.find.take().is_some() {
@@ -1972,6 +2024,42 @@ impl Dent {
             return true;
         }
         let plain = !k.modifiers.modified();
+        // ⇧Tab in the reply box or a new session's field steps the mode:
+        // Ask, Edits, Plan, round again. Full is never a keystroke away;
+        // it's chosen from the chip.
+        if k.key == "tab"
+            && k.modifiers.shift
+            && !k.modifiers.platform
+            && !k.modifiers.control
+            && !k.modifiers.alt
+            && let Some(f @ (Field::Composer | Field::Starter)) = self.field_focused(window, cx)
+        {
+            let now = match (f, self.current()) {
+                (Field::Composer, Some(s)) => s.permission,
+                _ => self.defaults.permission,
+            };
+            let next = match now {
+                Permission::Ask => Permission::Edits,
+                Permission::Edits => Permission::Plan,
+                Permission::Plan | Permission::Full => Permission::Ask,
+            };
+            if f == Field::Composer && self.selected.is_some() {
+                self.set_permission(next, cx);
+            } else {
+                self.defaults.permission = next;
+                cx.notify();
+            }
+            return true;
+        }
+        // ? with no text field in use: the shortcuts sheet.
+        if k.key_char.as_deref() == Some("?")
+            && !k.modifiers.platform
+            && !k.modifiers.control
+            && self.field_focused(window, cx).is_none()
+        {
+            self.toggle_keys(cx);
+            return true;
+        }
         // In ⌘F's field, Return goes to the next match and ⇧Return back.
         if k.key == "enter"
             && !k.modifiers.platform
@@ -2325,6 +2413,84 @@ impl Dent {
         } else {
             None
         }
+    }
+
+    /// Every text field, for what touches them all (the theme's colours).
+    pub fn fields(&self) -> [&Entity<TextareaState>; 8] {
+        [
+            &self.composer,
+            &self.starter,
+            &self.comment_input,
+            &self.aside_input,
+            &self.search,
+            &self.rename_input,
+            &self.menu_query,
+            &self.find_input,
+        ]
+    }
+
+    /// Wear the theme you chose, or the Mac's: everything retints, and
+    /// what was laid out in the old colours is laid out again.
+    pub fn apply_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let system = matches!(
+            window.appearance(),
+            WindowAppearance::Dark | WindowAppearance::VibrantDark
+        );
+        let dark = self
+            .forced_dark
+            .or(self.appearance.dark())
+            .unwrap_or(system);
+        if dark == self.t.dark {
+            return;
+        }
+        self.t = if dark {
+            Theme::carbon()
+        } else {
+            Theme::paper()
+        };
+        for input in self.fields() {
+            crate::style_input(input, &self.t, cx);
+        }
+        self.md.clear();
+        cx.notify();
+    }
+
+    /// Choose light, dark, or the Mac's appearance.
+    pub fn set_appearance(
+        &mut self,
+        a: crate::prefs::Appearance,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.appearance = a;
+        self.forced_dark = None;
+        self.apply_theme(window, cx);
+        self.save_prefs();
+        cx.notify();
+    }
+
+    /// ⌘+ and ⌘−: one step bigger or smaller; ⌘0 (`by` 0): as designed.
+    pub fn step_zoom(&mut self, by: i32, cx: &mut Context<Self>) {
+        let now = crate::ds::zoom();
+        let at = crate::ds::ZOOMS
+            .iter()
+            .position(|z| (*z - now).abs() < 0.001)
+            .unwrap_or(2) as i32;
+        let next = if by == 0 {
+            1.
+        } else {
+            crate::ds::ZOOMS[(at + by).clamp(0, crate::ds::ZOOMS.len() as i32 - 1) as usize]
+        };
+        if (next - now).abs() < 0.001 {
+            return;
+        }
+        crate::ds::set_zoom(next);
+        // Everything measured at the old size is measured again.
+        self.md.clear();
+        self.transcript.remeasure();
+        self.diff_list.remeasure();
+        self.save_prefs();
+        cx.notify();
     }
 
     pub fn field_entity(&self, f: Field) -> &Entity<TextareaState> {
@@ -2891,7 +3057,10 @@ impl Dent {
             effort: self.defaults.effort.clone(),
             panel_width: Some(self.panel_width),
             sidebar_width: Some(self.sidebar_w),
-            dark: Some(self.t.dark),
+            appearance: self.appearance,
+            pinned: self.pinned.clone(),
+            open_with: crate::open::chosen(),
+            zoom: Some(crate::ds::zoom()).filter(|z| *z != 1.),
             opened: self
                 .opened
                 .iter()
@@ -4308,8 +4477,9 @@ impl Dent {
             Vec::new()
         };
         let [needs, done, working] = self.shown_sections();
-        needs
+        self.pinned_sessions()
             .into_iter()
+            .chain(needs)
             .chain(done)
             .chain(working)
             .chain(closed)

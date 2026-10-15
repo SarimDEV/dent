@@ -13,13 +13,42 @@ pub struct Prefs {
     pub effort: Option<String>,
     pub panel_width: Option<f32>,
     pub sidebar_width: Option<f32>,
-    pub dark: Option<bool>,
+    /// Light, dark, or as the Mac is.
+    pub appearance: Appearance,
+    /// The text size you chose with ⌘+ and ⌘−, as a factor.
+    pub zoom: Option<f32>,
     /// Viewer tabs you closed, per session: file and its versions then.
     /// Files opened from links in each session's viewer, by path.
     pub opened: std::collections::BTreeMap<String, Vec<String>>,
     pub closed_tabs: std::collections::BTreeMap<String, std::collections::BTreeMap<String, usize>>,
     /// What you'd typed in each session and not sent, so quitting loses nothing.
     pub drafts: std::collections::BTreeMap<String, String>,
+    /// Sessions kept at the top of the sidebar, in the order pinned.
+    pub pinned: Vec<String>,
+    /// The app you picked to open each kind of file (by extension).
+    pub open_with: std::collections::BTreeMap<String, String>,
+}
+
+/// Which theme dent wears.
+#[derive(Serialize, Deserialize, Default, Clone, Copy, PartialEq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    /// Paper by day, Carbon by night, as the Mac is set.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    /// Dark or not when chosen outright; `None` follows the Mac.
+    pub fn dark(self) -> Option<bool> {
+        match self {
+            Appearance::System => None,
+            Appearance::Light => Some(false),
+            Appearance::Dark => Some(true),
+        }
+    }
 }
 
 fn path() -> std::path::PathBuf {

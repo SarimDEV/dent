@@ -57,6 +57,7 @@ Five sizes, two weights, three inks. Line heights sit on the 4 px grid.
 | `type.code` | Commit Mono | 12 / 20 | Code, diffs, tool lines, commands |
 | `type.label` | Commit Mono | 11 / 16 | Metadata and section labels |
 
+- **Text size (⌘+ / ⌘−) scales `type.reading` and `type.code` only**, lines rounded to whole pixels; display, UI and label sizes, and every control and gutter, stay as designed. Anything measured from those two types reads them through `Type::zoomed()`.
 - **Hierarchy comes from ink and weight before size.** Inks: `ink` (content), `quiet` (secondary, metadata), `faint` (line numbers, placeholders, separators). Weights: regular and medium only.
 - **Uppercase is for section labels only** (`PROJECTS`, `NEEDS YOU`). Inline metadata (`claude · mac-mini · 100,003 events`) stays lowercase.
 - **Numbers that change** (usage, counts, timers) are set in Commit Mono so every digit is the same width and nothing shifts as they update.

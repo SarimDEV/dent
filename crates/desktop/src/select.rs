@@ -1163,7 +1163,7 @@ pub fn open_link(url: &str, window: &mut Window, cx: &mut App) {
             OPEN.with(|o| *o.borrow_mut() = Some(url.to_string()));
             window.refresh();
         } else if std::path::Path::new(url).exists() {
-            cx.open_url(&format!("file://{url}"));
+            crate::open::open(url, cx);
         }
     } else if !url.starts_with('#') {
         cx.open_url(url);

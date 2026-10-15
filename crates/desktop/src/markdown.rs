@@ -68,7 +68,7 @@ impl Face {
     pub fn of(ty: Type, family: &'static str, ink: Hsla, bg: Hsla) -> Self {
         Self {
             family,
-            size: ty.size,
+            size: ty.zoomed().size,
             ink,
             bg,
             weight: FontWeight::NORMAL,
@@ -182,7 +182,7 @@ impl Inline {
             .collect();
         // Maths too wide for a line gets one of its own, between the text
         // before and after it.
-        let max = INLINE_MAX * face.size / READING.size;
+        let max = INLINE_MAX * face.size / READING.zoomed().size;
         if let Some(i) = lists
             .iter()
             .position(|l| l.as_ref().is_some_and(|l| l.width as f32 * em > max))
@@ -1211,7 +1211,7 @@ fn render_in(
                                     .absolute()
                                     .left_0()
                                     .top_0()
-                                    .h(px(READING.line))
+                                    .h(px(READING.zoomed().line))
                                     .flex()
                                     .items_center()
                                     .child(marker),

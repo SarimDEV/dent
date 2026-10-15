@@ -58,41 +58,81 @@ pub struct Type {
     pub family: fn() -> &'static str,
     pub size: f32,
     pub line: f32,
+    /// Grows and shrinks with the text size you choose (⌘+ and ⌘−): what
+    /// you read, not the chrome around it.
+    pub zooms: bool,
+}
+
+/// The text size you chose, as a factor; 1 is as designed.
+static ZOOM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+
+/// The steps ⌘+ and ⌘− move through.
+pub const ZOOMS: [f32; 8] = [0.85, 0.92, 1.0, 1.1, 1.2, 1.35, 1.5, 1.7];
+
+pub fn zoom() -> f32 {
+    f32::from_bits(ZOOM.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+pub fn set_zoom(z: f32) {
+    ZOOM.store(z.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+impl Type {
+    /// This type at the chosen text size. Lines stay on whole pixels so
+    /// text never sits blurry between them.
+    pub fn zoomed(self) -> Type {
+        if !self.zooms {
+            return self;
+        }
+        let z = zoom();
+        Type {
+            size: self.size * z,
+            line: (self.line * z).round(),
+            ..self
+        }
+    }
 }
 
 pub const DISPLAY: Type = Type {
     family: serif,
     size: 28.,
     line: 32.,
+    zooms: false,
 };
 pub const DISPLAY_COMPACT: Type = Type {
     family: serif,
     size: 20.,
     line: 24.,
+    zooms: false,
 };
 pub const READING: Type = Type {
     family: body,
     size: 15.,
     line: 24.,
+    zooms: true,
 };
 pub const UI: Type = Type {
     family: sans,
     size: 13.,
     line: 20.,
+    zooms: false,
 };
 pub const CODE: Type = Type {
     family: mono,
     size: 12.,
     line: 20.,
+    zooms: true,
 };
 pub const LABEL: Type = Type {
     family: label,
     size: 11.,
     line: 16.,
+    zooms: false,
 };
 
 pub trait Typed: Styled + Sized {
     fn ty(self, t: Type) -> Self {
+        let t = t.zoomed();
         self.font_family((t.family)())
             .text_size(px(t.size))
             .line_height(px(t.line))

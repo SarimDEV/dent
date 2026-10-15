@@ -155,6 +155,30 @@ impl Walk {
                 v.extend(reply_actions());
                 v
             }
+            "switch" => {
+                let mut v = vec![(
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                )];
+                v.extend(switching());
+                v
+            }
+            "view" => {
+                let mut v = vec![(
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                )];
+                v.extend(view_choices());
+                v
+            }
+            "pins" => {
+                let mut v = vec![(
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                )];
+                v.extend(pins());
+                v
+            }
             "recall" => {
                 let mut v = vec![(
                     0.,
@@ -832,6 +856,9 @@ fn checks() -> Vec<(f32, Act)> {
     v.extend(find());
     v.extend(answer_keys());
     v.extend(reply_actions());
+    v.extend(switching());
+    v.extend(view_choices());
+    v.extend(pins());
     v.extend([
         (0.3, Key("cmd-n")),
         (
@@ -2389,6 +2416,299 @@ fn reply_actions() -> Vec<(f32, Act)> {
             ),
         ),
         (0.1, Call(restore_clipboard)),
+    ]);
+    v
+}
+
+fn titled(d: &Dent, title: &str) -> bool {
+    current(d).is_some_and(|s| s.title == title)
+}
+
+/// Letting go of Ctrl, which a walkthrough can't do with a key.
+fn let_go(d: &mut Dent, w: &mut Window, cx: &mut Context<Dent>) {
+    d.switch_finish(w, cx);
+}
+
+/// Ctrl+Tab: a tap goes back to the last session, held it steps further.
+fn switching() -> Vec<(f32, Act)> {
+    let mut v = Vec::new();
+    for t in ["alpha notes", "beta notes", "gamma notes"] {
+        v.extend(new_session(t));
+        v.push((
+            0.1,
+            Until(leak(format!("“{t}” answers")), |d, _| answered(d), 20.),
+        ));
+    }
+    v.extend([
+        (0.2, Key("ctrl-tab")),
+        (0.05, Call(let_go)),
+        (
+            0.1,
+            Until(
+                "a tap of Ctrl+Tab goes back to the session before",
+                |d, _| titled(d, "beta notes") && d.switcher.is_none(),
+                1.,
+            ),
+        ),
+        (0.2, Key("ctrl-tab")),
+        (0.05, Call(let_go)),
+        (
+            0.1,
+            Until(
+                "another tap comes back again",
+                |d, _| titled(d, "gamma notes"),
+                1.,
+            ),
+        ),
+        (
+            0.05,
+            Until(
+                "a quick tap never shows the list",
+                |d, _| drawn(d, "switch-0").is_none(),
+                0.2,
+            ),
+        ),
+        (0.2, Key("ctrl-tab")),
+        (0.1, Key("ctrl-tab")),
+        (
+            0.4,
+            Until(
+                "held, the list shows, most recent first, the one two back lit",
+                |d, _| {
+                    drawn(d, "switch-2").is_some() && d.switcher.as_ref().is_some_and(|s| s.at == 2)
+                },
+                1.,
+            ),
+        ),
+        (0.2, Shot("switcher")),
+        (0.8, Call(let_go)),
+        (
+            0.1,
+            Until(
+                "letting go opens it",
+                |d, _| titled(d, "alpha notes") && drawn(d, "switch-0").is_none(),
+                1.,
+            ),
+        ),
+        (0.2, Key("ctrl-tab")),
+        (0.3, Key("escape")),
+        (
+            0.1,
+            Until(
+                "Esc stays where you are",
+                |d, _| titled(d, "alpha notes") && d.switcher.is_none(),
+                1.,
+            ),
+        ),
+        (0.2, Key("ctrl-shift-tab")),
+        (
+            0.05,
+            Until(
+                "Ctrl+Shift+Tab goes the other way, to the last in the list",
+                |d, _| {
+                    d.switcher
+                        .as_ref()
+                        .is_some_and(|s| s.at + 1 == s.order.len() && s.order.len() > 2)
+                },
+                1.,
+            ),
+        ),
+        (0.05, Call(let_go)),
+        (
+            0.1,
+            Until(
+                "and letting go opens it",
+                |d, _| d.switcher.is_none() && !titled(d, "alpha notes"),
+                1.,
+            ),
+        ),
+    ]);
+    v
+}
+
+fn zoom_is(z: f32) -> bool {
+    (crate::ds::zoom() - z).abs() < 0.001
+}
+
+/// ⇧Tab's modes, text size, appearance and the shortcuts sheet.
+fn view_choices() -> Vec<(f32, Act)> {
+    use dent_protocol::Permission as P;
+    let mut v = vec![
+        (0.3, Key("cmd-n")),
+        (0.2, Type(Field::Starter, "")),
+        (0.1, Key("shift-tab")),
+        (
+            0.1,
+            Until(
+                "⇧Tab on a new session steps the mode to Edits",
+                |d, _| d.defaults.permission == P::Edits,
+                1.,
+            ),
+        ),
+        (0.1, Key("shift-tab")),
+        (0.1, Key("shift-tab")),
+        (
+            0.1,
+            Until(
+                "on through Plan and round to Ask, never to Full",
+                |d, _| d.defaults.permission == P::Ask,
+                1.,
+            ),
+        ),
+    ];
+    v.extend(new_session("check the parser"));
+    v.extend([
+        (0.1, Until("it answers", |d, _| answered(d), 20.)),
+        (0.2, Type(Field::Composer, "")),
+        (0.1, Key("shift-tab")),
+        (
+            0.1,
+            Until(
+                "in a session, ⇧Tab changes the session's own mode",
+                |d, _| current(d).is_some_and(|s| s.permission == P::Edits),
+                3.,
+            ),
+        ),
+        (0.1, Key("shift-tab")),
+        (0.1, Key("shift-tab")),
+        (
+            0.1,
+            Until(
+                "and round again",
+                |d, _| current(d).is_some_and(|s| s.permission == P::Ask),
+                3.,
+            ),
+        ),
+        (0.2, Key("cmd-=")),
+        (0.1, Key("cmd-=")),
+        (
+            0.1,
+            Until(
+                "⌘+ makes the text bigger, a step at a time",
+                |_, _| zoom_is(1.2),
+                1.,
+            ),
+        ),
+        (0.4, Shot("text-bigger")),
+        (0.8, Key("cmd-0")),
+        (0.1, Until("⌘0 puts it back", |_, _| zoom_is(1.), 1.)),
+        (0.1, Key("cmd--")),
+        (0.1, Until("⌘− makes it smaller", |_, _| zoom_is(0.92), 1.)),
+        (0.1, Key("cmd-0")),
+        (
+            0.1,
+            Call(|d, w, cx| d.set_appearance(crate::prefs::Appearance::Dark, w, cx)),
+        ),
+        (
+            0.1,
+            Until("Dark Appearance wears Carbon", |d, _| d.t.dark, 1.),
+        ),
+        (
+            0.1,
+            Call(|d, w, cx| d.set_appearance(crate::prefs::Appearance::Light, w, cx)),
+        ),
+        (
+            0.1,
+            Until("Light Appearance wears Paper", |d, _| !d.t.dark, 1.),
+        ),
+        (0.1, Key("cmd-/")),
+        (
+            0.1,
+            Until(
+                "⌘/ shows every shortcut",
+                |d, _| d.keys_open && drawn(d, "keys").is_some(),
+                1.,
+            ),
+        ),
+        (0.4, Shot("keys")),
+        (0.8, Key("escape")),
+        (0.1, Until("Esc puts it away", |d, _| !d.keys_open, 1.)),
+        (0.1, Keys("?")),
+        (
+            0.1,
+            Until(
+                "? typed in the reply box is just a ?",
+                |d, cx| !d.keys_open && composer_is(d, cx, "?"),
+                1.,
+            ),
+        ),
+        (0.1, Type(Field::Composer, "")),
+    ]);
+    v
+}
+
+fn pin_first(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
+    // The oldest session: the one furthest down.
+    if let Some(id) = d.order().last().cloned() {
+        MARK.with(|m| m.set(d.sessions.iter().position(|s| s.id == id).unwrap_or(0)));
+        d.toggle_pin(&id, cx);
+    }
+}
+
+fn marked_id(d: &Dent) -> String {
+    d.sessions
+        .get(mark())
+        .map(|s| s.id.clone())
+        .unwrap_or_default()
+}
+
+/// Pinning keeps a session at the top; a file's Open offers Open with.
+fn pins() -> Vec<(f32, Act)> {
+    let mut v = Vec::new();
+    for t in ["first notes", "second notes"] {
+        v.extend(new_session(t));
+        v.push((
+            0.1,
+            Until(leak(format!("“{t}” answers")), |d, _| answered(d), 20.),
+        ));
+    }
+    v.extend([
+        (0.2, Call(pin_first)),
+        (
+            0.2,
+            Until(
+                "a pinned session moves to the top, under Pinned",
+                |d, _| d.order().first() == Some(&marked_id(d)) && d.pinned.len() == 1,
+                1.,
+            ),
+        ),
+        (0.3, Shot("pinned")),
+        (
+            0.8,
+            Call(|d, _, cx| {
+                let id = marked_id(d);
+                d.toggle_pin(&id, cx);
+            }),
+        ),
+        (
+            0.2,
+            Until(
+                "unpinned, it goes back to its section",
+                |d, _| d.pinned.is_empty() && d.order().first() != Some(&marked_id(d)),
+                1.,
+            ),
+        ),
+    ]);
+    v.extend(new_session("write about.md please"));
+    v.extend([
+        (
+            0.1,
+            Until(
+                "asks to write",
+                |d, _| has(d, |i| matches!(i, Item::Approval { .. })),
+                10.,
+            ),
+        ),
+        (0.2, Click("allow")),
+        (
+            0.1,
+            Until(
+                "the file opens with Open and Open with beside it",
+                |d, _| drawn(d, "open-doc").is_some() && drawn(d, "open-doc-with").is_some(),
+                10.,
+            ),
+        ),
+        (0.3, Shot("open-with")),
     ]);
     v
 }

@@ -37,11 +37,14 @@ impl Dent {
                 .collect()
         });
         let closed = self.closed();
-        let clear = needs.is_empty() && done.is_empty();
+        let pinned = self.pinned_sessions();
+        // Caught up means nothing needs you and nothing's waiting to be
+        // read, pinned or not.
+        let clear = self.needs().is_empty() && self.done().is_empty();
         let new_selected = self.selected.is_none();
 
         // Only the rows on screen are laid out, however many sessions there are.
-        let rows = self.inbox_rows(&needs, &done, &working, &closed, clear);
+        let rows = self.inbox_rows(&pinned, &needs, &done, &working, &closed, clear);
         self.sync_inbox(&rows);
         // A selection moved by the keyboard stays in view.
         if let Some(id) = self.reveal_row.take()
@@ -154,6 +157,7 @@ impl Dent {
     /// The sidebar's rows, top to bottom.
     fn inbox_rows(
         &self,
+        pinned: &[std::rc::Rc<Session>],
         needs: &[std::rc::Rc<Session>],
         done: &[std::rc::Rc<Session>],
         working: &[std::rc::Rc<Session>],
@@ -165,6 +169,7 @@ impl Dent {
             rows.push(InboxRow::Empty);
         }
         for (label, list, quiet) in [
+            ("Pinned", pinned, false),
             ("Needs you", needs, false),
             ("Done", done, false),
             ("Working", working, true),
@@ -457,6 +462,13 @@ impl Dent {
                         ("Rename", Do::Rename(sid.clone())),
                         ("Fork", Do::Fork(sid.clone())),
                     ];
+                    if !closed {
+                        let pinned = this.pinned.contains(&sid);
+                        items.push((
+                            if pinned { "Unpin" } else { "Pin to top" },
+                            Do::Pin(sid.clone()),
+                        ));
+                    }
                     if closed {
                         items.push(("Reopen", Do::Reopen(sid.clone())));
                     } else if closable {

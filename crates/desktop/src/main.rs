@@ -17,11 +17,13 @@ mod diagram;
 mod ds;
 mod find;
 mod highlight;
+mod keys;
 mod lightbox;
 mod live;
 mod markdown;
 mod math;
 mod notify;
+mod open;
 mod palette;
 mod picker;
 mod popout;
@@ -29,6 +31,7 @@ mod prefs;
 mod select;
 mod shell;
 mod sidebar;
+mod switcher;
 mod theme;
 mod ui;
 mod viewer;
@@ -482,7 +485,11 @@ impl Render for Dent {
             .on_action(cx.listener(|this, _: &Escape, window, cx| {
                 // Esc backs out one thing at a time; with nothing open it moves
                 // to the inbox, where arrows move and Enter opens.
-                if this.close_lightbox(cx) || this.context.take().is_some() {
+                if this.switch_cancel(cx)
+                    || std::mem::take(&mut this.keys_open)
+                    || this.close_lightbox(cx)
+                    || this.context.take().is_some()
+                {
                 } else if this.palette.is_some() {
                     this.close_palette(window, cx);
                 } else if this.close_find(window, cx)
@@ -525,6 +532,27 @@ impl Render for Dent {
             .on_action(
                 cx.listener(|this, _: &app::FindInSession, window, cx| this.open_find(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &app::TextBigger, _, cx| this.step_zoom(1, cx)))
+            .on_action(cx.listener(|this, _: &app::TextSmaller, _, cx| this.step_zoom(-1, cx)))
+            .on_action(cx.listener(|this, _: &app::TextActual, _, cx| this.step_zoom(0, cx)))
+            .on_action(cx.listener(|this, _: &app::LookSystem, window, cx| {
+                this.set_appearance(prefs::Appearance::System, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &app::LookLight, window, cx| {
+                this.set_appearance(prefs::Appearance::Light, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &app::LookDark, window, cx| {
+                this.set_appearance(prefs::Appearance::Dark, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &app::ShowKeys, _, cx| this.toggle_keys(cx)))
+            .on_action(cx.listener(|this, _: &app::SwitchNext, _, cx| this.switch_step(false, cx)))
+            .on_action(cx.listener(|this, _: &app::SwitchPrev, _, cx| this.switch_step(true, cx)))
+            // Letting go of Ctrl opens what Ctrl+Tab lit.
+            .on_modifiers_changed(cx.listener(|this, e: &ModifiersChangedEvent, window, cx| {
+                if this.switcher.is_some() && !e.modifiers.control {
+                    this.switch_finish(window, cx);
+                }
+            }))
             .on_action(
                 cx.listener(|this, _: &app::FindNext, window, cx| {
                     this.step_find(false, window, cx)
@@ -649,6 +677,8 @@ impl Render for Dent {
                 d.cursor_col_resize()
             })
             .children(self.palette.map(|at| self.palette_view(at, window, cx)))
+            .children(self.switcher_view(cx))
+            .children(self.keys_view(cx))
             .children(self.context_view(window, cx))
             // Over everything, menus painted late included.
             .children(
