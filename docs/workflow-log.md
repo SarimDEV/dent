@@ -30,7 +30,7 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 
 ### `just verify` builds every spike
 - Seen: 2026-10-15. Cargo.toml lists `spikes/*` as members and `verify` passes `--workspace`, so clippy and tests compile all 12 spike crates (gpui-chat, core-wasm, desktop-concepts…) every time. AGENTS.md says spikes are left out of the default build.
-- Cost: unmeasured. Likely a large share of every verify, which runs after each landed step.
+- Cost: clean `just verify` on the new Mac took 4 m 19 s; a warm run with nothing changed takes 8 s. 26 of the 35 test binaries it links run zero tests (mostly spikes). The real cost is on cold builds and after changes to shared crates, when spikes rebuild too: still to be measured.
 - Fix: verify uses the default members (`crates/*`). A separate `just verify-spikes` covers spikes when one is touched.
 - Check: time `just verify` warm, before and after.
 
@@ -48,7 +48,7 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 
 ### First build is long
 - Seen: 2026-10-15, new Mac. GPUI builds at opt-level 3 even in dev, and merman-render compiles with every diagram feature (30+).
-- Cost: first `just verify` on a clean machine: (to be measured). This hits every new machine or `cargo clean`.
+- Cost: first `just verify` on a clean machine: 4 m 19 s (clippy step alone 1 m 54 s), on 2026-10-15. This hits every new machine or `cargo clean`.
 - Fix: enable only the merman diagram types dent renders; consider sccache shared across machines.
 - Check: clean `just verify` time.
 
