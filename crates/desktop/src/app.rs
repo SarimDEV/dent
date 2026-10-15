@@ -4969,9 +4969,32 @@ impl Dent {
     /// Open session `id` from the palette: the one clicked, wherever the
     /// results have moved since.
     pub fn palette_open(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.search.read(cx).value().trim().to_string();
         self.palette = None;
-        self.select(Some(id), window, cx);
+        self.open_at_match(id, &query, window, cx);
         cx.notify();
+    }
+
+    /// Open a session from search. Found inside the conversation rather than
+    /// its title, it opens at the first place it was said, with ⌘F holding
+    /// the words so the next match is a ↩ away.
+    fn open_at_match(
+        &mut self,
+        id: String,
+        query: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let inside = !query.is_empty()
+            && self
+                .session(&id)
+                .is_some_and(|s| self.search_snippet(s, cx).is_some());
+        self.select(Some(id), window, cx);
+        if inside {
+            let q = query.to_string();
+            self.find_input.update(cx, |f, cx| put(f, q, window, cx));
+            self.open_find(window, cx);
+        }
     }
 
     pub fn palette_open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4985,7 +5008,7 @@ impl Dent {
         if let Some(id) = results.get(at).cloned() {
             // A closed session opens to read, as from the sidebar; Reopen
             // is in its footer.
-            self.select(Some(id), window, cx);
+            self.open_at_match(id, &query, window, cx);
         } else if !query.is_empty() {
             // The last row: start a session with what was typed.
             self.select(None, window, cx);

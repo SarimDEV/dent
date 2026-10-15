@@ -3768,6 +3768,33 @@ fn file_links() -> Vec<(f32, Act)> {
             0.,
             Call(|d, w, cx| d.composer.update(cx, |c, cx| c.set_value("", w, cx))),
         ),
+        (0.2, Key("cmd-k")),
+        (0.3, Keys("requests arrive")),
+        (
+            0.1,
+            Until(
+                "search finds words said inside the session",
+                |d, cx| {
+                    let here = d.selected.clone();
+                    d.palette_results(cx).first() == here.as_ref()
+                },
+                3.,
+            ),
+        ),
+        (0.2, Key("enter")),
+        (
+            0.1,
+            Until(
+                "opening it goes to where they were said, with ⌘F holding them",
+                |d, cx| {
+                    d.find.as_ref().is_some_and(|f| !f.hits.is_empty())
+                        && d.find_input.read(cx).value() == "requests arrive"
+                },
+                3.,
+            ),
+        ),
+        (0.3, Shot("search-match")),
+        (0.1, Key("escape")),
         (
             0.1,
             Call(|d, w, cx| {
