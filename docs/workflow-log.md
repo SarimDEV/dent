@@ -55,7 +55,8 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 ### Switching machines lost context and time
 - Seen: 2026-10-15. Moving to this Mac took about an hour of manual setup: the Xcode tools dialog got stuck, then rustup, `just` compiled from source because Homebrew was missing, an SSH key, and the winid helper. The owner's working preferences lived only in the old Mac's agent memory. Batch 1 (9 files, ~430 lines) was left uncommitted on the old Mac.
 - Cost: an hour per machine switch, plus work stranded until the owner can reach the old machine.
-- Fix: (a) move the working agreements from the handover into AGENTS.md so the repo carries them; (b) a `scripts/bootstrap.sh` that installs and checks everything (`just doctor`); (c) rule: unfinished work is pushed to a WIP branch at the end of every session.
+- Also: the owner had to step in five times (Xcode tools dialog, SSH key, pushing batch 1 twice, Screen Recording permission), and the permission only surfaced after the first walkthrough, not at setup. The owner said they don't want to babysit.
+- Fix: (a) move the working agreements from the handover into AGENTS.md so the repo carries them; (b) a `scripts/bootstrap.sh` that installs and checks everything (`just doctor`), listing every one-time permission (Screen Recording for stills) up front in one go; (c) rule: unfinished work is pushed to a WIP branch at the end of every session.
 - Check: time a clean-machine setup, and the count of handovers that find unpushed work.
 
 ### Claims made without checking
