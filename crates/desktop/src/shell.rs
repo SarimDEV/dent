@@ -894,9 +894,19 @@ impl Dent {
     }
 }
 
+/// A path as one shell word: bare when that's safe, else in single quotes.
+pub fn shell_quote(p: &str) -> String {
+    let safe = |c: char| c.is_ascii_alphanumeric() || "/._-+,:@%=".contains(c);
+    if !p.is_empty() && p.chars().all(safe) {
+        p.to_string()
+    } else {
+        format!("'{}'", p.replace('\'', "'\\''"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::key_bytes;
+    use super::{key_bytes, shell_quote};
     use alacritty_terminal::term::TermMode;
     use gpui_kit::Keystroke;
 
@@ -918,14 +928,12 @@ mod tests {
         let app = key_bytes(&Keystroke::parse("up").unwrap(), TermMode::APP_CURSOR).unwrap();
         assert_eq!(app, b"\x1bOA");
     }
-}
 
-/// A path as one shell word: bare when that's safe, else in single quotes.
-pub fn shell_quote(p: &str) -> String {
-    let safe = |c: char| c.is_ascii_alphanumeric() || "/._-+,:@%=".contains(c);
-    if !p.is_empty() && p.chars().all(safe) {
-        p.to_string()
-    } else {
-        format!("'{}'", p.replace('\'', "'\\''"))
+    #[test]
+    fn dropped_paths_are_one_shell_word() {
+        assert_eq!(shell_quote("/tmp/a.txt"), "/tmp/a.txt");
+        assert_eq!(shell_quote("/tmp/my file.txt"), "'/tmp/my file.txt'");
+        assert_eq!(shell_quote("/tmp/it's"), "'/tmp/it'\\''s'");
+        assert_eq!(shell_quote(""), "''");
     }
 }
