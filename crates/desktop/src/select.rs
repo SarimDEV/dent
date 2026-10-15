@@ -172,6 +172,59 @@ struct State {
     sources: HashMap<Area, Source>,
     /// A control took this press: it doesn't start a selection.
     claimed: bool,
+    /// What ⌘F looks for, and how many matches each item has painted so
+    /// far this frame, so the current one can be told apart.
+    find: Option<Find>,
+    found: HashMap<u32, usize>,
+}
+
+/// ⌘F in one area: every match of `needle` is tinted, and the `n`th match
+/// in item `current.0` stands out.
+#[derive(Clone)]
+pub struct Find {
+    pub area: Area,
+    pub needle: String,
+    pub current: Option<(u32, usize)>,
+    pub tint: Hsla,
+    pub strong: Hsla,
+}
+
+/// Show (or with `None`, stop showing) what ⌘F found.
+pub fn set_find(find: Option<Find>) {
+    with(|s| s.find = find.filter(|f| !f.needle.is_empty()));
+}
+
+/// Where `needle` occurs in `hay`, ignoring case, as byte ranges in `hay`.
+pub fn matches(hay: &str, needle: &str) -> Vec<Range<usize>> {
+    let needle: Vec<char> = needle.chars().flat_map(char::to_lowercase).collect();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let chars: Vec<(usize, char)> = hay.char_indices().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let mut j = 0;
+        let mut k = i;
+        // Compare a char at a time, lowercased; a char that lowercases to
+        // several (rare) simply doesn't match across them.
+        while j < needle.len() && k < chars.len() {
+            let mut low = chars[k].1.to_lowercase();
+            if low.len() != 1 || low.next() != Some(needle[j]) {
+                break;
+            }
+            j += 1;
+            k += 1;
+        }
+        if j == needle.len() {
+            let end = chars.get(k).map_or(hay.len(), |c| c.0);
+            out.push(chars[i].0..end);
+            i = k;
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 type Source = (usize, Rc<dyn Fn(usize) -> Option<String>>);
@@ -312,6 +365,7 @@ pub fn layer() -> impl IntoElement {
             with(|s| {
                 s.placed.retain(|p| p.win != win);
                 s.regions.retain(|r| r.win != win);
+                s.found.clear();
             });
         },
         |_, _, window, _| {
@@ -1051,6 +1105,24 @@ impl Element for Text {
         cx: &mut App,
     ) {
         let layout = self.styled.layout().clone();
+        // What ⌘F found here: every match tinted, the current one strong.
+        let marks = with(|s| {
+            let f = s.find.as_ref().filter(|f| f.area == self.key.area)?;
+            let item = *self.key.path.first()?;
+            let seen = s.found.entry(item).or_default();
+            let marks: Vec<(Range<usize>, Hsla)> = matches(&self.text, &f.needle)
+                .into_iter()
+                .map(|r| {
+                    let on = f.current == Some((item, *seen));
+                    *seen += 1;
+                    (r, if on { f.strong } else { f.tint })
+                })
+                .collect();
+            Some(marks)
+        });
+        for (r, color) in marks.into_iter().flatten() {
+            paint_range(&layout, r, color, window);
+        }
         let range = with(|s| {
             s.sel
                 .as_ref()

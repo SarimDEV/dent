@@ -131,6 +131,14 @@ impl Walk {
             "sweep" => sweep(),
             "markdown" => markdown(),
             "motion" => motion(),
+            "find" => {
+                let mut v = vec![(
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                )];
+                v.extend(find());
+                v
+            }
             "recall" => {
                 let mut v = vec![(
                     0.,
@@ -805,6 +813,7 @@ fn checks() -> Vec<(f32, Act)> {
     )];
     v.extend(typing());
     v.extend(recall());
+    v.extend(find());
     v.extend([
         (0.3, Key("cmd-n")),
         (
@@ -1997,6 +2006,136 @@ fn recall() -> Vec<(f32, Act)> {
             ),
         ),
         (0.1, Type(Field::Composer, "")),
+    ]);
+    v
+}
+
+fn find_at(d: &Dent) -> Option<(usize, usize)> {
+    d.find.as_ref().map(|f| (f.at, f.hits.len()))
+}
+
+thread_local! {
+    /// A number a step notes for later steps to check against.
+    static MARK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn mark() -> usize {
+    MARK.with(|m| m.get())
+}
+
+/// The turn is over and a reply follows your last message.
+fn answered(d: &Dent) -> bool {
+    status_is(d, Status::Done)
+        && current(d).is_some_and(|s| {
+            let last_mine = s.items.iter().rposition(|i| matches!(i, Item::User { .. }));
+            let last_reply = s.items.iter().rposition(|i| matches!(i, Item::Text(_)));
+            last_reply > last_mine
+        })
+}
+
+/// Send `text` and wait until it's answered.
+fn ask_and_wait(text: &'static str) -> Vec<(f32, Act)> {
+    vec![
+        (0.2, Type(Field::Composer, text)),
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until(
+                leak(format!("“{text}” is answered")),
+                |d, _| answered(d),
+                20.,
+            ),
+        ),
+    ]
+}
+
+/// ⌘F finds in the session: counts, steps round, says when nothing matches.
+fn find() -> Vec<(f32, Act)> {
+    let mut v = new_session("check the parser");
+    v.push((
+        0.1,
+        Until(
+            "the first turn ends",
+            |d, _| status_is(d, Status::Done),
+            20.,
+        ),
+    ));
+    v.extend(ask_and_wait("fix the footer"));
+    v.extend(ask_and_wait("tidy the docs"));
+    v.extend(ask_and_wait("the parser again"));
+    v.extend([
+        (0.3, Key("cmd-f")),
+        (
+            0.1,
+            Until(
+                "⌘F opens the bar with the keyboard in it",
+                |d, _| d.find.is_some() && drawn(d, "find-bar").is_some(),
+                1.,
+            ),
+        ),
+        (0.1, Keys("parser")),
+        (
+            0.1,
+            Until(
+                "it counts every match, in your messages and the replies",
+                |d, _| find_at(d).is_some_and(|(_, n)| n == 4),
+                1.,
+            ),
+        ),
+        (0.4, Shot("find")),
+        // A still takes a moment; nothing changes until it's taken.
+        (
+            0.8,
+            Call(|d, _, _| MARK.with(|m| m.set(find_at(d).map_or(0, |f| f.0)))),
+        ),
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until(
+                "Return goes to the next match, round the end",
+                |d, _| find_at(d).is_some_and(|(at, _)| at == (mark() + 1) % 4),
+                1.,
+            ),
+        ),
+        (0.1, Key("shift-enter")),
+        (
+            0.1,
+            Until(
+                "⇧Return goes back",
+                |d, _| find_at(d).is_some_and(|(at, _)| at == mark()),
+                1.,
+            ),
+        ),
+        (0.1, Key("cmd-g")),
+        (0.1, Key("cmd-g")),
+        (
+            0.1,
+            Until(
+                "⌘G steps on too",
+                |d, _| find_at(d).is_some_and(|(at, _)| at == (mark() + 2) % 4),
+                1.,
+            ),
+        ),
+        (0.1, Key("cmd-a")),
+        (0.1, Keys("zzqx")),
+        (
+            0.1,
+            Until(
+                "something not there finds nothing",
+                |d, _| find_at(d).is_some_and(|(_, n)| n == 0),
+                1.,
+            ),
+        ),
+        (0.3, Shot("find-none")),
+        (0.8, Key("escape")),
+        (
+            0.1,
+            Until(
+                "Esc puts the bar away and the keyboard goes back to the reply box",
+                |d, _| d.find.is_none() && drawn(d, "find-bar").is_none(),
+                1.,
+            ),
+        ),
     ]);
     v
 }

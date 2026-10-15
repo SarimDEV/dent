@@ -530,11 +530,15 @@ impl Dent {
             s.items.len(),
             move |ix| said.get(ix).and_then(Item::plain),
         );
+        // ⌘F keeps up with a reply still arriving.
+        self.refresh_find(false, cx);
+        let find = self.find_bar(cx);
         let transcript = div()
             .relative()
             .flex_1()
             .min_h_0()
             .child(transcript)
+            .children(find)
             // A drag past the top or bottom scrolls the chat under it.
             .child(crate::select::region(
                 crate::select::area(&format!("chat/{}", s.id)),

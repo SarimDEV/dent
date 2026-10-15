@@ -15,6 +15,7 @@ mod context;
 mod data;
 mod diagram;
 mod ds;
+mod find;
 mod highlight;
 mod lightbox;
 mod live;
@@ -481,7 +482,8 @@ impl Render for Dent {
                 if this.close_lightbox(cx) || this.context.take().is_some() {
                 } else if this.palette.is_some() {
                     this.close_palette(window, cx);
-                } else if this.project_back(window, cx)
+                } else if this.close_find(window, cx)
+                    || this.project_back(window, cx)
                     || this.menu.take().is_some()
                     || std::mem::take(&mut this.meter_open)
                     || this.dismiss_completion(cx)
@@ -516,6 +518,17 @@ impl Render for Dent {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Search, window, cx| this.open_palette(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &app::FindInSession, window, cx| this.open_find(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &app::FindNext, window, cx| {
+                    this.step_find(false, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &app::FindPrev, window, cx| this.step_find(true, window, cx)),
+            )
             .on_action(|_: &app::Minimize, window, _| window.minimize_window())
             .on_action(|_: &app::Zoom, window, _| window.zoom_window())
             .on_action(cx.listener(|this, _: &SelectPrev, window, cx| {

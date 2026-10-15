@@ -45,6 +45,9 @@ actions!(
         InboxOpen,
         InboxClose,
         SideChat,
+        FindInSession,
+        FindNext,
+        FindPrev,
         Quit,
         Hide,
         HideOthers,
@@ -95,6 +98,10 @@ pub fn set_menus(cx: &mut App) {
                 MenuItem::os_action("Copy", input::Copy, OsAction::Copy),
                 MenuItem::os_action("Paste", input::Paste, OsAction::Paste),
                 MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
+                MenuItem::separator(),
+                MenuItem::action("Find…", FindInSession),
+                MenuItem::action("Find Next", FindNext),
+                MenuItem::action("Find Previous", FindPrev),
             ],
             disabled: false,
         },
@@ -138,6 +145,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-.", StopSession, None),
         KeyBinding::new("cmd-enter", SteerSend, None),
         KeyBinding::new("cmd-k", Search, None),
+        KeyBinding::new("cmd-f", FindInSession, None),
+        KeyBinding::new("cmd-g", FindNext, None),
+        KeyBinding::new("shift-cmd-g", FindPrev, None),
         KeyBinding::new("cmd-;", SideChat, None),
         KeyBinding::new("alt-cmd-up", SelectPrev, None),
         KeyBinding::new("alt-cmd-down", SelectNext, None),
@@ -224,6 +234,7 @@ pub enum Field {
     Comment,
     Search,
     Rename,
+    Find,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -499,6 +510,9 @@ pub struct Dent {
     pub lightbox: Option<crate::lightbox::Lightbox>,
     /// What's typed in a menu that searches (the project picker).
     pub menu_query: Entity<TextareaState>,
+    /// ⌘F's field, and what it found.
+    pub find_input: Entity<TextareaState>,
+    pub find: Option<crate::find::Find>,
     pub project_mode: crate::picker::Mode,
     /// A project being made or cloned, said in the picker meanwhile.
     pub project_busy: Option<String>,
@@ -786,6 +800,18 @@ impl Dent {
         )
         .detach();
         single_line(&rename_input, window, cx);
+        let find_input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 1)
+                .placeholder("Find in this session")
+        });
+        cx.subscribe_in(&find_input, window, |this, _, ev: &InputEvent, _, cx| {
+            if let InputEvent::Change = ev {
+                crate::find::query_changed(this, cx);
+            }
+        })
+        .detach();
+        single_line(&find_input, window, cx);
         let menu_query = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 1)
@@ -984,6 +1010,8 @@ impl Dent {
             menu_scroll: ScrollHandle::new(),
             menu_ix: None,
             menu_query,
+            find_input,
+            find: None,
             lightbox: None,
             project_mode: crate::picker::Mode::Pick,
             project_busy: None,
@@ -1439,6 +1467,10 @@ impl Dent {
         {
             self.defaults.project = self.project_for(&s.cwd);
         }
+        // Find belongs to the session it searched.
+        if self.find.take().is_some() {
+            crate::select::set_find(None);
+        }
         // Each session keeps its own draft.
         let text = self.composer.read(cx).value().to_string();
         if let Some(old) = &self.selected {
@@ -1885,6 +1917,14 @@ impl Dent {
             return true;
         }
         let plain = !k.modifiers.modified();
+        // In ⌘F's field, Return goes to the next match and ⇧Return back.
+        if k.key == "enter"
+            && !k.modifiers.platform
+            && self.find_input.read(cx).focus_handle(cx).is_focused(window)
+        {
+            self.step_find(k.modifiers.shift, window, cx);
+            return true;
+        }
         // A picture open large: Space closes it (Esc is the Escape action's),
         // ← and → step through its set, and plain keys don't reach what's
         // behind it.
@@ -2208,6 +2248,8 @@ impl Dent {
             Some(Field::Search)
         } else if on(&self.rename_input) {
             Some(Field::Rename)
+        } else if on(&self.find_input) {
+            Some(Field::Find)
         } else {
             None
         }
@@ -2221,6 +2263,7 @@ impl Dent {
             Field::Comment => &self.comment_input,
             Field::Search => &self.search,
             Field::Rename => &self.rename_input,
+            Field::Find => &self.find_input,
         }
     }
 
