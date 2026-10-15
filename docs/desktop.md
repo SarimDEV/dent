@@ -63,7 +63,7 @@ The viewer shows, as tabs, everything the open session made or changed ([0037](d
   - **Widths:** desktop, tablet (768) and phone (390), the narrow ones framed in the panel.
   - **Point:** click anything on the page, and the element (tag, text, selector) rides along with your next message as a chip you can remove.
   - **Errors:** page errors appear in a bar under the page with **Ask to fix**, which sends the error to the agent straight away.
-  - **Dev servers:** an address like `http://localhost:5173` in a command's output or a reply becomes a card and a live page, loaded by the address the server answers on (127.0.0.1 or ::1), since WebKit here won't load `localhost` by name. A running server shows "running" instead of versions. Links to other sites open in your browser.
+  - **Dev servers:** an address like `http://localhost:5173` in a command's output or a reply becomes a card and a live page, loaded by the address the server answers on (127.0.0.1 or ::1), since WebKit here won't load `localhost` by name. A running server shows "Running" instead of versions. Links to other sites open in your browser.
   - **Pop out:** a page can move to its own window and back. The panel says where it went; closing the window brings it back.
   - **Covered pages:** when search or a menu has to cover the page, dent shows the page's last snapshot in its place.
   - Reload and open in your browser.
@@ -139,7 +139,7 @@ A panel shows the live view of the session's agent browser (see Daemon, Browser 
 
 ## Side chat and sharing
 
-- **Side chat** (Cmd/Ctrl+;, or the button beside Fork): ask a question with the session's full context without adding to it. It opens as a tab in the right pane. Each question runs a short-lived Claude Code that resumes the conversation as a fork, read-only (no commands, no edits), so the session itself never sees it; questions and answers are kept in the session's log, apart from the conversation. **Make it a fork** turns an answer into a new session that carries on from that forked conversation. A question still open when dent restarts is marked unanswered.
+- **Side chat** (Cmd/Ctrl+;, or the button beside Fork): ask a question with the session's full context without adding to it. It opens as a tab in the right pane. Each question runs a short-lived Claude Code that resumes the conversation as a fork, read-only (no commands, no edits), so the session itself never sees it; questions and answers are kept in the session's log, apart from the conversation. **Fork from here**, under an answer, turns it into a new session that carries on from that forked conversation. A question still open when dent restarts is marked unanswered.
 - **Sharing:** export a session as Markdown, HTML or JSON, or create a read-only link through the hub. The decryption key rides in the link itself, so the hub still cannot read it.
 - **Move to machine:** one command moves the current session to another machine, with a preview of what will be copied.
 

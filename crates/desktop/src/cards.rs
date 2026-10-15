@@ -233,7 +233,7 @@ pub fn meter(used: u64, max: u64, compacts_at: Option<u64>, parts: &[Part], t: &
                     .child(
                         div()
                             .ty(LABEL)
-                            .text_color(t.faint)
+                            .text_color(t.quiet)
                             .child("Loaded only when needed"),
                     )
                     .children(later.iter().map(|p| row(None, p.name.clone(), p.tokens))),

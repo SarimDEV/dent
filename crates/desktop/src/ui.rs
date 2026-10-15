@@ -248,6 +248,28 @@ pub fn action(
     )
 }
 
+/// The send of a prompt box (a session's reply, a new session's task, a
+/// side question): one square with an arrow, ink when it can go. `what`
+/// names it on hover with its key. The caller gives `el` its id, and the
+/// press only when ready.
+pub fn send(el: Stateful<Div>, ready: Ready, what: &'static str, t: &Theme) -> impl IntoElement {
+    action(
+        el.relative()
+            .flex_none()
+            .size(px(size::CONTROL))
+            .rounded(px(radius::MD))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(ready == Ready::Yes, |d| {
+                d.with_tip(tip(what, Some("↩"), *t))
+            }),
+        ready,
+        t,
+        |d, fg| d.child(icon("arrow-up", 15., fg)),
+    )
+}
+
 /// A small, flat, text-only button for inline actions.
 pub fn ghost(
     id: impl Into<SharedString>,
@@ -307,8 +329,8 @@ pub fn off_owned(el: Stateful<Div>, why: String, t: &Theme) -> Stateful<Div> {
         .with_tip(tip_owned(why, *t))
 }
 
-/// A quiet keyboard hint. Hints give way first: they shrink far faster
-/// than the controls beside them.
+/// A quiet keyboard hint, set like the keys it names. Hints give way
+/// first: they shrink far faster than the controls beside them.
 pub fn hint(text: &str, t: &Theme) -> Div {
     div()
         .min_w_0()
@@ -317,8 +339,15 @@ pub fn hint(text: &str, t: &Theme) -> Div {
         .whitespace_nowrap()
         .text_ellipsis()
         .ty(LABEL)
-        .text_color(t.faint)
+        .text_color(t.quiet)
         .child(text.to_string())
+}
+
+/// A quiet sentence that explains what's beside it ("Queued · sends when
+/// this reply finishes"). Sentences are read, so they're never mono or
+/// faint: those are for keys, paths and counts, and for separators.
+pub fn note(text: impl Into<SharedString>, t: &Theme) -> Div {
+    div().ty(UI).text_color(t.quiet).child(text.into())
 }
 
 /// Uppercase section label, with an optional count, at its natural

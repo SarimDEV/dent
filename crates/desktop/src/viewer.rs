@@ -14,10 +14,10 @@ use crate::ui::RevealOnHover;
 
 use crate::app::{Dent, Tab, Viewport};
 use crate::data::{FileDiff, Kind, Line, Session};
-use crate::ds::{CODE, LABEL, Typed, UI, radius, size, space};
+use crate::ds::{CODE, LABEL, READING, Typed, UI, radius, size, space};
 use crate::markdown;
 use crate::theme::{Status, status_square};
-use crate::ui::{Ready, action, button, ghost, icon, icon_button, kbd, probe, tip};
+use crate::ui::{Ready, button, ghost, icon, icon_button, probe, tip};
 
 /// Where a file the agent made is on disk: paths are kept as it wrote them,
 /// so `~/…` and relative ones are resolved here.
@@ -650,21 +650,13 @@ impl Dent {
         let toolbar = self
             .toolbar()
             .when(server, |d| {
-                d.pl(px(space::S3)).child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(space::S1H))
-                        .child(status_square(
-                            if down { Status::Idle } else { Status::Done },
-                            &t,
-                        ))
-                        .child(div().ty(LABEL).text_color(t.ink).child(if down {
-                            "stopped"
-                        } else {
-                            "running"
-                        })),
-                )
+                // A state, not a session's status: a quiet word, no square.
+                d.pl(px(space::S3))
+                    .child(div().ty(LABEL).text_color(t.quiet).child(if down {
+                        "Stopped"
+                    } else {
+                        "Running"
+                    }))
             })
             .when(!server, |d| d.children(self.versions(&a, cx)))
             .child(div().w(px(1.)).h(px(16.)).mx(px(space::S1)).bg(t.hairline))
@@ -938,7 +930,7 @@ impl Dent {
                         .text_color(t.ink)
                         .child("Click anything on the page to point the agent at it."),
                 )
-                .child(kbd("esc to cancel", &t))
+                .child(crate::ui::hint("esc to cancel", &t).flex_none())
         });
         let console = errors.first().cloned().map(|e| {
             let more = errors.len().saturating_sub(1);
@@ -1987,18 +1979,9 @@ impl Dent {
                                     .items_center()
                                     .gap(px(space::S2))
                                     .child(
-                                        div()
-                                            .flex_1()
-                                            .ty(LABEL)
-                                            .text_color(t.faint)
-                                            .child("comments collect into one review"),
+                                        crate::ui::note("Comments collect into one review", &t)
+                                            .flex_1(),
                                     )
-                                    .child(ghost("cancel-comment", "Cancel", &t).on_press(
-                                        cx.listener(|this, _, _, cx| {
-                                            this.commenting = None;
-                                            cx.notify();
-                                        }),
-                                    ))
                                     .child(
                                         button("add-comment", "Add comment", true, &t)
                                             .relative()
@@ -2006,7 +1989,13 @@ impl Dent {
                                                 this.add_comment(window, cx)
                                             }))
                                             .child(probe(&self.probes, "add-comment")),
-                                    ),
+                                    )
+                                    .child(ghost("cancel-comment", "Cancel", &t).on_press(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.commenting = None;
+                                            cx.notify();
+                                        }),
+                                    )),
                             ),
                     ),
                 )
@@ -2074,28 +2063,34 @@ impl Dent {
         for (i, a) in s.asides.iter().enumerate() {
             let _place = crate::select::item(area, i);
             let question = div().flex().justify_end().child(
+                // Your words look the same as in the chat.
                 div()
                     .max_w(relative(0.85))
-                    .px(px(space::S3))
-                    .py(px(space::S2))
+                    .px(px(space::S4))
+                    .py(px(space::S2 + 2.))
                     .rounded(px(radius::LG))
                     .bg(t.raised)
                     .border_1()
                     .border_color(t.hairline)
-                    .ty(UI)
+                    .ty(READING)
                     .text_color(t.ink)
                     .child(a.question.clone()),
             );
             let answer = match &a.answer {
+                // Working, as the chat's working line says it.
                 None => div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S2))
                     .ty(UI)
-                    .text_color(t.quiet)
-                    .child("Thinking…")
+                    .text_color(t.ink)
+                    .child(status_square(Status::Working, &t))
+                    .child("Working")
                     .into_any_element(),
                 Some((text, true, _)) => div()
                     .flex()
                     .gap(px(space::S2))
-                    .child(div().pt(px(3.)).child(icon("circle-alert", 13., t.needs.0)))
+                    .child(div().pt(px(3.)).child(icon("circle-alert", 13., t.quiet)))
                     .child(
                         div()
                             .flex_1()
@@ -2127,13 +2122,14 @@ impl Dent {
                         .child(body)
                         .when(agent.is_some(), |d| {
                             d.child(
+                                // Under an answer, as under a message in the chat.
                                 div().flex().child(
-                                    button(
+                                    ghost(
                                         SharedString::from(format!("promote-{i}")),
-                                        "Make it a fork",
-                                        false,
+                                        "Fork from here",
                                         &t,
                                     )
+                                    .ml(px(-space::S2))
                                     .relative()
                                     .with_tip(tip(
                                         "A new session that carries on from this answer",
@@ -2157,64 +2153,51 @@ impl Dent {
                     .child(answer),
             );
         }
-        let input =
-            div()
-                .flex_none()
-                .p(px(space::S3))
-                .border_t_1()
-                .border_color(t.hairline)
-                .child(
-                    div()
-                        .px(px(space::S3))
-                        .py(px(space::S2))
-                        .rounded(px(radius::LG))
-                        .bg(t.raised)
-                        .border_1()
-                        .border_color(t.hairline)
-                        .ty(UI)
-                        .text_color(t.ink)
-                        .relative()
-                        .flex()
-                        .items_end()
-                        .gap(px(space::S2))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(Textarea::new(&self.aside_input)),
+        let input = div()
+            .flex_none()
+            .p(px(space::S3))
+            .border_t_1()
+            .border_color(t.hairline)
+            .child(
+                // The chat's composer, narrower.
+                div()
+                    .px(px(space::S4))
+                    .py(px(space::S2))
+                    .rounded(px(radius::XL))
+                    .bg(t.raised)
+                    .border_1()
+                    .border_color(t.hairline)
+                    .ty(READING)
+                    .text_color(t.ink)
+                    .relative()
+                    .flex()
+                    .items_end()
+                    .gap(px(space::S2))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Textarea::new(&self.aside_input)),
+                    )
+                    .child({
+                        let ready = if self.aside_input.read(cx).value().trim().is_empty() {
+                            Ready::No("Type a question first")
+                        } else {
+                            Ready::Yes
+                        };
+                        crate::ui::send(
+                            div().id("aside-send").when(ready == Ready::Yes, |d| {
+                                d.on_press(
+                                    cx.listener(|this, _, window, cx| this.ask_aside(window, cx)),
+                                )
+                            }),
+                            ready,
+                            "Ask",
+                            &t,
                         )
-                        .child({
-                            let ready = if self.aside_input.read(cx).value().trim().is_empty() {
-                                Ready::No("Type a question first")
-                            } else {
-                                Ready::Yes
-                            };
-                            action(
-                                div()
-                                    .id("aside-send")
-                                    .size(px(size::CONTROL))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(radius::MD))
-                                    .when(ready == Ready::Yes, |d| {
-                                        d.on_press(cx.listener(|this, _, window, cx| {
-                                            this.ask_aside(window, cx)
-                                        }))
-                                        .with_tip(tip(
-                                            "Ask",
-                                            Some("↩"),
-                                            t,
-                                        ))
-                                    }),
-                                ready,
-                                &t,
-                                |d, fg| d.child(icon("arrow-up", 15., fg)),
-                            )
-                        })
-                        .child(probe(&self.probes, "aside-input")),
-                );
+                    })
+                    .child(probe(&self.probes, "aside-input")),
+            );
         div()
             .flex_1()
             .min_h_0()
@@ -2302,7 +2285,7 @@ impl Dent {
                 .flex()
                 .items_center()
                 .gap(px(space::S1))
-                // The Mac order: the destructive choice leads, Cancel trails.
+                // As everywhere: the choice first, Cancel after it.
                 .child(
                     crate::ui::button("discard-file-yes", "Discard changes", false, &t)
                         .relative()

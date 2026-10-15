@@ -1316,16 +1316,9 @@ fn copy_button(
     let md = r.md.clone();
     let owner = r.owner;
     let probes = r.md.probes();
-    div()
-        .id(SharedString::from(key.clone()))
+    crate::ui::ghost(key.clone(), if copied { "Copied" } else { label }, t)
         .relative()
-        .px(px(space::S1H))
-        .rounded(px(radius::SM))
-        .ty(LABEL)
-        .text_color(if copied { t.ink } else { t.quiet })
-        .cursor_pointer()
-        .hover(|d| d.bg(t.hover()).text_color(t.ink))
-        .child(if copied { "Copied" } else { label })
+        .when(copied, |d| d.text_color(t.ink))
         .child(crate::ui::probe(&probes, key.clone()))
         .on_press(move |_, _, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(text()));

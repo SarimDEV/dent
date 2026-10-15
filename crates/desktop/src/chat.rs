@@ -26,8 +26,7 @@ use crate::ds::{
 use crate::markdown;
 use crate::theme::{self, Status, status_square};
 use crate::ui::{
-    Ready, action, button, floating, ghost, hint, icon, icon_button, kbd, menu_row, probe, tip,
-    tip_owned,
+    Ready, button, floating, ghost, hint, icon, icon_button, kbd, menu_row, probe, tip, tip_owned,
 };
 
 impl Dent {
@@ -540,8 +539,16 @@ impl Dent {
                         .child("It changed files. Undo those too before trying again?"),
                 )
                 .child(div().flex_1())
-                // The Mac order: the destructive choice leads, the default
-                // trails, so Return never lands on it.
+                // As the agent asks: the main choice first, the other
+                // after it, then Cancel.
+                .child(
+                    button("try-again-keep", "Try again", true, &t)
+                        .relative()
+                        .on_press(
+                            cx.listener(move |this, _, _, cx| this.try_again(&s2, Some(false), cx)),
+                        )
+                        .child(probe(&self.probes, "try-again-keep")),
+                )
                 .child(
                     button("try-again-files", "Undo them and try again", false, &t)
                         .relative()
@@ -557,14 +564,6 @@ impl Dent {
                             cx.notify();
                         },
                     )),
-                )
-                .child(
-                    button("try-again-keep", "Try again", true, &t)
-                        .relative()
-                        .on_press(
-                            cx.listener(move |this, _, _, cx| this.try_again(&s2, Some(false), cx)),
-                        )
-                        .child(probe(&self.probes, "try-again-keep")),
                 )
         } else {
             let sid = s.id.clone();
@@ -992,23 +991,20 @@ impl Dent {
                                 )
                                 .when(long, |d| {
                                     d.child(
-                                        div()
-                                            .id(SharedString::from(format!("fold-{ix}")))
-                                            .ty(UI)
-                                            .text_color(t.quiet)
-                                            .cursor_pointer()
-                                            .hover(|d| d.text_color(t.ink))
+                                        div().flex().child(
+                                            ghost(
+                                                SharedString::from(format!("fold-{ix}")),
+                                                if open { "Show less" } else { "Show full message" },
+                                                &t,
+                                            )
+                                            .ml(px(-space::S2))
                                             .on_press(cx.listener(move |this, _, _, cx| {
                                                 if !this.expanded.remove(&key) {
                                                     this.expanded.insert(key.clone());
                                                 }
                                                 cx.notify();
-                                            }))
-                                            .child(if open {
-                                                "Show less"
-                                            } else {
-                                                "Show full message"
-                                            }),
+                                            })),
+                                        ),
                                     )
                                 })
                             }),
@@ -1027,39 +1023,8 @@ impl Dent {
                                     .justify_end()
                                     .items_center()
                                     .gap(px(space::S2))
-                                    // The Mac order: the destructive choice leads, the
-                                    // default trails, so Return never lands on it.
-                                    .when(!busy && has_files, |d| {
-                                        d.child(
-                                            button(
-                                                SharedString::from(format!("rewind-files-{ix}")),
-                                                "Go back and undo file changes",
-                                                false,
-                                                &t,
-                                            )
-                                            .relative()
-                                            .on_press(cx.listener(move |this, _, window, cx| {
-                                                this.rewind(&m2, true, window, cx)
-                                            }))
-                                            .child(
-                                                probe(&self.probes, format!("rewind-files-{ix}")),
-                                            ),
-                                        )
-                                        .child(div().flex_1())
-                                    })
-                                    .child(
-                                        ghost(
-                                            SharedString::from(format!("rewind-cancel-{ix}")),
-                                            "Cancel",
-                                            &t,
-                                        )
-                                        .on_press(
-                                            cx.listener(|this, _, _, cx| {
-                                                this.rewinding = None;
-                                                cx.notify();
-                                            }),
-                                        ),
-                                    )
+                                    // As the agent asks: the main choice first, the
+                                    // other after it, then Cancel.
                                     .when(!busy, |d| {
                                         d.child(
                                             button(
@@ -1076,7 +1041,37 @@ impl Dent {
                                                 probe(&self.probes, format!("rewind-chat-{ix}")),
                                             ),
                                         )
-                                    }),
+                                    })
+                                    .when(!busy && has_files, |d| {
+                                        d.child(
+                                            button(
+                                                SharedString::from(format!("rewind-files-{ix}")),
+                                                "Go back and undo file changes",
+                                                false,
+                                                &t,
+                                            )
+                                            .relative()
+                                            .on_press(cx.listener(move |this, _, window, cx| {
+                                                this.rewind(&m2, true, window, cx)
+                                            }))
+                                            .child(
+                                                probe(&self.probes, format!("rewind-files-{ix}")),
+                                            ),
+                                        )
+                                    })
+                                    .child(
+                                        ghost(
+                                            SharedString::from(format!("rewind-cancel-{ix}")),
+                                            "Cancel",
+                                            &t,
+                                        )
+                                        .on_press(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.rewinding = None;
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    ),
                             )
                         } else {
                             let (fsid, fmsg) = (s.id.clone(), msg.clone());
@@ -1787,7 +1782,7 @@ impl Dent {
                                 )
                             })
                     }))
-                    .child(div().ty(LABEL).text_color(t.faint).child(hint))
+                    .child(crate::ui::note(hint, &t))
                     .into_any_element()
             }
             Item::Note { icon: name, text } => {
@@ -1923,7 +1918,7 @@ impl Dent {
                                 .child(format!("+{added} −{removed}")),
                         )
                     })
-                    .child(div().ty(UI).text_color(t.ink).child("Review"))
+                    .child(div().ty(UI).child("Review"))
                     .child(probe(&self.probes, format!("changed-{ix}")))
                     .into_any_element()
             }
@@ -1959,16 +1954,14 @@ impl Dent {
                             .flex()
                             .items_center()
                             .gap(px(space::S2))
-                            .child(
-                                div()
-                                    .ty(LABEL)
-                                    .text_color(t.faint)
-                                    .child(if ahead.is_some() {
-                                        "Queued · sends after the one above"
-                                    } else {
-                                        "Queued · sends when this reply finishes"
-                                    }),
-                            )
+                            .child(crate::ui::note(
+                                if ahead.is_some() {
+                                    "Queued · sends after the one above"
+                                } else {
+                                    "Queued · sends when this reply finishes"
+                                },
+                                &t,
+                            ))
                             .when_some(ahead, |d, before| {
                                 d.child(
                                     ghost(
@@ -2067,7 +2060,7 @@ impl Dent {
                         .child(format!("replaced by v{}", version + 1)),
                 )
                 .when(showing, |d| {
-                    d.child(div().ty(UI).text_color(t.ink).child("Showing"))
+                    d.child(div().text_color(t.faint).child("showing"))
                 })
                 .when_some(review_button, |d, b| d.child(b))
                 .child(probe(&self.probes, format!("made-{art}-{version}")))
@@ -2156,15 +2149,28 @@ impl Dent {
                 )
             })
             .when_some(review_button, |d, b| d.child(b))
-            // "Open" is what a press on the card does; "Showing" is only
-            // a state, quieter than the Review beside it.
-            .child(
+            // Open does what a press on the card does; once it's open,
+            // "Showing" is only a state, set as one.
+            .child(if showing {
                 div()
                     .flex_none()
-                    .ty(UI)
-                    .text_color(if showing { t.faint } else { t.quiet })
-                    .child(if showing { "Showing" } else { "Open" }),
-            )
+                    .px(px(space::S2))
+                    .ty(LABEL)
+                    .text_color(t.quiet)
+                    .child("Showing")
+                    .into_any_element()
+            } else {
+                ghost(
+                    SharedString::from(format!("open-{art}-{version}")),
+                    "Open",
+                    &t,
+                )
+                .on_press(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.open_art(art, Some(version), cx)
+                }))
+                .into_any_element()
+            })
             .child(probe(&self.probes, format!("made-{art}-{version}")))
             .into_any_element()
     }
@@ -2220,24 +2226,16 @@ impl Dent {
             } else {
                 Ready::Yes
             };
-            action(
+            crate::ui::send(
                 div()
                     .id("send")
                     .child(probe(&self.probes, "send"))
-                    .relative()
-                    .flex_none()
-                    .size(px(size::CONTROL))
-                    .rounded(px(radius::MD))
-                    .flex()
-                    .items_center()
-                    .justify_center()
                     .when(ready == Ready::Yes, |d| {
                         d.on_press(cx.listener(|this, _, window, cx| this.send(window, cx)))
-                            .with_tip(tip("Send", Some("↩"), t))
                     }),
                 ready,
+                "Send",
                 &t,
-                |d, fg| d.child(icon("arrow-up", 15., fg)),
             )
             .into_any_element()
         };
@@ -2876,38 +2874,17 @@ impl Dent {
         } else {
             Ready::Yes
         };
-        let label = if self.creating() {
-            "Starting…"
-        } else {
-            "Start"
-        };
-        let start = action(
+        // The same send as a session's reply box.
+        let start = crate::ui::send(
             div()
                 .id("start")
                 .child(probe(&self.probes, "start"))
-                .relative()
-                .flex_none()
-                .h(px(size::CONTROL))
-                .px(px(space::S3))
-                .flex()
-                .items_center()
-                .gap(px(space::S2))
-                .rounded(px(radius::MD))
-                .ty(UI)
-                .font_weight(FontWeight::MEDIUM)
                 .when(ready == Ready::Yes, |d| {
                     d.on_press(cx.listener(|this, _, window, cx| this.start(window, cx)))
                 }),
             ready,
+            "Start",
             &t,
-            move |d, fg| {
-                // The key shows only when pressing it would do something.
-                d.text_color(fg)
-                    .child(label)
-                    .when(ready == Ready::Yes, |d| {
-                        d.child(div().ty(LABEL).opacity(0.7).child("↩"))
-                    })
-            },
         );
         div()
             .flex_1()
@@ -3045,14 +3022,13 @@ impl Dent {
                             ),
                     )
                     .child(if open {
-                        // A status square and its word, as status shows everywhere.
+                        // Unavailable: a quiet tag naming why, in place of
+                        // the time, and no signal colour.
                         div()
                             .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(px(space::S1H))
-                            .child(div().size(px(8.)).bg(t.working.0))
-                            .child(div().ty(LABEL).text_color(t.quiet).child("In use"))
+                            .ty(LABEL)
+                            .text_color(t.quiet)
+                            .child("In use")
                     } else {
                         div()
                             .flex_none()
@@ -3838,18 +3814,19 @@ impl Dent {
             )
             .when(long, |d| {
                 d.child(
-                    div()
-                        .id(SharedString::from(format!("report-{ix}-{call}")))
-                        .ty(UI)
-                        .text_color(t.quiet)
-                        .cursor_pointer()
-                        .hover(|d| d.text_color(t.ink))
-                        .on_press(fold)
-                        .child(if open {
-                            "Show less"
-                        } else {
-                            "Show full report"
-                        }),
+                    div().flex().child(
+                        ghost(
+                            SharedString::from(format!("report-{ix}-{call}")),
+                            if open {
+                                "Show less"
+                            } else {
+                                "Show full report"
+                            },
+                            &t,
+                        )
+                        .ml(px(-space::S2))
+                        .on_press(fold),
+                    ),
                 )
             })
             .into_any_element()
@@ -4058,10 +4035,7 @@ pub fn fit_footer(room: f32, chips: [(String, String); 3], context: bool, hint: 
 /// The line under an approval or a plan saying how to answer by key: the
 /// keys themselves while its card has the keyboard, else how to get there.
 fn ask_keys(keyed: bool, on: &'static str, off: &'static str, t: &theme::Theme) -> Div {
-    div()
-        .ty(LABEL)
-        .text_color(if keyed { t.ink } else { t.quiet })
-        .child(if keyed { on } else { off })
+    crate::ui::note(if keyed { on } else { off }, t).when(keyed, |d| d.text_color(t.ink))
 }
 
 /// For the last reply of a turn that has finished: when it finished, how

@@ -1646,7 +1646,7 @@ fn checks() -> Vec<(f32, Act)> {
         (
             0.1,
             Until(
-                "Make it a fork opens a session that carries on from the answer",
+                "Fork from here opens a session that carries on from the answer",
                 |d, _| {
                     current(d).is_some_and(|s| {
                         s.title.starts_with("Fork of")
