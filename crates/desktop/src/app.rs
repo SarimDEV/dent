@@ -303,6 +303,17 @@ pub struct Toast {
     pub at: Instant,
 }
 
+/// One of your messages brought back with ↑.
+pub struct Recall {
+    pub session: String,
+    /// How far back: 1 is your newest message.
+    pub back: usize,
+    /// The composer's text as it came back; once edited, arrows move the caret again.
+    pub shown: String,
+    /// Files it attached, to take off again if you step past it.
+    pub atts: Vec<String>,
+}
+
 /// Something riding along with the next message.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Attachment {
@@ -471,6 +482,9 @@ pub struct Dent {
     /// The session whose name is being edited in the header.
     pub renaming: Option<String>,
     pub drafts: HashMap<String, String>,
+    /// A message of yours brought back to the composer with ↑, while it's
+    /// shown as it came back: ↑ and ↓ step on through them.
+    pub recall: Option<Recall>,
     pub defaults: Defaults,
     pub menu: Option<Menu>,
     /// The model menu shows pinned older versions.
@@ -956,7 +970,8 @@ impl Dent {
             aside_input,
             rename_input: rename_input.clone(),
             renaming: None,
-            drafts: HashMap::new(),
+            drafts: prefs.drafts.clone().into_iter().collect(),
+            recall: None,
             defaults: Defaults {
                 project: prefs.project.clone(),
                 model: prefs.model.clone(),
@@ -2129,6 +2144,14 @@ impl Dent {
         {
             cx.notify();
         }
+        // Up in an empty composer brings back what you sent, to edit.
+        if plain
+            && in_composer
+            && matches!(k.key.as_str(), "up" | "down")
+            && self.step_recall(k.key == "up", window, cx)
+        {
+            return true;
+        }
         // Alt+Up and Alt+Down move between your own messages, while the
         // composer has nothing to edit.
         if k.modifiers.alt
@@ -2734,6 +2757,17 @@ impl Dent {
     }
 
     /// Remember the current defaults and layout for next time, when they change.
+    /// The open session's draft is what its composer holds right now.
+    pub fn sync_draft(&mut self, cx: &App) {
+        let Some(id) = &self.selected else { return };
+        let text = self.composer.read(cx).value();
+        if text.trim().is_empty() {
+            self.drafts.remove(id);
+        } else if self.drafts.get(id).is_none_or(|d| *d != *text) {
+            self.drafts.insert(id.clone(), text.to_string());
+        }
+    }
+
     pub fn save_prefs(&mut self) {
         let p = crate::prefs::Prefs {
             project: self.defaults.project.clone(),
@@ -2765,6 +2799,12 @@ impl Dent {
                         c.iter().map(|(a, n)| (a.to_string(), *n)).collect(),
                     )
                 })
+                .collect(),
+            drafts: self
+                .drafts
+                .iter()
+                .filter(|(_, d)| !d.trim().is_empty())
+                .map(|(id, d)| (id.clone(), d.clone()))
                 .collect(),
         };
         if self.saved_prefs.as_ref() != Some(&p) {
@@ -2821,6 +2861,7 @@ impl Dent {
         let message = with_attachments(&text, &atts);
         self.composer.update(cx, |c, cx| put(c, "", window, cx));
         self.drafts.remove(&id);
+        self.recall = None;
         self.just_sent = Some(Instant::now());
         // Send wakes up again when the pause ends, whatever else happens.
         cx.spawn(async move |this, cx| {
@@ -3236,31 +3277,120 @@ impl Dent {
         });
         self.rewinding = None;
         if let Some(text) = text {
-            // The words come back to the box, and attached files come back
-            // attached; other attachment lines stay behind.
-            for p in text.lines().filter_map(|l| l.strip_prefix("› Attached · ")) {
-                let full = if p.starts_with('/') {
-                    std::path::PathBuf::from(p)
-                } else {
-                    std::path::Path::new(&cwd).join(p)
-                };
-                let path = full.display().to_string();
-                if full.exists()
-                    && !self
-                        .attachments
-                        .iter()
-                        .any(|a| matches!(a, Attachment::File { path: p } if *p == path))
-                {
-                    self.attachments.push(Attachment::File { path });
-                }
+            self.restore_message(&text, &cwd, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// A message you sent, back in the composer to edit: the words come
+    /// back to the box, and attached files come back attached; other
+    /// attachment lines stay behind. Returns the files it attached.
+    fn restore_message(
+        &mut self,
+        text: &str,
+        cwd: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<String> {
+        let mut added = Vec::new();
+        for p in text.lines().filter_map(|l| l.strip_prefix("› Attached · ")) {
+            let full = if p.starts_with('/') {
+                std::path::PathBuf::from(p)
+            } else {
+                std::path::Path::new(cwd).join(p)
+            };
+            let path = full.display().to_string();
+            if full.exists()
+                && !self
+                    .attachments
+                    .iter()
+                    .any(|a| matches!(a, Attachment::File { path: p } if *p == path))
+            {
+                self.attachments
+                    .push(Attachment::File { path: path.clone() });
+                added.push(path);
             }
-            let words: Vec<&str> = text.lines().filter(|l| !l.starts_with("› ")).collect();
-            self.composer.update(cx, |c, cx| {
-                put(c, words.join("\n"), window, cx);
-                c.focus(window, cx);
+        }
+        let words: Vec<&str> = text.lines().filter(|l| !l.starts_with("› ")).collect();
+        self.composer.update(cx, |c, cx| {
+            put(c, words.join("\n"), window, cx);
+            c.focus(window, cx);
+        });
+        added
+    }
+
+    /// ↑ and ↓ in an empty composer, or while it shows a message brought
+    /// back unchanged: a waiting message comes out of the queue first,
+    /// then your messages, newest first. ↓ past the newest empties the box.
+    /// Returns whether the key was used.
+    fn step_recall(&mut self, up: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(s) = self.current_rc() else {
+            return false;
+        };
+        let value = self.composer.read(cx).value().to_string();
+        let browsing = self
+            .recall
+            .as_ref()
+            .filter(|r| r.session == s.id && r.shown == value)
+            .map(|r| r.back);
+        let empty = value.is_empty() && self.attachments.is_empty();
+        if browsing.is_none() && !(up && empty) {
+            return false;
+        }
+        // A message of several lines: the arrows walk its lines first.
+        let caret = self.composer.read(cx).cursor().min(value.len());
+        let (before, after) = value.split_at(caret);
+        if if up {
+            before.contains('\n')
+        } else {
+            after.contains('\n')
+        } {
+            return false;
+        }
+        if up
+            && browsing.is_none()
+            && let Some((msg, text)) = s.items.iter().rev().find_map(|i| match i {
+                Item::Queued { id, text } => Some((id.clone(), text.clone())),
+                _ => None,
+            })
+        {
+            self.unqueue(&s.id, &msg, &text, window, cx);
+            return true;
+        }
+        let mine: Vec<&str> = s
+            .items
+            .iter()
+            .rev()
+            .filter_map(|i| match i {
+                Item::User { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let back = browsing.unwrap_or(0);
+        let to = if up { back + 1 } else { back.saturating_sub(1) };
+        if up && to > mine.len() {
+            // Already at your first message: stay on it.
+            return !mine.is_empty();
+        }
+        // What the last step attached goes with it.
+        if let Some(r) = self.recall.take() {
+            self.attachments
+                .retain(|a| !matches!(a, Attachment::File { path } if r.atts.contains(path)));
+        }
+        if to == 0 {
+            self.composer.update(cx, |c, cx| put(c, "", window, cx));
+        } else {
+            let atts = self.restore_message(mine[to - 1], &s.cwd, window, cx);
+            let shown = self.composer.read(cx).value().to_string();
+            self.recall = Some(Recall {
+                session: s.id.clone(),
+                back: to,
+                shown,
+                atts,
             });
         }
         cx.notify();
+        true
     }
 
     /// A new session carrying on from this one: everything so far, or up to

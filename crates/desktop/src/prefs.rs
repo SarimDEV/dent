@@ -18,6 +18,8 @@ pub struct Prefs {
     /// Files opened from links in each session's viewer, by path.
     pub opened: std::collections::BTreeMap<String, Vec<String>>,
     pub closed_tabs: std::collections::BTreeMap<String, std::collections::BTreeMap<String, usize>>,
+    /// What you'd typed in each session and not sent, so quitting loses nothing.
+    pub drafts: std::collections::BTreeMap<String, String>,
 }
 
 fn path() -> std::path::PathBuf {

@@ -230,6 +230,7 @@ impl Render for Dent {
                 .update(cx, |c, cx| c.set_placeholder(want, window, cx));
         }
         self.inbox_focused = self.inbox_focus.is_focused(window);
+        self.sync_draft(cx);
         if self.menu.is_none() && !self.dragging && !self.dragging_sidebar && self.walk.is_none() {
             self.save_prefs();
         }
