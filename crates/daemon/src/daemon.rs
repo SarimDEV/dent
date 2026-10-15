@@ -36,6 +36,8 @@ pub enum Live {
         session: String,
         commands: Vec<dent_protocol::Command>,
     },
+    /// Anything else that's live and never logged.
+    Out(dent_protocol::Out),
 }
 
 pub struct Daemon {
@@ -196,6 +198,11 @@ impl Daemon {
             session: session.into(),
             commands: self.commands(Some(session)),
         }));
+    }
+
+    /// Tell every client something live that isn't logged.
+    pub fn tell(&self, out: dent_protocol::Out) {
+        let _ = self.live.send(Arc::new(Live::Out(out)));
     }
 
     /// Change what a session's agent is known to offer.

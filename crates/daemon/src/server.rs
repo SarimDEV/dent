@@ -204,6 +204,14 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             d.command(&session, Op::SetPermission(permission)).await?;
             Reply::Ok
         }
+        Request::Act {
+            session,
+            command,
+            act,
+        } => {
+            d.command(&session, Op::Act { command, act }).await?;
+            Reply::Ok
+        }
         Request::SetEffort { session, effort } => {
             d.command(&session, Op::SetEffort(effort)).await?;
             Reply::Ok
@@ -473,6 +481,7 @@ async fn subscribe(
                             session: session.clone(),
                             commands: commands.clone(),
                         },
+                        Live::Out(out) => out.clone(),
                     };
                     if tx.send(encode(0, &msg)).is_err() {
                         return;

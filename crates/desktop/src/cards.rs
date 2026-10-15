@@ -8,14 +8,14 @@
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
-use dent_protocol::{Activity, Bar, CommandOutcome, Part, View};
+use dent_protocol::{Act, Activity, Bar, CommandOutcome, Field, Mark, Part, Row, Section, View};
 
 use crate::app::{Dent, command_key};
 use crate::data::Session;
 use crate::ds::{CODE, LABEL, Typed, UI, motion, radius, space};
 use crate::markdown;
 use crate::theme::Theme;
-use crate::ui::{Arrive, From, Press, Tipped, ghost, icon, probe, tip_owned};
+use crate::ui::{self, Arrive, From, Press, Tipped, ghost, icon, probe, tip_owned};
 
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -535,8 +535,10 @@ impl Dent {
         let key = command_key(name, text);
         let open = self.expanded.contains(&key);
         let long = text.lines().count() > 6 || text.len() > 600;
-        // The view says it; the words are there for the detail.
-        let folds = view.is_some() || long;
+        // The view says it; the words are there for the detail. A sheet
+        // says all of it.
+        let sheet = matches!(view, Some(View::Sheet { .. }));
+        let folds = (view.is_some() || long) && !sheet;
         let body: Option<AnyElement> = match view {
             Some(View::Meter {
                 used,
@@ -548,37 +550,39 @@ impl Dent {
                 meter(*used, *max, compacts_at.or(s.compacts_at), parts, &t).into_any_element(),
             ),
             Some(View::Limits { bars }) => Some(limits(bars, &t).into_any_element()),
+            Some(View::Sheet { sections }) => Some(self.sheet(s, ix, name, sections, cx)),
             None => None,
         };
-        let words = (!text.trim().is_empty() && (open || !folds || body.is_none())).then(|| {
-            let src = if long && !open && body.is_none() {
-                // The first lines, then the fold.
-                text.lines().take(6).collect::<Vec<_>>().join("\n")
-            } else {
-                text.to_string()
-            };
-            match shape(&src) {
-                // Plain lines read best as they are, selectable.
-                Shape::Plain => {
-                    crate::select::text(SharedString::from(format!("command-{ix}")), src, &t)
-                        .into_any_element()
+        let words =
+            (!sheet && !text.trim().is_empty() && (open || !folds || body.is_none())).then(|| {
+                let src = if long && !open && body.is_none() {
+                    // The first lines, then the fold.
+                    text.lines().take(6).collect::<Vec<_>>().join("\n")
+                } else {
+                    text.to_string()
+                };
+                match shape(&src) {
+                    // Plain lines read best as they are, selectable.
+                    Shape::Plain => {
+                        crate::select::text(SharedString::from(format!("command-{ix}")), src, &t)
+                            .into_any_element()
+                    }
+                    Shape::Markdown | Shape::Columns => {
+                        let blocks = self.markdown(&as_markdown(&src));
+                        let mut r = markdown::R {
+                            md: self.mdv.clone(),
+                            owner: cx.entity_id(),
+                            window,
+                            cx,
+                            scope: format!("{}/{ix}/command", s.id),
+                            bg: t.surface,
+                            base: Some(std::path::PathBuf::from(&s.cwd)),
+                        };
+                        markdown::render_with(blocks.as_slice(), &t, false, true, &mut r)
+                            .into_any_element()
+                    }
                 }
-                Shape::Markdown | Shape::Columns => {
-                    let blocks = self.markdown(&as_markdown(&src));
-                    let mut r = markdown::R {
-                        md: self.mdv.clone(),
-                        owner: cx.entity_id(),
-                        window,
-                        cx,
-                        scope: format!("{}/{ix}/command", s.id),
-                        bg: t.surface,
-                        base: Some(std::path::PathBuf::from(&s.cwd)),
-                    };
-                    markdown::render_with(blocks.as_slice(), &t, false, true, &mut r)
-                        .into_any_element()
-                }
-            }
-        });
+            });
         let fold_label = match (open, body.is_some()) {
             (true, _) => "Show less",
             (false, true) => "Show the full answer",
@@ -589,7 +593,15 @@ impl Dent {
                 .flex()
                 .flex_col()
                 .gap(px(space::S3))
-                .children(body.map(|b| div().max_w(px(420.)).child(b)))
+                .children(body.map(|b| {
+                    // A sheet's rows carry more than a meter's.
+                    // A sheet fills the column, its edge on the composer's.
+                    if matches!(view, Some(View::Sheet { .. })) {
+                        div().child(b)
+                    } else {
+                        div().max_w(px(420.)).child(b)
+                    }
+                }))
                 .children(words)
                 .when(folds && !text.trim().is_empty(), |d| {
                     d.child(
@@ -608,6 +620,396 @@ impl Dent {
                     )
                 }),
         )
+    }
+}
+
+/// How many rows a section shows before it folds.
+const SHEET_ROWS: usize = 6;
+
+/// What a busy action's tooltip says, naming what it's acting on.
+fn doing(act: &Act) -> String {
+    match act {
+        Act::McpEnable {
+            enabled: true,
+            server,
+        } => format!("Turning on {server}…"),
+        Act::McpEnable {
+            enabled: false,
+            server,
+        } => format!("Turning off {server}…"),
+        Act::McpReconnect { server } => format!("Reconnecting {server}…"),
+        Act::McpSignIn { server } => format!("Signing in to {server}…"),
+        Act::Open { .. } => "Opening…".into(),
+    }
+}
+
+/// The colour of a row's mark. Working rows have none: only what's off
+/// or wants attention is marked.
+fn mark_color(mark: Mark, t: &Theme) -> Option<Option<Hsla>> {
+    match mark {
+        Mark::Good => None,
+        Mark::Off => Some(None),
+        Mark::Waiting => Some(Some(t.waiting.0)),
+        Mark::Attention | Mark::Bad => Some(Some(t.needs.0)),
+    }
+}
+
+/// Smaller interface text, for what sits under a row's name, and its
+/// line.
+const SMALL: f32 = 12.;
+const SMALL_LINE: f32 = 16.;
+
+/// A line of interface text, to line marks and controls up with a name.
+const LINE: f32 = crate::ds::size::LINE;
+
+/// `s` cut to about `max` characters in the middle: `2222…6666`.
+fn elide_middle(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    let max = max.max(9);
+    if n <= max {
+        return s.to_string();
+    }
+    let head = (max - 1) / 2;
+    let tail = max - 1 - head;
+    let a: String = s.chars().take(head).collect();
+    let b: String = s.chars().skip(n - tail).collect();
+    format!("{a}…{b}")
+}
+
+/// `s` cut to about `max` characters from the start: `…/proj/site`.
+fn elide_start(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max.max(8) {
+        return s.to_string();
+    }
+    let tail: String = s.chars().skip(n - max.max(8) + 1).collect();
+    format!("…{tail}")
+}
+
+impl Dent {
+    /// A command's sheet: sections of rows. Every row is the same: a mark
+    /// when something's off or needs you, the name, how it stands and
+    /// more beneath, and at the end its controls (a switch for on and
+    /// off, buttons for the rest) or, with none, its value.
+    fn sheet(
+        &mut self,
+        s: &Session,
+        ix: usize,
+        command: &str,
+        sections: &[Section],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.t;
+        let now = std::time::Instant::now();
+        self.signing
+            .retain(|_, since| now.duration_since(*since).as_secs() < 180);
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(space::S2))
+            .children(sections.iter().enumerate().map(|(si, sec)| {
+                let fold_key = format!("sheet/{}/{ix}/{si}", s.id);
+                let open = self.expanded.contains(&fold_key);
+                // A long section folds after its first few rows.
+                let n = sec.rows.len();
+                let (shown, folded): (Vec<usize>, Vec<usize>) = if open || n <= SHEET_ROWS + 1 {
+                    ((0..n).collect(), vec![])
+                } else {
+                    ((0..SHEET_ROWS).collect(), (SHEET_ROWS..n).collect())
+                };
+                let rows: Vec<AnyElement> = shown
+                    .iter()
+                    .map(|&ri| self.sheet_row(s, ix, command, si, ri, &sec.rows[ri], cx))
+                    .collect();
+                let fold = (!folded.is_empty() || open).then(|| {
+                    let label = if open {
+                        "Show less".to_string()
+                    } else {
+                        format!("Show {} more", folded.len())
+                    };
+                    let gid = format!("sheet-more-{ix}-{si}");
+                    let key = fold_key.clone();
+                    ghost(SharedString::from(gid.clone()), label, &t)
+                        .ml(px(-space::S2))
+                        .relative()
+                        .on_press(cx.listener(move |this, _, _, cx| {
+                            if !this.expanded.remove(&key) {
+                                this.expanded.insert(key.clone());
+                            }
+                            cx.notify();
+                        }))
+                        .child(probe(&self.probes, gid))
+                        .into_any_element()
+                });
+                let body = div().flex().flex_col().children(rows);
+                div()
+                    .flex()
+                    .flex_col()
+                    // Space, not lines, between sections: the rule and the
+                    // labels already make the structure.
+                    // Rows carry S1H of their own above and below their
+                    // words, so the gaps here make up the rest: S3 above
+                    // a label, S1H to its note, S2 to the first row. A
+                    // gap between sections stays under the one between
+                    // sheets, so a sheet's edge is the bigger break.
+                    .when(si > 0, |d| d.mt(px(space::S3 - space::S1H)))
+                    .child(ui::section_label(&sec.title, None, &t))
+                    .when(!sec.note.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .pt(px(space::S1H))
+                                .text_size(px(SMALL))
+                                .line_height(px(SMALL_LINE))
+                                .text_color(t.quiet)
+                                .child(sec.note.clone()),
+                        )
+                    })
+                    .child(div().h(px(space::S2 - space::S1H)))
+                    .child(body)
+                    .children(fold.map(|f| div().pt(px(space::S1)).flex().child(f)))
+            }))
+            .into_any_element()
+    }
+
+    /// One row of a sheet.
+    #[allow(clippy::too_many_arguments)]
+    fn sheet_row(
+        &mut self,
+        s: &Session,
+        ix: usize,
+        command: &str,
+        si: usize,
+        ri: usize,
+        r: &Row,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.t;
+        let id = format!("sheet-{ix}-{si}-{ri}");
+        let face = |d: Div, field: Field| match r.code == Some(field) {
+            true => d.ty(CODE),
+            false => d,
+        };
+        let waiting_browser = r.actions.iter().any(|a| {
+            matches!(&a.act, Act::McpSignIn { server }
+                if self.signing.contains_key(&(s.id.clone(), server.clone())))
+        });
+        let error = r.actions.iter().find_map(|a| {
+            self.act_errors
+                .get(&(s.id.clone(), command.to_string(), a.act.clone()))
+                .cloned()
+        });
+        let controls = !r.actions.is_empty();
+        let switch = r
+            .actions
+            .iter()
+            .any(|a| matches!(a.act, Act::McpEnable { .. }));
+        let buttons: Vec<AnyElement> = r
+            .actions
+            .iter()
+            .enumerate()
+            .map(|(ai, a)| {
+                let busy = self
+                    .acting
+                    .iter()
+                    .any(|(sid, c, act)| *sid == s.id && c == command && *act == a.act);
+                let bid = format!("{id}-{ai}");
+                let press = {
+                    let (sid, cmd, act) = (s.id.clone(), command.to_string(), a.act.clone());
+                    move |this: &mut Dent, cx: &mut Context<Dent>| {
+                        this.act(&sid, &cmd, act.clone(), cx)
+                    }
+                };
+                if let Act::McpEnable { enabled, server } = &a.act {
+                    // A switch shows where it's going while it gets there.
+                    let on = if busy { *enabled } else { !*enabled };
+                    let el = div().id(SharedString::from(bid.clone()));
+                    let el = if busy {
+                        ui::off_owned(el, doing(&a.act), &t)
+                    } else {
+                        let what = if *enabled { "Turn on" } else { "Turn off" };
+                        el.with_tip(tip_owned(format!("{what} {server}"), t))
+                            .on_press(cx.listener(move |this, _, _, cx| press(this, cx)))
+                    };
+                    return div()
+                        .relative()
+                        .child(ui::switch(el, on, &t))
+                        .child(probe(&self.probes, bid))
+                        .into_any_element();
+                }
+                // Outlined, even for a fix: the row's mark carries the
+                // urgency, and the same state always looks the same.
+                let b =
+                    ui::inner_button(SharedString::from(bid.clone()), a.label.clone(), false, &t)
+                        .h(px(crate::ds::size::CONTROL_SM))
+                        .px(px(space::S2))
+                        .relative()
+                        .child(probe(&self.probes, bid));
+                if busy {
+                    ui::off_owned(b, doing(&a.act), &t).into_any_element()
+                } else {
+                    b.on_press(cx.listener(move |this, _, _, cx| press(this, cx)))
+                        .into_any_element()
+                }
+            })
+            .collect();
+        let status = if waiting_browser {
+            "Finish signing in in your browser".to_string()
+        } else if switch && r.mark == Some(Mark::Off) {
+            // The switch says it's off.
+            String::new()
+        } else {
+            r.value.clone()
+        };
+        let small = |text: String, field: Option<Field>| {
+            let d = div()
+                .text_size(px(SMALL))
+                .line_height(px(SMALL_LINE))
+                .text_color(t.quiet)
+                .line_clamp(2)
+                .child(text);
+            match field {
+                Some(f) => face(d, f),
+                None => d,
+            }
+        };
+        let words = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(
+                face(div().min_w_0().truncate().text_color(t.ink), Field::Label)
+                    .child(r.label.clone()),
+            )
+            // With controls at the end, how it stands goes beneath.
+            .when(controls && !status.is_empty(), |d| {
+                d.child(small(status.clone(), Some(Field::Value)))
+            })
+            .when(!r.detail.is_empty(), |d| {
+                d.child(small(r.detail.clone(), Some(Field::Detail)))
+            })
+            // Signals are fills, never text: the dot carries the colour.
+            .children(error.map(|e| {
+                div()
+                    .text_size(px(SMALL))
+                    .line_height(px(SMALL_LINE))
+                    .text_color(t.ink)
+                    .line_clamp(2)
+                    .child(e)
+            }));
+        let trailing = if controls {
+            Some(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S2))
+                    .children(buttons)
+                    .into_any_element(),
+            )
+        } else if !status.is_empty() {
+            let path = r.code == Some(Field::Value) && status.starts_with(['/', '~']);
+            // A path keeps its end, which is the part that says where.
+            // An id keeps its start and end, which are what people match.
+            let room = ((self.chat_w * 0.45) / 7.8) as usize;
+            let shown = if path {
+                elide_start(&status, room)
+            } else if r.code == Some(Field::Value) {
+                elide_middle(&status, room)
+            } else {
+                status
+            };
+            Some(
+                face(
+                    div().flex_none().whitespace_nowrap().text_color(t.quiet),
+                    Field::Value,
+                )
+                .child(shown)
+                .into_any_element(),
+            )
+        } else {
+            None
+        };
+        // Everything lines up on the name's line. The mark hangs in the
+        // margin, so names start at the same place with or without one.
+        let on_line = |d: AnyElement| div().h(px(LINE)).flex_none().flex().items_center().child(d);
+        div()
+            .id(SharedString::from(id))
+            .relative()
+            .flex()
+            .items_start()
+            .gap(px(space::S3))
+            .py(px(space::S1H))
+            .children(r.mark.and_then(|m| mark_color(m, &t)).map(|c| {
+                div()
+                    .absolute()
+                    .left(px(-space::S3))
+                    .top(px(space::S1H))
+                    .h(px(LINE))
+                    .flex()
+                    .items_center()
+                    .child(ui::dot(c, &t))
+            }))
+            .child(words)
+            .children(trailing.map(on_line))
+            .into_any_element()
+    }
+
+    /// Do what a sheet's row offers: open a file here, or ask the daemon.
+    pub fn act(&mut self, session: &str, command: &str, act: Act, cx: &mut Context<Self>) {
+        if let Act::Open { path } = &act {
+            self.open_file(path, cx);
+            return;
+        }
+        let key = (session.to_string(), command.to_string(), act.clone());
+        if self.acting.contains(&key) {
+            return;
+        }
+        self.act_errors.remove(&key);
+        self.acting.push(key);
+        self.live.send(dent_protocol::Request::Act {
+            session: session.to_string(),
+            command: command.to_string(),
+            act,
+        });
+        cx.notify();
+    }
+
+    /// How something asked of a sheet went: open the page it gave, for the
+    /// client that asked, or say what went wrong.
+    pub fn acted(
+        &mut self,
+        session: &str,
+        command: &str,
+        act: &Act,
+        url: Option<&str>,
+        error: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.acting.len();
+        self.acting
+            .retain(|(s, c, a)| !(s == session && c == command && a == act));
+        if self.acting.len() == before {
+            // Someone else asked.
+            return;
+        }
+        if let Some(url) = url {
+            if let Act::McpSignIn { server } = act {
+                self.signing.insert(
+                    (session.to_string(), server.clone()),
+                    std::time::Instant::now(),
+                );
+            }
+            cx.open_url(url);
+        }
+        // What went wrong stays on the row it happened to.
+        if let Some(e) = error {
+            self.act_errors.insert(
+                (session.to_string(), command.to_string(), act.clone()),
+                e.to_string(),
+            );
+        }
+        cx.notify();
     }
 }
 

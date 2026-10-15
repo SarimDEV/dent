@@ -582,6 +582,16 @@ pub struct Dent {
     pub plan_open: bool,
     /// Long messages you've unfolded.
     pub expanded: HashSet<String>,
+    /// What this window asked a command's sheet to do, still under way:
+    /// session, command, act.
+    pub acting: Vec<(String, String, dent_protocol::Act)>,
+    /// MCP servers whose sign-in this window opened in the browser, by
+    /// session and server: the row says to finish there while it still
+    /// offers to sign in.
+    pub signing: HashMap<(String, String), std::time::Instant>,
+    /// What went wrong with a sheet's action, shown on its row until the
+    /// sheet changes or it's tried again.
+    pub act_errors: HashMap<(String, String, dent_protocol::Act), String>,
     /// The highlighted row of the slash menu.
     pub slash_ix: usize,
     /// The message whose "Edit from here" is asking to confirm.
@@ -1082,6 +1092,9 @@ impl Dent {
             recent: Vec::new(),
             slash_ix: 0,
             expanded: HashSet::new(),
+            acting: Vec::new(),
+            signing: HashMap::new(),
+            act_errors: HashMap::new(),
             plan_open: false,
             search_cache: RefCell::new(HashMap::new()),
             open_tools: HashSet::new(),
@@ -1724,6 +1737,23 @@ impl Dent {
                     }
                     if let Out::Commands { session, commands } = &out {
                         self.commands.insert(session.clone(), commands.clone());
+                    }
+                    if let Out::Sheet {
+                        session, command, ..
+                    } = &out
+                    {
+                        self.act_errors
+                            .retain(|(s, c, _), _| !(s == session && c == command));
+                    }
+                    if let Out::Acted {
+                        session,
+                        command,
+                        act,
+                        url,
+                        error,
+                    } = &out
+                    {
+                        self.acted(session, command, act, url.as_deref(), error.as_deref(), cx);
                     }
                     if let Out::Models { models } = &out {
                         self.models = models.clone();

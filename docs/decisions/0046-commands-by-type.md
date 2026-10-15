@@ -22,7 +22,7 @@ The `/` menu continues into a command's arguments: picking `/autocompact` shows 
 - **Unknown:** "Claude has no /fooo command", with the agent's suggestion as a button.
 - **Failed:** marked as an error.
 
-An answer that has a better shape as data gets a `View`. `/context` becomes a meter: the bar in parts and the threshold where the agent compacts on its own, with parts loaded only when needed listed apart. `/usage` becomes labelled limit bars. The answer's text stays a fold away. A sent `/command` looks like a command line from the start, and its card takes its place, so nothing jumps.
+An answer that has a better shape as data gets a `View`. Commands that are dialogs in the terminal (`/status`, `/mcp`, `/skills`, `/memory`, `/hooks`, `/permissions`) have control requests that return the dialog's data, so they answer with a **sheet**: sections of rows, each with how it stands, a mark when it's off or needs you, and what you can do about it (turn an MCP server on or off, reconnect, sign in, open a file). A row's action goes back as `Act`; the sheet arrives again as it is now and replaces the newest one in place. One table maps each command to its control request, and one function per command reads its data into rows; the drawing is the same for all. `/context` becomes a meter: the bar in parts and the threshold where the agent compacts on its own, with parts loaded only when needed listed apart. `/usage` becomes labelled limit bars. The answer's text stays a fold away. A sent `/command` looks like a command line from the start, and its card takes its place, so nothing jumps.
 
 **What the agent is doing.** Short-lived states are an `Activity`, sent to clients but never logged: compacting (with how long) and retrying (with a countdown, the agent's reason, and the attempt). The working line and the sidebar show it; a change of words eases in.
 
@@ -44,4 +44,4 @@ Everything degrades to text. If the hint can't be read, the command takes text. 
 
 - After /compact, the meter used to keep its old reading, and it measured every model against 200k. Both are fixed by asking for `get_context_usage`.
 - The question card's "type your own answer" is hidden for questions only choices can answer.
-- Still to come: an MCP panel (`mcp_status`, `mcp_toggle`, `mcp_reconnect`, `mcp_authenticate`) for `/mcp`, and the terminal-only commands that have control-request replacements (`/memory`, `/permissions`, `/hooks`, `/skills`, `/status`).
+- `/mcp`, `/status`, `/skills`, `/memory`, `/hooks` and `/permissions` work, as sheets. Editing permission rules waits on the daemon's own rule store, which `/permissions` will then edit.

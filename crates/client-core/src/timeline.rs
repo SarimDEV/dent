@@ -284,6 +284,17 @@ impl Sessions {
                 }
                 None => Vec::new(),
             },
+            Out::Sheet {
+                session,
+                command,
+                sections,
+            } => match self.list.get_mut(session) {
+                Some(s) => {
+                    s.sheet(command, sections);
+                    vec![session.clone()]
+                }
+                None => Vec::new(),
+            },
             Out::CaughtUp { .. } => {
                 self.live = true;
                 Vec::new()
@@ -316,6 +327,24 @@ impl SessionView {
     /// `None` when no entry changed.
     pub fn take_changes(&mut self) -> Option<usize> {
         self.changed_from.take()
+    }
+
+    /// A command's sheet as it is now: it replaces the one in the latest
+    /// answer to that command.
+    fn sheet(&mut self, command: &str, sections: &[dent_protocol::Section]) {
+        let Some(ix) = self
+            .entries
+            .iter()
+            .rposition(|e| matches!(e, Entry::Command { name, .. } if name == command))
+        else {
+            return;
+        };
+        if let Entry::Command { view, .. } = &mut self.entries[ix] {
+            *view = Some(dent_protocol::View::Sheet {
+                sections: sections.to_vec(),
+            });
+        }
+        self.touch(ix);
     }
 
     fn touch(&mut self, ix: usize) {

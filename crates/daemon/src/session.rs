@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use dent_protocol::{Activity, Answer, Body, Outcome, Permission, Status, Task};
+use dent_protocol::{
+    Act, Activity, Answer, Body, CommandOutcome, Out, Outcome, Permission, Section, Status, Task,
+};
 use dent_session_holder::wire::Proc as HeldProc;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
@@ -76,6 +78,11 @@ pub enum Op {
     },
     SetModel(String),
     SetPermission(Permission),
+    /// Do what a command's sheet offers.
+    Act {
+        command: String,
+        act: Act,
+    },
     SetEffort(String),
     Rename(String),
     Close,
@@ -117,7 +124,7 @@ struct Pending {
     dialog: Option<Vec<(String, String)>>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Ctl {
     Initialize,
     Interrupt,
@@ -125,6 +132,22 @@ enum Ctl {
     ContextUsage,
     /// What's in effect (`get_settings`), to say which choice is current.
     Settings,
+    /// A command's sheet, to answer it with.
+    Sheet {
+        command: String,
+        args: String,
+        text: String,
+        outcome: CommandOutcome,
+    },
+    /// A command's sheet again, after something on it changed.
+    Refresh {
+        command: String,
+    },
+    /// Something a sheet offered.
+    Act {
+        command: String,
+        act: Act,
+    },
     Other,
 }
 
@@ -175,6 +198,18 @@ struct Session {
     last: Option<(String, String, Vec<String>)>,
     /// The agent couldn't find the conversation it was asked to resume.
     forgot: bool,
+    /// Each command's sheet as clients last got it, so a refresh that
+    /// changes nothing says nothing.
+    sheets: HashMap<String, Vec<Section>>,
+    /// A sign-in finishing in the browser: refresh this command's sheet
+    /// now and then until it's done or the time's up.
+    watch: Option<Watch>,
+}
+
+struct Watch {
+    command: String,
+    next: Instant,
+    until: Instant,
 }
 
 /// Start a session's task from its row. `held` is what the holder is
@@ -213,6 +248,8 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
         outbox: Vec::new(),
         last: None,
         forgot: false,
+        sheets: HashMap::new(),
+        watch: None,
     };
     s.rebuild();
     // A side question this daemon never saw finish won't be answered now.
@@ -367,10 +404,15 @@ impl Session {
 
     async fn run(mut self, mut rx: mpsc::UnboundedReceiver<Cmd>) {
         loop {
-            let deadline = [self.idle_at, self.stop_at, self.start_by]
-                .into_iter()
-                .flatten()
-                .min();
+            let deadline = [
+                self.idle_at,
+                self.stop_at,
+                self.start_by,
+                self.watch.as_ref().map(|w| w.next),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             let cmd = match deadline {
                 Some(at) => tokio::select! {
                     c = rx.recv() => c,
@@ -441,6 +483,14 @@ impl Session {
                     title: None,
                 });
                 Ok(())
+            }
+            Op::Act { command, act } => {
+                let Some((subtype, extra)) = claude::sheets::request(&act) else {
+                    bail!("that's for the client to do");
+                };
+                self.ensure_proc().await?;
+                self.control(subtype, extra, Ctl::Act { command, act })
+                    .await
             }
             Op::SetEffort(effort) => {
                 // The same effort again mustn't restart the agent.
@@ -925,6 +975,20 @@ impl Session {
                 self.end_turn(Outcome::Error { message });
             }
         }
+        if let Some(w) = self.watch.as_mut().filter(|w| w.next <= now) {
+            w.next = now + Duration::from_secs(2);
+            let command = w.command.clone();
+            if w.until <= now {
+                self.watch = None;
+            }
+            if let Some(source) = claude::sheets::source(&command)
+                && self.proc.is_some()
+            {
+                let _ = self
+                    .control(source, json!({}), Ctl::Refresh { command })
+                    .await;
+            }
+        }
         if self.idle_at.is_some_and(|t| t <= now) {
             self.idle_at = None;
             let quiet = !self.in_turn && self.asked.is_empty() && self.background.is_empty();
@@ -1159,7 +1223,88 @@ impl Session {
                         c.applied = body["applied"].clone();
                     });
                 }
-                (Some(Ctl::Interrupt | Ctl::ContextUsage | Ctl::Settings), _)
+                (
+                    Some(Ctl::Sheet {
+                        command,
+                        args,
+                        text,
+                        outcome,
+                    }),
+                    ok,
+                ) => {
+                    let sections = ok
+                        .then(|| claude::sheets::sheet(&command, &body, &self.d.models()))
+                        .flatten();
+                    let body = match sections {
+                        Some(sections) => {
+                            self.sheets.insert(command.clone(), sections.clone());
+                            Body::Command {
+                                text: match outcome {
+                                    // Its own words, when it had some.
+                                    CommandOutcome::Done if !text.trim().is_empty() => text,
+                                    _ => claude::sheets::text(&sections),
+                                },
+                                name: command,
+                                args,
+                                outcome: CommandOutcome::Done,
+                                view: Some(claude::sheets::view(sections)),
+                            }
+                        }
+                        None => Body::Command {
+                            name: command,
+                            args,
+                            text,
+                            outcome,
+                            view: None,
+                        },
+                    };
+                    self.log_from(body, end);
+                }
+                (Some(Ctl::Refresh { command }), true) => {
+                    if let Some(sections) = claude::sheets::sheet(&command, &body, &self.d.models())
+                        && self.sheets.get(&command) != Some(&sections)
+                    {
+                        self.sheets.insert(command.clone(), sections.clone());
+                        self.d.tell(Out::Sheet {
+                            session: self.id.clone(),
+                            command,
+                            sections,
+                        });
+                    }
+                }
+                (Some(Ctl::Act { command, act }), ok) => {
+                    let url = body["authUrl"]
+                        .as_str()
+                        .filter(|_| ok && body["requiresUserAction"] == true)
+                        .map(str::to_string);
+                    // Signing in finishes in the browser: watch for it.
+                    if url.is_some() {
+                        let now = Instant::now();
+                        self.watch = Some(Watch {
+                            command: command.clone(),
+                            next: now + Duration::from_secs(2),
+                            until: now + Duration::from_secs(180),
+                        });
+                    }
+                    self.d.tell(Out::Acted {
+                        session: self.id.clone(),
+                        command: command.clone(),
+                        act,
+                        url,
+                        error: (!ok).then(|| {
+                            body.as_str()
+                                .unwrap_or("Claude Code couldn't do that")
+                                .to_string()
+                        }),
+                    });
+                    if let Some(source) = claude::sheets::source(&command) {
+                        self.control_later(source, Ctl::Refresh { command });
+                    }
+                }
+                (
+                    Some(Ctl::Interrupt | Ctl::ContextUsage | Ctl::Settings | Ctl::Refresh { .. }),
+                    _,
+                )
                 | (Some(Ctl::Other), true)
                 | (None, _) => {}
                 (Some(_), false) => self.log_from(
@@ -1343,16 +1488,32 @@ impl Session {
                     (None, None) => (String::new(), args),
                 };
                 self.said = true;
-                self.log_from(
-                    Body::Command {
-                        name,
-                        args,
-                        text,
-                        outcome,
-                        view,
-                    },
-                    end,
-                );
+                // A command whose answer is a screen gets its data as a
+                // sheet, even where the agent refused to draw it.
+                let sheet = claude::sheets::source(&name).filter(|_| {
+                    args.is_empty() && !matches!(outcome, CommandOutcome::Unknown { .. })
+                });
+                match sheet {
+                    Some(source) => self.control_later(
+                        source,
+                        Ctl::Sheet {
+                            command: name,
+                            args,
+                            text,
+                            outcome,
+                        },
+                    ),
+                    None => self.log_from(
+                        Body::Command {
+                            name,
+                            args,
+                            text,
+                            outcome,
+                            view,
+                        },
+                        end,
+                    ),
+                }
                 // It may have changed a setting a command offers.
                 self.control_later("get_settings", Ctl::Settings);
             }

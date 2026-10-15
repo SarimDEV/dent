@@ -105,14 +105,18 @@ pub enum Row {
 pub const CHAT_MIN: f32 = 440.;
 
 impl Dent {
-    pub fn has_viewer(s: &Session) -> bool {
-        !s.arts.is_empty() || !s.diff.is_empty()
+    /// Whether the viewer has anything for this session: what it made,
+    /// what it changed, or a file you opened.
+    pub fn has_viewer(&self, s: &Session) -> bool {
+        !s.arts.is_empty()
+            || !s.diff.is_empty()
+            || self.opened.get(&s.id).is_some_and(|o| !o.is_empty())
     }
 
-    /// Whether the right pane has anything for this session: what it made,
+    /// Whether the right pane has anything for this session: the viewer,
     /// or a side chat, even one just opened.
     pub fn shows_panel(&self, s: &Session) -> bool {
-        Self::has_viewer(s)
+        self.has_viewer(s)
             || !s.asides.is_empty()
             || matches!(self.tabs.get(&s.id), Some(Tab::Aside | Tab::Terminal))
     }
@@ -125,7 +129,7 @@ impl Dent {
         // A page in its own window never hides for menus: nothing covers it.
         let detached = self.preview.as_ref().is_some_and(|p| p.borrow().detached());
         self.panel_open
-            && Self::has_viewer(s)
+            && self.has_viewer(s)
             && matches!(self.tab(s), Tab::Art(a) if self.art(a).is_some_and(|a| a.kind.is_page()) && !self.popouts.contains_key(a) && !self.servers_down.contains(a))
             && (detached || (self.menu.is_none() && self.palette.is_none() && !self.dragging))
     }

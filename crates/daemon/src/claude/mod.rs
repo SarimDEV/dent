@@ -4,6 +4,7 @@
 //! [decision 0008]: ../../../docs/decisions/0008-claude-code-stream-json.md
 
 pub mod commands;
+pub mod sheets;
 pub mod wire;
 
 use dent_protocol::{Block, Body, Model, Permission, Task, Window};

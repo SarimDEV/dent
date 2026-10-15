@@ -249,6 +249,92 @@ pub enum View {
     },
     /// Usage against the account's limits.
     Limits { bars: Vec<Bar> },
+    /// A screen of facts in sections: each row says how something stands
+    /// and what you can do about it. `/status`, `/mcp`, `/skills`,
+    /// `/memory`, `/hooks` and `/permissions` answer with one.
+    Sheet { sections: Vec<Section> },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct Section {
+    pub title: String,
+    /// A line under the title that's true of every row.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    pub rows: Vec<Row>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct Row {
+    pub label: String,
+    /// How it stands, in a few words.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub value: String,
+    /// More, for those who want it: a description, where it's from.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mark: Option<Mark>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<Action>,
+    /// Which part is something typed (a rule, a path, a command), to set
+    /// in the code face.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<Field>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Field {
+    Label,
+    Value,
+    Detail,
+}
+
+/// How a row stands, at a glance.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Mark {
+    /// Working: connected, on.
+    Good,
+    /// Turned off, or not there.
+    Off,
+    /// On its way: starting, connecting.
+    Waiting,
+    /// Needs you: sign in, approve.
+    Attention,
+    /// Broken.
+    Bad,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Action {
+    pub label: String,
+    pub act: Act,
+}
+
+/// Something a sheet's row offers. The client sends it back with
+/// [`Request::Act`], except [`Act::Open`], which it does itself.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Act {
+    /// Turn an MCP server on or off for this session.
+    McpEnable {
+        server: String,
+        enabled: bool,
+    },
+    McpReconnect {
+        server: String,
+    },
+    /// Start signing in to an MCP server: [`Out::Acted`] carries the page
+    /// to open.
+    McpSignIn {
+        server: String,
+    },
+    /// A file or folder on the daemon's machine.
+    Open {
+        path: String,
+    },
 }
 
 /// One limit and how much of it is used.
@@ -707,6 +793,13 @@ pub enum Request {
         session: SessionId,
         path: String,
     },
+    /// Do what a sheet's row offers. `command` names the sheet, which
+    /// arrives again as [`Out::Sheet`] once it's done.
+    Act {
+        session: SessionId,
+        command: String,
+        act: Act,
+    },
 }
 
 // ---- daemon to client ----
@@ -751,6 +844,24 @@ pub enum Out {
     Commands {
         session: SessionId,
         commands: Vec<Command>,
+    },
+    /// A command's sheet as it is now, after something on it changed. It
+    /// replaces the sheet of the session's latest answer to `command`.
+    Sheet {
+        session: SessionId,
+        command: String,
+        sections: Vec<Section>,
+    },
+    /// How an [`Request::Act`] went. `url` is a page for the client that
+    /// asked to open, like a sign-in.
+    Acted {
+        session: SessionId,
+        command: String,
+        act: Act,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 }
 

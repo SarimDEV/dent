@@ -130,6 +130,81 @@ pub fn button(
         .child(label.into())
 }
 
+/// A button inside a card: the same button with the smaller corners the
+/// design system gives controls nested in a rounded surface.
+pub fn inner_button(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    primary: bool,
+    t: &Theme,
+) -> Stateful<Div> {
+    button(id, label, primary, t).rounded(px(radius::SM))
+}
+
+/// An on/off switch: a quiet track when on, a wash when off, the knob
+/// sliding between (`dur.fast`). Its hit area is a control's height
+/// though the track is small. The caller makes `el` (an id, the click)
+/// and wraps it in [`off`] while it can't be used.
+pub fn switch(mut el: Stateful<Div>, on: bool, t: &Theme) -> impl IntoElement {
+    const W: f32 = 26.;
+    const H: f32 = 15.;
+    const KNOB: f32 = 11.;
+    let (off_bg, on_bg) = (t.ink.opacity(0.3), t.quiet);
+    // White on Paper, as the Mac draws it; on Carbon the ink.
+    let knob = if t.dark { t.ink } else { t.surface };
+    let (edge, dark, knob_edge) = (t.hairline, t.dark, t.ink.opacity(0.25));
+    let key = el.interactivity().element_id.clone();
+    el.flex_none()
+        .h(px(size::CONTROL))
+        .w(px(W))
+        .flex()
+        .items_center()
+        .cursor_pointer()
+        .control()
+        .with_spring(
+            key.map_or_else(
+                || ElementId::Name("switch".into()),
+                |k| ElementId::Name(format!("{k}-state").into()),
+            ),
+            SpringAnimation::new(crate::anim::spring_config(motion::FAST / 1000., 0.)).to(on),
+            move |el, phase| {
+                let p = phase.0.clamp(0., 1.);
+                let inset = (H - KNOB) / 2.;
+                el.child(
+                    div()
+                        .relative()
+                        .w(px(W))
+                        .h(px(H))
+                        .rounded_full()
+                        .bg(Hsla::interpolate(off_bg, on_bg, p))
+                        // Off, a hairline keeps the track from vanishing.
+                        .border_1()
+                        .border_color(Hsla::interpolate(edge, edge.opacity(0.), p))
+                        .child(
+                            div()
+                                .absolute()
+                                .top(px(inset))
+                                .left(px(inset + (W - KNOB - inset * 2.) * p))
+                                .size(px(KNOB))
+                                .rounded_full()
+                                .bg(knob)
+                                .when(!dark, |d| d.border_1().border_color(knob_edge)),
+                        ),
+                )
+            },
+        )
+}
+
+/// A status mark: a dot in a signal colour, or a ring for off, so it
+/// reads without colour too.
+pub fn dot(color: Option<Hsla>, t: &Theme) -> Div {
+    let d = div().size(px(7.)).flex_none().rounded_full();
+    match color {
+        Some(c) => d.bg(c),
+        None => d.border_1().border_color(t.quiet),
+    }
+}
+
 /// Whether the main action of a form can go, and if not, why.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Ready {
@@ -225,6 +300,13 @@ pub fn off(el: Stateful<Div>, why: &'static str, t: &Theme) -> Stateful<Div> {
         .with_tip(tip(why, None, *t))
 }
 
+/// [`off`] with a reason made at run time.
+pub fn off_owned(el: Stateful<Div>, why: String, t: &Theme) -> Stateful<Div> {
+    el.opacity(0.45)
+        .cursor_not_allowed()
+        .with_tip(tip_owned(why, *t))
+}
+
 /// A quiet keyboard hint. Hints give way first: they shrink far faster
 /// than the controls beside them.
 pub fn hint(text: &str, t: &Theme) -> Div {
@@ -239,14 +321,13 @@ pub fn hint(text: &str, t: &Theme) -> Div {
         .child(text.to_string())
 }
 
-/// Uppercase section label, with an optional count.
+/// Uppercase section label, with an optional count, at its natural
+/// height. Where it sits (its sides, the space around it) is the
+/// caller's, to line up with what it labels.
 pub fn section_label(text: &str, count: Option<usize>, t: &Theme) -> Div {
     div()
-        .h(px(size::ROW))
-        .px(px(space::S4))
         .flex()
         .items_end()
-        .pb(px(space::S1))
         .gap(px(space::S2))
         .ty(LABEL)
         .child(div().text_color(t.quiet).child(text.to_uppercase()))
@@ -349,7 +430,14 @@ pub fn menu_row(
                 .flex_col()
                 .child(div().ty(UI).text_color(t.ink).child(name.to_string()))
                 .when_some(note, |d, n| {
-                    d.child(div().ty(UI).text_size(px(12.)).text_color(t.quiet).child(n))
+                    d.child(
+                        div()
+                            .ty(UI)
+                            .text_size(px(12.))
+                            .line_height(px(16.))
+                            .text_color(t.quiet)
+                            .child(n),
+                    )
                 }),
         )
 }

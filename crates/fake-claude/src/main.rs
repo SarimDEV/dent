@@ -22,6 +22,9 @@
 //!   `/output-style`, `/advisor`: answered as Claude Code answers them
 //!   itself, with no model turn; `/theme` is terminal-only, and an unknown
 //!   command gets a suggestion
+//! - `/status`, `/mcp`, `/skills`, `/memory`, `/hooks`, `/permissions`:
+//!   refused as dialogs, with their control requests answered; the MCP
+//!   servers turn on and off, reconnect (except `figma`) and sign in
 //! - anything else: a short Markdown reply
 //!
 //! `FAKE_CLAUDE_SPEED` scales every pause (0 makes it instant).
@@ -46,6 +49,8 @@ struct Agent {
     context: u64,
     /// A steered message arrived during the current turn.
     steer: bool,
+    /// MCP servers: name, status, scope.
+    mcp: Vec<(String, String, String)>,
 }
 
 /// Why a turn stopped early.
@@ -85,6 +90,16 @@ fn main() {
                 .or_else(|| arg("--session-id"))
                 .unwrap_or_else(new_id)
         },
+        mcp: [
+            ("docs", "connected", "user"),
+            ("tickets", "needs-auth", "project"),
+            ("figma", "failed", "user"),
+            ("old-search", "disabled", "user"),
+            ("claude.ai Calendar", "needs-auth", "claudeai"),
+        ]
+        .iter()
+        .map(|(n, st, sc)| (n.to_string(), st.to_string(), sc.to_string()))
+        .collect(),
         model: arg("--model").unwrap_or_else(|| "sonnet".into()),
         mode: arg("--permission-mode").unwrap_or_else(|| "default".into()),
         speed: std::env::var("FAKE_CLAUDE_SPEED")
@@ -206,6 +221,12 @@ impl Agent {
                             {"name": "advisor", "description": "Let Claude consult a stronger model at key moments", "argumentHint": "[fable|opus|sonnet|off]"},
                             {"name": "usage", "description": "Show session cost, plan usage, and what's contributing to your limits", "argumentHint": ""},
                             {"name": "theme", "description": "Change the theme", "argumentHint": ""},
+                            {"name": "status", "description": "Show Claude Code status", "argumentHint": ""},
+                            {"name": "mcp", "description": "Manage MCP servers", "argumentHint": "[reconnect|enable|disable [<server>|all]]"},
+                            {"name": "skills", "description": "List available skills", "argumentHint": ""},
+                            {"name": "memory", "description": "Edit Claude memory files", "argumentHint": ""},
+                            {"name": "hooks", "description": "View hook configurations", "argumentHint": ""},
+                            {"name": "permissions", "description": "Manage allow & deny tool permission rules", "argumentHint": ""},
                         ],
                         "output_style": "default",
                         "available_output_styles": ["default", "Concise", "Explanatory", "Learning"],
@@ -251,6 +272,96 @@ impl Agent {
                                 {"name": "Free space", "tokens": 200_000 - self.context, "kind": "free"},
                                 {"name": "Autocompact buffer", "tokens": 33_000, "kind": "buffer"}]})
                     }
+                    "get_status" => json!({"sections": [
+                        {"title": "Session", "rows": [
+                            {"label": "Version", "value": "0.0.0-fake"},
+                            {"label": "Session ID", "value": self.session},
+                            {"label": "cwd", "value": std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default()},
+                            {"label": "Login method", "value": "Claude Max account"}]},
+                        {"title": "Environment", "rows": [
+                            {"label": "Model", "value": self.model},
+                            {"label": "MCP servers", "value": "1 connected · 2 need sign-in · /mcp"},
+                            {"label": "Setting sources", "value": "User settings, Project settings"}]}]}),
+                    "mcp_status" => json!({"mcpServers": self.mcp.iter().map(|(n, st, sc)| {
+                        let mut v = json!({"name": n, "status": st, "scope": sc, "source": sc,
+                            "config": {"type": "stdio", "command": "npx", "args": ["-y", n, "--api-key", "fake-secret"]}});
+                        if st == "connected" {
+                            v["tools"] = json!([{"name": "search"}, {"name": "fetch"}, {"name": "list"}]);
+                            v["serverInfo"] = json!({"name": n, "description": "Up-to-date documentation for libraries. Fetched live."});
+                        }
+                        if st == "failed" {
+                            v["error"] = json!("Connection closed: the server exited (code 1)");
+                        }
+                        v
+                    }).collect::<Vec<_>>()}),
+                    "mcp_toggle" | "mcp_reconnect" | "mcp_authenticate" => {
+                        let name = v["request"]["serverName"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string();
+                        let Some(server) = self.mcp.iter_mut().find(|m| m.0 == name) else {
+                            out(json!({"type": "control_response", "response": {
+                                "subtype": "error", "request_id": id, "error": format!("Server not found: {name}")}}));
+                            return None;
+                        };
+                        std::thread::sleep(Duration::from_millis((600.0 * self.speed) as u64));
+                        match sub {
+                            "mcp_toggle" => {
+                                server.1 = if v["request"]["enabled"] == true {
+                                    "connected"
+                                } else {
+                                    "disabled"
+                                }
+                                .into();
+                                json!({})
+                            }
+                            "mcp_reconnect" if name == "figma" => {
+                                out(json!({"type": "control_response", "response": {
+                                    "subtype": "error", "request_id": id,
+                                    "error": "figma: Connection closed: the server exited (code 1)"}}));
+                                return None;
+                            }
+                            "mcp_reconnect" => {
+                                server.1 = "connected".into();
+                                json!({})
+                            }
+                            // Signing in happens elsewhere; the fake finishes
+                            // it at once rather than opening a browser.
+                            _ => {
+                                server.1 = "connected".into();
+                                json!({"requiresUserAction": false, "callbackExpected": false})
+                            }
+                        }
+                    }
+                    "get_skills_dialog" => json!({"skills": [
+                        {"name": "dataviz", "display_name": "dataviz", "description": "Use this skill whenever you are about to create any chart. It covers palettes and axes.", "source": "plugin", "tokens": 227, "state": "on", "locked_by": "plugin", "advertised": true},
+                        {"name": "deep-research", "display_name": "deep-research", "description": "Research a topic across many sources and write a cited report.", "source": "claude.ai sync", "tokens": 200, "state": "on", "advertised": true},
+                        {"name": "release-notes", "display_name": "release-notes", "description": "Draft release notes from the commits since the last tag.", "source": "project", "tokens": 140, "state": "off", "advertised": false}]}),
+                    "get_memory_dialog" => {
+                        let cwd = std::env::current_dir()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default();
+                        json!({"files": [
+                            {"kind": "user", "path": "/nonexistent/.claude/CLAUDE.md", "label": "User instructions", "description": "Saved in ~/.claude/CLAUDE.md", "exists": false},
+                            {"kind": "project", "path": format!("{cwd}/README.md"), "label": "Project instructions", "description": "Saved in ./CLAUDE.md", "exists": true}],
+                            "folders": [{"kind": "auto", "path": format!("{cwd}/"), "label": "Open auto-memory folder", "description": ""}],
+                            "memories": [], "auto_memory": {"enabled": true, "toggleable": true, "status": "on"},
+                            "auto_dream": {"shown": false}})
+                    }
+                    "get_hooks_listing" => json!({
+                        "events": [
+                            {"name": "PreToolUse", "summary": "Before tool execution", "supportsMatcher": true, "hookCount": 1},
+                            {"name": "PostToolUse", "summary": "After tool execution", "supportsMatcher": true, "hookCount": 0},
+                            {"name": "Stop", "summary": "Right before Claude concludes its response", "supportsMatcher": false, "hookCount": 1}],
+                        "hooks": [
+                            {"event": "PreToolUse", "matcher": "Bash", "source": "projectSettings", "sourceLabel": "Project settings (.claude/settings.json)", "type": "command", "displayText": "./scripts/check-command.sh"},
+                            {"event": "Stop", "matcher": "", "source": "userSettings", "sourceLabel": "User settings (~/.claude/settings.json)", "type": "command", "displayText": "say done"}],
+                        "eventCatalog": [], "policy": {"allDisabled": false, "disabledByPolicy": false}}),
+                    "list_permission_rules" => json!({"state": {"rules": [
+                        {"behavior": "allow", "rule": "Bash(cargo test:*)", "source": "projectSettings", "editability": "editable"},
+                        {"behavior": "allow", "rule": "WebFetch(domain:docs.rs)", "source": "userSettings", "editability": "editable"},
+                        {"behavior": "deny", "rule": "Bash(rm -rf:*)", "source": "userSettings", "editability": "editable"}],
+                        "workspaceDirectories": [], "managedOnly": false}}),
                     "get_settings" => json!({
                         "effective": {"autoCompact": true, "theme": "dark", "outputStyle": "default"},
                         "applied": {"model": self.model, "effort": null, "advisor": null}}),
@@ -573,6 +684,11 @@ impl Agent {
             "advisor" if args.is_empty() => self.local("advisor", "", "Advisor: off\nUsage: /advisor <fable|opus|sonnet|off>", json!({})),
             "advisor" => self.local("advisor", args, &format!("Advisor set to {args}"), json!({})),
             "theme" => self.local("", "", "/theme isn't available in this environment.", json!({"kind": "unavailable_headless"})),
+            "mcp" if args.is_empty() => self.local("mcp", "",
+                "MCP servers:\n  docs: connected\n  tickets: needs authentication\n  figma: failed\n  old-search: disabled", json!({})),
+            "mcp" => self.local("mcp", args, &format!("MCP: {args}"), json!({})),
+            "status" | "skills" | "memory" | "hooks" | "permissions" => self.local("", "",
+                &format!("/{name} isn't available in this environment."), json!({"kind": "unavailable_headless"})),
             _ => self.local("", "",
                 &format!("Unknown command: /{name}. Did you mean /compact?"),
                 json!({"kind": "unknown", "suggestion": "/compact"})),

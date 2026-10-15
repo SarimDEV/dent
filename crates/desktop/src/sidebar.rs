@@ -215,6 +215,9 @@ impl Dent {
         match r {
             InboxRow::Empty => self.inbox_empty(),
             InboxRow::Label(label, n) => section_label(label, Some(*n), &t)
+                .h(px(size::ROW))
+                .pb(px(space::S1))
+                .px(px(space::S4))
                 .mt(px(space::S3))
                 .into_any_element(),
             InboxRow::Session(s, quiet) => self.row(s, *quiet, cx),

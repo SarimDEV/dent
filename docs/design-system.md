@@ -181,6 +181,16 @@ With the system's reduce-motion setting on (read at launch and whenever the wind
 - Only the working square repaints a quiet window, at 8 fps, and only while a session is working and visible.
 - Every new motion is measured with the frame-timing bench before it lands (Reliability requirements).
 
+## Lists of things you act on
+
+A list where each row is something with a state and things to do about it (MCP servers, skills, permission rules: the command sheets, [0046](decisions/0046-commands-by-type.md)) reads like a settings pane, and every such list is drawn the same way:
+
+- **Sections** are a `ui::section_label`, with `space.4` above it, an optional note in 12/16 `quiet` `space.1h` below, then `space.2` to the first row. Space separates sections; no lines.
+- **A row** is the name in `type.ui` `ink`, how it stands and more beneath it in 12/16 `quiet`, and at its end either its controls at their natural width or, with none, its value in `quiet`. Everything lines up on the name's line. What's typed (a rule, a path, a command) is in the code face. A path keeps its end when short of room; an id keeps its start and end.
+- **Marks** hang in the margin left of the names, so names line up whether or not a row has one, and only rows that are off (a ring) or need you (a signal dot) have one. Working is unmarked.
+- **Controls:** on and off is a `ui::switch`; anything else is an outlined `ui::inner_button` at `size.control.sm`, even a fix: the mark carries urgency, and the same state always looks the same. A control at work keeps its label, goes off (`ui::off`) and says what it's doing on hover.
+- **Errors** stay on the row, in `ink` under its name; the mark carries the colour.
+
 ## Code
 
 Code blocks are highlighted (arborium, [0016](decisions/0016-highlighting-arborium.md)) within the palette: keywords in ink, bold (the code face has no medium); strings, functions, types and numbers are the ink mixed part way toward the done, working, waiting and idle hues (never needs, which is kept for what needs you); comments quiet and italic. Nothing is louder than the prose around it.
