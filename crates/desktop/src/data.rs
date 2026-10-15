@@ -279,6 +279,8 @@ pub struct Session {
     pub todos: Vec<(String, String, String)>,
     /// Dev servers it started, by address.
     pub servers: Vec<String>,
+    /// The agent's own id for it, for `claude --resume`.
+    pub agent_session: Option<String>,
     /// Messages with a snapshot of the files from just before them.
     pub checkpoints: std::collections::HashSet<String>,
     /// Tokens in context, and the window's size when known.
@@ -293,6 +295,16 @@ pub struct Session {
 }
 
 impl Session {
+    /// The command that carries this conversation on in a terminal, in its
+    /// folder, once the agent has said its id.
+    pub fn resume_command(&self) -> Option<String> {
+        let id = self.agent_session.as_deref()?;
+        Some(format!(
+            "cd {} && claude --resume {id}",
+            crate::shell::shell_quote(&self.cwd)
+        ))
+    }
+
     /// A turn is under way: working, or waiting on you mid-turn. A turn that
     /// ended in an error also needs you, but nothing is running to stop.
     pub fn running(&self) -> bool {
@@ -329,6 +341,7 @@ impl Session {
             servers: Vec::new(),
             made_sig: 0,
             todos: Vec::new(),
+            agent_session: None,
         }
     }
 }
@@ -511,6 +524,18 @@ pub fn machine_shown(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resuming_in_a_terminal_starts_in_its_folder() {
+        let mut s = super::Session::placeholder("x");
+        s.cwd = "/Users/me/my app".into();
+        assert_eq!(s.resume_command(), None);
+        s.agent_session = Some("abc-1".into());
+        assert_eq!(
+            s.resume_command().as_deref(),
+            Some("cd '/Users/me/my app' && claude --resume abc-1")
+        );
+    }
+
     #[test]
     fn opened_files_show_as_text_unless_binary() {
         use super::Kind;

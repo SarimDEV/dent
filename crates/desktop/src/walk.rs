@@ -3722,6 +3722,18 @@ fn file_links() -> Vec<(f32, Act)> {
             ),
         ),
         (0.2, Shot("own-links")),
+        (
+            0.,
+            Until(
+                "the session knows the agent's own id, to resume in a terminal",
+                |d, _| {
+                    current(d)
+                        .and_then(|s| s.resume_command())
+                        .is_some_and(|c| c.contains("claude --resume "))
+                },
+                3.,
+            ),
+        ),
         (0.2, RightClick("tool-row")),
         (
             0.1,
