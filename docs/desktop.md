@@ -147,7 +147,7 @@ A panel shows the live view of the session's agent browser (see Daemon, Browser 
 ## Overview, search and limits
 
 - **Overview:** the same inbox as a board, for a wide window; one key jumps to the next session that needs you.
-- **Command palette** (Cmd/Ctrl+K): sessions, projects, docs, commands and settings, fuzzy matched. A session found by words said inside it, not its title, opens at the first place they were said, with ⌘F holding them so ↩ steps to the next.
+- **Command palette** (Cmd/Ctrl+K): sessions, projects, docs, commands and settings, fuzzy matched. A session found by words said inside it, not its title, opens at the first place they were said, with ⌘F holding them so ↩ steps to the next. With a session open, files in its project that match what's typed (one word) are listed under the sessions, "Files in <project>", up to six; ↩ opens one in the viewer.
 - **Search** (Cmd/Ctrl+Shift+F): full text across all sessions and docs from the local cache, filterable by project, machine, agent and date.
 - **Usage limits:** always in the status bar: each Claude and Codex account's windows (5-hour and weekly, or whatever the plan has) as percentages with reset countdowns, turning amber and red near the limit. Account-level and synced across devices; see Daemon, Usage limits.
 

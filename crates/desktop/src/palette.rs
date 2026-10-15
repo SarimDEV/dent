@@ -23,12 +23,14 @@ impl Dent {
     ) -> AnyElement {
         let t = self.t;
         let results = self.palette_results(cx);
+        let files = self.palette_files(cx);
         let query = self.search.read(cx).value().trim().to_string();
         let n = results.len();
+        let all = n + files.len();
         let at = at.min(if query.is_empty() {
-            n.saturating_sub(1)
+            all.saturating_sub(1)
         } else {
-            n
+            all
         });
         let vw = window.viewport_size();
         let width = (vw.width.as_f32() - 2. * space::S8).min(560.);
@@ -151,7 +153,73 @@ impl Dent {
                 )
             })
             .collect();
-        let empty = rows.is_empty();
+        // Files of the session you're in, under the sessions.
+        let project = self
+            .current()
+            .map(|s| s.project.clone())
+            .unwrap_or_default();
+        let file_rows: Vec<AnyElement> = files
+            .iter()
+            .enumerate()
+            .map(|(j, path)| {
+                let i = n + j;
+                let on = i == at;
+                let (dir, name) = match path.rsplit_once('/') {
+                    Some((d, f)) => (d.to_string(), f.to_string()),
+                    None => (String::new(), path.clone()),
+                };
+                div()
+                    .id(SharedString::from(format!("result-{i}")))
+                    .relative()
+                    .mx(px(space::S1))
+                    .px(px(space::S3))
+                    .h(px(size::ROW + 8.))
+                    .rounded(px(radius::MD))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S3))
+                    .cursor_pointer()
+                    .when(on, |d| d.bg(t.selected()))
+                    .when(!on, |d| {
+                        d.hover(|d| d.bg(t.hover())).active(|d| d.bg(t.press()))
+                    })
+                    .on_press(cx.listener(move |this, _, window, cx| {
+                        this.palette = Some(i);
+                        this.palette_open_selected(window, cx);
+                    }))
+                    .child(icon("file", 14., t.quiet))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_baseline()
+                            .gap(px(space::S2))
+                            .child(div().flex_none().ty(UI).text_color(t.ink).child(name))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .ty(LABEL)
+                                    .text_color(t.quiet)
+                                    .child(dir),
+                            ),
+                    )
+                    .when(on, |d| d.child(kbd("↩", &t)))
+                    .child(probe(&self.probes, format!("result-{i}")))
+                    .into_any_element()
+            })
+            .collect();
+        let file_head = (!file_rows.is_empty()).then(|| {
+            div()
+                .px(px(space::S4))
+                .pt(px(space::S3))
+                .pb(px(space::S1))
+                .ty(LABEL)
+                .text_color(t.quiet)
+                .child(format!("Files in {project}"))
+        });
+        let empty = rows.is_empty() && file_rows.is_empty();
         div()
             .id("palette-scrim")
             // Takes the press that dismisses it: nothing under it is clicked.
@@ -215,9 +283,11 @@ impl Dent {
                             .track_scroll(&self.palette_scroll)
                             .py(px(space::S1))
                             .children(rows)
+                            .children(file_head)
+                            .children(file_rows)
                             // What you typed can always start a session, matches or not.
                             .when(empty || !query.is_empty(), |d| {
-                                let on = at >= n;
+                                let on = at >= all;
                                 d.child(
                                     div()
                                         .id("palette-start")
@@ -229,7 +299,7 @@ impl Dent {
                                         .when(on, |d| d.bg(t.selected()))
                                         .when(!on, |d| d.hover(|d| d.bg(t.hover())))
                                         .on_press(cx.listener(move |this, _, window, cx| {
-                                            this.palette = Some(n);
+                                            this.palette = Some(all);
                                             this.palette_open_selected(window, cx);
                                         }))
                                         .flex()

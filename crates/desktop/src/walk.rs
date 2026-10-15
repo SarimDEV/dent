@@ -3795,6 +3795,39 @@ fn file_links() -> Vec<(f32, Act)> {
         ),
         (0.3, Shot("search-match")),
         (0.1, Key("escape")),
+        (0.2, Key("escape")),
+        (0.2, Key("cmd-k")),
+        (0.3, Keys("readme")),
+        (
+            0.1,
+            Until(
+                "⌘K lists the project's files that match",
+                |d, cx| d.palette_files(cx) == ["README.md"],
+                5.,
+            ),
+        ),
+        (
+            0.,
+            Call(|d, cx_w, cx| {
+                let _ = cx_w;
+                d.palette = Some(d.palette_results(cx).len());
+            }),
+        ),
+        (0.3, Shot("quick-open")),
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until(
+                "and ↩ opens the file in the viewer",
+                |d, _| {
+                    current(d).is_some_and(|s| {
+                        matches!(d.tab(s), crate::app::Tab::Art(a)
+                            if d.art(a).is_some_and(|x| x.path.ends_with("/README.md")))
+                    })
+                },
+                3.,
+            ),
+        ),
         (
             0.1,
             Call(|d, w, cx| {

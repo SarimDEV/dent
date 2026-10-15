@@ -2729,7 +2729,25 @@ impl Dent {
     /// something is typed.
     pub fn palette_len(&self, cx: &App) -> usize {
         let typed = !self.search.read(cx).value().trim().is_empty();
-        self.palette_results(cx).len() + usize::from(typed)
+        self.palette_results(cx).len() + self.palette_files(cx).len() + usize::from(typed)
+    }
+
+    /// Files in the open session's project matching what's typed in ⌘K,
+    /// listed under the sessions; one opens in the viewer.
+    pub fn palette_files(&self, cx: &App) -> Vec<String> {
+        let q = self.search.read(cx).value().trim().to_string();
+        if q.is_empty() || q.contains(char::is_whitespace) {
+            return Vec::new();
+        }
+        let Some(list) = self.current().and_then(|s| self.files.get(&s.id)) else {
+            return Vec::new();
+        };
+        complete::files(list, &q)
+            .into_iter()
+            .map(|c| c.name)
+            .filter(|p| !p.ends_with('/'))
+            .take(6)
+            .collect()
     }
 
     /// Scroll to your previous or next message. Returns whether there was one.
@@ -5002,14 +5020,26 @@ impl Dent {
             return;
         }
         let results = self.palette_results(cx);
+        let files = self.palette_files(cx);
         let at = self.palette.unwrap_or(0);
         let query = self.search.read(cx).value().trim().to_string();
         self.palette = None;
-        if let Some(id) = results.get(at).cloned() {
+        if let Some(file) = at.checked_sub(results.len()).and_then(|j| files.get(j)) {
+            let full = self.current().map(|s| {
+                std::path::Path::new(&s.cwd)
+                    .join(file)
+                    .display()
+                    .to_string()
+            });
+            self.close_palette(window, cx);
+            if let Some(full) = full {
+                self.open_file(&full, cx);
+            }
+        } else if let Some(id) = results.get(at).cloned() {
             // A closed session opens to read, as from the sidebar; Reopen
             // is in its footer.
             self.open_at_match(id, &query, window, cx);
-        } else if !query.is_empty() {
+        } else if !query.is_empty() && at >= results.len() + files.len() {
             // The last row: start a session with what was typed.
             self.select(None, window, cx);
             self.starter.update(cx, |s, cx| {
