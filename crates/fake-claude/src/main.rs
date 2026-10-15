@@ -6,6 +6,7 @@
 //! What it does depends on words in the message:
 //!
 //! - `run` or `approve`: a Bash call that needs approval
+//! - `present a plan`: a plan to approve, as plan mode ends
 //! - `ask`: a question with choices (`ask several`: more than one answer)
 //! - `write <path>`: writes the file in its directory (asks first in Ask mode)
 //! - `background`: starts background work, ends the turn, then follows up
@@ -744,6 +745,16 @@ impl Agent {
                 .to_string();
             self.result(&id, &format!("User answered: {picked}"), false, None);
             self.say(&format!("Going with **{picked}**."), None)?;
+            self.end("done", false);
+            return Ok(());
+        }
+        if lower.contains("present a plan") {
+            let input =
+                json!({"plan": "1. Read the handler.\n2. Add the rate limit.\n3. Run the tests."});
+            match self.guarded("ExitPlanMode", input, true)? {
+                Some(why) => self.say(&format!("Okay, I'll keep planning: {why}"), None)?,
+                None => self.say("Building it now.", None)?,
+            }
             self.end("done", false);
             return Ok(());
         }

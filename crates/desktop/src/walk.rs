@@ -139,6 +139,14 @@ impl Walk {
                 v.extend(find());
                 v
             }
+            "keys" => {
+                let mut v = vec![(
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                )];
+                v.extend(answer_keys());
+                v
+            }
             "recall" => {
                 let mut v = vec![(
                     0.,
@@ -814,6 +822,7 @@ fn checks() -> Vec<(f32, Act)> {
     v.extend(typing());
     v.extend(recall());
     v.extend(find());
+    v.extend(answer_keys());
     v.extend([
         (0.3, Key("cmd-n")),
         (
@@ -2134,6 +2143,130 @@ fn find() -> Vec<(f32, Act)> {
                 "Esc puts the bar away and the keyboard goes back to the reply box",
                 |d, _| d.find.is_none() && drawn(d, "find-bar").is_none(),
                 1.,
+            ),
+        ),
+    ]);
+    v
+}
+
+fn noted(d: &Dent, start: &str) -> bool {
+    current(d).is_some_and(|s| {
+        s.items
+            .iter()
+            .any(|i| matches!(i, Item::Note { text, .. } if text.starts_with(start)))
+    })
+}
+
+/// Approvals and plans answer to keys on their card, and only there.
+fn answer_keys() -> Vec<(f32, Act)> {
+    fn waiting(d: &Dent) -> bool {
+        has(d, |i| matches!(i, Item::Approval { .. })) && status_is(d, Status::Needs)
+    }
+    let mut v = new_session("please run it");
+    v.extend([
+        (0.1, Until("an approval waits", |d, _| waiting(d), 10.)),
+        (0.2, Keys("1")),
+        (
+            0.3,
+            Until(
+                "a 1 typed in the reply box is just a 1: the approval still waits",
+                |d, cx| waiting(d) && composer_is(d, cx, "1"),
+                1.,
+            ),
+        ),
+        (0.1, Type(Field::Composer, "")),
+        (0.1, Key("escape")),
+        (
+            0.1,
+            Until(
+                "Esc from the empty box takes the keyboard to the card",
+                |d, _| d.ask_keyed,
+                1.,
+            ),
+        ),
+        (0.3, Shot("approval-keys")),
+        (0.8, Key("1")),
+        (
+            0.1,
+            Until(
+                "1 on the card allows once",
+                |d, _| {
+                    done_saying(d, "Ran it")
+                        && noted(d, "Allowed")
+                        && !noted(d, "Allowed echo hello > hello.txt for")
+                },
+                10.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "the keyboard goes back to the reply box",
+                |d, _| !d.ask_keyed,
+                1.,
+            ),
+        ),
+        (0.2, Type(Field::Composer, "run it again")),
+        (0.1, Key("enter")),
+        (0.1, Until("another approval", |d, _| waiting(d), 10.)),
+        (0.1, Key("escape")),
+        (0.2, Key("2")),
+        (
+            0.1,
+            Until(
+                "2 allows for this session",
+                |d, _| {
+                    status_is(d, Status::Done)
+                        && noted(d, "Allowed echo hello > hello.txt for this session")
+                },
+                10.,
+            ),
+        ),
+    ]);
+    v.extend(new_session("run it, please"));
+    v.extend([
+        (0.1, Until("a third approval", |d, _| waiting(d), 10.)),
+        (
+            0.1,
+            Until(
+                "a new session's reply box has the keyboard",
+                |d, _| d.composer_keyed,
+                1.,
+            ),
+        ),
+        (0.1, Key("escape")),
+        (
+            0.1,
+            Until("and Esc takes it to the card", |d, _| d.ask_keyed, 1.),
+        ),
+        (0.2, Key("3")),
+        (
+            0.1,
+            Until(
+                "3 denies",
+                |d, _| status_is(d, Status::Done) && noted(d, "Denied"),
+                10.,
+            ),
+        ),
+    ]);
+    v.extend(new_session("present a plan"));
+    v.extend([
+        (
+            0.1,
+            Until(
+                "a plan waits",
+                |d, _| has(d, |i| matches!(i, Item::Plan { .. })),
+                10.,
+            ),
+        ),
+        (0.1, Key("escape")),
+        (0.2, Key("enter")),
+        (
+            0.1,
+            Until(
+                "Return on its card starts building",
+                |d, _| done_saying(d, "Building it now") && noted(d, "Approved the plan"),
+                10.,
             ),
         ),
     ]);

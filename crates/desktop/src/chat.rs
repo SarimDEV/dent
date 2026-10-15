@@ -1248,7 +1248,10 @@ impl Dent {
             } => {
                 let (a, a2, d) = (s.id.clone(), s.id.clone(), s.id.clone());
                 let (k1, k2, k3) = (ask.clone(), ask.clone(), ask.clone());
+                let keyed = self.ask_focus.is_focused(window);
                 needs_card(&t)
+                    .id(SharedString::from(format!("ask-{ask}")))
+                    .track_focus(&self.ask_focus)
                     .child(needs_title(title, &t))
                     .when(!command.is_empty(), |c| {
                         c.child(
@@ -1308,6 +1311,12 @@ impl Dent {
                                     .child(probe(&self.probes, "deny")),
                             ),
                     )
+                    .child(ask_keys(
+                        keyed,
+                        "↩ or 1 allows once · 2 for this session · 3 denies",
+                        "Esc, then 1–3, to answer by key",
+                        &t,
+                    ))
                     .into_any_element()
             }
             Item::Plan { id: ask, plan } => {
@@ -1324,7 +1333,10 @@ impl Dent {
                     base: Some(std::path::PathBuf::from(&s.cwd)),
                 };
                 let plan_view = markdown::render(blocks.as_slice(), &t, false, &mut r);
+                let keyed = self.ask_focus.is_focused(window);
                 needs_card(&t)
+                    .id(SharedString::from(format!("ask-{ask}")))
+                    .track_focus(&self.ask_focus)
                     .child(needs_title("Plan ready for review", &t))
                     .child(
                         div()
@@ -1359,12 +1371,12 @@ impl Dent {
                                     .child(probe(&self.probes, "plan-keep")),
                             ),
                     )
-                    .child(
-                        div()
-                            .ty(LABEL)
-                            .text_color(t.quiet)
-                            .child("Typed text is sent as what to change"),
-                    )
+                    .child(ask_keys(
+                        keyed,
+                        "↩ or 1 starts building · 2 keeps planning, with what you typed",
+                        "Typed text is sent as what to change · Esc, then 1 or 2, to answer by key",
+                        &t,
+                    ))
                     .into_any_element()
             }
             Item::Question { id: ask, questions } => {
@@ -3703,4 +3715,13 @@ pub fn fit_footer(room: f32, chips: [(String, String); 3], context: bool, hint: 
         context: false,
         hint: false,
     }
+}
+
+/// The line under an approval or a plan saying how to answer by key: the
+/// keys themselves while its card has the keyboard, else how to get there.
+fn ask_keys(keyed: bool, on: &'static str, off: &'static str, t: &theme::Theme) -> Div {
+    div()
+        .ty(LABEL)
+        .text_color(if keyed { t.ink } else { t.quiet })
+        .child(if keyed { on } else { off })
 }

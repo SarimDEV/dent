@@ -231,6 +231,8 @@ impl Render for Dent {
                 .update(cx, |c, cx| c.set_placeholder(want, window, cx));
         }
         self.inbox_focused = self.inbox_focus.is_focused(window);
+        self.ask_keyed = self.ask_focus.is_focused(window);
+        self.composer_keyed = self.composer.read(cx).focus_handle(cx).is_focused(window);
         self.sync_draft(cx);
         if self.menu.is_none() && !self.dragging && !self.dragging_sidebar && self.walk.is_none() {
             self.save_prefs();
@@ -267,13 +269,13 @@ impl Render for Dent {
         self.chat_w = w - side - if wants_panel { self.panel_w } else { 0. };
         self.sidebar_hovered = self.over_sidebar(window.mouse_position(), window);
         self.take_lightbox_request(window);
-        // The question card had the keyboard and its question went: back
-        // to the reply box, so typing carries on.
+        // A card had the keyboard and its ask went: back to the reply box,
+        // so typing carries on.
         if self.ask_focus.is_focused(window)
             && !self
                 .selected
                 .clone()
-                .is_some_and(|id| matches!(self.open_ask(&id), Some(data::Item::Question { .. })))
+                .is_some_and(|id| self.open_ask(&id).is_some())
         {
             let composer = self.composer.clone();
             composer.update(cx, |c, cx| c.focus(window, cx));
@@ -505,12 +507,13 @@ impl Render for Dent {
                     // A draft keeps the keyboard: Esc doesn't throw you out of
                     // it, in a session or a new one.
                 } else if this.field_focused(window, cx) == Some(app::Field::Composer)
-                    && this.selected.clone().is_some_and(|id| {
-                        matches!(this.open_ask(&id), Some(data::Item::Question { .. }))
-                    })
+                    && this
+                        .selected
+                        .clone()
+                        .is_some_and(|id| this.open_ask(&id).is_some())
                 {
-                    // With a question waiting, Esc from the empty box goes to
-                    // its card, where the number keys pick.
+                    // With a question, approval or plan waiting, Esc from the
+                    // empty box goes to its card, where keys answer it.
                     window.focus(&this.ask_focus, cx);
                 } else {
                     this.focus_inbox(window, cx);

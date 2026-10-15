@@ -553,6 +553,10 @@ pub struct Dent {
     pub flash: Option<(String, usize, String)>,
     /// The question card, when the keyboard is on it.
     pub ask_focus: FocusHandle,
+    /// Whether the waiting ask's card had the keyboard at the last draw.
+    pub ask_keyed: bool,
+    /// Whether the reply box had the keyboard at the last draw.
+    pub composer_keyed: bool,
     /// Sessions started in a terminal that could carry on here.
     pub recent: Vec<RecentSession>,
     /// The account's usage, as the provider last reported it, and when.
@@ -981,6 +985,8 @@ impl Dent {
             focus: cx.focus_handle(),
             inbox_focus: cx.focus_handle(),
             ask_focus: cx.focus_handle(),
+            ask_keyed: false,
+            composer_keyed: false,
             ticks: HashMap::new(),
             flash: None,
             shells: HashMap::new(),
@@ -2119,6 +2125,23 @@ impl Dent {
                 return true;
             }
         }
+        // An approval or a plan answers to its keys while its card has the
+        // keyboard (Esc from the empty reply box gets there): never from
+        // a stray key elsewhere, as what it allows can't be taken back.
+        if plain
+            && self.ask_focus.is_focused(window)
+            && let Some(id) = self.selected.clone()
+            && let Some(item @ (Item::Approval { .. } | Item::Plan { .. })) = self.open_ask(&id)
+        {
+            let plan = matches!(item, Item::Plan { .. });
+            match (k.key.as_str(), plan) {
+                ("enter" | "1", _) => self.allow(&id, None, false, cx),
+                ("2", false) => self.allow(&id, None, true, cx),
+                ("2", true) | ("3", false) => self.deny(&id, None, window, cx),
+                _ => return false,
+            }
+            return true;
+        }
         // On the card, Return finishes a question that takes several.
         if plain
             && k.key == "enter"
@@ -3043,16 +3066,20 @@ impl Dent {
     }
 
     pub fn pressed_again(&mut self, key: String) -> bool {
-        let again = self
-            .pressed
-            .get(&key)
-            .is_some_and(|at| at.elapsed() < Duration::from_secs(3));
+        let again = self.pressed_lately(&key);
         if !again {
             self.pressed
                 .retain(|_, at| at.elapsed() < Duration::from_secs(3));
             self.pressed.insert(key, Instant::now());
         }
         again
+    }
+
+    /// Whether `key` was pressed in the last few seconds.
+    pub fn pressed_lately(&self, key: &str) -> bool {
+        self.pressed
+            .get(key)
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(3))
     }
 
     pub fn resume(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -3094,7 +3121,7 @@ impl Dent {
 
     fn reply_to_ask(&mut self, session: &str, ask: String, answer: Answer, cx: &mut Context<Self>) {
         // One answer per ask: the card stays until the agent hears it.
-        if self.pressed_again(format!("ask/{ask}")) {
+        if self.pressed_again(format!("ask/{session}/{ask}")) {
             return;
         }
         self.live.send(Request::Answer {
@@ -3143,7 +3170,7 @@ impl Dent {
         if let Some(Item::Approval { id: ask, .. } | Item::Plan { id: ask, .. }) =
             self.ask_for(id, ask)
         {
-            if self.pressed.contains_key(&format!("ask/{ask}")) {
+            if self.pressed_lately(&format!("ask/{id}/{ask}")) {
                 return;
             }
             if !reason.is_empty() {
