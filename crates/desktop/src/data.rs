@@ -105,6 +105,9 @@ pub enum Item {
     Tools {
         summary: String,
         lines: Vec<ToolLine>,
+        /// The summary counts several calls ("Read 3 files") rather than
+        /// being one call's own line.
+        counted: bool,
     },
     /// The agent wrote a viewable file: a card that opens it.
     Made {

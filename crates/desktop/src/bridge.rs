@@ -295,15 +295,21 @@ pub fn session(
                 }
                 let mut lines = tree(&calls, cwd);
                 let mut summary = summary(&calls, cwd);
+                let mut counted = calls.iter().filter(|c| c.parent.is_none()).count() > 1;
                 // One call at the top: the folded line is that call, so its
                 // line doesn't repeat it, and what's under it moves up.
                 if lines.iter().filter(|l| l.depth == 0).count() == 1 && lines.len() > 1 {
                     summary = lines.remove(0).text;
+                    counted = false;
                     for l in &mut lines {
                         l.depth -= 1;
                     }
                 }
-                items.push(Item::Tools { summary, lines });
+                items.push(Item::Tools {
+                    summary,
+                    lines,
+                    counted,
+                });
             }
             Entry::Ask {
                 id,
@@ -844,7 +850,7 @@ fn line(c: &Call, cwd: &Path) -> String {
             ..c.clone()
         };
         let what = line(&real, cwd);
-        let rest = what.split_once(' ').map(|x| x.1).unwrap_or(&what);
+        let rest = what[dent_client_core::timeline::verb_len(&what)..].trim_start();
         return format!("Waiting for you: {rest}");
     }
     let mut l = c.line();
@@ -861,78 +867,83 @@ fn line(c: &Call, cwd: &Path) -> String {
     format!("{l}{mark}")
 }
 
-/// A group's folded line, like "Read 3 files, changed 2 files, and ran a
-/// command": the two biggest kinds of work, the rest counted together.
+/// A group's folded line, like "Edited 2 files, read 3 files, ran a
+/// command": what it changed first, then what it read, then the rest; three
+/// kinds at most, the others counted as steps.
 fn summary(calls: &[Call], cwd: &Path) -> String {
     let top: Vec<&Call> = calls.iter().filter(|c| c.parent.is_none()).collect();
     if top.len() == 1 {
         return line(top[0], cwd).trim_start().to_string();
     }
-    // (priority, label, count): edits and commands first.
-    let mut kinds: Vec<(u8, &str, usize)> = Vec::new();
-    let mut changed: Vec<String> = Vec::new();
-    for c in &top {
+    // (tier, kind, count, first seen): writes, then reads, then the rest.
+    let mut kinds: Vec<(u8, &str, usize, usize)> = Vec::new();
+    let mut touched: Vec<(String, &str)> = Vec::new();
+    for (i, c) in top.iter().enumerate() {
         let agent = matches!(c.name.as_str(), "Task" | "Agent");
         let kind = match c.name.trim_start_matches("waiting:") {
-            _ if agent && c.result.is_none() => (0, "working"),
-            "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => {
+            _ if agent && c.result.is_none() => (2, "working"),
+            n @ ("Write" | "Edit" | "MultiEdit" | "NotebookEdit") => {
+                let k = if n == "Write" { "created" } else { "edited" };
+                // A file counts once, however many times it was changed.
                 let p = c.path().unwrap_or_default();
-                if changed.contains(&p) {
+                if touched.iter().any(|(q, j)| *q == p && *j == k) {
                     continue;
                 }
-                changed.push(p);
-                (0, "changed")
+                touched.push((p, k));
+                (0, k)
             }
-            "Bash" => (0, "ran"),
             "Read" => (1, "read"),
-            "Grep" | "Glob" | "LS" => (1, "searched code"),
-            "WebFetch" | "WebSearch" => (1, "searched the web"),
-            "Task" | "Agent" => (1, "subagents"),
+            "Grep" | "Glob" | "LS" => (1, "searched"),
+            "WebFetch" => (1, "fetched"),
+            "WebSearch" => (1, "searched the web"),
+            "Bash" => (2, "ran"),
+            "Task" | "Agent" => (2, "agents"),
             _ => (2, "used"),
         };
         match kinds.iter_mut().find(|k| k.1 == kind.1) {
             Some(k) => k.2 += 1,
-            None => kinds.push((kind.0, kind.1, 1)),
+            None => kinds.push((kind.0, kind.1, 1, i)),
         }
     }
-    kinds.sort_by_key(|k| k.0);
-    let phrase = |(_, label, n): &(u8, &str, usize)| -> String {
-        let n = *n;
-        let s = |w: &str| {
+    kinds.sort_by_key(|k| (k.0, std::cmp::Reverse(k.2), k.3));
+    let phrase = |&(_, kind, n, _): &(u8, &str, usize, usize)| -> String {
+        let count = |one: &str, many: &str| {
             if n == 1 {
-                w.to_string()
+                one.to_string()
             } else {
-                format!("{w}s")
+                format!("{n} {many}")
             }
         };
-        match *label {
-            "changed" => format!("changed {n} {}", s("file")),
-            "ran" => format!("ran {n} {}", s("command")),
-            "read" => format!("read {n} {}", s("file")),
-            "subagents" => format!("ran {n} {}", s("subagent")),
-            "working" => format!("{n} {} working", s("subagent")),
-            "used" => format!("used {n} {}", s("tool")),
-            l if n == 1 => l.to_string(),
-            l => format!("{l} {n} times"),
+        match kind {
+            "edited" => format!("edited {}", count("a file", "files")),
+            "created" => format!("created {}", count("a file", "files")),
+            "read" => format!("read {}", count("a file", "files")),
+            "fetched" => format!("read {}", count("a page", "pages")),
+            "ran" => format!("ran {}", count("a command", "commands")),
+            "agents" => format!("ran {}", count("an agent", "agents")),
+            "working" => format!("{} working", count("an agent", "agents")),
+            "used" => format!("used {}", count("a tool", "tools")),
+            // Searches aren't counted: one or five, it looked.
+            "searched" => "searched files".to_string(),
+            other => other.to_string(),
         }
     };
-    let mut parts: Vec<String> = kinds.iter().take(2).map(phrase).collect();
-    let rest: usize = kinds.iter().skip(2).map(|k| k.2).sum();
+    let shown = if kinds.len() > 3 { 2 } else { kinds.len() };
+    let mut out = kinds[..shown]
+        .iter()
+        .map(phrase)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rest: usize = kinds[shown..].iter().map(|k| k.2).sum();
     if rest > 0 {
-        parts.push(format!(
-            "performed {rest} other {}",
-            if rest == 1 { "action" } else { "actions" }
+        out.push_str(&format!(
+            ", and {rest} more {}",
+            if rest == 1 { "step" } else { "steps" }
         ));
     }
-    let mut out = match parts.len() {
-        0 => "Worked".to_string(),
-        1 => parts.remove(0),
-        2 => format!("{} and {}", parts[0], parts[1]),
-        _ => {
-            let last = parts.pop().unwrap_or_default();
-            format!("{}, and {last}", parts.join(", "))
-        }
-    };
+    if out.is_empty() {
+        out = "worked".into();
+    }
     if let Some(f) = out.get(..1) {
         out = f.to_uppercase() + &out[1..];
     }

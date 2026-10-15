@@ -26,7 +26,7 @@ A 4 px grid, with 2 px allowed only inside a component for optical fixes.
 | `space.8` | 32 | Chat column gutter |
 | `space.12` | 48 | Empty states |
 
-- **Inside is tighter than between:** the gap inside a component is always smaller than the gap around it. Tool lines in one turn sit 0 apart; turns sit 16 apart.
+- **Inside is tighter than between:** the gap inside a component is always smaller than the gap around it. Tool lines in a run sit 2 apart, 8 from the reply text around them; paragraphs of reply sit 16 apart.
 - **One gutter per region:** panels use 16, the chat column uses 32, and everything inside a region aligns to its gutter (the composer's text lines up with message text).
 
 ## Sizes
@@ -36,7 +36,7 @@ A 4 px grid, with 2 px allowed only inside a component for optical fixes.
 | `size.header` | 44 | Every panel header (sidebar, chat, diff, docs), so all column tops align |
 | `size.row` | 28 | Sidebar and list rows |
 | `size.toolbar` | 40 | Viewer toolbars under a panel header |
-| `size.line` | 20 | Code, diff and tool lines (equals the code line height) |
+| `size.line` | 20 | Code, diff and tool lines (equals the code and UI line height) |
 | `size.control` | 28 | Buttons and inputs |
 | `size.control.sm` | 22 | Pills, inline buttons |
 | `size.status` | 28 | Status bar |
@@ -53,11 +53,12 @@ Five sizes, two weights, three inks. Line heights sit on the 4 px grid.
 | --- | --- | --- | --- |
 | `type.display` | Instrument Serif | 28 / 32, compact 20 / 24 | Session title, doc title, palette query |
 | `type.reading` | Literata | 15 / 24 | Agent replies, user messages, docs body, composer |
-| `type.ui` | IBM Plex Sans | 13 / 20 | Sidebar titles, buttons, menus |
-| `type.code` | Commit Mono | 12 / 20 | Code, diffs, tool lines, commands |
+| `type.ui` | IBM Plex Sans | 13 / 20 | Sidebar titles, buttons, menus, tool lines, the working line |
+| `type.code` | Commit Mono | 12 / 20 | Code, diffs, commands, a tool call's input and output |
 | `type.label` | Commit Mono | 11 / 16 | Metadata and section labels |
 
 - **Text size (⌘+ / ⌘−) scales `type.reading` and `type.code` only**, lines rounded to whole pixels; display, UI and label sizes, and every control and gutter, stay as designed. Anything measured from those two types reads them through `Type::zoomed()`.
+- **Tool lines are two inks:** the verb in `quiet`, what it worked on in `secondary` (between `quiet` and `ink`), both to `ink` on hover. A count of work ("Edited 2 files, read 3 files") is one quiet phrase. The chevron trails the label.
 - **Hierarchy comes from ink and weight before size.** Inks: `ink` (content), `quiet` (secondary, metadata), `faint` (line numbers, placeholders, separators). Weights: regular and medium only.
 - **Uppercase is for section labels only** (`PROJECTS`, `NEEDS YOU`). Inline metadata (`claude · mac-mini · 100,003 events`) stays lowercase.
 - **Numbers that change** (usage, counts, timers) are set in Commit Mono so every digit is the same width and nothing shifts as they update.
@@ -70,7 +71,7 @@ Five sizes, two weights, three inks. Line heights sit on the 4 px grid.
 | `radius.0` | 0 | Status squares, dither, diff rows (pixels are square) |
 | `radius.sm` | 4 | Buttons inside cards, pills, tags, keys |
 | `radius.md` | 6 | Buttons, inputs, selected rows |
-| `radius.lg` | 8 | Cards, approval cards, user messages |
+| `radius.lg` | 8 | Cards, approval cards, an opened tool group (user messages take 10) |
 | `radius.xl` | 12 | Composer, menus, palette, dialogs |
 
 - **Nested radius:** inner = outer − padding, never below `radius.sm`. A card at 8 with 12 padding holds buttons at 4.
@@ -90,6 +91,7 @@ Three layers. Components never use a hex value.
 | --- | --- | --- | --- |
 | `state.hover` | ink 5% | ink 6% | Row and ghost button hover |
 | `state.press` | ink 9% | ink 10% | Pressed |
+| `tint` | ink 5% | ink 7% | Your messages' fill (no edge), a tool call's opened detail |
 | `state.selected` | ink 10% | ink 12% | Selected row (twice hover, so a hovered row never reads as a second selection) |
 | `signal.wash` | signal 7% | signal 12% | Approval card fill, signal tints |
 | `signal.edge` | signal 45% | signal 50% | Approval card edge |
@@ -163,6 +165,8 @@ Each motion has one name and one job.
 | **Lift** | A picture zooms from where it sits to the middle of the window (`dur.slow` + 40 ms, `ease.out`) as the backdrop fades dark a little ahead of it; it zooms back in `dur.base`, the backdrop clearing first | Opening a picture large |
 | **Compact** | The serif title eases from 28 to 20 on `spring.snappy`; the live pill arrives with a 4 px slide | Reading history |
 | **Drift** | The working square's checker shifts one cell, stepped at `steps.pixel` | Working status |
+| **Hand-over** | The working line's words stay up at least 650 ms (2 s for a step) and change only once the new words have held 250 ms; the old rise 3 px out, the new rise 3 px in, `dur.base` in all | Working line |
+| **Breathe** | After 3 s of work the working line's words ease between full and 60% opacity over 2 s | Working line |
 | **Press** | See States | Buttons, rows |
 
 ### Never animated
@@ -179,7 +183,7 @@ With the system's reduce-motion setting on (read at launch and whenever the wind
 
 - Allowed per frame: opacity, offsets, colours, flat quads, and remeasuring at most the one row that is changing.
 - The dither is a grid of flat quads, so it is for small surfaces only. Across a whole window it measured far over budget, which is why the theme switch is a colour tween.
-- Only the working square repaints a quiet window, at 8 fps, and only while a session is working and visible.
+- Only the working line repaints a quiet window (its square's drift, its words' breath and hand-over), and only while a session is working and visible.
 - Every new motion is measured with the frame-timing bench before it lands (Reliability requirements).
 
 ## Lists of things you act on

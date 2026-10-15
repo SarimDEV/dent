@@ -291,11 +291,10 @@ impl Dent {
             .flex()
             .flex_col()
             .gap(px(space::S2))
-            .p(px(space::S3))
+            .px(px(space::S3))
+            .py(px(space::S2))
             .rounded(px(radius::MD))
-            .bg(t.raised)
-            .border_1()
-            .border_color(t.hairline)
+            .bg(t.tint())
             .ty(CODE)
             .text_color(t.ink);
         // The line under a clipped block: how much more, and a press shows
@@ -346,7 +345,9 @@ impl Dent {
                 .child(
                     div()
                         .ty(LABEL)
-                        .text_color(if *failed { t.needs.0 } else { t.faint })
+                        // Magenta means only "needs you": a failure is said
+                        // in words, in ink.
+                        .text_color(if *failed { t.ink } else { t.faint })
                         .child(if *failed { "Failed" } else { "Output" }),
                 )
                 .child(block(format!("call-out-{key}"), text, t.quiet))
@@ -702,7 +703,30 @@ impl Dent {
                                 // take the rest of the gap.
                                 space::S1
                             } else {
-                                space::S4
+                                // Work sits close: tool lines in a run
+                                // almost touch, and hang near the words
+                                // around them; paragraphs of reply breathe.
+                                let work = |i: Option<&Item>| {
+                                    matches!(
+                                        i,
+                                        None | Some(
+                                            Item::Tools { .. }
+                                                | Item::Thinking(_)
+                                                | Item::Note { .. }
+                                        )
+                                    )
+                                };
+                                let next = s
+                                    .items
+                                    .get(ix + 1..)
+                                    .unwrap_or_default()
+                                    .iter()
+                                    .find(|i| !matches!(i, Item::TurnEnd { .. }));
+                                match (work(s.items.get(ix)), work(next)) {
+                                    (true, true) => space::HALF,
+                                    (true, false) | (false, true) => space::S2,
+                                    (false, false) => space::S4,
+                                }
                             }))
                             .child(body),
                     )
@@ -846,43 +870,65 @@ impl Dent {
             .into_any_element()
     }
 
-    /// The last line while the agent works: what it's doing, and for how long.
+    /// The last line while the agent works: what it's doing, and for how
+    /// long. The square hangs in the gutter so the words line up with the
+    /// reply; the words breathe once it's been a while, and each change of
+    /// words hands over in place: the old rise out, the new rise in.
     fn working_line(&self, s: &Session) -> AnyElement {
         let t = self.t;
         let since = self.working_since.get(&s.id).copied();
-        // Compacting or retrying says so, in place of the work; each
-        // change of words eases in.
+        // Compacting or retrying says so, in place of the work.
         let special = s
             .activity
             .as_ref()
             .and_then(|a| crate::cards::activity_line(a, crate::cards::now_ms()));
         let (lead, detail) = match special {
             Some(line) => line,
-            None => (
-                match since {
-                    Some(at) if at.elapsed().as_secs() >= 1 => {
-                        format!("Working for {}", duration(at.elapsed().as_secs()))
-                    }
-                    _ => "Working".into(),
-                },
-                s.detail.clone(),
-            ),
+            None => ("Working…".to_string(), s.detail.clone()),
         };
         let kind = match &s.activity {
             Some(dent_protocol::Activity::Compacting { .. }) => "compacting",
             Some(dent_protocol::Activity::Retrying { .. }) => "retrying",
             Some(dent_protocol::Activity::Preparing { .. }) | None => "working",
         };
-        let changed = self.changed_words(&s.id, kind, &detail);
-        let fade = if crate::reduce_motion() {
+        let live = self.live_words(&s.id, kind, &detail);
+        let still = crate::reduce_motion();
+        let k = if still {
             1.
         } else {
-            anim::ease_out(anim::progress(changed, motion::BASE))
+            anim::progress(live.at, motion::BASE)
         };
+        // The first half the old words leave, the second the new arrive.
+        let (words, fade, rise) = if k < 0.5 && !live.was.is_empty() {
+            let out = anim::ease_out(k * 2.);
+            (live.was.clone(), 1. - out, -out * motion::SWAP)
+        } else {
+            let k = if live.was.is_empty() {
+                k
+            } else {
+                (k - 0.5) * 2.
+            };
+            let inn = anim::ease_out(k.clamp(0., 1.));
+            (live.words.clone(), inn, (1. - inn) * motion::SWAP)
+        };
+        let ran = since.map(|at| at.elapsed());
+        // A slow breath once it's been a while: still working, not stuck.
+        let breath = match ran {
+            Some(r) if !still && r.as_millis() as f32 > motion::BREATHE_AFTER => {
+                let p = (r.as_millis() as f32 - motion::BREATHE_AFTER) / motion::BREATHE;
+                let wave = 0.5 - 0.5 * (p * std::f32::consts::TAU).cos();
+                1. - (1. - motion::BREATHE_LOW) * wave
+            }
+            _ => 1.,
+        };
+        let elapsed = ran
+            .filter(|r| r.as_secs() >= 2)
+            .map(|r| duration(r.as_secs()));
         div()
             .flex()
             .items_center()
             .gap(px(space::S2))
+            .ml(px(-(size::SQUARE + space::S2)))
             .ty(UI)
             .text_color(t.quiet)
             .child(status_square(
@@ -893,16 +939,32 @@ impl Dent {
                 },
                 &t,
             ))
-            .child(div().text_color(t.ink).child(lead))
-            .child(div().text_color(t.faint).child("·"))
             .child(
                 div()
+                    .flex()
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .opacity(fade)
-                    .ml(px((1. - fade) * motion::NUDGE))
-                    .child(detail),
+                    .items_center()
+                    .gap(px(space::S1H))
+                    .opacity(breath)
+                    .child(div().flex_none().child(lead))
+                    .when(!words.is_empty(), |d| {
+                        d.child(div().flex_none().text_color(t.faint).child("·"))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .relative()
+                                    .top(px(rise))
+                                    .opacity(fade)
+                                    .text_color(t.secondary())
+                                    .child(words),
+                            )
+                    })
+                    .when_some(elapsed, |d, e| {
+                        d.child(div().flex_none().text_color(t.faint).child("·"))
+                            .child(div().flex_none().ty(LABEL).text_color(t.faint).child(e))
+                    }),
             )
             .into_any_element()
     }
@@ -941,12 +1003,10 @@ impl Dent {
                     .child(
                         div()
                             .max_w(relative(0.85))
-                            .px(px(space::S4))
-                            .py(px(space::S2 + 2.))
-                            .rounded(px(radius::LG))
-                            .bg(t.raised)
-                            .border_1()
-                            .border_color(t.hairline)
+                            .px(px(space::S3 + space::HALF))
+                            .py(px(space::S2))
+                            .rounded(px(radius::LG + space::HALF))
+                            .bg(t.tint())
                             .flex()
                             .flex_col()
                             .gap(px(space::S2))
@@ -1206,7 +1266,11 @@ impl Dent {
                     }
                 }
             }
-            Item::Tools { summary, lines } => {
+            Item::Tools {
+                summary,
+                lines,
+                counted,
+            } => {
                 // A lone call opens straight to what it did; a group opens
                 // to its calls, each of which opens in turn.
                 let lone = lines.len() == 1 && lines[0].detail.is_some();
@@ -1222,20 +1286,22 @@ impl Dent {
                     } else {
                         self.open_tools.contains(&key)
                     };
+                let group = SharedString::from(format!("tools-g-{ix}"));
                 div()
                     .flex()
                     .flex_col()
                     .child(
                         div()
                             .id(SharedString::from(format!("tools-{ix}")))
+                            .group(group.clone())
                             .flex()
                             .items_center()
-                            .gap(px(space::S2))
-                            .ty(CODE)
+                            .gap(px(space::S1H))
+                            .ty(UI)
                             .text_color(t.quiet)
                             .when(more, |d| {
-                                d.cursor_pointer().hover(|d| d.text_color(t.ink)).on_press(
-                                    cx.listener(move |this, _, _, cx| {
+                                d.cursor_pointer()
+                                    .on_press(cx.listener(move |this, _, _, cx| {
                                         let set = if lone {
                                             &mut this.open_calls
                                         } else {
@@ -1245,41 +1311,32 @@ impl Dent {
                                             set.insert(key.clone());
                                         }
                                         cx.notify();
-                                    }),
-                                )
+                                    }))
                             })
-                            // A lone call sits flush with the text above.
+                            // Flush with the reply's text; the chevron trails.
+                            .child(if *counted {
+                                // A count of work reads as one quiet phrase.
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .group_hover(group.clone(), |d| d.text_color(t.ink))
+                                    .child(summary.clone())
+                            } else {
+                                tool_text(summary, more.then_some(group.clone()), &t)
+                            })
                             .when(more, |d| {
                                 d.child(
                                     div()
-                                        .w(px(space::S4))
                                         .flex_none()
-                                        .flex()
-                                        .justify_center()
-                                        .child(crate::ui::disclosure(
-                                            "fold",
-                                            open,
-                                            12.,
-                                            t.quiet.opacity(0.7),
-                                        )),
+                                        .child(crate::ui::disclosure("fold", open, 11., t.faint)),
                                 )
-                            })
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .child(summary.clone()),
-                            ),
+                            }),
                     )
                     .when(open && lone, |d| {
                         let detail = lines[0].detail.clone();
                         d.children(detail.map(|dt| {
                             self.call_detail(s, &format!("{ix}-0"), &dt, cx)
-                                .ml(px(space::S4))
-                                .mt(px(space::S1))
+                                .mt(px(space::S1H))
                         }))
                     })
                     .when(open && !lone, |d| {
@@ -1300,9 +1357,21 @@ impl Dent {
                                 // level carries on below, then this row's branch.
                                 // The rails are drawn, so they join from row to
                                 // row whatever each row's height.
-                                let mut row = div().flex().ty(CODE).text_color(t.quiet);
+                                // Rows sit in one card, a hairline between the
+                                // group's own calls; a subagent's steps hang
+                                // from its call on rails.
+                                const PAD: f32 = space::S1;
+                                let mut row = div()
+                                    .flex()
+                                    .px(px(space::S3))
+                                    .py(px(PAD))
+                                    .ty(UI)
+                                    .text_color(t.quiet)
+                                    .when(l.depth == 0 && i > 0, |d| {
+                                        d.border_t_1().border_color(t.hairline)
+                                    });
                                 let rail = t.quiet.opacity(0.35);
-                                for k in 0..=l.depth {
+                                for k in 1..=l.depth {
                                     let more = continues(&depths, i, k);
                                     let own = k == l.depth;
                                     row = row.child(
@@ -1320,11 +1389,12 @@ impl Dent {
                                                         .bg(rail)
                                                         .map(|d| {
                                                             if more {
-                                                                d.bottom_0()
+                                                                d.bottom(px(-PAD))
                                                             } else {
-                                                                d.h(px(size::LINE / 2.))
+                                                                d.h(px(PAD + size::LINE / 2.))
                                                             }
-                                                        }),
+                                                        })
+                                                        .top(px(-PAD)),
                                                 )
                                             })
                                             .when(own, |d| {
@@ -1376,23 +1446,28 @@ impl Dent {
                                         let call = l.id.clone();
                                         let opened = self.open_calls.contains(&call);
                                         let detail = l.detail.clone().filter(|_| opened);
+                                        let gname =
+                                            SharedString::from(format!("tool-line-g-{ix}-{n}"));
                                         let line = div()
                                             .id(SharedString::from(format!("tool-line-{ix}-{n}")))
+                                            .group(gname.clone())
+                                            .flex()
                                             .min_w_0()
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
-                                            .text_ellipsis()
+                                            .child(tool_text(
+                                                &l.text,
+                                                l.detail.is_some().then_some(gname),
+                                                &t,
+                                            ))
                                             .when(l.detail.is_some(), |d| {
-                                                d.cursor_pointer()
-                                                    .hover(|d| d.text_color(t.ink))
-                                                    .on_press(cx.listener(move |this, _, _, cx| {
+                                                d.cursor_pointer().on_press(cx.listener(
+                                                    move |this, _, _, cx| {
                                                         if !this.open_calls.remove(&call) {
                                                             this.open_calls.insert(call.clone());
                                                         }
                                                         cx.notify();
-                                                    }))
-                                            })
-                                            .child(l.text.clone());
+                                                    },
+                                                ))
+                                            });
                                         // Opened, its details sit in the row, so the
                                         // tree's rails run on beside them.
                                         row.child(
@@ -1420,7 +1495,17 @@ impl Dent {
                                 }
                             })
                             .collect();
-                        d.children(rows)
+                        d.child(
+                            div()
+                                .mt(px(space::S1H))
+                                .py(px(space::HALF))
+                                .rounded(px(radius::LG))
+                                .border_1()
+                                .border_color(t.hairline)
+                                .flex()
+                                .flex_col()
+                                .children(rows),
+                        )
                     })
                     .into_any_element()
             }
@@ -1431,14 +1516,14 @@ impl Dent {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(space::S1))
+                    .gap(px(space::S1H))
                     .child(
                         div()
                             .id(SharedString::from(format!("thought-{ix}")))
                             .flex()
                             .items_center()
-                            .gap(px(space::S2))
-                            .ty(CODE)
+                            .gap(px(space::S1H))
+                            .ty(UI)
                             .text_color(t.quiet)
                             .cursor_pointer()
                             .hover(|d| d.text_color(t.ink))
@@ -1448,25 +1533,12 @@ impl Dent {
                                 }
                                 cx.notify();
                             }))
-                            .child(
-                                div()
-                                    .w(px(space::S4))
-                                    .flex_none()
-                                    .flex()
-                                    .justify_center()
-                                    .child(crate::ui::disclosure(
-                                        "fold",
-                                        open,
-                                        12.,
-                                        t.quiet.opacity(0.7),
-                                    )),
-                            )
-                            .child(format!("Thought · {words} words")),
+                            .child(format!("Thought · {words} words"))
+                            .child(crate::ui::disclosure("fold", open, 11., t.faint)),
                     )
                     .when(open, |d| {
                         d.child(
                             div()
-                                .ml(px(space::S4))
                                 .pl(px(space::S3))
                                 .border_l_2()
                                 .border_color(t.hairline)
@@ -1975,11 +2047,16 @@ impl Dent {
                     )
                     .child(
                         div()
+                            .max_w_full()
                             .flex()
+                            .flex_wrap()
+                            .justify_end()
                             .items_center()
                             .gap(px(space::S2))
                             .child(
                                 div()
+                                    .min_w_0()
+                                    .truncate()
                                     .ty(LABEL)
                                     .text_color(t.faint)
                                     .child(if ahead.is_some() {
@@ -4134,4 +4211,29 @@ pub fn turn_end_after(items: &[Item], ix: usize) -> Option<(u64, u64, bool)> {
         }
     }
     None
+}
+
+/// A tool line: its verb quiet, what it worked on a step darker, both to
+/// ink while `hover` (the row's group) is under the pointer. Too long for
+/// the row, the object gives way first.
+fn tool_text(text: &str, hover: Option<SharedString>, t: &theme::Theme) -> Div {
+    let n = dent_client_core::timeline::verb_len(text);
+    let (verb, rest) = text.split_at(n);
+    let part = |d: Div, ink: Hsla| match &hover {
+        Some(g) => d
+            .text_color(ink)
+            .group_hover(g.clone(), |d| d.text_color(t.ink)),
+        None => d.text_color(ink),
+    };
+    div()
+        .flex()
+        .min_w_0()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .when(!verb.is_empty(), |d| {
+            d.child(part(div().flex_none(), t.quiet).child(verb.to_string()))
+        })
+        .when(!rest.trim().is_empty(), |d| {
+            d.child(part(div().min_w_0().truncate(), t.secondary()).child(rest.to_string()))
+        })
 }

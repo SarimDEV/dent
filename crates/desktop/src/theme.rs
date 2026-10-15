@@ -143,6 +143,16 @@ impl Theme {
             self.raised
         }
     }
+    /// Between `quiet` and `ink`: what a tool line worked on (a file, a
+    /// command), so the verb before it can sit back.
+    pub fn secondary(&self) -> Hsla {
+        mix(self.quiet, self.ink, 0.45)
+    }
+    /// Your messages' fill: a tint of ink, no edge, so a message reads as
+    /// yours without becoming a card.
+    pub fn tint(&self) -> Hsla {
+        self.ink.opacity(self.a(0.05, 0.07))
+    }
     pub fn selected(&self) -> Hsla {
         self.ink.opacity(self.a(0.10, 0.12))
     }

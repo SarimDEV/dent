@@ -194,19 +194,23 @@ impl Call {
             "TodoWrite" => Some("updated the plan".into()),
             _ => None,
         };
+        // Running, a call says what it's doing; done, what it did.
+        let running = self.result.is_none();
+        let tense = |doing: &'static str, did: &'static str| if running { doing } else { did };
         let verb = match self.name.as_str() {
             "Bash" => match &self.result {
                 None => "Running",
                 Some((true, _)) => "Failed",
                 Some((false, _)) => "Ran",
             },
-            "Read" => "Read",
-            "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => "Changed",
-            "Grep" => "Searched",
-            "Glob" => "Searched files",
-            "LS" => "Listed",
-            "WebFetch" => "Fetched",
-            "WebSearch" => "Searched the web for",
+            "Read" => tense("Reading", "Read"),
+            "Write" => tense("Creating", "Created"),
+            "Edit" | "MultiEdit" | "NotebookEdit" => tense("Editing", "Edited"),
+            "Grep" => tense("Searching for", "Searched for"),
+            "Glob" => tense("Looking for files", "Looked for files"),
+            "LS" => tense("Listing", "Listed"),
+            "WebFetch" => tense("Fetching", "Fetched"),
+            "WebSearch" => tense("Searching the web for", "Searched the web for"),
             "Task" | "Agent" => "Subagent:",
             "TodoWrite" => "Updated",
             other => other,
@@ -227,6 +231,42 @@ fn launched(output: &str) -> Option<String> {
     }
     let id = output.split("agentId:").nth(1)?.split_whitespace().next()?;
     Some(id.to_string())
+}
+
+/// Every verb a call's line can start with, longest first so "Searching
+/// the web for" wins over "Searching for".
+const VERBS: &[&str] = &[
+    "Searching the web for",
+    "Searched the web for",
+    "Looking for files",
+    "Looked for files",
+    "Waiting for you:",
+    "Searching for",
+    "Searched for",
+    "Subagent:",
+    "Creating",
+    "Created",
+    "Editing",
+    "Edited",
+    "Reading",
+    "Running",
+    "Fetching",
+    "Fetched",
+    "Listing",
+    "Listed",
+    "Updated",
+    "Failed",
+    "Read",
+    "Ran",
+];
+
+/// How much of a call's line is its verb, so the verb can sit quieter
+/// than what it worked on: 0 when the line starts with no known verb.
+pub fn verb_len(line: &str) -> usize {
+    VERBS
+        .iter()
+        .find(|v| line.starts_with(**v) && line[v.len()..].chars().next().is_none_or(|c| c == ' '))
+        .map_or(0, |v| v.len())
 }
 
 fn first_line(s: &str, max: usize) -> String {

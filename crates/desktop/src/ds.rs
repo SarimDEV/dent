@@ -51,6 +51,19 @@ pub mod motion {
     /// Arrive rises this far (px); chrome moves half as far.
     pub const RISE: f32 = 6.;
     pub const NUDGE: f32 = 4.;
+    /// The working line's words stay at least this long (ms) before the
+    /// next replace them, and a step's words longer, so quick calls never
+    /// flicker; new words must hold still for `SETTLE` first.
+    pub const DWELL: f32 = 650.;
+    pub const DWELL_STEP: f32 = 2000.;
+    pub const SETTLE: f32 = 250.;
+    /// Words swap by rising this far (px): out above, in from below.
+    pub const SWAP: f32 = 3.;
+    /// The working line breathes (full to `BREATHE_LOW` and back) over this
+    /// period (ms), once it has run `BREATHE_AFTER` (ms).
+    pub const BREATHE: f32 = 2000.;
+    pub const BREATHE_LOW: f32 = 0.6;
+    pub const BREATHE_AFTER: f32 = 3000.;
 }
 
 #[derive(Clone, Copy)]

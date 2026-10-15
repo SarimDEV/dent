@@ -28,6 +28,12 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 
 ## Open
 
+### A design brief was read too literally
+- Seen: 2026-10-15. Asked to make the chat feel like Claude desktop's, the work started on Markdown typography; the owner meant the whole feel of an agent at work (tool calls, the working line, rhythm). One research run (~10 min) was redirected and then restarted with a rewritten brief.
+- Cost: ~15 min and one throwaway research pass.
+- Fix: for a "make it feel like X" request, write the brief back in one paragraph (what experience, which moments) and check it before researching.
+- Check: no restarted research passes on the next design request.
+
 ### `just verify` builds every spike
 - Seen: 2026-10-15. Cargo.toml lists `spikes/*` as members and `verify` passes `--workspace`, so clippy and tests compile all 12 spike crates (gpui-chat, core-wasm, desktop-concepts…) every time. AGENTS.md says spikes are left out of the default build.
 - Cost: clean `just verify` on the new Mac took 4 m 19 s; a warm run with nothing changed takes 8 s. 26 of the 35 test binaries it links run zero tests (mostly spikes). The real cost is on cold builds and after changes to shared crates, when spikes rebuild too: still to be measured.

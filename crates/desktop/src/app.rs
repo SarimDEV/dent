@@ -745,7 +745,7 @@ pub struct Dent {
     pub updated_at: HashMap<&'static str, Instant>,
     /// Each session's working-line words and when they last changed, so
     /// new words ease in.
-    pub live_words: std::cell::RefCell<HashMap<String, (String, Instant)>>,
+    pub live_words: std::cell::RefCell<HashMap<String, LiveWords>>,
     /// The context meter's breakdown is open over the composer.
     pub meter_open: bool,
     pub attachments: Vec<Attachment>,
@@ -4545,7 +4545,7 @@ impl Dent {
                 fp(t, &mut h);
                 self.open_calls.contains(&thought_key(t)).hash(&mut h);
             }
-            Item::Tools { lines, summary } => {
+            Item::Tools { lines, summary, .. } => {
                 (lines, summary).hash(&mut h);
                 lines
                     .first()
@@ -5015,29 +5015,54 @@ impl Dent {
                 .values()
                 .any(|t| t.elapsed() < Duration::from_secs(3))
             || self.dragging
-            || self.live_words.borrow().values().any(|(_, at)| {
-                at.elapsed() < Duration::from_millis(crate::ds::motion::BASE as u64 + 40)
+            || self.live_words.borrow().values().any(|w| {
+                w.next.is_some()
+                    || w.at.elapsed() < Duration::from_millis(crate::ds::motion::BASE as u64 + 40)
             })
     }
 
-    /// When the working line's words for `session` last changed.
-    pub fn changed_words(&self, session: &str, kind: &str, words: &str) -> Instant {
+    /// The working line's words for `session` as shown: what it was, what
+    /// it is now, and when it changed. New words wait until the old ones
+    /// have been up long enough to read and have themselves held still a
+    /// moment, so a run of quick calls never flickers.
+    pub fn live_words(&self, session: &str, kind: &str, words: &str) -> LiveWords {
+        use crate::ds::motion::{DWELL, DWELL_STEP, SETTLE};
         let key = format!("{kind}\u{1f}{words}");
+        let now = Instant::now();
         let mut all = self.live_words.borrow_mut();
-        match all.get(session) {
-            Some((k, at)) if *k == key => *at,
-            Some(_) => {
-                let now = Instant::now();
-                all.insert(session.to_string(), (key, now));
-                now
-            }
+        let w = all.entry(session.to_string()).or_insert_with(|| LiveWords {
+            key: key.clone(),
+            words: words.to_string(),
+            was: String::new(),
             // The first words are just there.
-            None => {
-                let then = Instant::now() - Duration::from_secs(1);
-                all.insert(session.to_string(), (key, then));
-                then
+            at: now - Duration::from_secs(1),
+            next: None,
+        });
+        if w.key == key {
+            w.next = None;
+        } else {
+            match &w.next {
+                Some((k, _)) if *k == key => {}
+                _ => w.next = Some((key.clone(), now)),
+            }
+            let held = if w.words.is_empty() {
+                DWELL
+            } else {
+                DWELL_STEP
+            };
+            let up = w.at.elapsed().as_millis() as f32;
+            let still = w
+                .next
+                .as_ref()
+                .map_or(0., |(_, t)| t.elapsed().as_millis() as f32);
+            if up >= held && still >= SETTLE {
+                w.was = std::mem::replace(&mut w.words, words.to_string());
+                w.key = key;
+                w.at = now;
+                w.next = None;
             }
         }
+        w.clone()
     }
 
     /// Put a suggested command in the composer, ready to send.
@@ -5109,3 +5134,14 @@ fn with_attachments(text: &str, atts: &[Attachment]) -> String {
 
 /// More items than this landing at once (history arriving) just appear.
 const ARRIVE_AT_ONCE: usize = 3;
+
+/// What the working line shows (see `App::live_words`).
+#[derive(Clone)]
+pub struct LiveWords {
+    key: String,
+    pub words: String,
+    /// The words before, leaving as these arrive.
+    pub was: String,
+    pub at: Instant,
+    next: Option<(String, Instant)>,
+}

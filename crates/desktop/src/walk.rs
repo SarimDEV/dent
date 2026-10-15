@@ -753,7 +753,7 @@ fn sweep_step(me: &Entity<Dent>, window: &mut Window, cx: &mut App) -> bool {
 }
 
 fn has_agent(i: &Item) -> bool {
-    matches!(i, Item::Tools { summary, lines } if summary.starts_with("Subagent")
+    matches!(i, Item::Tools { summary, lines, .. } if summary.starts_with("Subagent")
         || lines.iter().any(|l| l.text.starts_with("Subagent")))
 }
 
@@ -1650,7 +1650,7 @@ fn checks() -> Vec<(f32, Act)> {
         0.1,
         Until("a subagent shows how far it got", |d, _| {
             status_is(d, Status::Done)
-                && has(d, |i| matches!(i, Item::Tools { summary, lines } if summary.contains("Subagent:") && summary.contains("Survey the tests · 3 steps") && !lines.iter().any(|l| l.text.contains("Survey the tests"))))
+                && has(d, |i| matches!(i, Item::Tools { summary, lines, .. } if summary.contains("Subagent:") && summary.contains("Survey the tests · 3 steps") && !lines.iter().any(|l| l.text.contains("Survey the tests"))))
         }, 10.),
     ), (
         0.1,
@@ -3555,7 +3555,7 @@ fn narration() -> Vec<(f32, Act)> {
                 "and the line says what it's doing",
                 |d, _| {
                     current(d).is_some_and(|s| {
-                        s.detail == "Subagent: Survey competitors · Searched the web for Monarch free trial"
+                        s.detail == "Subagent: Survey competitors · Searching the web for Monarch free trial"
                     })
                 },
                 10.,
@@ -3568,7 +3568,7 @@ fn narration() -> Vec<(f32, Act)> {
                 |d, _| {
                     done_saying(d, "The research is in")
                         && has(d, |i| {
-                            matches!(i, Item::Tools { summary, lines }
+                            matches!(i, Item::Tools { summary, lines, .. }
                                 if summary.starts_with("Subagent: Survey competitors")
                                     && lines.iter().any(|l| l.report.as_deref() == Some("Monarch starts everyone on a trial before linking."))
                                     && !lines.iter().any(|l| l.report.as_deref().is_some_and(|r| r.contains("Async"))))
@@ -3585,7 +3585,7 @@ fn narration() -> Vec<(f32, Act)> {
             "a subagent's latest step shows beside its task",
             |d, _| {
                 current(d)
-                    .is_some_and(|s| s.detail.starts_with("Subagent: Survey the tests · Read "))
+                    .is_some_and(|s| s.detail.starts_with("Subagent: Survey the tests · Read"))
             },
             10.,
         ),

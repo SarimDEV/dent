@@ -12,7 +12,7 @@ dent uses the Field Notes direction: warm paper in light mode, warm carbon in da
 
 ## Borrowed from the alternatives
 
-- **From Typewriter:** ASCII and pixel character as accents, not everywhere: `├─ └─` trees for tool calls, ASCII loaders and empty states, the pixel-font logo for splash and dent.sh.
+- **From Typewriter:** ASCII and pixel character as accents, not everywhere: rails for a subagent's steps under its call, ASCII loaders and empty states, the pixel-font logo for splash and dent.sh.
 - **From Phosphor (one cyan):** status told by pattern as well as colour, so it never depends on colour alone.
 - **From Mist:** nothing by default; the painterly mood can return later as an optional theme.
 
