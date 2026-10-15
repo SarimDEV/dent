@@ -717,6 +717,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A recording of the real CLI, when one is given
+    /// (`DENT_WIRE_SAMPLE=path`): every line parses, and what dent types
+    /// by kind comes out typed.
+    #[test]
+    fn a_real_recording_parses_by_kind() {
+        let Ok(path) = std::env::var("DENT_WIRE_SAMPLE") else {
+            return;
+        };
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut kinds = std::collections::BTreeMap::<String, usize>::new();
+        for line in text.lines().filter(|l| l.starts_with('{')) {
+            let k = match parse(line.as_bytes()).unwrap() {
+                Inbound::LocalCommand {
+                    name,
+                    outcome,
+                    view,
+                    ..
+                } => {
+                    format!("command {name:?} {outcome:?} view={}", view.is_some())
+                }
+                Inbound::Compacted {
+                    auto,
+                    before,
+                    after,
+                } => {
+                    format!("compacted auto={auto} {before}->{after:?}")
+                }
+                Inbound::Compacting { on, .. } => format!("compacting {on}"),
+                Inbound::Retrying { .. } => "retrying".into(),
+                Inbound::CommandsChanged(_) => "commands changed".into(),
+                Inbound::Notice(t) => format!("notice {t}"),
+                other => format!("{other:?}")
+                    .split([' ', '(', '{'])
+                    .next()
+                    .unwrap()
+                    .into(),
+            };
+            *kinds.entry(k).or_default() += 1;
+        }
+        for (k, n) in &kinds {
+            eprintln!("{n:4}  {k}");
+        }
+    }
+
     #[test]
     fn long_output_is_cut_on_a_char_boundary() {
         let long = "é".repeat(OUTPUT_CAP);

@@ -537,7 +537,12 @@ impl Agent {
                 out(self.envelope(json!({"type": "system", "subtype": "status", "status": null, "compact_result": "success"}), None));
                 out(self.envelope(json!({"type": "system", "subtype": "compact_boundary",
                     "compact_metadata": {"trigger": "manual", "pre_tokens": before, "post_tokens": 2_100}}), None));
-                self.local("compact", args, "Compacted ", json!({}));
+                // As the real CLI: the output only as a replayed message, and
+                // an empty result.
+                out(self.envelope(json!({"type": "user", "isReplay": true,
+                    "message": {"role": "user", "content": "<local-command-stdout>Compacted </local-command-stdout>"}}), None));
+                out(self.envelope(json!({"type": "result", "subtype": "success", "is_error": false,
+                    "num_turns": 0, "result": "", "local_command": "compact", "usage": self.usage()}), None));
             }
             "context" => self.local("context", "",
                 "## Context Usage\n\n**Model:** claude-sonnet-5-5  \n**Tokens:** 18k / 200k (9%)\n\n| Category | Tokens |\n|---|---|\n| System prompt | 3.2k |\n| Messages | 2.6k |",
