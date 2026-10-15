@@ -329,7 +329,13 @@ impl Dent {
         let mark: AnyElement = if s.closed {
             icon("archive", 12., t.faint).into_any_element()
         } else {
-            status_square_at(s.status, &t, pop).into_any_element()
+            // Retrying waits, as the working line says.
+            let status = if matches!(s.activity, Some(dent_protocol::Activity::Retrying { .. })) {
+                Status::Waiting
+            } else {
+                s.status
+            };
+            status_square_at(status, &t, pop).into_any_element()
         };
         let title_ink = if quiet { t.quiet } else { t.ink };
         let detail = if s.closed {

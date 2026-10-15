@@ -1922,6 +1922,10 @@ impl Dent {
                             .when_some(s.context.filter(|_| fit.context), |d, (used, max)| {
                                 d.child(self.context_meter(s, used, max, cx))
                             })
+                            // A dot only between two things that both show.
+                            .when(fit.hint && fit.context && s.context.is_some(), |d| {
+                                d.child(div().ty(LABEL).text_color(t.faint).child("·"))
+                            })
                             .when(fit.hint, |d| d.child(hint(hint_text, &t)))
                             .child(action),
                     )
@@ -2249,16 +2253,21 @@ impl Dent {
                 } else if arg {
                     // A value: as written, what it means, which is in
                     // effect; one of your own reads as an invitation.
+                    // A name that only restates the value (`opus`, "Opus
+                    // 5.5") shows once, as the name.
+                    let restates = !item.about.is_empty()
+                        && item
+                            .about
+                            .to_lowercase()
+                            .starts_with(&item.label.to_lowercase());
                     let name_el = if item.open {
+                        div().flex_none().ty(UI).text_color(t.ink).child("Custom…")
+                    } else if restates {
                         div()
                             .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(px(space::S1H))
                             .ty(UI)
-                            .text_color(t.quiet)
-                            .child(icon("text-cursor-input", 13., t.quiet))
-                            .child(format!("Your own {}", item.label))
+                            .text_color(t.ink)
+                            .child(item.about.clone())
                     } else {
                         div()
                             .flex_none()
@@ -2267,6 +2276,13 @@ impl Dent {
                             .ty(CODE)
                             .text_color(t.ink)
                             .child(item.label.clone())
+                    };
+                    let about = if item.open {
+                        format!("Type {} after the command", item.label)
+                    } else if restates {
+                        String::new()
+                    } else {
+                        item.about.clone()
                     };
                     row.child(
                         div()
@@ -2283,7 +2299,7 @@ impl Dent {
                                     .truncate()
                                     .ty(UI)
                                     .text_color(t.quiet)
-                                    .child(item.about.clone()),
+                                    .child(about),
                             ),
                     )
                     .when(item.current, |d| d.child(icon("check", 13., t.ink)))
@@ -2366,8 +2382,8 @@ impl Dent {
                             .pt(px(space::S1))
                             .pb(px(space::S1H))
                             .truncate()
-                            .ty(LABEL)
-                            .text_color(t.faint)
+                            .ty(UI)
+                            .text_color(t.quiet)
                             .child(title)
                     }))
                     .child(
@@ -3561,15 +3577,16 @@ pub struct Fit {
 
 /// Fit chips (each with its full and short label; an empty short label is
 /// the icon alone) and the optional readings into `room` points. Things give
-/// way one at a time: the hint, the context, then each chip's words in turn,
-/// model first and permission last.
+/// way one at a time: the hint, each chip's words in turn (model first,
+/// permission last), then the context gauge, which opens the meter and so
+/// stays longest.
 pub fn fit_footer(room: f32, chips: [(String, String); 3], context: bool, hint: &str) -> Fit {
     // Widths from the label lengths: the interface face runs about 7 pt a
     // character; a chip adds its icon, chevron and padding.
     let text = |t: &str| t.chars().count() as f32 * 7.2;
     let chip = |t: &str| if t.is_empty() { 44. } else { 52. + text(t) };
     let gap = space::S1;
-    let ctx_w = text("context 9.9% · ");
+    let ctx_w = text("context 9.9%") + space::S2;
     let hint_w = text(hint) + space::S2;
     // The steps, least loss first.
     let mut steps: Vec<([bool; 3], [bool; 3], bool, bool)> = Vec::new();
@@ -3577,10 +3594,10 @@ pub fn fit_footer(room: f32, chips: [(String, String); 3], context: bool, hint: 
     let full = [false; 3];
     steps.push((full, full, true, true));
     steps.push((full, full, true, false));
-    steps.push((full, full, false, false));
-    steps.push(([true, false, false], full, false, false));
-    steps.push(([true, false, true], full, false, false));
-    steps.push(([true, false, true], [false, false, true], false, false));
+    steps.push(([true, false, false], full, true, false));
+    steps.push(([true, false, true], full, true, false));
+    steps.push(([true, false, true], [false, false, true], true, false));
+    steps.push(([true, true, true], [false, true, true], true, false));
     steps.push(([true, true, true], [false, true, true], false, false));
     for (short, icon, ctx, h) in &steps {
         let labels: [String; 3] = std::array::from_fn(|i| {

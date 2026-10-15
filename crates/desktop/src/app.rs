@@ -2353,7 +2353,7 @@ impl Dent {
                     .or_else(|| self.commands.get(EVERY))?
                     .iter()
                     .find(|c| c.name == token.command)?;
-                title = Some(format!("/{} · {}", cmd.name, cmd.description));
+                title = Some(cmd.description.clone()).filter(|d| !d.is_empty());
                 (
                     complete::arg_rows(&cmd.args, &token.before, &token.query)?,
                     false,

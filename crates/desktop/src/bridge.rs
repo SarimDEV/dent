@@ -541,7 +541,7 @@ fn detail(v: &SessionView) -> String {
         Wire::Working | Wire::New => {
             match &v.activity {
                 Some(dent_protocol::Activity::Compacting { .. }) => {
-                    return "Compacting the conversation".into();
+                    return "Summarizing the conversation so far".into();
                 }
                 Some(dent_protocol::Activity::Retrying { error, .. }) => {
                     return format!("Retrying · {error}");

@@ -12,7 +12,7 @@ use dent_protocol::{Activity, Bar, CommandOutcome, Part, View};
 
 use crate::app::{Dent, command_key};
 use crate::data::Session;
-use crate::ds::{CODE, LABEL, READING, Typed, UI, motion, radius, space};
+use crate::ds::{CODE, LABEL, Typed, UI, motion, radius, space};
 use crate::markdown;
 use crate::theme::Theme;
 use crate::ui::{Arrive, From, Press, Tipped, ghost, icon, probe, tip_owned};
@@ -50,7 +50,7 @@ pub fn activity_line(a: &Activity, now_ms: u64) -> (String, String) {
                 } else {
                     "Compacting".into()
                 },
-                "Summarizing the conversation to make room".into(),
+                "Summarizing the conversation so far".into(),
             )
         }
         Activity::Retrying {
@@ -104,7 +104,7 @@ pub fn command_line(typed: &str, glyph: &str, color: Hsla, t: &Theme) -> Div {
 /// The parts of a meter, darkest first, in the ink: a share of the whole
 /// reads by its weight, not by a colour to look up.
 fn tone(i: usize, t: &Theme) -> Hsla {
-    const STEPS: [f32; 6] = [0.78, 0.6, 0.46, 0.36, 0.28, 0.22];
+    const STEPS: [f32; 6] = [0.86, 0.62, 0.42, 0.28, 0.2, 0.14];
     t.ink.opacity(STEPS[i.min(STEPS.len() - 1)])
 }
 
@@ -129,6 +129,8 @@ pub fn meter(used: u64, max: u64, compacts_at: Option<u64>, parts: &[Part], t: &
                 .absolute()
                 .inset_0()
                 .flex()
+                // A hair between parts, so each reads as its own.
+                .gap(px(1.))
                 .children(if counted.is_empty() {
                     vec![div().h_full().w(relative(share(used))).bg(tone(0, t))]
                 } else {
@@ -334,9 +336,9 @@ impl Dent {
                 cx.notify();
             }))
             .child(if pct < 10. {
-                format!("context {pct:.1}% · ")
+                format!("context {pct:.1}%")
             } else {
-                format!("context {pct:.0}% · ")
+                format!("context {pct:.0}%")
             })
             .child(probe(&self.probes, "context-gauge"));
         let popover = open.then(|| {
@@ -402,6 +404,7 @@ impl Dent {
         div()
             .relative()
             .min_w_0()
+            .mr(px(space::S1))
             .flex_shrink(2.)
             .child(gauge)
             .children(popover)
@@ -482,53 +485,50 @@ impl Dent {
             CommandOutcome::Done => ("terminal", t.quiet),
         };
         let head = command_line(&typed, glyph, glyph_color, &t);
+        // Every answer sits under the same rule, in the interface face:
+        // something beside the conversation, not Claude talking.
+        let rule = |inner: Div| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(space::S2))
+                .child(head)
+                .child(
+                    inner
+                        .ml(px(space::S2 - 1.))
+                        .pl(px(space::S3 + space::S1))
+                        .border_l_2()
+                        .border_color(t.hairline)
+                        .ty(UI)
+                        .text_color(t.quiet),
+                )
+                .into_any_element()
+        };
         // Commands that can't run here say so in dent's words, and offer
         // what might have been meant.
         match outcome {
             CommandOutcome::TerminalOnly => {
-                return div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(space::S1))
-                    .child(head)
-                    .child(
-                        div()
-                            .ml(px(space::S4 + space::S2))
-                            .ty(UI)
-                            .text_color(t.quiet)
-                            .child(format!(
-                                "/{name} works only in Claude Code in the terminal."
-                            )),
-                    )
-                    .into_any_element();
+                return rule(div().child("Works only in Claude Code in the terminal."));
             }
             CommandOutcome::Unknown { suggestion } => {
                 let sid = s.id.clone();
-                return div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(space::S1))
-                    .child(head)
-                    .child(
-                        div()
-                            .ml(px(space::S4 + space::S2))
-                            .flex()
-                            .items_center()
-                            .gap(px(space::S2))
-                            .ty(UI)
-                            .text_color(t.quiet)
-                            .child(format!("Claude has no /{name} command."))
-                            .children(suggestion.clone().map(|sug| {
-                                let label = format!("Use /{sug}");
-                                ghost(SharedString::from(format!("suggest-{ix}")), label, &t)
-                                    .relative()
-                                    .on_press(cx.listener(move |this, _, window, cx| {
-                                        this.suggest_command(&sid, &sug, window, cx)
-                                    }))
-                                    .child(probe(&self.probes, format!("suggest-{ix}")))
-                            })),
-                    )
-                    .into_any_element();
+                return rule(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S1))
+                        .child("Claude has no command by that name.")
+                        .children(suggestion.clone().map(|sug| {
+                            let label = format!("Use /{sug}");
+                            ghost(SharedString::from(format!("suggest-{ix}")), label, &t)
+                                .text_color(t.ink)
+                                .relative()
+                                .on_press(cx.listener(move |this, _, window, cx| {
+                                    this.suggest_command(&sid, &sug, window, cx)
+                                }))
+                                .child(probe(&self.probes, format!("suggest-{ix}")))
+                        })),
+                );
             }
             _ => {}
         }
@@ -543,7 +543,10 @@ impl Dent {
                 max,
                 compacts_at,
                 parts,
-            }) => Some(meter(*used, *max, *compacts_at, parts, &t).into_any_element()),
+            }) => Some(
+                // The agent's last full count says where it compacts.
+                meter(*used, *max, compacts_at.or(s.compacts_at), parts, &t).into_any_element(),
+            ),
             Some(View::Limits { bars }) => Some(limits(bars, &t).into_any_element()),
             None => None,
         };
@@ -554,67 +557,72 @@ impl Dent {
             } else {
                 text.to_string()
             };
-            let blocks = self.markdown(&as_markdown(&src));
-            let mut r = markdown::R {
-                md: self.mdv.clone(),
-                owner: cx.entity_id(),
-                window,
-                cx,
-                scope: format!("{}/{ix}/command", s.id),
-                bg: t.surface,
-                base: Some(std::path::PathBuf::from(&s.cwd)),
-            };
-            markdown::render_with(blocks.as_slice(), &t, false, true, &mut r).into_any_element()
+            match shape(&src) {
+                // Plain lines read best as they are, selectable.
+                Shape::Plain => {
+                    crate::select::text(SharedString::from(format!("command-{ix}")), src, &t)
+                        .into_any_element()
+                }
+                Shape::Markdown | Shape::Columns => {
+                    let blocks = self.markdown(&as_markdown(&src));
+                    let mut r = markdown::R {
+                        md: self.mdv.clone(),
+                        owner: cx.entity_id(),
+                        window,
+                        cx,
+                        scope: format!("{}/{ix}/command", s.id),
+                        bg: t.surface,
+                        base: Some(std::path::PathBuf::from(&s.cwd)),
+                    };
+                    markdown::render_with(blocks.as_slice(), &t, false, true, &mut r)
+                        .into_any_element()
+                }
+            }
         });
         let fold_label = match (open, body.is_some()) {
             (true, _) => "Show less",
             (false, true) => "Show the full answer",
             (false, false) => "Show all",
         };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(space::S2))
-            .child(head)
-            .child(
-                div()
-                    .ml(px(space::S2 - 1.))
-                    .pl(px(space::S3 + space::S1))
-                    .border_l_2()
-                    .border_color(t.hairline)
-                    .flex()
-                    .flex_col()
-                    .gap(px(space::S3))
-                    .ty(READING)
-                    .text_color(t.quiet)
-                    .children(body.map(|b| div().max_w(px(420.)).child(b)))
-                    .children(words)
-                    .when(folds && !text.trim().is_empty(), |d| {
-                        d.child(
-                            div().flex().child(
-                                ghost(SharedString::from(format!("fold-{ix}")), fold_label, &t)
-                                    .ml(px(-space::S2))
-                                    .relative()
-                                    .on_press(cx.listener(move |this, _, _, cx| {
-                                        if !this.expanded.remove(&key) {
-                                            this.expanded.insert(key.clone());
-                                        }
-                                        cx.notify();
-                                    }))
-                                    .child(probe(&self.probes, format!("fold-{ix}"))),
-                            ),
-                        )
-                    }),
-            )
-            .into_any_element()
+        rule(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(space::S3))
+                .children(body.map(|b| div().max_w(px(420.)).child(b)))
+                .children(words)
+                .when(folds && !text.trim().is_empty(), |d| {
+                    d.child(
+                        div().flex().child(
+                            ghost(SharedString::from(format!("fold-{ix}")), fold_label, &t)
+                                .ml(px(-space::S2))
+                                .relative()
+                                .on_press(cx.listener(move |this, _, _, cx| {
+                                    if !this.expanded.remove(&key) {
+                                        this.expanded.insert(key.clone());
+                                    }
+                                    cx.notify();
+                                }))
+                                .child(probe(&self.probes, format!("fold-{ix}"))),
+                        ),
+                    )
+                }),
+        )
     }
 }
 
-/// A command's words as Markdown. Claude Code answers some commands in
-/// Markdown (`/context`) and others in plain lines (`/autocompact`) or
-/// columns lined up with spaces (`/skill-doctor`): plain lines keep their
-/// breaks, columns keep their alignment in the code face.
-pub fn as_markdown(text: &str) -> String {
+/// How a command's words are written.
+#[derive(PartialEq, Debug)]
+pub enum Shape {
+    /// Headings, tables, lists: Markdown.
+    Markdown,
+    /// Columns lined up with spaces: kept in the code face.
+    Columns,
+    /// Plain lines.
+    Plain,
+}
+
+pub fn shape(text: &str) -> Shape {
     let markdown = text.lines().any(|l| {
         let l = l.trim_start();
         l.starts_with('#')
@@ -624,16 +632,28 @@ pub fn as_markdown(text: &str) -> String {
             || l.contains('`')
     });
     if markdown {
-        return text.to_string();
+        return Shape::Markdown;
     }
-    let columns = text.lines().filter(|l| l.trim().contains("   ")).count() >= 2;
-    if columns {
-        return format!("```text\n{}\n```", text.trim_end());
+    if text.lines().filter(|l| l.trim().contains("   ")).count() >= 2 {
+        return Shape::Columns;
     }
-    text.lines()
-        .map(str::trim_end)
-        .collect::<Vec<_>>()
-        .join("  \n")
+    Shape::Plain
+}
+
+/// A command's words as Markdown. Claude Code answers some commands in
+/// Markdown (`/context`) and others in plain lines (`/autocompact`) or
+/// columns lined up with spaces (`/skill-doctor`): plain lines keep their
+/// breaks, columns keep their alignment in the code face.
+pub fn as_markdown(text: &str) -> String {
+    match shape(text) {
+        Shape::Markdown => text.to_string(),
+        Shape::Columns => format!("```text\n{}\n```", text.trim_end()),
+        Shape::Plain => text
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("  \n"),
+    }
 }
 
 /// A quiet rounded panel for a view that floats: the context meter.
