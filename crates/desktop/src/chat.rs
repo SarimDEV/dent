@@ -274,10 +274,10 @@ impl Dent {
     ) -> Div {
         let t = self.t;
         const MAX: usize = 60;
-        // Long text shows its start; the rest is a line saying how much.
-        let clip = |text: &str| -> (String, usize) {
+        // Long text shows its start, and a line that opens the rest.
+        let clip = |text: &str, all: bool| -> (String, usize) {
             let n = text.lines().count();
-            if n <= MAX {
+            if n <= MAX || all {
                 (text.trim_end().to_string(), 0)
             } else {
                 (
@@ -298,23 +298,50 @@ impl Dent {
             .border_color(t.hairline)
             .ty(CODE)
             .text_color(t.ink);
+        // The line under a clipped block: how much more, and a press shows
+        // it all; shown whole, a press folds it again.
+        let rest = |which: &str, text: &str, cx: &mut Context<Self>| -> Option<AnyElement> {
+            let fold = format!("call-{which}-all-{key}");
+            let all = self.expanded.contains(&fold);
+            let more = text.lines().count().saturating_sub(MAX);
+            (more > 0).then(|| {
+                let label = if all {
+                    "Show less".to_string()
+                } else if more == 1 {
+                    "Show 1 more line".to_string()
+                } else {
+                    format!("Show {more} more lines")
+                };
+                div()
+                    .id(SharedString::from(fold.clone()))
+                    .relative()
+                    .text_color(t.faint)
+                    .cursor_pointer()
+                    .hover(|d| d.text_color(t.ink))
+                    .on_press(cx.listener(move |this, _, _, cx| {
+                        if !this.expanded.remove(&fold) {
+                            this.expanded.insert(fold.clone());
+                        }
+                        cx.notify();
+                    }))
+                    .child(label)
+                    .child(probe(&self.probes, format!("call-{which}-all")))
+                    .into_any_element()
+            })
+        };
         if !d.input.trim().is_empty() {
-            let (text, more) = clip(&d.input);
+            let all = self.expanded.contains(&format!("call-in-all-{key}"));
+            let (text, _) = clip(&d.input, all);
             col = col
                 .child(block(format!("call-in-{key}"), text, t.ink))
-                .when(more > 0, |c| {
-                    c.child(
-                        div()
-                            .text_color(t.faint)
-                            .child(format!("… {more} more lines")),
-                    )
-                });
+                .children(rest("in", &d.input, cx));
         }
         if let Some((failed, out)) = &d.output
             && !out.trim().is_empty()
             && !d.edits
         {
-            let (text, more) = clip(out);
+            let all = self.expanded.contains(&format!("call-out-all-{key}"));
+            let (text, _) = clip(out, all);
             col = col
                 .child(
                     div()
@@ -323,13 +350,7 @@ impl Dent {
                         .child(if *failed { "Failed" } else { "Output" }),
                 )
                 .child(block(format!("call-out-{key}"), text, t.quiet))
-                .when(more > 0, |c| {
-                    c.child(
-                        div()
-                            .text_color(t.faint)
-                            .child(format!("… {more} more lines")),
-                    )
-                });
+                .children(rest("out", out, cx));
         }
         // Its file: shown in dent when it can be, and its changes.
         let in_diff = d.path.as_ref().and_then(|p| {
@@ -2267,7 +2288,10 @@ impl Dent {
         let room = self.chat_w.min(size::COLUMN + space::S8 * 2.) - space::S8 * 2. - space::S4 * 2.
             + space::S2
             - size::CONTROL
-            - space::S2;
+            - space::S2
+            // The attach button.
+            - size::CONTROL
+            - space::S1;
         let effort_word = match s.effort.as_deref() {
             None => "Effort",
             e => effort_name(e),
@@ -2322,6 +2346,7 @@ impl Dent {
                             // label, then permission's; each keeps its icon
                             // and says what it is on hover. The model's name
                             // always shows.
+                            .child(self.attach_button(cx))
                             .child(self.chip(Menu::SessionModel, "claude", &labels[0], false, cx))
                             .child(self.chip(
                                 Menu::SessionPermission,
@@ -2343,8 +2368,25 @@ impl Dent {
                             .child(action),
                     )
                     .child(probe(&self.probes, "composer"))
-                    .children(self.slash_menu(false, cx)),
+                    .children(self.slash_menu(false, cx))
+                    .children(
+                        cx.has_active_drag()
+                            .then(|| crate::ui::drop_hint("Drop to attach to your message", &t)),
+                    ),
             )
+    }
+
+    /// Opens the system's file picker; what you pick rides along with the
+    /// next message.
+    fn attach_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.t;
+        icon_button("attach", "paperclip", &t)
+            .relative()
+            .flex_none()
+            .on_press(cx.listener(|this, _, window, cx| this.pick_attachments(window, cx)))
+            .with_tip(tip("Attach files", Some("⇧ ⌘ A"), t))
+            .child(probe(&self.probes, "attach"))
+            .into_any_element()
     }
 
     /// The agent's plan, folded to one line above the composer.
@@ -2955,9 +2997,20 @@ impl Dent {
                             .gap(px(space::S2))
                             .children(self.attachment_chips(cx))
                             .child(self.prompt_field(&self.starter.clone(), cx))
-                            .child(div().flex().justify_end().child(start))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .ml(px(-space::S2))
+                                    .child(self.attach_button(cx))
+                                    .child(start),
+                            )
                             .child(probe(&self.probes, "starter"))
-                            .children(self.slash_menu(true, cx)),
+                            .children(self.slash_menu(true, cx))
+                            .children(cx.has_active_drag().then(|| {
+                                crate::ui::drop_hint("Drop to attach to your message", &t)
+                            })),
                     )
                     .child(chips)
                     .children(self.terminal_sessions(cx)),

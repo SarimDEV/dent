@@ -77,6 +77,26 @@ pub fn disclosure(id: &'static str, open: bool, px_size: f32, color: Hsla) -> im
     )
 }
 
+/// While files are dragged over the window: what dropping them here does,
+/// over the area it applies to. It takes no pointer, so the drop lands.
+pub fn drop_hint(text: &'static str, t: &Theme) -> AnyElement {
+    div()
+        .absolute()
+        .inset_0()
+        .rounded(px(radius::XL))
+        .border_2()
+        .border_dashed()
+        .border_color(t.ink.opacity(0.5))
+        .bg(t.raised.opacity(0.92))
+        .flex()
+        .items_center()
+        .justify_center()
+        .ty(UI)
+        .text_color(t.ink)
+        .child(text)
+        .into_any_element()
+}
+
 /// A 28px square button holding an icon, with a hover tint.
 pub fn icon_button(id: impl Into<SharedString>, name: &str, t: &Theme) -> Stateful<Div> {
     div()

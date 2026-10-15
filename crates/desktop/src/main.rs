@@ -52,7 +52,7 @@ use gpui_kit::*;
 use crate::ui::Press;
 
 use app::{
-    CloseSession, Dent, Escape, InboxClose, InboxDown, InboxOpen, InboxUp, NewSession,
+    AttachFiles, CloseSession, Dent, Escape, InboxClose, InboxDown, InboxOpen, InboxUp, NewSession,
     NextNeedsYou, Search, SelectNext, SelectPrev, ShowChanges, ShowFirst, ShowTerminal, SideChat,
     SteerSend, StopSession, Tab, ToastAction, TogglePanel, UndoClose,
 };
@@ -452,6 +452,9 @@ impl Render for Dent {
             .on_action(
                 cx.listener(|this, _: &SideChat, window, cx| this.open_side_chat(window, cx)),
             )
+            .on_action(
+                cx.listener(|this, _: &AttachFiles, window, cx| this.pick_attachments(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &StopSession, window, cx| {
                 if let Some(id) = this.selected.clone() {
                     this.stop(&id, window, cx);
@@ -482,9 +485,32 @@ impl Render for Dent {
                     cx.stop_propagation();
                 }
             }))
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
-                this.attach_paths(paths.paths(), window, cx)
-            }))
+            // Files dragged in from Finder: followed wherever they are, and
+            // let go of (below) by where the pointer is, whatever was last
+            // typed, since a drag from another app doesn't count as the
+            // pointer moving.
+            .on_drag_move(
+                cx.listener(|this, e: &DragMoveEvent<ExternalPaths>, _, cx| {
+                    this.dragging_files = Some(e.drag(cx).paths().to_vec());
+                }),
+            )
+            .child({
+                let me = cx.entity().downgrade();
+                canvas(
+                    |_, _, _| {},
+                    move |_, _, window, _| {
+                        let me = me.clone();
+                        window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
+                            if phase == DispatchPhase::Capture && cx.has_active_drag() {
+                                let _ = me
+                                    .update(cx, |this, cx| this.drop_files(e.position, window, cx));
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .size_0()
+            })
             .on_action(cx.listener(|this, _: &Escape, window, cx| {
                 // Esc backs out one thing at a time; with nothing open it moves
                 // to the inbox, where arrows move and Enter opens.

@@ -1060,7 +1060,9 @@ impl Agent {
                 "Read",
                 json!({"file_path": "src/handler.rs"}),
             )?;
-            self.result(&id, "fn handle() {}", false, None);
+            // Long enough that the tool's output is clipped.
+            let body: String = (1..=100).map(|n| format!("// line {n}\n")).collect();
+            self.result(&id, &body, false, None);
             let notes = "Notes on the handler.\n".repeat(40);
             let id = self.say_and_call(
                 "Now I'll write up what I found.",

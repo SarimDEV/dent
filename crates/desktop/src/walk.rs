@@ -61,6 +61,12 @@ pub enum Act {
     Release,
     /// Move the pointer over a probe, offset by this much, and rest there.
     Hover(&'static str, f32, f32),
+    /// Files from Finder dragged in and held over a probe, at fractions of
+    /// its size: the project's red.png and "my notes.txt".
+    DragFiles(&'static str, f32, f32),
+    /// Let go of the dragged files where they are. (Without the platform's
+    /// drop event, which would bring the window to the front.)
+    DropFiles,
 }
 
 thread_local! {
@@ -139,6 +145,14 @@ impl Walk {
                     Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
                 )];
                 v.extend(find());
+                v
+            }
+            "attach" => {
+                let mut v = vec![(
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                )];
+                v.extend(attaching());
                 v
             }
             "narrate" => {
@@ -439,6 +453,49 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
         }
         Sweep => {
             advance = sweep_step(&me, window, cx);
+        }
+        DragFiles(name, fx, fy) => {
+            let at = me.read(cx).probes.borrow().get(name).copied().map(|b| {
+                point(
+                    b.origin.x + b.size.width * fx,
+                    b.origin.y + b.size.height * fy,
+                )
+            });
+            match at {
+                Some(at) => {
+                    POINTER.with(|p| p.set(at));
+                    let dir = std::env::var("DENT_WALK_PROJECT").unwrap_or_else(|_| "/tmp".into());
+                    let dir = std::path::Path::new(&dir);
+                    let _ = std::fs::write(dir.join("my notes.txt"), "notes\n");
+                    let paths = ExternalPaths(
+                        [dir.join("red.png"), dir.join("my notes.txt")]
+                            .into_iter()
+                            .collect(),
+                    );
+                    window.dispatch_event(
+                        PlatformInput::FileDrop(FileDropEvent::Entered {
+                            position: at,
+                            paths,
+                        }),
+                        cx,
+                    );
+                    window.dispatch_event(
+                        PlatformInput::FileDrop(FileDropEvent::Pending { position: at }),
+                        cx,
+                    );
+                }
+                None => note(
+                    &me,
+                    cx,
+                    leak(format!("drag target “{name}” on screen")),
+                    false,
+                ),
+            }
+        }
+        DropFiles => {
+            let at = POINTER.with(|p| p.get());
+            mouse(window, cx, at, false);
+            window.dispatch_event(PlatformInput::FileDrop(FileDropEvent::Exited), cx);
         }
         Press(name, fx, fy) => {
             let at = me.read(cx).probes.borrow().get(name).copied().map(|b| {
@@ -1778,6 +1835,7 @@ fn checks() -> Vec<(f32, Act)> {
     v.extend(failures());
     v.extend(queue_order());
     v.extend(narration());
+    v.extend(attaching());
     v.extend(turn_changes());
     v
 }
@@ -3532,6 +3590,166 @@ fn narration() -> Vec<(f32, Act)> {
             10.,
         ),
     ));
+    v
+}
+
+thread_local! {
+    static MARKED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+fn files_attached(d: &Dent) -> Vec<String> {
+    d.attachments
+        .iter()
+        .filter_map(|a| match a {
+            crate::app::Attachment::File { path } => {
+                Some(path.rsplit('/').next().unwrap_or(path).to_string())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Attaching: a session keeps what you attached while you look elsewhere,
+/// the paperclip is there, a drag says where it lands, a drop on the
+/// terminal types the paths, and clipped tool output opens in full.
+fn attaching() -> Vec<(f32, Act)> {
+    let mut v = new_session("Narrate as you go");
+    v.extend([
+        (
+            0.1,
+            Until("it finishes", |d, _| done_saying(d, "All done"), 20.),
+        ),
+        (
+            0.,
+            Until(
+                "the paperclip is in the reply box",
+                |d, _| drawn(d, "attach").is_some(),
+                3.,
+            ),
+        ),
+        (0.1, Call(attach_red)),
+        (
+            0.,
+            Call(|d, _, _| MARKED.with(|m| *m.borrow_mut() = d.selected.clone())),
+        ),
+        (0.3, Key("cmd-n")),
+        (
+            0.1,
+            Until(
+                "a new session starts with nothing attached",
+                |d, _| d.selected.is_none() && d.attachments.is_empty(),
+                3.,
+            ),
+        ),
+        (
+            0.,
+            Until(
+                "and has its own paperclip",
+                |d, _| drawn(d, "attach").is_some(),
+                3.,
+            ),
+        ),
+        (
+            0.2,
+            Call(|d, w, cx| {
+                let id = MARKED.with(|m| m.borrow().clone());
+                d.select(id, w, cx);
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "back in the session, its attachment is still there",
+                |d, _| files_attached(d) == ["red.png"],
+                3.,
+            ),
+        ),
+        (0.2, DragFiles("composer", 0.5, 0.5)),
+        (
+            0.1,
+            Until(
+                "dragging files over the window says where they'd go",
+                |d, cx| cx.has_active_drag() && drawn(d, "composer").is_some(),
+                3.,
+            ),
+        ),
+        (0.2, Shot("drop-hint")),
+        (0.1, DropFiles),
+        (
+            0.1,
+            Until(
+                "dropped, they join the message once each",
+                |d, cx| !cx.has_active_drag() && files_attached(d) == ["red.png", "my notes.txt"],
+                3.,
+            ),
+        ),
+        (0.3, Click("terminal")),
+        (
+            0.1,
+            Until(
+                "the terminal opens",
+                |d, _| {
+                    current(d).is_some_and(|s| d.shells.contains_key(&s.id))
+                        && drawn(d, "shell").is_some()
+                },
+                10.,
+            ),
+        ),
+        (1.0, DragFiles("shell", 0.5, 0.5)),
+        (0.3, Shot("drop-terminal")),
+        (0.2, DropFiles),
+        (
+            0.1,
+            Until(
+                "dropped on the terminal, the paths are typed there, quoted",
+                |d, _| {
+                    current(d)
+                        .and_then(|s| d.shells.get(&s.id))
+                        .is_some_and(|sh| sh.text().replace('\n', "").contains("my notes.txt' "))
+                        && files_attached(d).len() == 2
+                },
+                5.,
+            ),
+        ),
+        (
+            0.,
+            Call(|d, _, cx| {
+                // Open the Read call, to reach its clipped output.
+                let id = current(d).and_then(|s| {
+                    s.items.iter().find_map(|i| match i {
+                        Item::Tools { lines, .. }
+                            if lines.len() == 1 && lines[0].text.contains("handler.rs") =>
+                        {
+                            Some(lines[0].id.clone())
+                        }
+                        _ => None,
+                    })
+                });
+                if let Some(id) = id {
+                    d.open_calls.insert(id);
+                }
+                cx.notify();
+            }),
+        ),
+        (
+            0.3,
+            Until(
+                "clipped output says how much more",
+                |d, _| drawn(d, "call-out-all").is_some(),
+                3.,
+            ),
+        ),
+        (0.1, Click("call-out-all")),
+        (0.5, Shot("output-all")),
+        (
+            0.2,
+            Until(
+                "and a press shows all of it",
+                |d, _| d.expanded.iter().any(|k| k.starts_with("call-out-all-")),
+                3.,
+            ),
+        ),
+    ]);
     v
 }
 

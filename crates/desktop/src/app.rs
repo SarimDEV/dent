@@ -27,6 +27,7 @@ actions!(
     dent,
     [
         NewSession,
+        AttachFiles,
         CloseSession,
         UndoClose,
         NextNeedsYou,
@@ -89,6 +90,7 @@ pub fn set_menus(cx: &mut App) {
             name: "File".into(),
             items: vec![
                 MenuItem::action("New Session", NewSession),
+                MenuItem::action("Attach Files…", AttachFiles),
                 MenuItem::action("Search Sessions…", Search),
                 MenuItem::separator(),
                 MenuItem::action("Close Session", CloseSession),
@@ -156,6 +158,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-cmd-h", HideOthers, None),
         KeyBinding::new("cmd-m", Minimize, None),
         KeyBinding::new("cmd-n", NewSession, None),
+        KeyBinding::new("shift-cmd-a", AttachFiles, None),
         KeyBinding::new("cmd-w", CloseSession, None),
         KeyBinding::new("cmd-z", UndoClose, Some("Dent")),
         KeyBinding::new("cmd-j", NextNeedsYou, None),
@@ -551,6 +554,11 @@ pub struct Dent {
     /// The session whose name is being edited in the header.
     pub renaming: Option<String>,
     pub drafts: HashMap<String, String>,
+    /// What each session's next message carries, kept while you look
+    /// elsewhere (`None`: the new-session page).
+    pub attached: HashMap<Option<String>, Vec<Attachment>>,
+    /// Files being dragged in from another app, until they're let go.
+    pub dragging_files: Option<Vec<std::path::PathBuf>>,
     /// The appearance you chose, and one a flag forces for this run.
     pub appearance: crate::prefs::Appearance,
     /// Sessions pinned to the top of the sidebar.
@@ -1201,6 +1209,8 @@ impl Dent {
             live_words: Default::default(),
             meter_open: false,
             attachments: Vec::new(),
+            attached: HashMap::new(),
+            dragging_files: None,
             diff_file: HashMap::new(),
             commenting: None,
             review: Vec::new(),
@@ -1653,10 +1663,15 @@ impl Dent {
             self.fetch_recent();
         }
         self.reveal_row = id.clone();
+        // Each session keeps what you attached, as it keeps its draft.
+        let held = std::mem::take(&mut self.attachments);
+        if !held.is_empty() {
+            self.attached.insert(self.selected.clone(), held);
+        }
+        self.attachments = self.attached.remove(&id).unwrap_or_default();
         self.selected = id;
         self.menu = None;
         self.end_pick();
-        self.attachments.clear();
         self.commenting = None;
         match &self.selected {
             Some(_) => self.composer.update(cx, |c, cx| c.focus(window, cx)),
@@ -4013,6 +4028,60 @@ impl Dent {
             None => self.starter.update(cx, |c, cx| c.focus(window, cx)),
         }
         cx.notify();
+    }
+
+    /// Dragged files let go: on your terminal they're typed as paths, as
+    /// in any terminal; anywhere else they ride along with the message.
+    pub fn drop_files(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(paths) = self.dragging_files.take() else {
+            return;
+        };
+        let frame = crate::ui::FRAME.load(std::sync::atomic::Ordering::Relaxed);
+        let on_shell = crate::ui::PROBE_FRAME
+            .with(|f| f.borrow().get("shell").copied())
+            .is_some_and(|f| f + 1 >= frame)
+            && self
+                .probes
+                .borrow()
+                .get("shell")
+                .is_some_and(|b| b.contains(&at));
+        let shell = self
+            .selected
+            .as_ref()
+            .and_then(|id| self.shells.get(id))
+            .filter(|_| on_shell);
+        match shell {
+            Some(sh) => {
+                let typed: Vec<String> = paths
+                    .iter()
+                    .map(|p| crate::shell::shell_quote(&p.display().to_string()))
+                    .collect();
+                sh.paste(&format!("{} ", typed.join(" ")));
+                self.term_focus.focus(window, cx);
+                cx.notify();
+            }
+            None => self.attach_paths(&paths, window, cx),
+        }
+    }
+
+    /// Files picked with the system's open panel ride along, as dropped
+    /// ones do.
+    pub fn pick_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: true,
+            multiple: true,
+            prompt: Some("Attach".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else {
+                return;
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.attach_paths(&paths, window, cx);
+            });
+        })
+        .detach();
     }
 
     /// A pasted picture is saved where the agent can read it, then attached.

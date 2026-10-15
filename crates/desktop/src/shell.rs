@@ -753,6 +753,10 @@ impl Dent {
             .overflow_hidden()
             .bg(t.panel)
             .cursor(CursorStyle::IBeam)
+            .children(
+                cx.has_active_drag()
+                    .then(|| crate::ui::drop_hint("Drop to type the paths here", &t)),
+            )
             .child(
                 canvas(
                     move |bounds, window, _| {
@@ -913,5 +917,15 @@ mod tests {
         assert_eq!(k("pageup"), b"\x1b[5~");
         let app = key_bytes(&Keystroke::parse("up").unwrap(), TermMode::APP_CURSOR).unwrap();
         assert_eq!(app, b"\x1bOA");
+    }
+}
+
+/// A path as one shell word: bare when that's safe, else in single quotes.
+pub fn shell_quote(p: &str) -> String {
+    let safe = |c: char| c.is_ascii_alphanumeric() || "/._-+,:@%=".contains(c);
+    if !p.is_empty() && p.chars().all(safe) {
+        p.to_string()
+    } else {
+        format!("'{}'", p.replace('\'', "'\\''"))
     }
 }
