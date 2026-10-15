@@ -33,6 +33,8 @@ mod viewer;
 mod walk;
 mod web;
 
+use crate::ui::Arrive;
+use crate::ui::Tipped;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -83,6 +85,22 @@ pub fn reduce_motion() -> bool {
 
 pub fn set_reduce_motion(on: bool) {
     REDUCE_MOTION.store(on, Ordering::Relaxed);
+}
+
+/// `--reduce-motion` holds it on whatever the system says.
+static REDUCE_MOTION_FORCED: AtomicBool = AtomicBool::new(false);
+
+/// Follow the system's Reduce Motion setting, for dent's own motion and
+/// gpui's alike. Read at launch and whenever the window comes forward,
+/// which is when a change in System Settings could have happened.
+pub fn sync_reduce_motion(cx: &mut App) {
+    #[cfg(target_os = "macos")]
+    if !REDUCE_MOTION_FORCED.load(Ordering::Relaxed) {
+        let on =
+            objc2_app_kit::NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
+        set_reduce_motion(on);
+    }
+    cx.set_reduce_motion(reduce_motion());
 }
 
 pub fn window_rect() -> (f32, f32, f32, f32) {
@@ -307,7 +325,7 @@ impl Render for Dent {
                                     .text_color(t.ink)
                                     .line_clamp(3)
                                     .when(toast.text.len() > 90, |d| {
-                                        d.tooltip(ui::tip_owned(toast.text.clone(), t))
+                                        d.with_tip(ui::tip_owned(toast.text.clone(), t))
                                     })
                                     .child(toast.text.clone()),
                             )
@@ -320,6 +338,11 @@ impl Render for Dent {
                                         this.toast_action(window, cx)
                                     }))
                                     .child(ui::probe(&self.probes, "toast-action")),
+                            )
+                            .arrive(
+                                ElementId::Name(format!("toast-{:?}", toast.at).into()),
+                                ui::From::Below,
+                                ds::motion::BASE,
                             ),
                     )
             });
@@ -639,7 +662,10 @@ fn opts() -> Opts {
         match a.as_str() {
             "--dark" => o.dark = Some(true),
             "--light" => o.dark = Some(false),
-            "--reduce-motion" => REDUCE_MOTION.store(true, Ordering::Relaxed),
+            "--reduce-motion" => {
+                REDUCE_MOTION.store(true, Ordering::Relaxed);
+                REDUCE_MOTION_FORCED.store(true, Ordering::Relaxed);
+            }
             // Open behind whatever you're using, without taking focus.
             "--background" => o.background = true,
             "--walk" => o.walk = it.next(),
@@ -687,6 +713,7 @@ fn main() {
     }
     app.run(move |cx| {
         gpui_kit::init(cx);
+        sync_reduce_motion(cx);
         notify::init();
         load_fonts(cx);
         math::load_fonts(cx);
@@ -732,6 +759,12 @@ fn main() {
         }
         let (main_window, view) = gpui_kit::open_window(options, cx, move |window, cx| {
             let view = cx.new(|cx| {
+                cx.observe_window_activation(window, |_, window, cx| {
+                    if window.is_window_active() {
+                        sync_reduce_motion(cx);
+                    }
+                })
+                .detach();
                 let mut d = Dent::new(dark, window, cx);
                 d.walk = walk;
                 d

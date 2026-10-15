@@ -1,6 +1,7 @@
 //! The sidebar is the inbox: what needs you, then what's done and waiting to
 //! be steered or closed, then working sessions, lighter, at the bottom.
 
+use crate::ui::Tipped;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -133,7 +134,7 @@ impl Dent {
                             .on_press(
                                 cx.listener(|this, _, window, cx| this.open_palette(window, cx)),
                             )
-                            .tooltip(tip("Search sessions", Some("⌘ K"), t)),
+                            .with_tip(tip("Search sessions", Some("⌘ K"), t)),
                     )
                     .child(
                         icon_button("new-session", "square-pen", &t)
@@ -143,7 +144,7 @@ impl Dent {
                             .on_press(
                                 cx.listener(|this, _, window, cx| this.select(None, window, cx)),
                             )
-                            .tooltip(tip("New session", Some("⌘ N"), t))
+                            .with_tip(tip("New session", Some("⌘ N"), t))
                             .child(probe(&self.probes, "new-session")),
                     ),
             )
@@ -235,15 +236,7 @@ impl Dent {
                         this.show_closed = !this.show_closed;
                         cx.notify();
                     }))
-                    .child(icon(
-                        if open {
-                            "chevron-down"
-                        } else {
-                            "chevron-right"
-                        },
-                        12.,
-                        t.faint,
-                    ))
+                    .child(crate::ui::disclosure("fold", open, 12., t.faint))
                     .child(div().ty(LABEL).text_color(t.quiet).child("CLOSED"))
                     .child(div().ty(LABEL).text_color(t.faint).child(n.to_string()))
                     .child(probe(&self.probes, "closed-toggle"))
@@ -370,7 +363,7 @@ impl Dent {
                         cx.stop_propagation();
                         this.close(&close_id, window, cx);
                     }))
-                    .tooltip(tip("Close", None, t))
+                    .with_tip(tip("Close", None, t))
                     .child(icon("archive", 13., t.quiet))
                     .into_any_element(),
             )
@@ -390,7 +383,7 @@ impl Dent {
                         cx.stop_propagation();
                         this.reopen(&reopen_id, cx);
                     }))
-                    .tooltip(tip("Reopen", None, t))
+                    .with_tip(tip("Reopen", None, t))
                     .child(icon("archive-restore", 13., t.quiet))
                     .into_any_element(),
             )
@@ -492,7 +485,7 @@ impl Dent {
                                     .when(!quiet, |d| d.font_weight(FontWeight::MEDIUM))
                                     // A title too long for the row reads in full on hover.
                                     .when(s.title.chars().count() > 30, |d| {
-                                        d.tooltip(crate::ui::tip_owned(s.title.clone(), t))
+                                        d.with_tip(crate::ui::tip_owned(s.title.clone(), t))
                                     })
                                     .child(s.title.clone()),
                             )
@@ -561,7 +554,7 @@ impl Dent {
                         .flex()
                         .items_center()
                         .gap(px(space::S1H))
-                        .tooltip(crate::ui::tip_owned(usage_tip, t))
+                        .with_tip(crate::ui::tip_owned(usage_tip, t))
                         .child(icon("claude", 12., crate::theme::CLAUDE))
                         .when_some(five, |d, v| {
                             d.child(div().text_color(t.ink).child(v))
@@ -582,7 +575,7 @@ impl Dent {
                     .items_center()
                     .gap(px(space::S1H))
                     .when(down, |d| d.text_color(t.ink))
-                    .tooltip(crate::ui::tip_owned(link_tip, t))
+                    .with_tip(crate::ui::tip_owned(link_tip, t))
                     .child(link),
             )
             .when(needs > 0, |d| {

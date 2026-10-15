@@ -8,9 +8,11 @@ use gpui_kit::*;
 use crate::ui::Press;
 
 use crate::app::Dent;
-use crate::ds::{DISPLAY_COMPACT, LABEL, Typed, UI, radius, size, space};
+use std::time::Duration;
+
+use crate::ds::{DISPLAY_COMPACT, LABEL, Typed, UI, motion, radius, size, space};
 use crate::theme::status_square;
-use crate::ui::{floating, icon, kbd, probe};
+use crate::ui::{Arrive, From, floating, icon, kbd, probe};
 
 impl Dent {
     pub fn palette_view(
@@ -246,7 +248,15 @@ impl Dent {
                                         .when(on, |d| d.child(kbd("↩", &t))),
                                 )
                             }),
-                    ),
+                    )
+                    .arrive("palette-arrive", From::Above, motion::FAST),
+            )
+            // The dim comes up with it, so opening never flashes.
+            .with_animation(
+                "palette-scrim-in",
+                Animation::new(Duration::from_millis(motion::FAST as u64))
+                    .with_easing(crate::anim::ease_out),
+                |d, p| d.opacity(p),
             )
             .into_any_element()
     }

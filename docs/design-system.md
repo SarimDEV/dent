@@ -149,7 +149,9 @@ Each motion has one name and one job.
 
 | Motion | What happens | Where |
 | --- | --- | --- |
-| **Arrive** | Opacity 0→1 and a 6 px rise, `dur.base`, `ease.out`; staggered when several land together | New chat rows and tool lines |
+| **Arrive** | Opacity 0→1 and a 6 px rise, `dur.base`, `ease.out`; staggered when several land together (more than three at once, like history loading, just appear) | New chat rows and tool lines |
+| **Pop in** | Chrome arriving (`ui::Arrive`): opacity 0→1 and the last 4 px towards where it rests, away from what opened it, on `ease.out`. `dur.fast` for what you open often (menus, the slash menu, the palette and its dim, the right-click menu); `dur.base` for what comes to you (a tooltip, a toast, the Latest pill). Exits are instant | Menus, palette, tooltips, toasts, pills |
+| **Turn** | A fold's chevron (`ui::disclosure`) turns from right to down on `spring.snappy` instead of swapping icons | Tool groups, thoughts, menu folds, the Closed section |
 | **Stream** | Each new word fades in over `dur.base`; a block cursor in `working` breathes while text arrives | Agent replies |
 | **Resolve** | The ordered-dither dissolve, the Field Notes signature, on small surfaces only | Approval cards arriving (`dur.slow`), images and diagrams loading |
 | **Shift** | Every colour token tweens from the old theme to the new, `dur.theme`, `ease.out`; the grain crossfades. Nothing moves and text stays readable | Theme switch |
@@ -165,12 +167,12 @@ Each motion has one name and one job.
 ### Never animated
 
 - Keyboard navigation, session switching, focus, selection, scrolling, text selection.
-- Row hover. Tooltips after the first one.
+- Row hover. Tooltips after the first one: while one is showing or went in the last 400 ms, the next shows after 60 ms instead of 500 ms, without its arrival, so a sweep along a toolbar reads each name at once. Every tooltip goes through `with_tip` for this.
 - Streaming text layout: words are appended, never re-laid out or tweened in position.
 
 ### Reduced motion
 
-With the system's reduce-motion setting on, every motion resolves instantly, the working square holds still, and streamed text still appears word by word.
+With the system's reduce-motion setting on (read at launch and whenever the window comes forward; `--reduce-motion` forces it), every motion resolves instantly, the working square holds still, and streamed text still appears word by word.
 
 ### Cost rules
 

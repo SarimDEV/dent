@@ -11,6 +11,7 @@
 //! sits each frame, so the zoom starts from the thumbnail itself and goes
 //! back to whichever one is showing when it closes.
 
+use crate::ui::Tipped;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -444,7 +445,7 @@ fn round(
         .when(!on, |d| d.cursor(CursorStyle::OperationNotAllowed))
         // A press on a button never reaches the backdrop, which would close.
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .tooltip(tip_above(says, on.then_some(keys), t))
+        .with_tip(tip_above(says, on.then_some(keys), t))
         .child(icon(
             name,
             16.,

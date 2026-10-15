@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -58,6 +59,22 @@ pub fn icon(name: &str, px_size: f32, color: Hsla) -> Svg {
         .size(px(px_size))
         .flex_none()
         .text_color(color)
+}
+
+/// A fold's chevron: right when folded, down when open, turning between
+/// the two on `spring.snappy` so the fold reads as one thing moving. Its
+/// spring is keyed `id` within the row; a row scrolled into view starts
+/// settled.
+pub fn disclosure(id: &'static str, open: bool, px_size: f32, color: Hsla) -> impl IntoElement {
+    icon("chevron-right", px_size, color).with_spring(
+        id,
+        SpringAnimation::new(crate::anim::spring_config(0.25, 0.)).to(open),
+        |s, phase| {
+            s.with_transformation(Transformation::rotate(radians(
+                phase.0 * std::f32::consts::FRAC_PI_2,
+            )))
+        },
+    )
 }
 
 /// A 28px square button holding an icon, with a hover tint.
@@ -138,7 +155,7 @@ pub fn action(
     let el = el.control();
     let el = match ready {
         Ready::Yes => el.cursor_pointer().active(|s| s.opacity(0.82)),
-        Ready::No(why) => el.cursor_not_allowed().tooltip(tip(why, None, *t)),
+        Ready::No(why) => el.cursor_not_allowed().with_tip(tip(why, None, *t)),
     };
     el.with_spring(
         key.map_or_else(
@@ -205,7 +222,7 @@ pub fn kbd(keys: &str, t: &Theme) -> Div {
 pub fn off(el: Stateful<Div>, why: &'static str, t: &Theme) -> Stateful<Div> {
     el.opacity(0.45)
         .cursor_not_allowed()
-        .tooltip(tip(why, None, *t))
+        .with_tip(tip(why, None, *t))
 }
 
 /// A quiet keyboard hint. Hints give way first: they shrink far faster
@@ -337,6 +354,71 @@ pub fn menu_row(
         )
 }
 
+/// Where a surface comes from as it arrives.
+#[derive(Clone, Copy)]
+pub enum From {
+    /// It settles downwards: menus and tooltips below their control.
+    Above,
+    /// It settles upwards: menus above their control, toasts, pills.
+    Below,
+}
+
+/// The Arrive motion for chrome: it fades in and moves the last
+/// `motion::NUDGE` px into place on `ease.out`, over `ms` (`dur.fast` for
+/// what you open often, like menus; `dur.base` for what comes to you, like
+/// a toast). It plays once each time the surface appears under `id`; the
+/// offset never moves anything else, and reduce motion shows it settled.
+/// It positions the element relative to its place, so put it on one in
+/// the flow, never on one placed absolutely.
+pub trait Arrive: Styled + IntoElement + 'static {
+    fn arrive(self, id: impl Into<ElementId>, from: From, ms: f32) -> AnimationElement<Self> {
+        let sign = match from {
+            From::Above => -1.,
+            From::Below => 1.,
+        };
+        self.relative().with_animation(
+            id,
+            Animation::new(Duration::from_millis(ms as u64)).with_easing(crate::anim::ease_out),
+            move |d, p| d.opacity(p).top(px(sign * (1. - p) * motion::NUDGE)),
+        )
+    }
+}
+impl<T: Styled + IntoElement + 'static> Arrive for T {}
+
+/// How long after a tooltip goes the next one still shows at once: moving
+/// along a row of controls reads each one's name without waiting.
+const TIP_WARM: Duration = Duration::from_millis(400);
+/// The wait before the first tooltip, and before one while warm.
+const TIP_COLD_DELAY: Duration = Duration::from_millis(500);
+const TIP_WARM_DELAY: Duration = Duration::from_millis(60);
+
+thread_local! {
+    /// Tooltips on screen, and when the last one went.
+    static TIPS: std::cell::Cell<(usize, Option<Instant>)> = const { std::cell::Cell::new((0, None)) };
+    static TIP_IDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether a tooltip is showing or has just gone.
+fn tips_warm() -> bool {
+    let (live, gone) = TIPS.get();
+    live > 0 || gone.is_some_and(|at| at.elapsed() < TIP_WARM)
+}
+
+/// Every control's tooltip goes through here, so they all wait and appear
+/// the same way: the first after a moment, arriving; the next ones, while
+/// one is showing or just went, at once and still.
+pub trait Tipped: StatefulInteractiveElement + Sized {
+    fn with_tip(self, build: impl Fn(&mut Window, &mut App) -> AnyView + 'static) -> Self {
+        self.tooltip_show_delay(if tips_warm() {
+            TIP_WARM_DELAY
+        } else {
+            TIP_COLD_DELAY
+        })
+        .tooltip(build)
+    }
+}
+impl<T: StatefulInteractiveElement> Tipped for T {}
+
 /// A tooltip: what the control does and its key, on a floating surface.
 pub struct Tip {
     text: SharedString,
@@ -345,6 +427,44 @@ pub struct Tip {
     /// It belongs to something drawn over the window (the large picture),
     /// so it shows while that's open.
     above: bool,
+    /// Its arrival's key, or none when another tooltip was just up and
+    /// this one shows still.
+    arrive: Option<u64>,
+}
+
+impl Tip {
+    fn new(
+        text: SharedString,
+        keys: Option<&'static str>,
+        t: Theme,
+        above: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let arrive = (!tips_warm()).then(|| {
+            let n = TIP_IDS.get() + 1;
+            TIP_IDS.set(n);
+            n
+        });
+        TIPS.set((TIPS.get().0 + 1, TIPS.get().1));
+        cx.on_release(|_, cx| {
+            TIPS.set((TIPS.get().0.saturating_sub(1), Some(Instant::now())));
+            // Once warm has passed, controls are drawn again with the
+            // first tooltip's wait.
+            cx.spawn(async move |cx| {
+                cx.background_executor().timer(TIP_WARM).await;
+                cx.update(|cx| cx.refresh_windows());
+            })
+            .detach();
+        })
+        .detach();
+        Self {
+            text,
+            keys,
+            t,
+            above,
+            arrive,
+        }
+    }
 }
 
 impl Render for Tip {
@@ -353,28 +473,37 @@ impl Render for Tip {
         // gpui decides a tooltip's hover by its element's bounds alone, so
         // something covered (by the large picture) would still show its own.
         if !self.above && crate::lightbox::covering() {
-            return div();
+            return div().into_any_element();
         }
-        div().pt(px(space::S1)).child(
-            floating(&t)
-                .rounded(px(radius::MD))
-                .px(px(space::S2))
-                .py(px(space::S1))
-                .flex()
-                .items_center()
-                .gap(px(space::S2))
-                .ty(UI)
-                .text_color(t.ink)
-                // Long text, like a full title or path, wraps rather than
-                // being cut off in the very tooltip meant to show it.
-                .child(
-                    div()
-                        .max_w(px(360.))
-                        .whitespace_normal()
-                        .child(self.text.clone()),
-                )
-                .when_some(self.keys, |d, k| d.child(kbd(k, &t))),
-        )
+        let surface = floating(&t)
+            .rounded(px(radius::MD))
+            .px(px(space::S2))
+            .py(px(space::S1))
+            .flex()
+            .items_center()
+            .gap(px(space::S2))
+            .ty(UI)
+            .text_color(t.ink)
+            // Long text, like a full title or path, wraps rather than
+            // being cut off in the very tooltip meant to show it.
+            .child(
+                div()
+                    .max_w(px(360.))
+                    .whitespace_normal()
+                    .child(self.text.clone()),
+            )
+            .when_some(self.keys, |d, k| d.child(kbd(k, &t)));
+        let tip = div().pt(px(space::S1));
+        match self.arrive {
+            Some(n) => tip
+                .child(surface.arrive(
+                    ElementId::Name(format!("tip-{n}").into()),
+                    From::Above,
+                    motion::BASE,
+                ))
+                .into_any_element(),
+            None => tip.child(surface).into_any_element(),
+        }
     }
 }
 
@@ -384,46 +513,28 @@ pub fn tip(
     t: Theme,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     move |_, cx| {
-        cx.new(|_| Tip {
-            text: text.into(),
-            keys,
-            t,
-            above: false,
-        })
-        .into()
+        cx.new(|cx| Tip::new(text.into(), keys, t, false, cx))
+            .into()
     }
 }
 
-/// A tooltip with text made at run time, like a file's full path.
 /// A tooltip for a control on the large picture, shown over it.
 pub fn tip_above(
     text: &'static str,
     keys: Option<&'static str>,
     t: Theme,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
-    move |_, cx| {
-        cx.new(|_| Tip {
-            text: text.into(),
-            keys,
-            t,
-            above: true,
-        })
-        .into()
-    }
+    move |_, cx| cx.new(|cx| Tip::new(text.into(), keys, t, true, cx)).into()
 }
 
+/// A tooltip with text made at run time, like a file's full path.
 pub fn tip_owned(
     text: impl Into<SharedString>,
     t: Theme,
 ) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     let text: SharedString = text.into();
     move |_, cx| {
-        cx.new(|_| Tip {
-            text: text.clone(),
-            keys: None,
-            t,
-            above: false,
-        })
-        .into()
+        cx.new(|cx| Tip::new(text.clone(), None, t, false, cx))
+            .into()
     }
 }

@@ -617,6 +617,9 @@ pub struct Dent {
     pub inbox_sigs: Vec<u64>,
     /// What the list was last measured for: the session, and a signature per item.
     pub transcript_sigs: (Option<String>, Vec<u64>),
+    /// Items that just landed in the open chat, by index: when, and how
+    /// far into the stagger they start (ms). They rise into place.
+    pub row_born: HashMap<usize, (Instant, f32)>,
     /// The diff draws only the lines on screen.
     pub diff_list: ListState,
     /// Each document's scroll, so each keeps its own place.
@@ -1039,6 +1042,7 @@ impl Dent {
             inbox_list: ListState::new(0, ListAlignment::Top, px(400.)),
             inbox_sigs: Vec::new(),
             transcript_sigs: (None, Vec::new()),
+            row_born: HashMap::new(),
             diff_list: ListState::new(0, ListAlignment::Top, px(400.)),
             doc_scrolls: HashMap::new(),
             diff_key: 0,
@@ -3551,6 +3555,7 @@ impl Dent {
                 self.read_at.insert(prev, (at, following));
             }
             self.transcript.reset(sigs.len());
+            self.row_born.clear();
             match self.read_at.get(&s.id).copied() {
                 // Back where you left it, unless you were at the end.
                 Some((at, false)) if at.item_ix < sigs.len() => {
@@ -3570,7 +3575,24 @@ impl Dent {
                 .position(|(a, b)| a != b)
                 .unwrap_or(old.len().min(sigs.len()));
             self.transcript.splice(first..old.len(), sigs.len() - first);
+            // A few items added at the end arrive; the working line's
+            // signature trails the items and isn't one of them. A batch
+            // (history loading) just appears.
+            let items = |v: &[u64]| v.len() - usize::from(v.last() == Some(&u64::MAX));
+            let (was, now) = (items(old), items(&sigs));
+            if first >= was && now > was && now - was <= ARRIVE_AT_ONCE {
+                let at = Instant::now();
+                for (k, ix) in (was..now).enumerate() {
+                    let delay =
+                        (k as f32 * crate::ds::motion::STAGGER).min(crate::ds::motion::STAGGER_CAP);
+                    self.row_born.insert(ix, (at, delay));
+                }
+            }
         }
+        let settle = Duration::from_millis(
+            (crate::ds::motion::BASE + crate::ds::motion::STAGGER_CAP) as u64,
+        );
+        self.row_born.retain(|_, (at, _)| at.elapsed() < settle);
         self.transcript_sigs = (Some(s.id.clone()), sigs);
     }
 
@@ -4048,6 +4070,7 @@ impl Dent {
             })
         });
         streaming
+            || !self.row_born.is_empty()
             || fresh(&self.finished_at)
             || fresh(&self.arrived_at)
             || self
@@ -4078,3 +4101,6 @@ fn with_attachments(text: &str, atts: &[Attachment]) -> String {
     }
     lines.join("\n")
 }
+
+/// More items than this landing at once (history arriving) just appear.
+const ARRIVE_AT_ONCE: usize = 3;

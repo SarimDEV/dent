@@ -1,6 +1,8 @@
 //! The main column: a session's conversation and composer, or the new-session
 //! page where you start by typing.
 
+use crate::ui::Tipped;
+use crate::ui::{Arrive, From};
 use gpui_kit::base::input::Textarea;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
@@ -60,13 +62,13 @@ impl Dent {
         {
             let sid = id.clone();
             let fork = if tight {
-                icon_button("fork", "git-fork", &t).tooltip(tip(
+                icon_button("fork", "git-fork", &t).with_tip(tip(
                     "Fork: a new session that carries on from here",
                     None,
                     t,
                 ))
             } else {
-                button("fork", "Fork", false, &t).tooltip(tip(
+                button("fork", "Fork", false, &t).with_tip(tip(
                     "A new session that carries on from here",
                     None,
                     t,
@@ -89,7 +91,7 @@ impl Dent {
             };
             let close = if Self::can_close(s) {
                 close
-                    .tooltip(tip("Close", Some("⌘ W"), t))
+                    .with_tip(tip("Close", Some("⌘ W"), t))
                     .on_press(cx.listener(move |this, _, window, cx| {
                         this.close(&sid, window, cx);
                     }))
@@ -108,7 +110,7 @@ impl Dent {
                 icon_button("terminal", "square-terminal", &t)
                     .relative()
                     .on_press(cx.listener(|this, _, window, cx| this.open_shell(window, cx)))
-                    .tooltip(tip("Your terminal", Some("⌘ 3"), t))
+                    .with_tip(tip("Your terminal", Some("⌘ 3"), t))
                     .child(probe(&self.probes, "terminal")),
             );
         }
@@ -117,7 +119,7 @@ impl Dent {
                 icon_button("side-chat", "message-circle-question-mark", &t)
                     .relative()
                     .on_press(cx.listener(|this, _, window, cx| this.open_side_chat(window, cx)))
-                    .tooltip(tip("Ask on the side", Some("⌘ ;"), t))
+                    .with_tip(tip("Ask on the side", Some("⌘ ;"), t))
                     .child(probe(&self.probes, "side-chat")),
             );
         }
@@ -162,7 +164,7 @@ impl Dent {
                             this.panel_open = false;
                             cx.notify();
                         }))
-                        .tooltip(tip("Show sessions", None, t)),
+                        .with_tip(tip("Show sessions", None, t)),
                 )
             })
             .flex()
@@ -214,7 +216,7 @@ impl Dent {
                                         }
                                     })
                                     .truncate()
-                                    .tooltip(tip_owned(s.title.clone(), t))
+                                    .with_tip(tip_owned(s.title.clone(), t))
                                     .ty(DISPLAY_COMPACT)
                                     .text_color(t.ink)
                                     // Double-click to rename; a single press still moves the window.
@@ -252,7 +254,7 @@ impl Dent {
                 this.end_pick();
                 cx.notify();
             }))
-            .tooltip(tip(
+            .with_tip(tip(
                 if open { "Hide viewer" } else { "Show viewer" },
                 Some("⌘ \\"),
                 t,
@@ -420,13 +422,13 @@ impl Dent {
                         d.cursor_pointer()
                             .hover(|d| d.bg(t.hover()))
                             .active(|d| d.bg(t.press()))
-                            .tooltip(tip(label, Some(keys), t))
+                            .with_tip(tip(label, Some(keys), t))
                             // A stepper: each click of a quick run steps.
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.jump_to_mine(up, cx);
                             }))
                     } else {
-                        d.cursor_not_allowed().tooltip(tip(off, None, t))
+                        d.cursor_not_allowed().with_tip(tip(off, None, t))
                     }
                 })
                 .child(probe(&self.probes, id))
@@ -475,6 +477,13 @@ impl Dent {
                 } else {
                     body
                 };
+                // Just landed: it rises the last few pixels into place.
+                let arrive = (!crate::reduce_motion())
+                    .then(|| this.row_born.get(&ix))
+                    .flatten()
+                    .map(|(at, delay)| {
+                        anim::ease_out(anim::progress_after(*at, *delay, motion::BASE))
+                    });
                 // The list sizes each row to its full width, so the column is
                 // centred inside it, in line with the composer.
                 div()
@@ -487,6 +496,9 @@ impl Dent {
                             .max_w(px(size::COLUMN + space::S8 * 2.))
                             .px(px(space::S8))
                             .when(ix == 0, |d| d.pt(px(space::S6)))
+                            .when_some(arrive, |d, k| {
+                                d.relative().top(px((1. - k) * motion::RISE)).opacity(k)
+                            })
                             .pb(px(if ix + 1 == count {
                                 space::S8
                             } else if matches!(s.items.get(ix), Some(Item::User { .. })) {
@@ -568,7 +580,8 @@ impl Dent {
                         }))
                         .child(icon("arrow-down", 13., t.quiet))
                         .child("Latest")
-                        .child(probe(&self.probes, "to-latest")),
+                        .child(probe(&self.probes, "to-latest"))
+                        .arrive("to-latest-arrive", From::Below, motion::BASE),
                 )
         });
         let footer: AnyElement = if s.closed {
@@ -993,12 +1006,9 @@ impl Dent {
                                         .flex_none()
                                         .flex()
                                         .justify_center()
-                                        .child(icon(
-                                            if open {
-                                                "chevron-down"
-                                            } else {
-                                                "chevron-right"
-                                            },
+                                        .child(crate::ui::disclosure(
+                                            "fold",
+                                            open,
                                             12.,
                                             t.quiet.opacity(0.7),
                                         )),
@@ -1155,12 +1165,9 @@ impl Dent {
                                     .flex_none()
                                     .flex()
                                     .justify_center()
-                                    .child(icon(
-                                        if open {
-                                            "chevron-down"
-                                        } else {
-                                            "chevron-right"
-                                        },
+                                    .child(crate::ui::disclosure(
+                                        "fold",
+                                        open,
                                         12.,
                                         t.quiet.opacity(0.7),
                                     )),
@@ -1730,7 +1737,7 @@ impl Dent {
                 })
                 .cursor_pointer()
                 .on_press(cx.listener(move |this, _, window, cx| this.stop(&id, window, cx)))
-                .tooltip(tip("Stop", Some("⌘ ."), t))
+                .with_tip(tip("Stop", Some("⌘ ."), t))
                 .child(
                     div()
                         .size(px(9.))
@@ -1759,7 +1766,7 @@ impl Dent {
                     .justify_center()
                     .when(ready == Ready::Yes, |d| {
                         d.on_press(cx.listener(|this, _, window, cx| this.send(window, cx)))
-                            .tooltip(tip("Send", Some("↩"), t))
+                            .with_tip(tip("Send", Some("↩"), t))
                     }),
                 ready,
                 &t,
@@ -2067,7 +2074,7 @@ impl Dent {
                     .pr(px(space::S1))
                     .rounded(px(radius::SM))
                     .bg(t.selected())
-                    .tooltip(crate::ui::tip_owned(
+                    .with_tip(crate::ui::tip_owned(
                         match &a {
                             crate::app::Attachment::File { path } => path.replacen(&home(), "~", 1),
                             _ => a.label(),
@@ -2305,6 +2312,12 @@ impl Dent {
                             .ty(LABEL)
                             .text_color(t.quiet)
                             .child(footer),
+                    )
+                    // Settles away from the field it opens from.
+                    .arrive(
+                        "slash-arrive",
+                        if below { From::Above } else { From::Below },
+                        motion::FAST,
                     ),
             );
         Some(deferred(menu).with_priority(1).into_any_element())
@@ -2479,7 +2492,7 @@ impl Dent {
                     // Running in a terminal: shown, so you know where it
                     // went, but it can't be picked up until it's closed there.
                     .when(open, |d| {
-                        d.cursor_not_allowed().tooltip(tip(
+                        d.cursor_not_allowed().with_tip(tip(
                             "Running in a terminal. Close it there to pick it up here.",
                             None,
                             t,
@@ -2614,7 +2627,7 @@ impl Dent {
                     // An icon-only chip still says what it is.
                     .when(label.is_empty(), |d| {
                         let current = self.current();
-                        d.tooltip(tip_owned(
+                        d.with_tip(tip_owned(
                             match which {
                                 Menu::Effort => {
                                     format!(
@@ -2668,11 +2681,19 @@ impl Dent {
                     anchored()
                         .anchor(Anchor::BottomLeft)
                         .snap_to_window_with_margin(px(8.))
-                        .child(div().mb(px(6.)).child(list))
+                        .child(div().mb(px(6.)).child(list).arrive(
+                            ElementId::Name(format!("{name}-arrive").into()),
+                            From::Below,
+                            motion::FAST,
+                        ))
                 } else {
-                    anchored()
-                        .snap_to_window_with_margin(px(8.))
-                        .child(div().mt(px(size::CONTROL_SM + 2. + 6.)).child(list))
+                    anchored().snap_to_window_with_margin(px(8.)).child(
+                        div().mt(px(size::CONTROL_SM + 2. + 6.)).child(list).arrive(
+                            ElementId::Name(format!("{name}-arrive").into()),
+                            From::Above,
+                            motion::FAST,
+                        ),
+                    )
                 };
                 // Placed from the chip's top-left corner, not from below
                 // it, where the flow would put it.
@@ -2895,15 +2916,7 @@ impl Dent {
                             .when(lit, |d| d.bg(t.hover()))
                             .hover(|d| d.bg(t.hover()))
                             .active(|d| d.bg(t.press()))
-                            .child(icon(
-                                if *open {
-                                    "chevron-down"
-                                } else {
-                                    "chevron-right"
-                                },
-                                12.,
-                                t.quiet,
-                            ))
+                            .child(crate::ui::disclosure("fold", *open, 12., t.quiet))
                             .child(
                                 div()
                                     .ty(UI)
@@ -2949,7 +2962,7 @@ impl Dent {
                                                 cx.stop_propagation();
                                                 remove(this, window, cx);
                                             }))
-                                            .tooltip(tip(tip_text, Some("⌘ ⌫"), t))
+                                            .with_tip(tip(tip_text, Some("⌘ ⌫"), t))
                                             .child(icon("x", 12., t.quiet)),
                                     )
                                 },

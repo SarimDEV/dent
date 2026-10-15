@@ -59,6 +59,8 @@ pub enum Act {
     MoveBy(f32, f32),
     /// Let go of the mouse where it is.
     Release,
+    /// Move the pointer over a probe, offset by this much, and rest there.
+    Hover(&'static str, f32, f32),
 }
 
 thread_local! {
@@ -128,6 +130,7 @@ impl Walk {
             "real" => real(),
             "sweep" => sweep(),
             "markdown" => markdown(),
+            "motion" => motion(),
             "typing" => {
                 let mut v = vec![(
                     0.,
@@ -389,6 +392,26 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
             let at = POINTER.with(|p| p.get());
             mouse(window, cx, at, false);
         }
+        Hover(name, dx, dy) => match center(&me, name, cx) {
+            Some(at) => {
+                let at = point(at.x + px(dx), at.y + px(dy));
+                POINTER.with(|p| p.set(at));
+                window.dispatch_event(
+                    PlatformInput::MouseMove(MouseMoveEvent {
+                        position: at,
+                        pressed_button: None,
+                        modifiers: Modifiers::default(),
+                    }),
+                    cx,
+                );
+            }
+            None => note(
+                &me,
+                cx,
+                leak(format!("hover target “{name}” on screen")),
+                false,
+            ),
+        },
         Shot(name) => {
             let dir = me.read(cx).walk.as_ref().and_then(|d| d.shots.clone());
             if let Some(dir) = dir {
@@ -1784,6 +1807,37 @@ fn markdown() -> Vec<(f32, Act)> {
         ),
     )];
     v.extend(rich_reply());
+    v
+}
+
+/// The chrome's motion, for a recording of the window: a first tooltip,
+/// the next one while warm, the palette, a menu, a session's rows arriving,
+/// a toast and a fold.
+fn motion() -> Vec<(f32, Act)> {
+    let mut v: Vec<(f32, Act)> = vec![
+        (
+            0.,
+            Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+        ),
+        (1.0, Hover("new-session", 0., 0.)),
+        (1.5, Hover("new-session", -crate::ds::size::CONTROL, 0.)),
+        (1.2, Hover("starter", 0., 0.)),
+        (1.0, Key("cmd-k")),
+        (1.0, Key("escape")),
+        (0.8, Click("chip-model")),
+        (1.0, Key("escape")),
+    ];
+    v.extend(new_session("Fix the footer on small screens"));
+    v.extend([
+        (
+            0.1,
+            Until("the agent finishes", |d, _| status_is(d, Status::Done), 30.),
+        ),
+        (1.0, Key("cmd-w")),
+        (1.5, Click("closed-toggle")),
+        (1.0, Click("closed-toggle")),
+        (1.0, Wait),
+    ]);
     v
 }
 

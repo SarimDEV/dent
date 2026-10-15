@@ -5,9 +5,10 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use crate::ui::Press;
+use crate::ui::{Arrive, From};
 
 use crate::app::Dent;
-use crate::ds::{Typed, radius, size, space};
+use crate::ds::{Typed, motion, radius, size, space};
 use crate::theme::Theme;
 
 #[derive(Clone)]
@@ -114,27 +115,23 @@ impl Dent {
                     this.context = None;
                     cx.notify();
                 }))
+                // Placed by an outer box, so the menu itself can arrive.
                 .child(
-                    div()
-                        .id("context-menu")
-                        .absolute()
-                        .left(px(x))
-                        .top(px(y))
-                        .w(px(WIDTH))
-                        .py(px(space::S1))
-                        .flex()
-                        .flex_col()
-                        .bg(t.raised)
-                        .border_1()
-                        .border_color(t.hairline)
-                        .rounded(px(radius::LG))
-                        .shadow_md()
-                        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-                        .children(
-                            menu.items
-                                .into_iter()
-                                .enumerate()
-                                .map(|(i, (label, what))| {
+                    div().absolute().left(px(x)).top(px(y)).child(
+                        div()
+                            .id("context-menu")
+                            .w(px(WIDTH))
+                            .py(px(space::S1))
+                            .flex()
+                            .flex_col()
+                            .bg(t.raised)
+                            .border_1()
+                            .border_color(t.hairline)
+                            .rounded(px(radius::LG))
+                            .shadow_md()
+                            .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                            .children(menu.items.into_iter().enumerate().map(
+                                |(i, (label, what))| {
                                     if matches!(what, Do::Separator) {
                                         return div()
                                             .id(("context-sep", i))
@@ -160,8 +157,14 @@ impl Dent {
                                             this.run_context(what.clone(), window, cx)
                                         }))
                                         .child(label)
-                                }),
-                        ),
+                                },
+                            ))
+                            .arrive(
+                                ElementId::Name(format!("context-{x}-{y}").into()),
+                                From::Above,
+                                motion::FAST,
+                            ),
+                    ),
                 )
                 .into_any_element(),
         )

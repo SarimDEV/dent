@@ -1,6 +1,7 @@
 //! The viewer: everything a session made or changed, beside the chat. Pages
 //! run live, docs render, images show, changes take review comments.
 
+use crate::ui::Tipped;
 use std::rc::Rc;
 
 use gpui_kit::base::input::Textarea;
@@ -297,7 +298,7 @@ impl Dent {
                                     .on_press(
                                         cx.listener(move |this, _, _, cx| this.show_tab(which, cx)),
                                     )
-                                    .when_some(path, |d, p| d.tooltip(crate::ui::tip_owned(p, t)))
+                                    .when_some(path, |d, p| d.with_tip(crate::ui::tip_owned(p, t)))
                                     // A middle click closes a file's tab, as in a browser.
                                     .when_some(art, |d, a| {
                                         d.on_mouse_down(
@@ -334,7 +335,7 @@ impl Dent {
                                                     cx.stop_propagation();
                                                     this.close_tab(a, cx);
                                                 }))
-                                                .tooltip(tip("Close tab", None, t))
+                                                .with_tip(tip("Close tab", None, t))
                                                 .child(icon("x", 12., t.quiet)),
                                         )
                                     })
@@ -1231,7 +1232,7 @@ impl Dent {
                         // The text is read when you copy, not each frame.
                         let bytes = a.versions[v - 1].clone();
                         ghost("copy-doc", if copied { "Copied" } else { "Copy text" }, &t)
-                            .tooltip(tip("Copy the file's text", None, t))
+                            .with_tip(tip("Copy the file's text", None, t))
                             .on_press(cx.listener(move |this, _, _, cx| {
                                 let src = String::from_utf8_lossy(&bytes).into_owned();
                                 cx.write_to_clipboard(ClipboardItem::new_string(src));
@@ -1245,7 +1246,7 @@ impl Dent {
                                 .on_press(move |_, _, cx| {
                                     cx.open_url(&format!("file://{}", full.display()))
                                 })
-                                .tooltip(tip("Open in its app", None, t)),
+                                .with_tip(tip("Open in its app", None, t)),
                         )
                     }),
             )
@@ -1612,7 +1613,7 @@ impl Dent {
                                             .on_press(move |_, _, cx| {
                                                 cx.open_url(&format!("file://{}", full.display()))
                                             })
-                                            .tooltip(tip("Open in its app", None, t))
+                                            .with_tip(tip("Open in its app", None, t))
                                     })
                                     .child(div().ty(LABEL).text_color(t.faint).child(
                                         match (compact, file.lines.is_empty()) {
@@ -2035,7 +2036,7 @@ impl Dent {
                                         &t,
                                     )
                                     .relative()
-                                    .tooltip(tip(
+                                    .with_tip(tip(
                                         "A new session that carries on from this answer",
                                         None,
                                         t,
@@ -2102,7 +2103,7 @@ impl Dent {
                                         d.on_press(cx.listener(|this, _, window, cx| {
                                             this.ask_aside(window, cx)
                                         }))
-                                        .tooltip(tip(
+                                        .with_tip(tip(
                                             "Ask",
                                             Some("↩"),
                                             t,
