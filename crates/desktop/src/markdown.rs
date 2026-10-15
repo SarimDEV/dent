@@ -1080,7 +1080,9 @@ pub fn render(blocks: &[Block], t: &Theme, doc: bool, r: &mut R) -> Div {
 /// subagent's report, and shouldn't read as the answer.
 pub fn render_with(blocks: &[Block], t: &Theme, doc: bool, quiet: bool, r: &mut R) -> Div {
     let prev = LINK_BASE.with(|b| b.replace(r.base.clone()));
-    let out = render_in(blocks, t, doc, r, space::S3, quiet, None, false);
+    // Inset prose keeps its own, tighter rhythm.
+    let gap = if inset() { space::S2 } else { space::S3 };
+    let out = render_in(blocks, t, doc, r, gap, quiet, None, false);
     LINK_BASE.with(|b| *b.borrow_mut() = prev);
     out
 }
@@ -1093,6 +1095,10 @@ thread_local! {
 
 fn prose() -> Type {
     PROSE.with(|p| p.get())
+}
+
+fn inset() -> bool {
+    prose().size < READING.size
 }
 
 /// Blocks set inside something else, like a subagent's report: quiet ink,
@@ -1167,8 +1173,13 @@ fn render_in(
                     FontWeight::NORMAL
                 };
                 let f = face(ty, family, ink).weighted(weight);
+                // Inset, a heading opening the blocks sits right under
+                // what it's set in from.
+                let lead = if inset() { space::S1 } else { space::S3 };
                 div()
-                    .when(*level > 1 || !doc, |d| d.pt(px(space::S3)))
+                    .when((*level > 1 || !doc) && !(inset() && ix == 0), |d| {
+                        d.pt(px(lead))
+                    })
                     .ty(ty)
                     .text_color(ink)
                     .child(i.element(&key, t, f, None, &r.md, r.window))

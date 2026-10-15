@@ -106,6 +106,17 @@ pub fn glyph(name: &str, t: &Theme) -> AnyElement {
     }
 }
 
+/// Something after a quiet line's words (a chevron, a ghost button), held
+/// on the middle of its first line whatever its own height.
+pub fn on_line(el: impl IntoElement) -> Div {
+    div()
+        .h(px(CODE.zoomed().line))
+        .flex_none()
+        .flex()
+        .items_center()
+        .child(el)
+}
+
 /// A quiet line: its glyph in the lead column, then the caller's words,
 /// in the code face. The caller adds the words, and anything after them.
 pub fn quiet_line(glyph: impl IntoElement, t: &Theme) -> Div {

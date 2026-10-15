@@ -3144,6 +3144,9 @@ fn zoom_is(z: f32) -> bool {
     (crate::ds::zoom() - z).abs() < 0.001
 }
 
+/// Whether the walk was dark before the appearance check switched it.
+static STARTED_DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// ⇧Tab's modes, text size, appearance and the shortcuts sheet.
 fn view_choices() -> Vec<(f32, Act)> {
     use dent_protocol::Permission as P;
@@ -3209,6 +3212,12 @@ fn view_choices() -> Vec<(f32, Act)> {
         (0.1, Key("cmd--")),
         (0.1, Until("⌘− makes it smaller", |_, _| zoom_is(0.92), 1.)),
         (0.1, Key("cmd-0")),
+        // What the walk started in comes back afterwards, so a dark walk's
+        // later stills stay dark.
+        (
+            0.1,
+            Call(|d, _, _| STARTED_DARK.store(d.t.dark, std::sync::atomic::Ordering::Relaxed)),
+        ),
         (
             0.1,
             Call(|d, w, cx| d.set_appearance(crate::prefs::Appearance::Dark, w, cx)),
@@ -3224,6 +3233,14 @@ fn view_choices() -> Vec<(f32, Act)> {
         (
             0.1,
             Until("Light Appearance wears Paper", |d, _| !d.t.dark, 1.),
+        ),
+        (
+            0.1,
+            Call(|d, w, cx| {
+                if STARTED_DARK.load(std::sync::atomic::Ordering::Relaxed) {
+                    d.set_appearance(crate::prefs::Appearance::Dark, w, cx)
+                }
+            }),
         ),
         (0.1, Key("cmd-/")),
         (

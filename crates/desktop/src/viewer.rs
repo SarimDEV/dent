@@ -658,8 +658,10 @@ impl Dent {
                         "Running"
                     }))
             })
-            .when(!server, |d| d.children(self.versions(&a, cx)))
-            .child(div().w(px(1.)).h(px(16.)).mx(px(space::S1)).bg(t.hairline))
+            .when(!server, |d| {
+                d.children(self.versions(&a, cx))
+                    .child(div().w(px(1.)).h(px(16.)).mx(px(space::S1)).bg(t.hairline))
+            })
             .child(match self.toolbar_hint {
                 Some(h) => div()
                     .flex_1()
@@ -1676,11 +1678,8 @@ impl Dent {
                                             .text_color(t.ink)
                                             .child(file.path.clone()),
                                     )
-                                    .child({
-                                        let full = std::path::Path::new(&s.cwd).join(&file.path);
-                                        self.open_button("open-file", full, cx)
-                                    })
-                                    .child(self.discard_file(s, &file.path, cx))
+                                    // Its counts, then what can be done to it, so a
+                                    // confirm's Cancel is the last thing on the row.
                                     .child(div().ty(LABEL).text_color(t.faint).child(
                                         match (compact, file.lines.is_empty()) {
                                             (true, _) => {
@@ -1694,7 +1693,12 @@ impl Dent {
                                             (false, true) => String::new(),
                                             (false, false) => counts(file),
                                         },
-                                    )),
+                                    ))
+                                    .child({
+                                        let full = std::path::Path::new(&s.cwd).join(&file.path);
+                                        self.open_button("open-file", full, cx)
+                                    })
+                                    .child(self.discard_file(s, &file.path, cx)),
                             )
                             .child(
                                 div()
@@ -2109,32 +2113,39 @@ impl Dent {
                         base: Some(std::path::PathBuf::from(&s.cwd)),
                     };
                     let body = markdown::render(blocks.as_slice(), &t, false, &mut r);
+                    let words = text.clone();
+                    let copy =
+                        self.copy_ghost(format!("copy-aside-{}", a.id), move || words.clone(), cx);
                     div()
                         .flex()
                         .flex_col()
                         .gap(px(space::S2))
                         .child(body)
-                        .when(agent.is_some(), |d| {
-                            d.child(
-                                // Under an answer, as under a message in the chat.
-                                div().flex().child(
-                                    ghost(
-                                        SharedString::from(format!("promote-{i}")),
-                                        "Fork from here",
-                                        &t,
+                        // Under an answer, as under a reply in the chat.
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(space::S1))
+                                .ml(px(-space::S2))
+                                .child(copy)
+                                .when(agent.is_some(), |d| {
+                                    d.child(
+                                        ghost(
+                                            SharedString::from(format!("promote-{i}")),
+                                            "Fork from here",
+                                            &t,
+                                        )
+                                        .relative()
+                                        .with_tip(tip(
+                                            "A new session that carries on from this answer",
+                                            None,
+                                            t,
+                                        ))
+                                        .on_press(promote)
+                                        .child(probe(&self.probes, format!("promote-{i}"))),
                                     )
-                                    .ml(px(-space::S2))
-                                    .relative()
-                                    .with_tip(tip(
-                                        "A new session that carries on from this answer",
-                                        None,
-                                        t,
-                                    ))
-                                    .on_press(promote)
-                                    .child(probe(&self.probes, format!("promote-{i}"))),
-                                ),
-                            )
-                        })
+                                }),
+                        )
                         .into_any_element()
                 }
             };
@@ -2281,7 +2292,7 @@ impl Dent {
                 .gap(px(space::S1))
                 // As everywhere: the choice first, Cancel after it.
                 .child(
-                    crate::ui::button("discard-file-yes", "Discard changes", false, &t)
+                    crate::ui::button("discard-file-yes", "Discard changes", true, &t)
                         .relative()
                         .on_press(
                             cx.listener(move |this, _, _, cx| this.discard(&sid, &p, None, cx)),

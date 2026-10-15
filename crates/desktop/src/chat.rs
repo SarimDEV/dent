@@ -454,7 +454,7 @@ impl Dent {
 
     /// A Copy that says "Copied" for a moment. `text` runs only when
     /// pressed.
-    fn copy_ghost(
+    pub(crate) fn copy_ghost(
         &self,
         key: String,
         text: impl Fn() -> String + 'static,
@@ -534,6 +534,7 @@ impl Dent {
             let (s1, s2) = (s.id.clone(), s.id.clone());
             div()
                 .mt(px(space::S2))
+                .mr(px(-space::S2))
                 .flex()
                 .flex_wrap()
                 .items_center()
@@ -1027,6 +1028,8 @@ impl Dent {
                                     .justify_end()
                                     .items_center()
                                     .gap(px(space::S2))
+                                    // A trailing ghost's words end on the edge.
+                                    .mr(px(-space::S2))
                                     // As the agent asks: the main choice first, the
                                     // other after it, then Cancel.
                                     .when(!busy, |d| {
@@ -1772,7 +1775,7 @@ impl Dent {
                                 text.clone(),
                                 &t,
                             ))
-                            .when_some(limit, |d, l| d.child(div().text_color(t.ink).child(l))),
+                            .when_some(limit, |d, l| d.child(crate::ui::note(l, &t))),
                     )
                     // The last thing that went wrong can be tried again: once
                     // the limit it hit starts over, if it hit one.
@@ -1788,19 +1791,20 @@ impl Dent {
                                 ghost(SharedString::from(format!("retry-{ix}")), "Try again", &t)
                                     .relative()
                                     .child(probe(&self.probes, format!("retry-{ix}")));
-                            match self.limit_hit() {
-                                Some((_, at)) => d.child(crate::ui::off_owned(
+                            // On the line's middle, as a chevron is.
+                            d.child(crate::cards::on_line(match self.limit_hit() {
+                                Some((_, at)) => crate::ui::off_owned(
                                     retry,
                                     format!(
                                         "Once it resets, at {}",
                                         crate::data::clock(at as u64 * 1000)
                                     ),
                                     &t,
-                                )),
-                                None => d.child(retry.on_press(
+                                ),
+                                None => retry.on_press(
                                     cx.listener(move |this, _, _, cx| this.retry(&sid, cx)),
-                                )),
-                            }
+                                ),
+                            }))
                         },
                     )
                     .into_any_element()
@@ -1849,16 +1853,14 @@ impl Dent {
                         )
                     })
                     // Opens Changes on just this turn, at its first file.
-                    .child(
-                        div().h(px(CODE.zoomed().line)).flex().items_center().child(
-                            ghost(SharedString::from(format!("changed-{ix}")), "Review", &t)
-                                .relative()
-                                .on_press(cx.listener(move |this, _, _, cx| {
-                                    this.review_turn(&sid, turn.clone(), Some(first.clone()), cx)
-                                }))
-                                .child(probe(&self.probes, format!("changed-{ix}"))),
-                        ),
-                    )
+                    .child(crate::cards::on_line(
+                        ghost(SharedString::from(format!("changed-{ix}")), "Review", &t)
+                            .relative()
+                            .on_press(cx.listener(move |this, _, _, cx| {
+                                this.review_turn(&sid, turn.clone(), Some(first.clone()), cx)
+                            }))
+                            .child(probe(&self.probes, format!("changed-{ix}"))),
+                    ))
                     .into_any_element()
             }
             Item::Queued { id: msg, text } => {
@@ -1893,6 +1895,7 @@ impl Dent {
                             .flex()
                             .items_center()
                             .gap(px(space::S2))
+                            .mr(px(-space::S2))
                             .child(crate::ui::note(
                                 if ahead.is_some() {
                                     "Queued · sends after the one above"
@@ -3690,18 +3693,13 @@ fn needs_title(text: &str, t: &theme::Theme) -> Div {
 /// What a quiet line that opens shows after its words: the fold's
 /// chevron, sized to sit on the line's middle.
 fn fold_mark(open: bool, t: &theme::Theme) -> Div {
-    div()
-        .h(px(CODE.zoomed().line))
-        .flex_none()
-        .flex()
-        .items_center()
-        .ml(px(-space::S1))
-        .child(crate::ui::disclosure(
-            "fold",
-            open,
-            12.,
-            t.quiet.opacity(0.7),
-        ))
+    crate::cards::on_line(crate::ui::disclosure(
+        "fold",
+        open,
+        12.,
+        t.quiet.opacity(0.7),
+    ))
+    .ml(px(-space::S1))
 }
 
 fn continues(depths: &[usize], i: usize, k: usize) -> bool {
@@ -3768,18 +3766,22 @@ impl Dent {
             .child(div().ml(px(step)).mt(px(space::S1)).child(body))
             .when(long, |d| {
                 d.child(
-                    div().flex().ml(px(step - space::S2)).child(
-                        ghost(
-                            SharedString::from(format!("report-{ix}-{call}")),
-                            if open {
-                                "Show less"
-                            } else {
-                                "Show full report"
-                            },
-                            &t,
-                        )
-                        .on_press(fold),
-                    ),
+                    div()
+                        .flex()
+                        .ml(px(step - space::S2))
+                        .mt(px(space::S1))
+                        .child(
+                            ghost(
+                                SharedString::from(format!("report-{ix}-{call}")),
+                                if open {
+                                    "Show less"
+                                } else {
+                                    "Show full report"
+                                },
+                                &t,
+                            )
+                            .on_press(fold),
+                        ),
                 )
             })
             .into_any_element()
@@ -3990,7 +3992,14 @@ pub fn fit_footer(room: f32, chips: [(String, String); 3], context: bool, hint: 
 /// The line under an approval or a plan saying how to answer by key: the
 /// keys themselves while its card has the keyboard, else how to get there.
 fn ask_keys(keyed: bool, on: &'static str, off: &'static str, t: &theme::Theme) -> Div {
-    crate::ui::note(if keyed { on } else { off }, t).when(keyed, |d| d.text_color(t.ink))
+    // Each key and what it does stay together when the line wraps.
+    let keys = on
+        .split(" · ")
+        .map(|part| part.replace(' ', "\u{a0}"))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    crate::ui::note(if keyed { keys } else { off.to_string() }, t)
+        .when(keyed, |d| d.text_color(t.ink))
 }
 
 /// For the last reply of a turn that has finished: when it finished, how
