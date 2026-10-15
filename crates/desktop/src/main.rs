@@ -612,6 +612,14 @@ impl Render for Dent {
                 cx.listener(|this, _: &app::FindPrev, window, cx| this.step_find(true, window, cx)),
             )
             .on_action(|_: &app::Minimize, window, _| window.minimize_window())
+            .on_action(|_: &app::FullScreen, window, _| window.toggle_fullscreen())
+            .on_action(cx.listener(|this, _: &app::NotifySound, _, cx| {
+                use std::sync::atomic::Ordering::Relaxed;
+                let on = notify::SOUND.load(Relaxed);
+                notify::SOUND.store(!on, Relaxed);
+                this.save_prefs();
+                app::refresh_menus(cx);
+            }))
             .on_action(|_: &app::Zoom, window, _| window.zoom_window())
             .on_action(cx.listener(|this, _: &SelectPrev, window, cx| {
                 this.step_selection(-1, false, window, cx)

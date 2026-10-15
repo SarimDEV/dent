@@ -4151,6 +4151,32 @@ fn attaching() -> Vec<(f32, Act)> {
                 3.,
             ),
         ),
+        (0.2, Click("pic-chip")),
+        (
+            0.1,
+            Until(
+                "a picture opened large offers Copy and Open in Preview",
+                |d, _| d.lightbox.is_some() && drawn(d, "lightbox-copy").is_some(),
+                3.,
+            ),
+        ),
+        (0.4, Shot("picture-large")),
+        (0.1, Click("lightbox-copy")),
+        (
+            0.1,
+            Until(
+                "Copy puts the picture on the clipboard",
+                |_, cx| {
+                    cx.read_from_clipboard().is_some_and(|c| {
+                        c.entries()
+                            .iter()
+                            .any(|e| matches!(e, ClipboardEntry::Image(_)))
+                    })
+                },
+                3.,
+            ),
+        ),
+        (0.2, Key("escape")),
         (
             0.2,
             Until(

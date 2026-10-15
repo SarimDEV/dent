@@ -269,6 +269,9 @@ impl Dent {
         if n > 1 {
             caption = format!("{caption} · {} of {n}", at + 1);
         }
+        let copied = self
+            .copied_at
+            .is_some_and(|at| at.elapsed().as_secs_f32() < 1.5);
         // The backdrop is dark in either theme, as photos are shown.
         let shade = gpui_kit::black().opacity(if t.dark { 0.78 } else { 0.66 });
         Some(
@@ -318,7 +321,7 @@ impl Dent {
                         })
                         // A press on the picture itself keeps it open.
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(img(path).size_full().object_fit(ObjectFit::Contain)),
+                        .child(img(path.clone()).size_full().object_fit(ObjectFit::Contain)),
                 )
                 .child(
                     div()
@@ -329,16 +332,51 @@ impl Dent {
                         .flex()
                         .justify_center()
                         .opacity(((open - 0.6) / 0.4).clamp(0., 1.))
-                        // On its own band, clear of whatever shows through.
+                        // On its own band, clear of whatever shows through,
+                        // with what you can do with the picture beside it.
                         .child(
                             div()
                                 .px(px(space::S2))
                                 .py(px(space::HALF))
                                 .rounded(px(radius::SM))
                                 .bg(gpui_kit::black().opacity(0.6))
+                                .flex()
+                                .items_center()
+                                .gap(px(space::S3))
                                 .ty(LABEL)
                                 .text_color(gpui_kit::white().opacity(0.86))
-                                .child(caption),
+                                .child(caption)
+                                .child(
+                                    band_action(
+                                        "lightbox-copy",
+                                        if copied { "Copied" } else { "Copy" },
+                                    )
+                                    .relative()
+                                    .child(crate::ui::probe(&self.probes, "lightbox-copy"))
+                                    .on_press(cx.listener({
+                                        let path = path.clone();
+                                        move |this, _, _, cx| {
+                                            if let Some(item) = picture_item(&path) {
+                                                cx.write_to_clipboard(item);
+                                                this.copied_at = Some(std::time::Instant::now());
+                                                cx.notify();
+                                            }
+                                        }
+                                    })),
+                                )
+                                .child(
+                                    band_action("lightbox-preview", "Open in Preview").on_press(
+                                        cx.listener({
+                                            let path = path.clone();
+                                            move |_, _, _, _| {
+                                                let _ = std::process::Command::new("open")
+                                                    .args(["-a", "Preview"])
+                                                    .arg(&path)
+                                                    .spawn();
+                                            }
+                                        }),
+                                    ),
+                                ),
                         ),
                 )
                 .child(
@@ -451,6 +489,35 @@ fn round(
             16.,
             gpui_kit::white().opacity(if on { 0.9 } else { 0.3 }),
         ))
+}
+
+/// A word on the picture's band that does something: white on the dark
+/// band in either theme, brighter on hover. A press on it keeps the
+/// picture open.
+fn band_action(id: &'static str, label: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .cursor_pointer()
+        .text_color(gpui_kit::white().opacity(0.7))
+        .hover(|d| d.text_color(gpui_kit::white()))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(label)
+}
+
+/// The picture at `path` for the clipboard, as its own kind of image.
+fn picture_item(path: &std::path::Path) -> Option<ClipboardItem> {
+    let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
+    let format = match ext.as_str() {
+        "png" => ImageFormat::Png,
+        "jpg" | "jpeg" => ImageFormat::Jpeg,
+        "gif" => ImageFormat::Gif,
+        "webp" => ImageFormat::Webp,
+        "svg" => ImageFormat::Svg,
+        "tif" | "tiff" => ImageFormat::Tiff,
+        _ => return None,
+    };
+    let bytes = std::fs::read(path).ok()?;
+    Some(ClipboardItem::new_image(&Image::from_bytes(format, bytes)))
 }
 
 #[cfg(test)]

@@ -2614,7 +2614,11 @@ impl Dent {
                             .into_any_element(),
                         _ => icon(a.icon(), 12., t.quiet).into_any_element(),
                     })
-                    .child(div().truncate().ty(UI).text_color(t.ink).child(a.label()));
+                    .child(div().truncate().ty(UI).text_color(t.ink).child(a.label()))
+                    .relative()
+                    .when(shown.is_some(), |d| {
+                        d.child(probe(&self.probes, "pic-chip"))
+                    });
                 div()
                     .id(SharedString::from(format!("att-{id}")))
                     .flex()

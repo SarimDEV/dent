@@ -70,20 +70,34 @@ actions!(
         ChatPageDown,
         ChatTop,
         ChatBottom,
+        NotifySound,
+        FullScreen,
+        About,
     ]
 );
 
 /// The menu bar: the app menu, Edit for text fields, and Window.
 pub fn set_menus(cx: &mut App) {
-    use gpui_kit::base::input;
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+    cx.on_action(|_: &About, _| crate::notify::about());
+    refresh_menus(cx);
+}
+
+/// The menus as things stand: the sound's tick follows your choice.
+pub fn refresh_menus(cx: &mut App) {
+    use gpui_kit::base::input;
+    let sound = crate::notify::SOUND.load(std::sync::atomic::Ordering::Relaxed);
     cx.set_menus([
         gpui_kit::Menu {
             name: "dent".into(),
             items: vec![
+                MenuItem::action("About dent", About),
+                MenuItem::separator(),
+                MenuItem::action("Notification Sound", NotifySound).checked(sound),
+                MenuItem::separator(),
                 MenuItem::action("Hide dent", Hide),
                 MenuItem::action("Hide Others", HideOthers),
                 MenuItem::action("Show All", ShowAll),
@@ -146,6 +160,8 @@ pub fn set_menus(cx: &mut App) {
             items: vec![
                 MenuItem::action("Minimize", Minimize),
                 MenuItem::action("Zoom", Zoom),
+                MenuItem::separator(),
+                MenuItem::action("Enter Full Screen", FullScreen),
             ],
             disabled: false,
         },
@@ -164,6 +180,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-h", Hide, None),
         KeyBinding::new("alt-cmd-h", HideOthers, None),
         KeyBinding::new("cmd-m", Minimize, None),
+        KeyBinding::new("ctrl-cmd-f", FullScreen, None),
         KeyBinding::new("cmd-n", NewSession, None),
         KeyBinding::new("shift-cmd-a", AttachFiles, None),
         KeyBinding::new("cmd-w", CloseSession, None),
@@ -1228,7 +1245,10 @@ impl Dent {
             panel_w: 600.,
             chat_w: 800.,
             sidebar_hidden: false,
-            sidebar_off: prefs.sidebar_off,
+            sidebar_off: {
+                crate::notify::SOUND.store(!prefs.quiet, std::sync::atomic::Ordering::Relaxed);
+                prefs.sidebar_off
+            },
             sidebar_forced: false,
             dragging: false,
             tabs: HashMap::new(),
@@ -1678,6 +1698,10 @@ impl Dent {
     // ---- Selecting and closing ----
 
     pub fn select(&mut self, id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        // Looking at a session deals with what it notified you about.
+        if let Some(id) = &id {
+            crate::notify::clear(id);
+        }
         // Choosing the session already open only puts you in its reply box:
         // attachments, draft and place stay as they are.
         if id.is_some() && id == self.selected {
@@ -3343,6 +3367,7 @@ impl Dent {
             panel_width: Some(self.panel_width),
             sidebar_width: Some(self.sidebar_w),
             sidebar_off: self.sidebar_off,
+            quiet: !crate::notify::SOUND.load(std::sync::atomic::Ordering::Relaxed),
             appearance: self.appearance,
             pinned: self.pinned.clone(),
             open_with: crate::open::chosen(),
