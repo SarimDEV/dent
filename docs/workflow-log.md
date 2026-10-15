@@ -64,6 +64,12 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 - Fix: rule: describe behaviour only after reading the code or running it, and say "unverified" when neither was done.
 - Check: corrections from the owner per week.
 
+### Walkthroughs pass when stills fail
+- Seen: 2026-10-15, new Mac. `scripts/walk.sh attach` printed "could not create image from window" for every shot, saved nothing, and still reported "13 checks, 0 failed". The cause was missing Screen Recording permission on a fresh machine.
+- Cost: a UI change can look verified with no picture taken, and nobody notices until someone asks for the screenshot.
+- Fix: a failed still fails the run (or the scene checks capture once at startup and stops with the fix to apply). Add the permission to the bootstrap checklist.
+- Check: run a scene without the permission; it must fail.
+
 ### `walk.rs` is one 3,939-line file
 - Seen: 2026-10-15. Every walkthrough scene lives in `crates/desktop/src/walk.rs`.
 - Cost: each edit means reading or searching a large file, which costs agent time and tokens and makes conflicts likelier.
