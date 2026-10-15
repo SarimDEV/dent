@@ -40,7 +40,7 @@ The desktop app is a GPUI client for macOS, Linux and Windows, built around a ch
 - **Queue or steer:** while the agent works, Enter queues the next message and Cmd/Ctrl+Enter steers, interrupting with it now. Queued messages can be edited, reordered or removed: each waiting message after the first has **Move up**, which puts it ahead of the one before (the daemon reorders its queue and logs `Requeued`, so every client and a restart agree); **Edit** takes it back to the box and **Send now** steers with it.
 - **Context meter:** the composer's "context 9%" gauge, from the agent's own count and the model's real window. A click opens what fills it, where it compacts on its own, and Compact now (off, with the reason, while a turn runs).
 - **Model, effort and mode:** switchable mid-session from the composer; resuming or forking keeps them.
-- **Permission mode:** ask, accept edits, plan, or auto, always visible. Claude Code now defaults to an auto mode where a classifier approves tool calls ([write-up](https://hyrax.dev/blog/claude-code-auto-mode-default-august-14)), so actions the classifier blocked show as a reviewable list rather than one prompt at a time.
+- **Permission mode:** ask, accept edits, plan, or auto, always visible. Claude Code now defaults to an auto mode where a classifier approves tool calls, so actions the classifier blocked show as a reviewable list rather than one prompt at a time.
 - **Attachments:** paste or drop images and files; they upload to the session's machine, even a remote one.
 - **Accounts:** several Claude or Codex logins per machine, picked per project or session, each with its own usage limits.
 - **Rewind:** each of your messages offers restore code, restore conversation, or both (see Checkpoints).
