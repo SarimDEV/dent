@@ -4126,18 +4126,20 @@ impl Dent {
         });
         self.rewinding = None;
         if let Some(text) = text {
-            self.restore_message(&text, &cwd, window, cx);
+            self.restore_message(&text, &cwd, true, window, cx);
         }
         cx.notify();
     }
 
     /// A message you sent, back in the composer to edit: the words come
-    /// back to the box, and attached files come back attached; other
-    /// attachment lines stay behind. Returns the files it attached.
+    /// back to the box (with `keep_draft`, before what was typed there), and
+    /// attached files come back attached; other attachment lines stay
+    /// behind. Returns the files it attached.
     fn restore_message(
         &mut self,
         text: &str,
         cwd: &str,
+        keep_draft: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<String> {
@@ -4154,8 +4156,14 @@ impl Dent {
                 added.push(path);
             }
         }
+        // Whatever was typed stays, after it; and ⌘Z undoes the change.
+        let text = if keep_draft {
+            joined(&words, self.composer.read(cx).value().trim())
+        } else {
+            words
+        };
         self.composer.update(cx, |c, cx| {
-            put(c, words, window, cx);
+            put_undoable(c, text, window, cx);
             c.focus(window, cx);
         });
         added
@@ -4222,7 +4230,7 @@ impl Dent {
         if to == 0 {
             self.composer.update(cx, |c, cx| put(c, "", window, cx));
         } else {
-            let atts = self.restore_message(mine[to - 1], &s.cwd, window, cx);
+            let atts = self.restore_message(mine[to - 1], &s.cwd, false, window, cx);
             let shown = self.composer.read(cx).value().to_string();
             self.recall = Some(Recall {
                 session: s.id.clone(),
@@ -5044,7 +5052,7 @@ impl Dent {
         &mut self,
         art: &'static str,
         v: usize,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.pressed_again(format!("fix/{art}/{v}")) {
@@ -5057,13 +5065,43 @@ impl Dent {
             .art(art)
             .map(|a| a.path.to_string())
             .unwrap_or_default();
-        self.attachments
-            .retain(|a| !matches!(a, Attachment::Error { .. }));
-        self.attachments
-            .push(Attachment::Error { file, message: msg });
-        self.composer
-            .update(cx, |c, cx| put(c, "Fix this error.", window, cx));
-        self.send(window, cx);
+        let Some(id) = self.selected.clone() else {
+            return;
+        };
+        // Its own message: the draft and what's attached to it stay put.
+        self.send_aside_draft(
+            &id,
+            "Fix this error.",
+            &[Attachment::Error { file, message: msg }],
+            cx,
+        );
+    }
+
+    /// Send a message dent wrote for you (fix this error, address these
+    /// comments) with only its own attachments, leaving the draft and the
+    /// files attached to it as they are.
+    fn send_aside_draft(&mut self, id: &str, text: &str, atts: &[Attachment], cx: &mut Context<Self>) {
+        let files: Vec<String> = atts
+            .iter()
+            .filter_map(|a| match a {
+                Attachment::File { path } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        let notes: Vec<Attachment> = atts
+            .iter()
+            .filter(|a| !matches!(a, Attachment::File { .. }))
+            .cloned()
+            .collect();
+        self.live.send(Request::Send {
+            session: id.to_string(),
+            id: crate::message_id(),
+            text: with_attachments(text, &notes),
+            steer: false,
+            attachments: files,
+        });
+        self.follow();
+        cx.notify();
     }
 
     pub fn start_comment(
@@ -5095,25 +5133,20 @@ impl Dent {
         cx.notify();
     }
 
-    pub fn send_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn send_review(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if self.review.is_empty() {
             return;
         }
-        let n = self.review.len();
-        self.attachments.extend(std::mem::take(&mut self.review));
-        self.composer.update(cx, |c, cx| {
-            put(
-                c,
-                if n == 1 {
-                    "Please address this comment."
-                } else {
-                    "Please address these comments."
-                },
-                window,
-                cx,
-            )
-        });
-        self.send(window, cx);
+        let Some(id) = self.selected.clone() else {
+            return;
+        };
+        let comments = std::mem::take(&mut self.review);
+        let text = if comments.len() == 1 {
+            "Please address this comment."
+        } else {
+            "Please address these comments."
+        };
+        self.send_aside_draft(&id, text, &comments, cx);
     }
 
     // ---- Keyboard and search ----
@@ -5344,8 +5377,9 @@ impl Dent {
         } else if !query.is_empty() && at >= results.len() + files.len() {
             // The last row: start a session with what was typed.
             self.select(None, window, cx);
+            // Over a draft as an edit ⌘Z undoes.
             self.starter.update(cx, |s, cx| {
-                put(s, query.clone(), window, cx);
+                put_undoable(s, query.clone(), window, cx);
                 s.focus(window, cx);
             });
         } else {
@@ -5534,9 +5568,10 @@ impl Dent {
         if self.selected.as_deref() != Some(session) {
             return;
         }
+        // Over a draft as an edit ⌘Z undoes: the draft is a keystroke back.
         let text = format!("/{name} ");
         self.composer.clone().update(cx, |f, cx| {
-            put(f, text.clone(), window, cx);
+            put_undoable(f, text.clone(), window, cx);
             f.focus(window, cx);
         });
         cx.notify();
