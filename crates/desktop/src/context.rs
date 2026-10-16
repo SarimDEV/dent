@@ -168,21 +168,7 @@ impl Dent {
         let Some(detail) = line.detail.as_ref() else {
             return;
         };
-        let mut items: Vec<(&str, Do)> = Vec::new();
-        if line.text.starts_with("$ ") {
-            items.push(("Copy Command", Do::Copy(detail.input.clone())));
-            items.push((
-                "Run in My Terminal",
-                Do::RunInTerminal(detail.input.clone()),
-            ));
-        }
-        if let Some(path) = &detail.path {
-            if std::path::Path::new(path).exists() {
-                items.push(("Open", Do::OpenLink(path.clone())));
-                items.push(("Show in Finder", Do::Reveal(path.clone())));
-            }
-            items.push(("Copy Path", Do::CopyPath(path.clone())));
-        }
+        let items = tool_items(detail, |p| std::path::Path::new(p).exists());
         if !items.is_empty() {
             self.open_context(at, items, cx);
         }
@@ -379,11 +365,71 @@ pub fn quote_block(words: &str) -> String {
         .join("\n")
 }
 
+/// A tool row's menu: a command copies or goes to your terminal; a file
+/// opens, shows in Finder or copies its path (`exists` says whether it's
+/// still there); what came back copies whole.
+fn tool_items(
+    detail: &crate::data::CallDetail,
+    exists: impl Fn(&str) -> bool,
+) -> Vec<(&'static str, Do)> {
+    let mut items: Vec<(&str, Do)> = Vec::new();
+    if let Some(command) = &detail.command {
+        items.push(("Copy Command", Do::Copy(command.clone())));
+        items.push(("Run in My Terminal", Do::RunInTerminal(command.clone())));
+    }
+    if let Some(path) = &detail.path {
+        if exists(path) {
+            items.push(("Open", Do::OpenLink(path.clone())));
+            items.push(("Show in Finder", Do::Reveal(path.clone())));
+        }
+        items.push(("Copy Path", Do::CopyPath(path.clone())));
+    }
+    // Everything kept, not the folded view: plain, without colour codes.
+    if let Some((_, out)) = detail.output.as_ref().filter(|(_, o)| !o.trim().is_empty()) {
+        items.push(("Copy Output", Do::Copy(crate::ansi::parse(out).0)));
+    }
+    items
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn quotes_keep_their_lines() {
         assert_eq!(super::quote_block(" a\n\nb \n"), "> a\n\n> b");
         assert_eq!(super::quote_block("  "), "");
+    }
+
+    #[test]
+    fn a_command_row_copies_and_runs_the_bare_command() {
+        use super::Do;
+        let detail = crate::data::CallDetail {
+            input: "$ cargo test".into(),
+            command: Some("cargo test".into()),
+            output: Some((true, "\x1b[31merror\x1b[0m: failed\n".into())),
+            path: None,
+            edits: false,
+        };
+        let items = super::tool_items(&detail, |_| true);
+        let labels: Vec<_> = items.iter().map(|(l, _)| *l).collect();
+        assert_eq!(
+            labels,
+            ["Copy Command", "Run in My Terminal", "Copy Output"]
+        );
+        assert!(matches!(&items[0].1, Do::Copy(c) if c == "cargo test"));
+        assert!(matches!(&items[1].1, Do::RunInTerminal(c) if c == "cargo test"));
+        assert!(matches!(&items[2].1, Do::Copy(c) if c == "error: failed\n"));
+        // A file row: no command.
+        let file = crate::data::CallDetail {
+            input: String::new(),
+            command: None,
+            output: None,
+            path: Some("/p/a.rs".into()),
+            edits: true,
+        };
+        let labels: Vec<_> = super::tool_items(&file, |_| false)
+            .iter()
+            .map(|(l, _)| *l)
+            .collect();
+        assert_eq!(labels, ["Copy Path"]);
     }
 }

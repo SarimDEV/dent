@@ -261,6 +261,9 @@ pub struct ToolLine {
 pub struct CallDetail {
     /// The command, the edit as removed and added lines, or the input.
     pub input: String,
+    /// A shell command, bare (no prompt sign): what Copy Command copies
+    /// and Run in My Terminal types.
+    pub command: Option<String>,
     /// What came back, and whether it failed.
     pub output: Option<(bool, String)>,
     /// The file, made whole from the session's folder.

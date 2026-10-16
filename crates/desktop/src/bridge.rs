@@ -894,8 +894,12 @@ fn call_detail(c: &Call, cwd: &Path) -> crate::data::CallDetail {
             cwd.join(p).display().to_string()
         }
     });
+    let command = (name == "Bash")
+        .then(|| s("command"))
+        .filter(|c| !c.trim().is_empty());
     crate::data::CallDetail {
         input,
+        command,
         output: c.result.clone(),
         path,
         edits: matches!(name, "Write" | "Edit" | "MultiEdit" | "NotebookEdit"),
