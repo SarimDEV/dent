@@ -764,14 +764,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dent-att-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let png = dir.join("shot.png");
-        std::fs::write(&png, [137, 80, 78, 71]).unwrap();
+        // A PNG's signature: what it is is read from its bytes.
+        std::fs::write(&png, [137, 80, 78, 71, 13, 10, 26, 10]).unwrap();
         let txt = dir.join("notes.txt").display().to_string();
         let png = png.display().to_string();
         let v = user_message("look", "u", false, &[png.clone(), txt.clone()]);
         let blocks = v["message"]["content"].as_array().unwrap();
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0]["type"], "image");
-        assert_eq!(blocks[0]["source"]["data"], "iVBORw==");
+        assert_eq!(blocks[0]["source"]["data"], "iVBORw0KGgo=");
         let text = blocks[1]["text"].as_str().unwrap();
         assert!(text.starts_with("look") && text.contains(&png) && text.contains(&txt));
         assert_eq!(
