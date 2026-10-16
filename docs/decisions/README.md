@@ -48,3 +48,4 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0044. Project picker: one field that searches, goes to a path, makes and clones](0044-project-picker.md)
 - [0045. A new session's project is never guessed from what you type](0045-no-project-guessing.md)
 - [0046. Commands, statuses and the agent's questions are handled by kind](0046-commands-by-type.md)
+- [0049. Ambient backgrounds on the new-session page](0049-ambient-backgrounds.md)

@@ -1,0 +1,13 @@
+[package]
+name = "dent-ambient"
+description = "Ambient backgrounds for the new-session screen: simulations that draw into a small display list any client can paint."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -31,6 +31,9 @@ pub struct Prefs {
     pub drafts: std::collections::BTreeMap<String, String>,
     /// Sessions kept at the top of the sidebar, in the order pinned.
     pub pinned: Vec<String>,
+    /// The ambient background on the new-session page, by id; none when unset
+    /// or no longer known.
+    pub ambient: Option<String>,
     /// The app you picked to open each kind of file (by extension).
     pub open_with: std::collections::BTreeMap<String, String>,
 }

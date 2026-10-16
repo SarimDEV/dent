@@ -185,7 +185,7 @@ With the system's reduce-motion setting on (read at launch and whenever the wind
 
 - Allowed per frame: opacity, offsets, colours, flat quads, and remeasuring at most the one row that is changing.
 - The dither is a grid of flat quads, so it is for small surfaces only. Across a whole window it measured far over budget, which is why the theme switch is a colour tween.
-- Only the working line repaints a quiet window (its square's drift, its words' breath and hand-over), and only while a session is working and visible.
+- Only the working line repaints a quiet window (its square's drift, its words' breath and hand-over), and only while a session is working and visible. The one exception is an ambient background you chose for the new-session page, which redraws every frame while that page is visible ([0049](decisions/0049-ambient-backgrounds.md)).
 - Every new motion is measured with the frame-timing bench before it lands (Reliability requirements).
 
 ## Lists of things you act on

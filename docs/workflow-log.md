@@ -122,6 +122,13 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 
 ## Done
 
+### Ambient walk padded with settle time
+- Seen: 2026-10-15. `just ambient-walk` took 35 s with a warm build (52 s cold): 1.6 s of waiting before each of 13 stills (~21 s) and a 3 s idle check. The owner asked why it took so long. The backgrounds prefill their history, and the longest fade-in is 0.5 s.
+- Cost: ~13 s per run, on demand only.
+- Fix: 0.6 s per still and a 2 s idle check. Re-measured at 22 s, all checks passing, stills fully settled.
+- Check: `just ambient-walk` stays under 25 s with a warm build.
+
+
 ### A design review caught what the walkthroughs passed
 - Seen: 2026-10-15, batch 2. Every new check passed, yet the reviewer found two blockers (showing the sidebar by hand squeezed the chat below its minimum; Send fell to its own row) and five should-fixes. And the full suite found a real bug no scene of its own showed: focus left on the terminal after the viewer switched away, so every shortcut went dead.
 - Fix: review stills before landing, not after; run the full suite before calling a batch done, since scenes leave state for the next one.

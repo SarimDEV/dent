@@ -4,6 +4,7 @@
 //! `cargo run -p dent-desktop -- [--dark] [--size WxH] [--reduce-motion] [--background]`
 //! starts the daemon beside it when none is running.
 
+mod ambient;
 mod anim;
 mod app;
 mod assets;
@@ -204,7 +205,7 @@ impl Render for Dent {
                 self.animating()
             );
         }
-        if self.animating() || toast_arriving || walking {
+        if self.animating() || toast_arriving || walking || ambient::wants_frames(self) {
             window.request_animation_frame();
         }
         // The composer says what Enter will do in this session's state.
@@ -621,6 +622,12 @@ impl Render for Dent {
             )
             .on_action(|_: &app::Minimize, window, _| window.minimize_window())
             .on_action(|_: &app::FullScreen, window, _| window.toggle_fullscreen())
+            .on_action(cx.listener(|this, a: &ambient::SetAmbient, _, cx| {
+                ambient::choose(a.id.as_deref());
+                this.save_prefs();
+                app::refresh_menus(cx);
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &app::NotifySound, _, cx| {
                 use std::sync::atomic::Ordering::Relaxed;
                 let on = notify::SOUND.load(Relaxed);

@@ -142,6 +142,14 @@ impl Walk {
             "sweep" => sweep(),
             "markdown" => markdown(),
             "motion" => motion(),
+            "ambient" => {
+                let mut v = vec![(
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                )];
+                v.extend(ambient());
+                v
+            }
             "find" => {
                 let mut v = vec![(
                     0.,
@@ -4628,6 +4636,76 @@ fn compare() -> Vec<(f32, Act)> {
         both(&mut v, &format!("{i:03}"));
         v.push((0.9, Call(pace)));
     }
+    v
+}
+
+/// Which background the ambient walk shows next.
+static AMBIENT_AT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn next_ambient(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
+    let i = AMBIENT_AT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    crate::ambient::choose(dent_ambient::ALL.get(i).map(|s| s.id));
+    let _ = d;
+    cx.notify();
+}
+
+/// Ambient backgrounds (docs/ambient.md): a still of each on the new-session
+/// page, then proof that frames stop with none chosen and once a session
+/// starts. `scripts/walk.sh ambient --shots DIR [--dark]`.
+fn ambient() -> Vec<(f32, Act)> {
+    let mut v = vec![
+        (
+            0.,
+            Call(|_, _, _| AMBIENT_AT.store(0, std::sync::atomic::Ordering::Relaxed)),
+        ),
+        (0.3, Key("cmd-n")),
+    ];
+    for s in dent_ambient::ALL {
+        let name: &'static str = Box::leak(format!("ambient-{}", s.id).into_boxed_str());
+        v.push((0.1, Call(next_ambient)));
+        // Backgrounds prefill their history; the longest fade-in is 0.5 s.
+        v.push((0.6, Shot(name)));
+    }
+    v.extend([
+        (
+            0.1,
+            Call(|d, _, cx| {
+                crate::ambient::choose(None);
+                d.save_prefs();
+                cx.notify();
+            }),
+        ),
+        (0.3, Idle("no background draws no frames", 2., 2.5)),
+        (
+            0.1,
+            Call(|_, _, cx| {
+                crate::ambient::choose(Some("prism"));
+                cx.notify();
+            }),
+        ),
+        (0.3, Keys("Draw the footer again")),
+        (0.6, Shot("ambient-typing")),
+        (0.1, Key("enter")),
+        (
+            0.,
+            Until("the new session opens", |d, _| d.selected.is_some(), 10.),
+        ),
+        (
+            0.,
+            Until(
+                "a started session stops the background",
+                |d, _| !crate::ambient::wants_frames(d),
+                2.,
+            ),
+        ),
+        (
+            0.1,
+            Call(|_, _, cx| {
+                crate::ambient::choose(None);
+                cx.notify();
+            }),
+        ),
+    ]);
     v
 }
 

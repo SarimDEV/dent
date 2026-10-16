@@ -449,19 +449,29 @@ pub fn ago(ms: u64) -> String {
     }
 }
 
+/// Local calendar time for Unix seconds.
+#[cfg(unix)]
+pub fn local_tm(secs: i64) -> Option<libc::tm> {
+    let t: libc::time_t = secs as libc::time_t;
+    // SAFETY: an all-zero `tm` is a valid value to be overwritten.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: both pointers are valid for the call; localtime_r writes only
+    // into `tm`.
+    let ok = unsafe { !libc::localtime_r(&t, &mut tm).is_null() };
+    ok.then_some(tm)
+}
+
+#[cfg(not(unix))]
+pub fn local_tm(_secs: i64) -> Option<libc::tm> {
+    None
+}
+
 /// A moment as a clock reads it: "3:42 PM" today, "Oct 12, 3:42 PM"
 /// before, "Oct 12 2025, 3:42 PM" in another year. Local time.
 pub fn clock(ms: u64) -> String {
     #[cfg(unix)]
     {
-        let local = |secs: i64| {
-            let t: libc::time_t = secs as libc::time_t;
-            let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-            // SAFETY: both pointers are valid for the call; localtime_r
-            // writes only into `tm`.
-            let ok = unsafe { !libc::localtime_r(&t, &mut tm).is_null() };
-            ok.then_some(tm)
-        };
+        let local = local_tm;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);

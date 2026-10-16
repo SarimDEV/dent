@@ -30,6 +30,10 @@ pub struct Theme {
     pub idle: (Hsla, Hsla),
     pub added: Hsla,
     pub removed: Hsla,
+    /// Six hues for kinds of agent work, violet to orange (think, read,
+    /// search, edit, bash, web), for ambient backgrounds. Never the
+    /// needs-you magenta.
+    pub spectrum: [Hsla; 6],
 }
 
 fn c(hex: u32) -> Hsla {
@@ -56,6 +60,7 @@ impl Theme {
             idle: (c(0xB9B4A9), c(0xDCD7CC)),
             added: c(0xE2F2DE),
             removed: c(0xF3E2DA),
+            spectrum: [0x6A4FC9, 0x2A6FD1, 0x1FA9C9, 0x3FAF4F, 0xD99A12, 0xE2672A].map(c),
         }
     }
 
@@ -76,6 +81,7 @@ impl Theme {
             idle: (c(0x6B675F), c(0x2E2C28)),
             added: c(0x1A2E1C),
             removed: c(0x33211B),
+            spectrum: [0x9B84F0, 0x4F9BF0, 0x4FD3EC, 0x5FD86B, 0xF0B43A, 0xF5884A].map(c),
         }
     }
 }
@@ -118,6 +124,7 @@ impl Theme {
             idle: p(a.idle, b.idle),
             added: mix(a.added, b.added, k),
             removed: mix(a.removed, b.removed, k),
+            spectrum: std::array::from_fn(|i| mix(a.spectrum[i], b.spectrum[i], k)),
         }
     }
 }

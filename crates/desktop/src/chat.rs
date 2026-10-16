@@ -3157,12 +3157,25 @@ impl Dent {
                     })
             },
         );
+        // The ambient background, when one is chosen, sits behind everything;
+        // text that floats over it gets a soft glow of the page colour.
+        let ambient = crate::ambient::layer(self);
+        let lit = ambient.is_some();
+        let over = |e: AnyElement, hug: bool| {
+            if lit {
+                crate::ambient::glow(&t, e, hug).into_any_element()
+            } else {
+                e
+            }
+        };
         div()
+            .relative()
             .flex_1()
             .min_w_0()
             .h_full()
             .flex()
             .flex_col()
+            .children(ambient)
             .child(div().h(px(size::HEADER)).flex_none().on_mouse_down(
                 MouseButton::Left,
                 |e, window, _| {
@@ -3183,13 +3196,17 @@ impl Dent {
                     .flex()
                     .flex_col()
                     .gap(px(space::S3))
-                    .child(
+                    .child(probe(&self.probes, "ambient-ui"))
+                    .relative()
+                    .child(over(
                         div()
                             .pb(px(space::S1))
                             .ty(DISPLAY)
                             .text_color(t.ink)
-                            .child("New session"),
-                    )
+                            .child("New session")
+                            .into_any_element(),
+                        true,
+                    ))
                     .child(
                         div()
                             .relative()
@@ -3229,8 +3246,8 @@ impl Dent {
                                     }),
                             ),
                     )
-                    .child(chips)
-                    .children(self.terminal_sessions(cx)),
+                    .child(over(chips.into_any_element(), false))
+                    .children(self.terminal_sessions(cx).map(|e| over(e, false))),
             )
             .child(div().flex_1())
             .into_any_element()

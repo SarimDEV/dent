@@ -22,6 +22,15 @@ verify:
     cargo test --workspace --quiet
     scripts/check-boundaries.sh
 
+# Ambient backgrounds, on demand only (docs/ambient.md): every background at
+# five sizes and three frame rates, with timings.
+ambient-stress:
+    cargo test -q -p dent-ambient --release -- --ignored --nocapture stress
+
+# Ambient backgrounds in the real app: a still of each. Needs WINID; pass --shots DIR, --dark.
+ambient-walk *args:
+    scripts/walk.sh ambient {{args}}
+
 # Regenerate Codex app-server types from the installed (pinned) codex. Needs cargo-typify.
 gen-codex-types dir="spikes/codex-app-server":
     python3 -I scripts/gen-codex-types.py {{dir}}

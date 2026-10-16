@@ -15,6 +15,7 @@ publish = false
 [workspace.dependencies]
 dent-protocol = { path = "crates/protocol" }
 dent-client-core = { path = "crates/client-core" }
+dent-ambient = { path = "crates/ambient" }
 
 anyhow = "=1.0.104"
 serde = { version = "=1.0.229", features = ["derive"] }

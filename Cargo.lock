@@ -2080,6 +2080,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
+name = "dent-ambient"
+version = "0.0.0"
+
+[[package]]
 name = "dent-cli"
 version = "0.0.0"
 dependencies = [
@@ -2117,6 +2121,7 @@ dependencies = [
  "arborium",
  "block2 0.6.2",
  "cairo-rs",
+ "dent-ambient",
  "dent-client-core",
  "dent-protocol",
  "futures",

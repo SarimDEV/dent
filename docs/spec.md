@@ -12,6 +12,7 @@ The spec is split by area. Each file is the source of truth for its area; a chan
 | Hub, sync, connections, encryption, push, hosted services | [hub.md](hub.md) |
 | Projects, repos, checkouts, worktrees, docs folder, secrets | [projects.md](projects.md) |
 | Desktop app | [desktop.md](desktop.md) |
+| Ambient backgrounds on the new-session page | [ambient.md](ambient.md) |
 | Chat rendering and the renderer registry | [chat-rendering.md](chat-rendering.md) |
 | iPhone app | [iphone.md](iphone.md) |
 | Remote and ephemeral machines | [remote-machines.md](remote-machines.md) |

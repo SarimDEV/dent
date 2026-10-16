@@ -152,6 +152,8 @@ pub fn refresh_menus(cx: &mut App) {
                 MenuItem::action("Match the Mac's Appearance", LookSystem),
                 MenuItem::action("Light Appearance", LookLight),
                 MenuItem::action("Dark Appearance", LookDark),
+                MenuItem::separator(),
+                crate::ambient::menu(),
             ],
             disabled: false,
         },
@@ -654,6 +656,11 @@ pub struct Dent {
     pub connection: Result<(), String>,
     /// The window is in front, so the person sees what changes.
     pub window_active: bool,
+    /// Some of the window is on screen (not minimised, covered or on
+    /// another Space), so animation is worth drawing.
+    pub window_visible: bool,
+    /// The ambient background behind the new-session page.
+    pub ambient: Rc<RefCell<crate::ambient::State>>,
     /// Times the connection dropped, for the walkthrough.
     pub drops: u32,
     pub models: Vec<Model>,
@@ -873,6 +880,7 @@ impl Dent {
         let prefs = crate::prefs::load();
         crate::ds::set_zoom(prefs.zoom.unwrap_or(1.));
         crate::open::load(prefs.open_with.clone());
+        crate::ambient::choose(prefs.ambient.as_deref());
         // Follows the Mac's appearance unless you chose one (or --dark or
         // --light asks).
         let system_dark = matches!(
@@ -1051,6 +1059,11 @@ impl Dent {
             this.window_active = window.is_window_active();
         })
         .detach();
+        cx.observe_window_visibility(window, |this, _, window, cx| {
+            this.window_visible = window.is_visible();
+            cx.notify();
+        })
+        .detach();
         // A background run never keeps the front: whatever activates dent's
         // window, activation goes straight back to the app you're using.
         #[cfg(target_os = "macos")]
@@ -1210,6 +1223,8 @@ impl Dent {
             connection: Err("Starting dent…".into()),
             drops: 0,
             window_active: true,
+            window_visible: true,
+            ambient: Rc::default(),
             models: Vec::new(),
             projects: Vec::new(),
             waiting: HashMap::new(),
@@ -2277,6 +2292,13 @@ impl Dent {
         // Your terminal takes every key but ⌘ while it has focus.
         if self.shell_key(k, window, cx) {
             return true;
+        }
+        if !k.modifiers.platform
+            && !k.modifiers.control
+            && (k.key.chars().count() == 1 || matches!(k.key.as_str(), "space" | "backspace"))
+            && self.field_focused(window, cx) == Some(Field::Starter)
+        {
+            self.ambient.borrow_mut().key();
         }
         let plain = !k.modifiers.modified();
         // ⇧Tab in the reply box or a new session's field steps the mode:
@@ -3374,6 +3396,7 @@ impl Dent {
             appearance: self.appearance,
             pinned: self.pinned.clone(),
             open_with: crate::open::chosen(),
+            ambient: crate::ambient::chosen().map(|s| s.id.to_string()),
             zoom: Some(crate::ds::zoom()).filter(|z| *z != 1.),
             opened: self
                 .opened
@@ -3521,6 +3544,7 @@ impl Dent {
         if self.attachments.is_empty() && self.sent_own(&text, window, cx) {
             return;
         }
+        self.ambient.borrow_mut().submit();
         let d = self.defaults.clone();
         let cwd = match d.project {
             Some(p) => p,

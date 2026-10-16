@@ -14,6 +14,8 @@ path = "src/main.rs"
 [dependencies]
 dent-protocol.workspace = true
 dent-client-core.workspace = true
+# Ambient backgrounds for the new-session page: simulations we paint (docs/ambient.md).
+dent-ambient.workspace = true
 gpui-kit = "=0.7.1"
 # Live pages: the system web view as a child of the GPUI window (0037).
 wry = "=0.57.0"
