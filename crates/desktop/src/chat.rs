@@ -4052,7 +4052,15 @@ impl Dent {
     fn stash_entries(&self) -> Vec<Entry> {
         let n = self.stashes.len();
         let rows = self.stashes.iter().enumerate().rev().map(|(i, st)| {
-            let first = st.text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+            // Folded pastes read as their chips do.
+            let mut text = st.text.clone();
+            for (n, full) in &self.pastes {
+                text = text.replace(
+                    &crate::compose::fold_label(*n, full),
+                    &crate::compose::chip_label(full),
+                );
+            }
+            let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
             let name = if first.chars().count() > 60 {
                 format!("{}…", first.chars().take(60).collect::<String>().trim_end())
             } else if first.is_empty() {
