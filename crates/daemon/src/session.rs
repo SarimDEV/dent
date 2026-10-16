@@ -309,7 +309,18 @@ impl Session {
         };
         let mut rewound_to: Option<String> = None;
         let mut forked_at: Option<Option<String>> = None;
+        // A waiting message handed to the agent whose turn hadn't started:
+        // the last daemon went in between, so that turn is still owed.
+        let mut handed = false;
         for e in events.iter().cloned() {
+            match &e.body {
+                Body::Delivered { .. } => handed = true,
+                Body::TurnStarted
+                | Body::TurnEnded { .. }
+                | Body::Rewound { .. }
+                | Body::Forked { .. } => handed = false,
+                _ => {}
+            }
             match e.body {
                 Body::User {
                     id,
@@ -385,7 +396,7 @@ impl Session {
                 _ => {}
             }
         }
-        if matches!(self.status, Status::Working | Status::NeedsYou) {
+        if matches!(self.status, Status::Working | Status::NeedsYou) || handed {
             self.in_turn = true;
         }
         // A fork the agent hasn't picked up yet: it starts from the copy.
@@ -404,8 +415,18 @@ impl Session {
 
     async fn reattach(&mut self, row: &Row, held: &[HeldProc]) {
         let Some(proc) = row.proc.clone() else {
-            // No agent, so nothing of its runs in the background.
+            // No agent, so nothing of its runs in the background, and a
+            // turn owed (the last daemon went while starting one) can't
+            // come: it ends here.
             self.background_gone();
+            if self.in_turn {
+                self.end_turn(Outcome::Interrupted {
+                    reason: Some("dent restarted while the agent was starting".into()),
+                });
+            }
+            if self.asked.is_empty() && !self.held.is_empty() {
+                self.deliver_held().await;
+            }
             return;
         };
         let alive = held.iter().find(|p| p.id == proc);
@@ -445,6 +466,12 @@ impl Session {
                     reason: Some("dent restarted while the agent was working".into()),
                 });
             }
+        }
+        // Messages waiting on a turn that ended while dent was away (or
+        // ended above, its agent gone) go now, as after a crash; else they
+        // would wait for a turn that never comes.
+        if !self.in_turn && self.asked.is_empty() && !self.held.is_empty() {
+            self.deliver_held().await;
         }
     }
 
@@ -615,6 +642,9 @@ impl Session {
                         });
                     }
                     drop(p);
+                }
+                if !self.in_turn && self.asked.is_empty() && !self.held.is_empty() {
+                    self.deliver_held().await;
                 }
                 Ok(())
             }
