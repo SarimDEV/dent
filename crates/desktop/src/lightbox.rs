@@ -273,7 +273,9 @@ impl Dent {
             .copied_at
             .is_some_and(|at| at.elapsed().as_secs_f32() < 1.5);
         // The backdrop is dark in either theme, as photos are shown.
-        let shade = gpui_kit::black().opacity(if t.dark { 0.78 } else { 0.66 });
+        // Dark enough that the chat behind stops reading, so a small
+        // picture stands alone.
+        let shade = gpui_kit::black().opacity(if t.dark { 0.86 } else { 0.82 });
         Some(
             div()
                 .id("lightbox")
