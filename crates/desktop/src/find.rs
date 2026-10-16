@@ -40,6 +40,9 @@ pub fn tints(t: &crate::theme::Theme) -> (Hsla, Hsla) {
     )
 }
 
+/// Frames to look for a match to bring into view before giving up.
+const REVEAL_FRAMES: u8 = 6;
+
 /// What the bar found, kept in step with what it searches as that grows.
 pub struct Find {
     pub session: String,
@@ -51,8 +54,9 @@ pub struct Find {
     /// What the hits were counted against: the query and a digest of the
     /// text, so a reply streaming in is searched too.
     sig: (String, u64),
-    /// A match to bring into view once the viewer is next drawn.
-    reveal: bool,
+    /// A match to bring into view once it's next drawn: how many more
+    /// frames to look for it (it may not be laid out on the first).
+    reveal: u8,
     /// In the terminal: where each match is.
     pub cells: Vec<alacritty_terminal::term::search::Match>,
     /// In a page: how many matches it last said it has.
@@ -170,7 +174,7 @@ impl Dent {
                 hits: Vec::new(),
                 at: 0,
                 sig: (String::new(), 0),
-                reveal: false,
+                reveal: 0,
                 cells: Vec::new(),
                 page_count: 0,
                 chat: Default::default(),
@@ -465,7 +469,12 @@ impl Dent {
             return;
         };
         match f.scope {
-            Scope::Chat => self.transcript.scroll_to_reveal_item(ix),
+            // Its message first, then the match within it once that's
+            // laid out: a long reply's later matches are in view too.
+            Scope::Chat => {
+                self.transcript.scroll_to_reveal_item(ix);
+                f.reveal = REVEAL_FRAMES;
+            }
             Scope::Changes => self.diff_list.scroll_to_reveal_item(ix),
             Scope::Terminal => {
                 if let (Some(m), Some(sh)) = (f.cells.get(ix), self.shells.get(&f.session)) {
@@ -474,13 +483,18 @@ impl Dent {
             }
             Scope::Page(_) => {}
             // Found where it was laid out, once it's drawn.
-            Scope::Doc(_) | Scope::Aside => f.reveal = true,
+            Scope::Doc(_) | Scope::Aside => f.reveal = REVEAL_FRAMES,
         }
     }
 
-    /// Bring a match in the viewer into view, as laid out last frame.
+    /// Bring a match in the chat or the viewer into view, as laid out last
+    /// frame; if it wasn't laid out yet, look again next frame, a few times.
     pub fn reveal_found(&mut self, s: &Session, window: &mut Window, cx: &App) {
-        let Some(f) = self.find.as_ref().filter(|f| f.reveal && f.session == s.id) else {
+        let Some(f) = self
+            .find
+            .as_ref()
+            .filter(|f| f.reveal > 0 && f.session == s.id)
+        else {
             return;
         };
         let Some(&(ix, k)) = f.hits.get(f.at) else {
@@ -488,11 +502,14 @@ impl Dent {
         };
         let area = self.scope_area(s, f.scope);
         let needle = self.find_input.read(cx).value().to_string();
-        if crate::select::reveal(area, ix as u32, k, &needle, window) {
-            if let Some(f) = self.find.as_mut() {
-                f.reveal = false;
-            }
+        let found = crate::select::reveal(area, ix as u32, k, &needle, window);
+        if let Some(f) = self.find.as_mut() {
+            f.reveal = if found { 0 } else { f.reveal - 1 };
+        }
+        if found {
             window.refresh();
+        } else {
+            window.request_animation_frame();
         }
     }
 

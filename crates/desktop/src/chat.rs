@@ -721,7 +721,7 @@ impl Dent {
             .into_any_element()
     }
 
-    fn chat(&mut self, s: &Session, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn chat(&mut self, s: &Session, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.t;
         self.sync_transcript(s);
         let count = self.transcript.item_count();
@@ -842,8 +842,16 @@ impl Dent {
             s.items.len(),
             move |ix| said.get(ix).and_then(Item::plain),
         );
-        // ⌘F keeps up with a reply still arriving.
+        // ⌘F keeps up with a reply still arriving, and the match it went
+        // to is brought into view within its message.
         self.refresh_find(false, cx);
+        if self
+            .find
+            .as_ref()
+            .is_some_and(|f| f.scope == crate::find::Scope::Chat)
+        {
+            self.reveal_found(s, window, cx);
+        }
         let find = self.find_bar(crate::find::Scope::Chat, cx);
         let transcript = div()
             .relative()
