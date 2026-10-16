@@ -96,13 +96,73 @@ pub fn folds(text: &str) -> bool {
     text.lines().count() > FOLD_LINES || text.len() > FOLD_BYTES
 }
 
-/// The line a folded paste shows as. Numbered, so each is told apart and
-/// can be found again in a saved draft.
+/// The plain text a folded paste stands as in the box (what a saved draft
+/// keeps, and what copying the chip gives). Numbered, so each is told apart
+/// and can be found again in a saved draft.
 pub fn fold_label(n: u32, text: &str) -> String {
     match text.lines().count() {
         1 => format!("[Pasted text #{n} · {} KB]", text.len().div_ceil(1024)),
         lines => format!("[Pasted text #{n} +{lines} lines]"),
     }
+}
+
+/// What a folded paste's chip says.
+pub fn chip_label(text: &str) -> String {
+    match text.lines().count() {
+        1 => format!("Pasted text · {} KB", text.len().div_ceil(1024)),
+        lines => format!("Pasted text · {lines} lines"),
+    }
+}
+
+/// The number of the paste a chip's token id names (`paste-3`).
+pub fn paste_of(id: &str) -> Option<u32> {
+    id.strip_prefix("paste-")?.parse().ok()
+}
+
+/// `text` with each chip (its range in `text` and its token id) opened back
+/// to what was pasted. Chips are known by their id, never by their words,
+/// so typing a chip's words by hand sends them as typed.
+pub fn unfold_tokens(
+    text: &str,
+    chips: &[(Range<usize>, &str)],
+    pastes: &BTreeMap<u32, String>,
+) -> String {
+    let mut chips: Vec<_> = chips.to_vec();
+    chips.sort_by_key(|(r, _)| r.start);
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for (r, id) in chips {
+        let Some(full) = paste_of(id).and_then(|n| pastes.get(&n)) else {
+            continue;
+        };
+        if r.start < at || r.end > text.len() {
+            continue;
+        }
+        out.push_str(&text[at..r.start]);
+        out.push_str(full);
+        at = r.end;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
+/// What opening a chip at `at` in `text` replaces, and with what: the
+/// paste on lines of its own, a line break before and after it unless one
+/// is already there, taking the spaces that separated it from its words.
+pub fn opened(text: &str, at: &Range<usize>, full: &str) -> (Range<usize>, String) {
+    let full = full.trim_end_matches('\n');
+    let start = text[..at.start].trim_end_matches(' ').len();
+    let end = text.len() - text[at.end..].trim_start_matches(' ').len();
+    let before = !(start == 0 || text[..start].ends_with('\n'));
+    let after = !(end >= text.len() || text[end..].starts_with('\n'));
+    (
+        start..end,
+        format!(
+            "{}{full}{}",
+            if before { "\n" } else { "" },
+            if after { "\n" } else { "" }
+        ),
+    )
 }
 
 /// Where folded pastes sit in `text`: each one's range and number.
@@ -118,36 +178,37 @@ pub fn folded_in(text: &str, pastes: &BTreeMap<u32, String>) -> Vec<(Range<usize
     found
 }
 
-/// `text` with every folded paste opened back to what was pasted.
-pub fn unfold(text: &str, pastes: &BTreeMap<u32, String>) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut at = 0;
-    for (r, n) in folded_in(text, pastes) {
-        if r.start < at {
-            continue;
-        }
-        out.push_str(&text[at..r.start]);
-        out.push_str(&pastes[&n]);
-        at = r.end;
-    }
-    out.push_str(&text[at..]);
-    out
-}
-
-/// `text` with each folded paste it holds whole shown as its chip label
-/// again: a queued message reads as it did in the box.
-pub fn refold(text: &str, pastes: &BTreeMap<u32, String>) -> String {
+/// `text` with each folded paste it holds whole taken out, and the chips
+/// they showed as: a queued message shows its pastes as chips again, the
+/// words around them closing up.
+pub fn refold(text: &str, pastes: &BTreeMap<u32, String>) -> (String, Vec<String>) {
     // Only text this long can hold a folded paste.
     if text.lines().nth(FOLD_LINES).is_none() && text.len() <= FOLD_BYTES {
-        return text.to_string();
+        return (text.to_string(), Vec::new());
     }
     let mut out = text.to_string();
-    for (n, full) in pastes.iter().rev() {
-        if out.contains(full.as_str()) {
-            out = out.replacen(full.as_str(), &fold_label(*n, full), 1);
+    let mut chips = Vec::new();
+    for full in pastes.values() {
+        let Some(at) = out.find(full.as_str()) else {
+            continue;
+        };
+        if full.trim().is_empty() {
+            continue;
         }
+        let (a, b) = (&out[..at], &out[at + full.len()..]);
+        let (a, b) = (
+            a.trim_end_matches([' ', '\n']),
+            b.trim_start_matches([' ', '\n']),
+        );
+        let gap = if a.is_empty() || b.is_empty() {
+            ""
+        } else {
+            " "
+        };
+        out = format!("{a}{gap}{b}");
+        chips.push(chip_label(full));
     }
-    out
+    (out, chips)
 }
 
 #[cfg(test)]
@@ -165,13 +226,49 @@ mod tests {
         assert_eq!(label, "[Pasted text #1 +60 lines]");
         assert_eq!(fold_label(2, &pastes[&2]), "[Pasted text #2 · 5 KB]");
         let typed = format!("look at this:\n{label}\nand {}", fold_label(2, &pastes[&2]));
+        // A saved draft finds its chips again by their words.
+        let chips: Vec<(Range<usize>, String)> = folded_in(&typed, &pastes)
+            .into_iter()
+            .map(|(r, n)| (r, format!("paste-{n}")))
+            .collect();
+        assert_eq!(chips.len(), 2);
+        let chips: Vec<(Range<usize>, &str)> = chips
+            .iter()
+            .map(|(r, id)| (r.clone(), id.as_str()))
+            .collect();
         assert_eq!(
-            unfold(&typed, &pastes),
+            unfold_tokens(&typed, &chips, &pastes),
             format!("look at this:\n{long}\nand {}", "y".repeat(5000))
         );
-        assert_eq!(folded_in(&typed, &pastes).len(), 2);
         // Nothing folded: the words as typed.
-        assert_eq!(unfold("plain", &pastes), "plain");
+        assert_eq!(unfold_tokens("plain", &[], &pastes), "plain");
+    }
+
+    #[test]
+    fn chips_open_by_their_id_not_their_words() {
+        let long: String = (0..60).map(|i| format!("line {i}\n")).collect();
+        let pastes = BTreeMap::from([(1, long.clone())]);
+        assert_eq!(chip_label(&long), "Pasted text · 60 lines");
+        let label = fold_label(1, &long);
+        // The words typed by hand, and the chip after them.
+        let text = format!("{label} and {label}");
+        let chip = text.len() - label.len()..text.len();
+        assert_eq!(
+            unfold_tokens(&text, &[(chip, "paste-1")], &pastes),
+            format!("{label} and {long}")
+        );
+        // An unknown id leaves its words.
+        assert_eq!(unfold_tokens("x", &[(0..1, "paste-9")], &pastes), "x");
+    }
+
+    #[test]
+    fn an_opened_chip_takes_lines_of_its_own() {
+        let t = "see [chip] why";
+        assert_eq!(opened(t, &(4..10), "a\nb\n"), (3..11, "\na\nb\n".into()));
+        let t = "[chip]";
+        assert_eq!(opened(t, &(0..6), "a\nb"), (0..6, "a\nb".into()));
+        let t = "see\n[chip]\nwhy";
+        assert_eq!(opened(t, &(4..10), "a\nb\n"), (4..10, "a\nb".into()));
     }
 
     #[test]
@@ -231,15 +328,15 @@ mod tests {
     fn a_queued_message_shows_its_pastes_folded() {
         let long: String = (0..60).map(|i| format!("line {i}\n")).collect();
         let pastes = BTreeMap::from([(1, long.clone()), (2, "short".to_string())]);
-        let sent = unfold(
-            &format!("look at this {} please", fold_label(1, &long)),
-            &pastes,
-        );
+        let sent = format!("look at this {long} please");
         assert_eq!(
             refold(&sent, &pastes),
-            "look at this [Pasted text #1 +60 lines] please"
+            (
+                "look at this please".to_string(),
+                vec!["Pasted text · 60 lines".to_string()]
+            )
         );
         // Short text is left alone, even if a paste's words are in it.
-        assert_eq!(refold("short", &pastes), "short");
+        assert_eq!(refold("short", &pastes), ("short".to_string(), vec![]));
     }
 }

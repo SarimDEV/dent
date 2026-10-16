@@ -330,6 +330,20 @@ pub fn put_undoable(
     cx.emit(InputEvent::Change);
 }
 
+/// What a prompt field holds, trimmed, its folded pastes opened in full:
+/// each chip by its token, not by its words.
+pub fn unfolded(field: &TextareaState, pastes: &std::collections::BTreeMap<u32, String>) -> String {
+    let text = field.value();
+    let chips: Vec<(std::ops::Range<usize>, &str)> = field
+        .tokens()
+        .iter()
+        .map(|t| (t.range(), t.token().id().as_ref()))
+        .collect();
+    crate::compose::unfold_tokens(&text, &chips, pastes)
+        .trim()
+        .to_string()
+}
+
 /// Put a draft back in a field, its folded pastes folded again.
 pub fn put_draft(
     field: &mut TextareaState,
@@ -340,7 +354,8 @@ pub fn put_draft(
 ) {
     let mut content = InputContent::new(text.to_string());
     for (r, n) in crate::compose::folded_in(text, pastes) {
-        let token = InlineToken::new(format!("paste-{n}"), text[r.clone()].to_string());
+        let token = InlineToken::new(format!("paste-{n}"), text[r.clone()].to_string())
+            .with_label(crate::compose::chip_label(&pastes[&n]));
         if let Ok(c) = content.clone().with_token(r, token) {
             content = c;
         }
@@ -3901,9 +3916,8 @@ impl Dent {
         let Some(id) = self.selected.clone() else {
             return;
         };
-        let text = self.composer.read(cx).value().trim().to_string();
         // Folded pastes go in full.
-        let text = crate::compose::unfold(&text, &self.pastes);
+        let text = unfolded(self.composer.read(cx), &self.pastes);
         if text.is_empty() && self.attachments.is_empty() {
             return;
         }
@@ -3980,7 +3994,8 @@ impl Dent {
 
     /// Start a new session from the starter box with the chosen defaults.
     pub fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.starter.read(cx).value().trim().to_string();
+        // Folded pastes go in full.
+        let text = unfolded(self.starter.read(cx), &self.pastes);
         // Files alone can start one, as they can be sent in a session.
         if text.is_empty() && self.attachments.is_empty() || self.creating() {
             return;
@@ -4005,7 +4020,7 @@ impl Dent {
             permission: d.permission,
             effort: d.effort,
             id: crate::message_id(),
-            text: crate::compose::unfold(&text, &self.pastes),
+            text: text.clone(),
             attachments: atts
                 .iter()
                 .filter_map(|a| match a {
@@ -4343,8 +4358,9 @@ impl Dent {
         }
         let n = self.pastes.keys().next_back().map_or(1, |n| n + 1);
         let label = crate::compose::fold_label(n, &text);
+        let token = InlineToken::new(format!("paste-{n}"), label)
+            .with_label(crate::compose::chip_label(&text));
         self.pastes.insert(n, text);
-        let token = InlineToken::new(format!("paste-{n}"), label);
         self.field_entity(f)
             .clone()
             .update(cx, |c, cx| c.replace_with_token(token, window, cx))
@@ -4369,6 +4385,8 @@ impl Dent {
             return;
         };
         field.update(cx, |c, cx| {
+            // On lines of its own, not run into the words around it.
+            let (at, full) = crate::compose::opened(&c.value(), &at, &full);
             c.set_selected_range(at, cx);
             c.replace(full, window, cx);
             cx.emit(InputEvent::Change);

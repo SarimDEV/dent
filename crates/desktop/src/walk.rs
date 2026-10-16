@@ -4517,8 +4517,7 @@ fn visuals() -> Vec<(f32, Act)> {
                     let c = chips(d, cx);
                     let text = d.composer.read(cx).value().to_string();
                     c.len() == 1
-                        && c[0].starts_with("[Pasted text #")
-                        && c[0].ends_with(" +60 lines]")
+                        && c[0] == "Pasted text · 60 lines"
                         && text.starts_with("Here's the sync log [Pasted text #")
                         && text.ends_with("why does event 42 apply twice?")
                 },
@@ -4543,13 +4542,13 @@ fn visuals() -> Vec<(f32, Act)> {
         (
             0.2,
             Until(
-                "opened, the chip becomes the whole paste in place",
+                "opened, the chip becomes the whole paste in place, on lines of its own",
                 |d, cx| {
                     let text = d.composer.read(cx).value().to_string();
                     chips(d, cx).is_empty()
-                        && text.starts_with("Here's the sync log 2026-10-16")
+                        && text.starts_with("Here's the sync log\n2026-10-16")
                         && text.contains("applied event 60")
-                        && text.ends_with("why does event 42 apply twice?")
+                        && text.ends_with("\nwhy does event 42 apply twice?")
                 },
                 3.,
             ),

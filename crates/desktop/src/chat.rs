@@ -2224,7 +2224,7 @@ impl Dent {
                 // Folded pastes show as their chips again, and long text
                 // folds as a sent message does.
                 let open = self.expanded.contains(msg);
-                let refolded = crate::compose::refold(text, &self.pastes);
+                let (refolded, pasted) = crate::compose::refold(text, &self.pastes);
                 let body: Vec<&str> = refolded.lines().collect();
                 let (shown, long) = user_shown(&body, open);
                 let fold_key = msg.clone();
@@ -2278,24 +2278,23 @@ impl Dent {
                                         }),
                                 )
                             })
-                            // The files it carries, as they'll go with it.
-                            .when(!attachments.is_empty(), |d| {
-                                d.child(div().flex().flex_wrap().gap(px(space::S1H)).children(
-                                    attachments.iter().map(|p| {
-                                        let a = crate::app::Attachment::File { path: p.clone() };
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(space::S1H))
-                                            .max_w(px(320.))
-                                            .h(px(size::CONTROL_SM))
-                                            .px(px(space::S2))
-                                            .rounded(px(radius::SM))
-                                            .bg(t.selected())
-                                            .child(icon(a.icon(), 12., t.quiet))
-                                            .child(div().truncate().ty(UI).child(a.label()))
-                                    }),
-                                ))
+                            // Its folded pastes and the files it carries, as
+                            // they showed in the box.
+                            .when(!attachments.is_empty() || !pasted.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .gap(px(space::S1H))
+                                        .children(pasted.into_iter().map(|label| {
+                                            small_chip(ChipFace::Icon("file-text"), label, &t)
+                                        }))
+                                        .children(attachments.iter().map(|p| {
+                                            let a =
+                                                crate::app::Attachment::File { path: p.clone() };
+                                            small_chip(file_face(p), a.label(), &t)
+                                        })),
+                                )
                             }),
                     )
                     .child(
@@ -2894,42 +2893,31 @@ impl Dent {
                 let id = ident(i, &a);
                 let key = SharedString::from(format!("att-pic-{id}"));
                 let shown = pictures.iter().position(|p| p.key == key);
-                // What it is: a picture shows itself, small; anything else
-                // its kind's icon.
-                let what = div()
-                    .flex()
-                    .items_center()
-                    .gap(px(space::S1H))
-                    .min_w_0()
-                    .h_full()
-                    .pl(px(space::S2))
-                    .child(match &a {
-                        crate::app::Attachment::File { path } if shown.is_some() => div()
-                            .size(px(16.))
-                            .flex_none()
-                            .rounded(px(3.))
-                            .overflow_hidden()
-                            .child(
-                                img(std::path::PathBuf::from(path))
-                                    .size_full()
-                                    .object_fit(ObjectFit::Cover),
-                            )
-                            .into_any_element(),
-                        _ => icon(a.icon(), 12., t.quiet).into_any_element(),
-                    })
-                    .child(div().truncate().ty(UI).text_color(t.ink).child(a.label()))
-                    .relative()
-                    .when(shown.is_some(), |d| {
-                        d.child(probe(&self.probes, "pic-chip"))
-                    });
+                // The shared chip, its x beside it.
+                let what = small_chip(
+                    match &a {
+                        crate::app::Attachment::File { path } if shown.is_some() => {
+                            ChipFace::Picture(std::path::PathBuf::from(path))
+                        }
+                        _ => ChipFace::Icon(a.icon()),
+                    },
+                    a.label(),
+                    &t,
+                )
+                .bg(gpui_kit::transparent_black())
+                .pr_0()
+                .relative()
+                .when(shown.is_some(), |d| {
+                    d.child(probe(&self.probes, "pic-chip"))
+                });
                 div()
                     .id(SharedString::from(format!("att-{id}")))
                     .flex()
                     .items_center()
-                    .gap(px(space::S1H))
+                    .gap(px(space::HALF))
                     .max_w(px(420.))
-                    .h(px(size::CONTROL_SM + 2.))
-                    .pr(px(space::S1))
+                    .h(px(size::CONTROL_SM))
+                    .pr(px(space::HALF))
                     .rounded(px(radius::SM))
                     .bg(t.selected())
                     .with_tip(crate::ui::tip_owned(
@@ -2998,13 +2986,8 @@ impl Dent {
             .child(
                 Textarea::new(field)
                     .token(move |tok, _, _| {
-                        div()
-                            .px(px(space::S1H))
-                            .rounded(px(radius::SM))
-                            .bg(t.selected())
-                            .text_color(t.quiet)
+                        small_chip(ChipFace::Icon("file-text"), tok.token().label().clone(), &t)
                             .cursor_pointer()
-                            .child(tok.token().label().clone())
                     })
                     .on_token_click(move |e, window, cx| {
                         let id = e.token().id().to_string();
@@ -4340,6 +4323,25 @@ fn sent_attachment(
             ))
             .child(div().ty(LABEL).text_color(t.quiet).child(name));
     }
+    // Any other file goes as the chip it was in the box.
+    if place == "Attached" {
+        let name = what.rsplit('/').next().unwrap_or(what).to_string();
+        return div().flex().child(
+            // Not found as a picture (that would show above), so by its kind.
+            small_chip(
+                ChipFace::Icon(
+                    crate::app::Attachment::File {
+                        path: what.to_string(),
+                    }
+                    .icon(),
+                ),
+                name,
+                t,
+            )
+            .id(SharedString::from(format!("sent-file-{what}")))
+            .with_tip(crate::ui::tip_owned(what.to_string(), *t)),
+        );
+    }
     div()
         .flex()
         .items_start()
@@ -4358,6 +4360,61 @@ fn sent_attachment(
                 .child(div().ty(LABEL).text_color(t.quiet).child(place.to_string()))
                 .child(div().text_color(t.ink).child(what.to_string())),
         )
+}
+
+/// What a small chip leads with: a picture shows itself, small; anything
+/// else its kind's icon.
+pub enum ChipFace {
+    Icon(&'static str),
+    Picture(std::path::PathBuf),
+}
+
+/// The one small chip for what goes with a message (a file, a picture, a
+/// folded paste), the same in the reply box, a queued message and a sent
+/// one: `type.ui` in ink on the selected fill, `size.control.sm` high,
+/// `radius.sm`.
+pub fn small_chip(face: ChipFace, label: impl Into<SharedString>, t: &theme::Theme) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(space::S1H))
+        .max_w(px(420.))
+        .min_w_0()
+        .h(px(size::CONTROL_SM))
+        .px(px(space::S2))
+        .rounded(px(radius::SM))
+        .bg(t.selected())
+        .ty(UI)
+        .text_color(t.ink)
+        .child(chip_face(face, t))
+        .child(div().min_w_0().truncate().child(label.into()))
+}
+
+fn chip_face(face: ChipFace, t: &theme::Theme) -> AnyElement {
+    match face {
+        ChipFace::Icon(name) => icon(name, 12., t.quiet).into_any_element(),
+        ChipFace::Picture(path) => div()
+            .size(px(16.))
+            .flex_none()
+            .rounded(px(3.))
+            .overflow_hidden()
+            .child(img(path).size_full().object_fit(ObjectFit::Cover))
+            .into_any_element(),
+    }
+}
+
+/// A file's chip face: its picture when it is one, else its kind's icon.
+pub fn file_face(path: &str) -> ChipFace {
+    if Kind::of(path) == Some(Kind::Image) {
+        ChipFace::Picture(std::path::PathBuf::from(path))
+    } else {
+        ChipFace::Icon(
+            crate::app::Attachment::File {
+                path: path.to_string(),
+            }
+            .icon(),
+        )
+    }
 }
 
 /// The queued message the working line sits above, while a session works
