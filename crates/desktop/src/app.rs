@@ -3133,6 +3133,25 @@ impl Dent {
         {
             return true;
         }
+        // ⇧⌘V in a prompt pastes text as it is, never folded into a chip:
+        // a long paste to edit in place. Pictures and files attach as with ⌘V.
+        if k.key == "v"
+            && k.modifiers.platform
+            && k.modifiers.shift
+            && !k.modifiers.alt
+            && !k.modifiers.control
+            && self.palette.is_none()
+            && let Some(f @ (Field::Composer | Field::Starter)) = field
+        {
+            if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
+                self.field_entity(f).clone().update(cx, |c, cx| {
+                    c.replace(text, window, cx);
+                    cx.emit(InputEvent::Change);
+                });
+                return true;
+            }
+            return self.paste_attachment(window, cx);
+        }
         // ⌘V with a picture or files on the clipboard attaches them.
         if k.key == "v"
             && k.modifiers.platform
@@ -4723,15 +4742,22 @@ impl Dent {
         if browsing.is_none() && !(up && empty) {
             return false;
         }
-        // A message of several lines: the arrows walk its lines first.
-        let caret = self.composer.read(cx).cursor().min(value.len());
-        let (before, after) = value.split_at(caret);
-        if if up {
-            before.contains('\n')
-        } else {
-            after.contains('\n')
-        } {
-            return false;
+        // A message of several lines, or one long enough to wrap: the
+        // arrows walk its lines as they show first, and step through what
+        // you sent only from the first line (↑) or the last (↓). The field
+        // knows where its lines wrap, so it's asked to move the caret: one
+        // already on its first or last line stays put.
+        if !value.is_empty() {
+            let before = self.composer.read(cx).cursor();
+            let handle = self.composer.read(cx).focus_handle(cx);
+            if up {
+                handle.dispatch_action(&gpui_kit::base::input::MoveUp, window, cx);
+            } else {
+                handle.dispatch_action(&gpui_kit::base::input::MoveDown, window, cx);
+            }
+            if self.composer.read(cx).cursor() != before {
+                return true;
+            }
         }
         if up
             && browsing.is_none()

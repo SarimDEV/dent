@@ -5076,6 +5076,79 @@ fn composing() -> Vec<(f32, Act)> {
             }),
         ),
     ]);
+    // ⇧⌘V pastes a long text as it is, to edit in place.
+    v.extend([
+        (0., Call(save_clipboard)),
+        (0., Call(copy_long_log)),
+        (0.1, Type(Field::Composer, "")),
+        (0.1, Key("cmd-shift-v")),
+        (
+            0.2,
+            Until(
+                "⇧⌘V pastes a long text whole, not folded",
+                |d, cx| {
+                    let text = composer_text(d, cx);
+                    chips(d, cx).is_empty()
+                        && text.starts_with("2026-10-16")
+                        && text.contains("applied event 60")
+                },
+                2.,
+            ),
+        ),
+        (0., Call(restore_clipboard)),
+        (0.1, Type(Field::Composer, "")),
+    ]);
+    // ↑ through a long message that wraps walks its lines as they show.
+    const WRAPS: &str = "This one line is long enough to wrap over several lines of the reply box, so the arrows have lines to walk before they step back through what was sent, the way a message of several lines already did; it goes on a little more to be sure of it.";
+    v.extend([
+        (0.1, Type(Field::Composer, WRAPS)),
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until(
+                "a long line is answered",
+                |d, _| status_is(d, Status::Done) && sent_order(d).last().is_some_and(|t| t == WRAPS),
+                20.,
+            ),
+        ),
+        (0.2, Key("up")),
+        (
+            0.1,
+            Until(
+                "↑ brings it back, the caret at its end",
+                |d, cx| composer_is(d, cx, WRAPS) && d.composer.read(cx).cursor() == WRAPS.len(),
+                1.,
+            ),
+        ),
+        (0.2, Key("up")),
+        (
+            0.1,
+            Until(
+                "↑ on a wrapped line moves the caret up a line, not back a message",
+                |d, cx| composer_is(d, cx, WRAPS) && d.composer.read(cx).cursor() < WRAPS.len(),
+                1.,
+            ),
+        ),
+        (
+            0.,
+            Call(|d, w, cx| {
+                d.composer.update(cx, |c, cx| {
+                    let end = c.value().len();
+                    c.set_selected_range(end..end, cx);
+                    let _ = w;
+                });
+            }),
+        ),
+        (0.2, Key("down")),
+        (
+            0.1,
+            Until(
+                "↓ on its last line steps forward: the box empties",
+                |d, cx| composer_is(d, cx, ""),
+                1.,
+            ),
+        ),
+    ]);
     v
 }
 

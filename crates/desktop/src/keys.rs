@@ -30,6 +30,7 @@ pub const SHEET: &[(&str, &[(&str, &str)])] = &[
             ("Send", "↩"),
             ("New line", "⇧ ↩"),
             ("Attach files", "⇧ ⌘ A"),
+            ("Paste text unfolded", "⇧ ⌘ V"),
             ("Send now, into the running turn", "⌘ ↩"),
             ("Stop", "⌘ .  Esc"),
             ("Bring back what you sent", "↑"),
