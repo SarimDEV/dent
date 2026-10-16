@@ -14,7 +14,7 @@ use crate::ui::RevealOnHover;
 
 use crate::app::{Dent, Tab, Viewport};
 use crate::data::{FileDiff, Kind, Line, Session};
-use crate::ds::{CODE, LABEL, Typed, UI, radius, size, space};
+use crate::ds::{CODE, LABEL, READING, Typed, UI, radius, size, space};
 use crate::markdown;
 use crate::theme::{Status, status_square};
 use crate::ui::{Ready, action, button, ghost, icon, icon_button, kbd, probe, tip};
@@ -2246,15 +2246,14 @@ impl Dent {
         for (i, a) in s.asides.iter().enumerate() {
             let _place = crate::select::item(area, i);
             let question = div().flex().justify_end().child(
+                // Your question as your messages read in the chat.
                 div()
                     .max_w(relative(0.85))
-                    .px(px(space::S3))
+                    .px(px(space::S3 + space::HALF))
                     .py(px(space::S2))
-                    .rounded(px(radius::LG))
-                    .bg(t.raised)
-                    .border_1()
-                    .border_color(t.hairline)
-                    .ty(UI)
+                    .rounded(px(radius::LG + space::HALF))
+                    .bg(t.tint())
+                    .ty(READING)
                     .text_color(t.ink)
                     .child(a.question.clone()),
             );
@@ -2336,14 +2335,16 @@ impl Dent {
                 .border_t_1()
                 .border_color(t.hairline)
                 .child(
+                    // The chat's reply box, smaller: the reading face, its
+                    // corners and its surface.
                     div()
                         .px(px(space::S3))
                         .py(px(space::S2))
-                        .rounded(px(radius::LG))
+                        .rounded(px(radius::XL))
                         .bg(t.raised)
                         .border_1()
                         .border_color(t.hairline)
-                        .ty(UI)
+                        .ty(READING)
                         .text_color(t.ink)
                         .relative()
                         .flex()
