@@ -379,9 +379,32 @@ pub fn files(paths: &[String], query: &str) -> Vec<Command> {
         .collect()
 }
 
+/// Whether an `@` word names this file or folder outright: its name, or
+/// its name less the extension, or its whole path. Return picks such a row
+/// without the arrows; otherwise Return sends what's typed.
+pub fn names(path: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return false;
+    }
+    let path = path.trim_end_matches('/');
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
+    [path, name, stem].iter().any(|n| n.eq_ignore_ascii_case(query))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_at_word_names_a_file_only_outright() {
+        assert!(names("src/main.rs", "main.rs"));
+        assert!(names("src/main.rs", "main"));
+        assert!(names("src/main.rs", "src/main.rs"));
+        assert!(names("docs/", "docs"));
+        assert!(!names("src/main.rs", "ma"));
+        assert!(!names("src/main.rs", ""));
+    }
 
     fn cmd(name: &str, description: &str) -> Command {
         Command {

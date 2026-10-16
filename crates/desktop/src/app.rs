@@ -821,6 +821,9 @@ pub struct Dent {
     pub act_errors: HashMap<(String, String, dent_protocol::Act), String>,
     /// The highlighted row of the slash menu.
     pub slash_ix: usize,
+    /// The arrows have moved through the prompt's menu since it last
+    /// changed: Return picks the lit row then.
+    pub slash_moved: bool,
     /// The message whose "Edit from here" is asking to confirm.
     pub rewinding: Option<(String, String)>,
     /// A new session is on its way.
@@ -1350,6 +1353,7 @@ impl Dent {
             usage: None,
             recent: Vec::new(),
             slash_ix: 0,
+            slash_moved: false,
             expanded: HashSet::new(),
             acting: Vec::new(),
             signing: HashMap::new(),
@@ -2839,6 +2843,9 @@ impl Dent {
         // Return sends instead when the command is typed in full, or when
         // the lit row was only found by its description: Return never
         // swaps what you typed for a different name unless you chose it.
+        // An `@` word likewise: Return picks a file only once the arrows
+        // have chosen one or the word names it outright, and "/" alone
+        // takes nothing. Tab always picks.
         if plain
             && matches!(k.key.as_str(), "up" | "down" | "tab" | "enter")
             && in_prompt
@@ -2861,11 +2868,24 @@ impl Dent {
                 .name
                 .to_lowercase()
                 .contains(&c.token.query.to_lowercase());
-            let chosen = self.slash_ix > 0;
-            if !(k.key == "enter" && (whole || slash && !named && !chosen)) {
+            let chosen = self.slash_ix > 0 || self.slash_moved;
+            let mention = c.token.kind == complete::Kind::Mention;
+            if k.key == "enter" && slash && c.token.query.is_empty() && !chosen {
+                return true;
+            }
+            let send = whole
+                || slash && !named && !chosen
+                || mention && !self.slash_moved && !complete::names(&c.items[at].name, &c.token.query);
+            if !(k.key == "enter" && send) {
                 match k.key.as_str() {
-                    "up" => self.slash_ix = (at + n - 1) % n,
-                    "down" => self.slash_ix = (at + 1) % n,
+                    "up" => {
+                        self.slash_ix = (at + n - 1) % n;
+                        self.slash_moved = true;
+                    }
+                    "down" => {
+                        self.slash_ix = (at + 1) % n;
+                        self.slash_moved = true;
+                    }
                     _ => {
                         let pick = c.items[at].name.clone();
                         self.pick_completion(&pick, window, cx);
@@ -3300,6 +3320,7 @@ impl Dent {
     /// files are asked for when an `@` needs them.
     pub fn prompt_changed(&mut self, cx: &mut Context<Self>) {
         self.slash_ix = 0;
+        self.slash_moved = false;
         let field = self.prompt().read(cx);
         let token = complete::token(&field.value(), field.cursor());
         // Erased back to its bare `/` or `@`, the word starts over.
@@ -3365,6 +3386,7 @@ impl Dent {
             f.focus(window, cx);
         });
         self.slash_ix = 0;
+        self.slash_moved = false;
         if own {
             self.run_own(name, "", window, cx);
         } else if runs {
