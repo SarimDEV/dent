@@ -250,9 +250,12 @@ pub fn bind_keys(cx: &mut App) {
     ]);
 }
 
-/// A thought's key for being opened: its start, which doesn't change.
-pub fn thought_key(text: &str) -> String {
-    format!("thought:{}", text.chars().take(48).collect::<String>())
+/// A thought's key for being opened: its session and which thought of
+/// that session it is. Thoughts are only ever added at the end (a rewind
+/// drops later ones), so the count before it doesn't change, and two that
+/// start alike, here or in another session, open on their own.
+pub fn thought_key(session: &str, nth: usize) -> String {
+    format!("thought:{session}:{nth}")
 }
 
 /// What keeps a command's answer opened or folded.
@@ -5198,10 +5201,17 @@ impl Dent {
     /// Keep the conversation list's measurements in step with its items:
     /// a new session starts at the end; changed items are measured again.
     pub fn sync_transcript(&mut self, s: &Session) {
+        let mut thoughts = 0;
         let sigs: Vec<u64> = s
             .items
             .iter()
-            .map(|i| self.item_sig(i))
+            .map(|i| {
+                let thought = matches!(i, Item::Thinking(_)).then(|| {
+                    thoughts += 1;
+                    thought_key(&s.id, thoughts - 1)
+                });
+                self.item_sig(i, thought.as_deref())
+            })
             .chain((s.status == Status::Working).then_some(u64::MAX))
             .collect();
         let (id, old) = &self.transcript_sigs;
@@ -5255,7 +5265,8 @@ impl Dent {
     }
 
     /// Anything about an item that changes its height.
-    fn item_sig(&self, item: &Item) -> u64 {
+    /// `thought` is a thought's key, for whether it's open.
+    fn item_sig(&self, item: &Item, thought: Option<&str>) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         std::mem::discriminant(item).hash(&mut h);
@@ -5286,7 +5297,9 @@ impl Dent {
             }
             Item::Thinking(t) => {
                 fp(t, &mut h);
-                self.open_calls.contains(&thought_key(t)).hash(&mut h);
+                thought
+                    .is_some_and(|k| self.open_calls.contains(k))
+                    .hash(&mut h);
             }
             Item::Tools { lines, summary, .. } => {
                 (lines, summary).hash(&mut h);

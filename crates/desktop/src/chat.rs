@@ -271,6 +271,8 @@ impl Dent {
 
     /// A tool call opened up: the command or edit, what came back, and the
     /// way to its file. All of it selects and copies.
+    /// A call opened up. `key` is the session and the call's id, so what's
+    /// shown whole stays with the call, not with a place in the chat.
     fn call_detail(
         &self,
         s: &Session,
@@ -1484,10 +1486,10 @@ impl Dent {
                     )
                     .when(open && lone, |d| {
                         let detail = lines[0].detail.clone();
-                        d.children(detail.map(|dt| {
-                            self.call_detail(s, &format!("{ix}-0"), &dt, cx)
-                                .mt(px(space::S1H))
-                        }))
+                        let call = format!("{}/{}", s.id, lines[0].id);
+                        d.children(
+                            detail.map(|dt| self.call_detail(s, &call, &dt, cx).mt(px(space::S1H))),
+                        )
                     })
                     .when(open && !lone, |d| {
                         // A subagent's earlier steps stay folded until asked for.
@@ -1639,7 +1641,7 @@ impl Dent {
                                                 .children(detail.map(|dt| {
                                                     self.call_detail(
                                                         s,
-                                                        &format!("{ix}-{n}"),
+                                                        &format!("{}/{}", s.id, l.id),
                                                         &dt,
                                                         cx,
                                                     )
@@ -1669,7 +1671,11 @@ impl Dent {
                     .into_any_element()
             }
             Item::Thinking(text) => {
-                let key = crate::app::thought_key(text);
+                let nth = s.items[..ix]
+                    .iter()
+                    .filter(|i| matches!(i, Item::Thinking(_)))
+                    .count();
+                let key = crate::app::thought_key(&s.id, nth);
                 let open = self.open_calls.contains(&key);
                 let words = text.split_whitespace().count();
                 div()
@@ -1692,7 +1698,10 @@ impl Dent {
                                 }
                                 cx.notify();
                             }))
-                            .child(format!("Thought · {words} words"))
+                            .child(format!(
+                                "Thought · {words} word{}",
+                                if words == 1 { "" } else { "s" }
+                            ))
                             .child(crate::ui::disclosure("fold", open, 11., t.faint)),
                     )
                     .when(open, |d| {
