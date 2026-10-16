@@ -4857,6 +4857,73 @@ fn composing() -> Vec<(f32, Act)> {
                 5.,
             ),
         ),
+        // The side chat's box gives the keyboard back when the viewer goes.
+        (0.1, Key("cmd-;")),
+        (
+            0.1,
+            Until(
+                "⌘; puts the keyboard in the side chat's box",
+                |d, _| d.panel_open && !d.composer_keyed,
+                2.,
+            ),
+        ),
+        (0.1, Key("cmd-\\")),
+        (
+            0.1,
+            Until(
+                "hiding the viewer gives the keyboard back to the reply box",
+                |d, _| !d.panel_open && d.composer_keyed,
+                2.,
+            ),
+        ),
+    ]);
+    // While an approval waits, words in the box are a note, sent with ⌘↩.
+    fn asks(d: &Dent) -> bool {
+        has(d, |i| matches!(i, Item::Approval { .. })) && status_is(d, Status::Needs)
+    }
+    v.extend(new_session("please run it"));
+    v.extend([
+        (0.1, Until("an approval waits", |d, _| asks(d), 10.)),
+        (0.4, Type(Field::Composer, "not that one")),
+        (0.1, Key("enter")),
+        (
+            0.2,
+            Until(
+                "Return with a note doesn't deny: the approval waits, the note stays, the box says ⌘↩ sends it",
+                |d, cx| {
+                    asks(d) && composer_is(d, cx, "not that one") && drawn(d, "deny-hint").is_some()
+                },
+                2.,
+            ),
+        ),
+        (0.3, Shot("deny-hint")),
+        (0.1, Key("escape")),
+        (
+            0.1,
+            Until(
+                "Esc goes to the card even with words typed, and keeps them",
+                |d, cx| d.ask_keyed && composer_is(d, cx, "not that one"),
+                1.,
+            ),
+        ),
+        (0.1, Type(Field::Composer, "not that one")),
+        (0.1, Key("cmd-enter")),
+        (
+            0.1,
+            Until(
+                "⌘↩ denies with the note",
+                |d, _| {
+                    status_is(d, Status::Done)
+                        && current(d).is_some_and(|s| {
+                            s.items.iter().any(|i| {
+                                matches!(i, Item::Note { text, .. }
+                                    if text.starts_with("Denied") && text.ends_with(": not that one"))
+                            })
+                        })
+                },
+                10.,
+            ),
+        ),
     ]);
     v
 }

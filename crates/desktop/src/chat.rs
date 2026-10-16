@@ -2555,6 +2555,19 @@ impl Dent {
             .just_sent
             .is_some_and(|at| at.elapsed().as_secs_f32() < 2.5);
         let id = s.id.clone();
+        // An approval or plan waiting: words typed are a note for it, sent
+        // with ⌘↩ (or this button), never with Return alone.
+        let card = match self.open_ask(&s.id) {
+            Some(Item::Approval { .. }) => Some(false),
+            Some(Item::Plan { .. }) => Some(true),
+            _ => None,
+        };
+        let noting = card.is_some() && !text.trim().is_empty() && self.attachments.is_empty();
+        // Return with a note just now: the box says what does send it.
+        let told = noting
+            && self
+                .deny_hint
+                .is_some_and(|at| at.elapsed() < crate::app::DENY_HINT);
         // While it works and nothing is typed, the button stops it. Right after
         // sending it stays inert, so a double press never lands on Stop.
         // Ink only while it works: waiting on you, the card's own answer is
@@ -2611,9 +2624,24 @@ impl Dent {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .when(ready == Ready::Yes, |d| {
+                    .when(ready == Ready::Yes && !noting, |d| {
                         d.on_press(cx.listener(|this, _, window, cx| this.send(window, cx)))
                             .with_tip(tip("Send", Some("↩"), t))
+                    })
+                    // A press is as deliberate as ⌘↩: the note goes.
+                    .when(noting, |d| {
+                        d.on_press(
+                            cx.listener(|this, _, window, cx| this.send_with(true, window, cx)),
+                        )
+                        .with_tip(tip(
+                            if card == Some(true) {
+                                "Keep planning with this note"
+                            } else {
+                                "Deny with this note"
+                            },
+                            Some("⌘ ↩"),
+                            t,
+                        ))
                     }),
                 ready,
                 &t,
@@ -2627,14 +2655,18 @@ impl Dent {
             .map_or(s.agent.as_str(), |(_, m)| m)
             .to_string();
         let permission = self.permission_shown(s).label().to_string();
-        let hint_text = if s.status == Status::Needs {
+        let hint_text = if let Some(plan) = card {
+            match (noting, plan) {
+                (true, false) => "⌘ ↩ deny with this note",
+                (true, true) => "⌘ ↩ keep planning with this note",
+                (false, _) => "Esc to answer",
+            }
+        } else if s.status == Status::Needs {
             s.items
                 .iter()
                 .rev()
                 .find_map(|i| match i {
                     Item::Question { .. } => Some("↩ answer"),
-                    Item::Approval { .. } => Some("↩ deny with this reason"),
-                    Item::Plan { .. } => Some("↩ ask for changes"),
                     _ => None,
                 })
                 .unwrap_or("↩ send")
@@ -2697,6 +2729,20 @@ impl Dent {
                     .gap(px(space::S2))
                     .children(self.attachment_chips(cx))
                     .child(self.prompt_field(&self.composer.clone(), cx))
+                    .when(told, |d| {
+                        d.child(
+                            div()
+                                .relative()
+                                .ty(LABEL)
+                                .text_color(t.ink)
+                                .child(if card == Some(true) {
+                                    "Return doesn't send this to the plan: ⌘ ↩ keeps planning with it, Esc goes to the card."
+                                } else {
+                                    "Return doesn't deny: ⌘ ↩ denies with this note, Esc goes to the card."
+                                })
+                                .child(probe(&self.probes, "deny-hint")),
+                        )
+                    })
                     .child(
                         div()
                             .flex()

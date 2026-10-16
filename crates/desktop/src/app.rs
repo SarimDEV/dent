@@ -398,6 +398,10 @@ pub fn put_draft(
     cx.emit(InputEvent::Change);
 }
 
+/// How long the box says that ⌘↩, not Return, sends a note to a waiting
+/// approval or plan.
+pub const DENY_HINT: Duration = Duration::from_secs(4);
+
 /// Where the new-session page keeps its draft and files among the
 /// sessions' (in `drafts` and the prefs).
 pub const NEW_DRAFT: &str = "";
@@ -898,6 +902,9 @@ pub struct Dent {
     partial_seen: HashMap<String, String>,
     /// Send is inert for a moment after sending, so a double press can't stop.
     pub just_sent: Option<Instant>,
+    /// Return was pressed with a note while an approval or plan waited:
+    /// when, so the box says for a moment that ⌘↩ is what sends it.
+    pub deny_hint: Option<Instant>,
     /// The message last sent, by session and id, and when: until the turn
     /// it starts shows as running, Esc and ⌘. can still stop it.
     pub sent_at: Option<(String, String, Instant)>,
@@ -1434,6 +1441,7 @@ impl Dent {
             saved_prefs: None,
             partial_seen: HashMap::new(),
             just_sent: None,
+            deny_hint: None,
             sent_at: None,
             panel_open: true,
             panel_width: prefs.panel_width.unwrap_or(600.),
@@ -3049,6 +3057,12 @@ impl Dent {
                 return true;
             }
         }
+        // Return on a note for a waiting approval or plan sends nothing and
+        // says that ⌘↩ does (see `send_with`).
+        if plain && k.key == "enter" && in_composer && self.noting(cx) {
+            self.tell_deny(cx);
+            return true;
+        }
         // Moving the caret can move it into or out of a word to complete.
         if in_prompt
             && matches!(
@@ -3973,6 +3987,25 @@ impl Dent {
         if self.attachments.is_empty() && self.sent_own(&text, window, cx) {
             return;
         }
+        // While it asks to run something, or shows a plan, words typed are a
+        // note to deny with (or what to change in the plan), and only ⌘↩
+        // sends them so: Return never turns a draft into a denial unasked,
+        // it says so in place instead.
+        if self.attachments.is_empty()
+            && let Some(Item::Approval { id: ask, .. } | Item::Plan { id: ask, .. }) =
+                self.open_ask(&id)
+        {
+            if !steer {
+                self.tell_deny(cx);
+                return;
+            }
+            self.deny_hint = None;
+            self.composer.update(cx, |c, cx| put(c, "", window, cx));
+            self.drafts.remove(&id);
+            self.recall = None;
+            self.reply_to_ask(&id, ask, Answer::Deny { message: text }, cx);
+            return;
+        }
         let mut atts = std::mem::take(&mut self.attachments);
         // Files travel as attachments; the rest are lines in the message.
         let files: Vec<String> = atts
@@ -3994,18 +4027,8 @@ impl Dent {
             let _ = this.update(cx, |_, cx| cx.notify());
         })
         .detach();
-        // Typing while it asks a question answers it; while it asks to run
-        // something, the text is the reason for denying; on a plan, it's
-        // what to change.
+        // Typing while it asks a question answers it.
         if atts.is_empty() && files.is_empty() && self.answer_with_text(&id, &text, cx) {
-            return;
-        }
-        if atts.is_empty()
-            && files.is_empty()
-            && let Some(Item::Approval { id: ask, .. } | Item::Plan { id: ask, .. }) =
-                self.open_ask(&id)
-        {
-            self.reply_to_ask(&id, ask, Answer::Deny { message: text }, cx);
             return;
         }
         let msg = crate::message_id();
@@ -4018,6 +4041,31 @@ impl Dent {
             attachments: files,
         });
         self.follow();
+        cx.notify();
+    }
+
+    /// Whether the reply box holds a note for a waiting approval or plan:
+    /// words, no files, and one of those cards open.
+    pub fn noting(&self, cx: &App) -> bool {
+        self.attachments.is_empty()
+            && !self.composer.read(cx).value().trim().is_empty()
+            && self.selected.as_ref().is_some_and(|id| {
+                matches!(
+                    self.open_ask(id),
+                    Some(Item::Approval { .. } | Item::Plan { .. })
+                )
+            })
+    }
+
+    /// Return pressed on a note: the box says, for a moment, that ⌘↩ is
+    /// what sends it.
+    fn tell_deny(&mut self, cx: &mut Context<Self>) {
+        self.deny_hint = Some(Instant::now());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(DENY_HINT).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
         cx.notify();
     }
 
