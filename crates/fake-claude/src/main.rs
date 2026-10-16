@@ -1393,7 +1393,7 @@ fn odd_content() -> String {
         s.push_str(&"> ".repeat(depth));
         s.push_str(&format!("Quoted at depth {depth}.\n"));
     }
-    s.push_str("\n");
+    s.push('\n');
     for depth in 0..8 {
         s.push_str(&"  ".repeat(depth));
         s.push_str(&format!(
