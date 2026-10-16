@@ -3590,6 +3590,17 @@ impl Dent {
         self.slash_moved = false;
         let field = self.prompt().read(cx);
         let token = complete::token(&field.value(), field.cursor());
+        // A waiting message taken back to edit and then cleared away has
+        // no place to go back to: what's typed next is a new message.
+        if field.value().trim().is_empty()
+            && self.taking_back.is_empty()
+            && self
+                .editing_queued
+                .as_ref()
+                .is_some_and(|(sid, _)| self.selected.as_ref() == Some(sid))
+        {
+            self.editing_queued = None;
+        }
         // Erased back to its bare `/` or `@`, the word starts over.
         if token.as_ref().map(|t| (t.kind, t.start)) != self.slash_dismissed
             || token.as_ref().is_some_and(|t| t.query.is_empty())
@@ -4116,8 +4127,8 @@ impl Dent {
         // the one after it is still waiting and this one will wait too.
         let place = self
             .editing_queued
-            .take()
-            .filter(|(sid, _)| *sid == id && !steer)
+            .take_if(|(sid, _)| *sid == id)
+            .filter(|_| !steer)
             .and_then(|(_, next)| next)
             .filter(|next| {
                 self.session(&id).is_some_and(|s| {
