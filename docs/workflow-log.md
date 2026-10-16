@@ -28,6 +28,12 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 
 ## Open
 
+### Real walkthroughs stall while the Mac is locked
+- Seen: 2026-10-15. A `scripts/walk.sh compare` run sat at "Starting dent…" for 14 min: the owner was away, the screen had locked after ~48 min idle, and a window that isn't drawn never ticks the walk. It printed nothing, so it looked like a hang. Re-run under `caffeinate -dimsu`, it finished in ~3 min.
+- Cost: 14 min plus a wasted real-agent run, each time a long walk starts while the owner is away.
+- Fix: `walk.sh` wraps the desktop in `caffeinate -dimsu`, and a step stuck longer than its timeout without a frame says so on stderr.
+- Check: an unattended real walk on a locked-screen schedule finishes, or fails within a minute, saying why.
+
 ### A design brief was read too literally
 - Seen: 2026-10-15. Asked to make the chat feel like Claude desktop's, the work started on Markdown typography; the owner meant the whole feel of an agent at work (tool calls, the working line, rhythm). One research run (~10 min) was redirected and then restarted with a rewritten brief.
 - Cost: ~15 min and one throwaway research pass.
