@@ -317,6 +317,14 @@ impl Walk {
                 v.extend(visuals());
                 v
             }
+            "attaching" => {
+                let mut v = vec![(
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                )];
+                v.extend(attaching());
+                v
+            }
             "typing" => {
                 let mut v = vec![(
                     0.,
