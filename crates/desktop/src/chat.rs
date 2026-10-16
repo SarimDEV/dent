@@ -2370,43 +2370,64 @@ impl Dent {
                                         "Queued · sends when this reply finishes"
                                     }),
                             )
-                            .when_some(ahead, |d, before| {
-                                d.child(
-                                    ghost(
-                                        SharedString::from(format!("move-up-{ix}")),
-                                        "Move up",
-                                        &t,
+                            // The actions keep together: a narrow column
+                            // puts them all under the words, never one alone.
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_none()
+                                    .items_center()
+                                    .gap(px(space::S2))
+                                    .when_some(ahead, |d, before| {
+                                        d.child(
+                                            ghost(
+                                                SharedString::from(format!("move-up-{ix}")),
+                                                "Move up",
+                                                &t,
+                                            )
+                                            .relative()
+                                            .on_press(cx.listener(move |this, _, _, cx| {
+                                                this.requeue(&sid3, &msg3, Some(before.clone()), cx)
+                                            }))
+                                            .child(probe(&self.probes, format!("move-up-{ix}"))),
+                                        )
+                                    })
+                                    .child(
+                                        ghost(
+                                            SharedString::from(format!("unqueue-{ix}")),
+                                            "Edit",
+                                            &t,
+                                        )
+                                        .relative()
+                                        .on_press(cx.listener(move |this, _, _, cx| {
+                                            this.unqueue(&sid, &msg, cx)
+                                        }))
+                                        .child(probe(&self.probes, format!("unqueue-{ix}"))),
                                     )
-                                    .relative()
-                                    .on_press(cx.listener(move |this, _, _, cx| {
-                                        this.requeue(&sid3, &msg3, Some(before.clone()), cx)
-                                    }))
-                                    .child(probe(&self.probes, format!("move-up-{ix}"))),
-                                )
-                            })
-                            .child(
-                                ghost(SharedString::from(format!("unqueue-{ix}")), "Edit", &t)
-                                    .relative()
-                                    .on_press(cx.listener(move |this, _, _, cx| {
-                                        this.unqueue(&sid, &msg, cx)
-                                    }))
-                                    .child(probe(&self.probes, format!("unqueue-{ix}"))),
-                            )
-                            .child(
-                                ghost(SharedString::from(format!("steer-{ix}")), "Send now", &t)
-                                    .relative()
-                                    .on_press(cx.listener(move |this, _, _, cx| {
-                                        this.steer_queued(&sid2, &msg2, cx)
-                                    }))
-                                    .child(probe(&self.probes, format!("steer-{ix}"))),
-                            )
-                            .child(
-                                ghost(SharedString::from(format!("remove-{ix}")), "Remove", &t)
-                                    .relative()
-                                    .on_press(cx.listener(move |this, _, _, cx| {
-                                        this.remove_queued(&sid4, &msg4, cx)
-                                    }))
-                                    .child(probe(&self.probes, format!("remove-{ix}"))),
+                                    .child(
+                                        ghost(
+                                            SharedString::from(format!("steer-{ix}")),
+                                            "Send now",
+                                            &t,
+                                        )
+                                        .relative()
+                                        .on_press(cx.listener(move |this, _, _, cx| {
+                                            this.steer_queued(&sid2, &msg2, cx)
+                                        }))
+                                        .child(probe(&self.probes, format!("steer-{ix}"))),
+                                    )
+                                    .child(
+                                        ghost(
+                                            SharedString::from(format!("remove-{ix}")),
+                                            "Remove",
+                                            &t,
+                                        )
+                                        .relative()
+                                        .on_press(cx.listener(move |this, _, _, cx| {
+                                            this.remove_queued(&sid4, &msg4, cx)
+                                        }))
+                                        .child(probe(&self.probes, format!("remove-{ix}"))),
+                                    ),
                             ),
                     )
                     .into_any_element()
@@ -3024,6 +3045,8 @@ impl Dent {
                     .items_center()
                     .gap(px(space::HALF))
                     .max_w(px(420.))
+                    // A narrow box narrows the chip: its name truncates.
+                    .min_w_0()
                     .h(px(size::CONTROL_SM))
                     .pr(px(space::HALF))
                     .rounded(px(radius::SM))
@@ -3066,11 +3089,17 @@ impl Dent {
                     .into_any_element()
             })
             .collect();
+        // Many files scroll in three rows rather than push the box (and
+        // its send button) off the window.
+        let rows = 3.;
         (!chips.is_empty()).then(|| {
             div()
+                .id("att-chips")
                 .flex()
                 .flex_wrap()
                 .gap(px(space::S1H))
+                .max_h(px(rows * size::CONTROL_SM + (rows - 1.) * space::S1H))
+                .overflow_y_scroll()
                 .children(chips)
                 .into_any_element()
         })
