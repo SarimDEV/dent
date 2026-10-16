@@ -2677,11 +2677,7 @@ impl Dent {
             // From the mode last asked for, if the daemon hasn't said yet:
             // two quick presses step twice.
             let now = match (f, self.current()) {
-                (Field::Composer, Some(s)) => self
-                    .asked_permission
-                    .as_ref()
-                    .filter(|(id, _, at)| *id == s.id && at.elapsed() < Duration::from_secs(3))
-                    .map_or(s.permission, |(_, p, _)| *p),
+                (Field::Composer, Some(s)) => self.permission_shown(s),
                 _ => self.defaults.permission,
             };
             let next = match now {
@@ -4935,9 +4931,25 @@ impl Dent {
         cx.notify();
     }
 
+    /// The mode a session's chip shows: the one just asked for (⇧Tab, the
+    /// menu) while the daemon hasn't answered yet, so the chip follows the
+    /// key at once; then what's in effect, which a refusal leaves as it was.
+    pub fn permission_shown(&self, s: &Session) -> Permission {
+        self.asked_permission
+            .as_ref()
+            .filter(|(id, _, at)| *id == s.id && at.elapsed() < Duration::from_secs(3))
+            .map_or(s.permission, |(_, p, _)| *p)
+    }
+
     pub fn set_permission(&mut self, p: Permission, cx: &mut Context<Self>) {
         if let Some(id) = self.selected.clone() {
             self.asked_permission = Some((id.clone(), p, Instant::now()));
+            // A refusal shows once the wait is over: the chip goes back.
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
             self.live.send(Request::SetPermission {
                 session: id,
                 permission: p,

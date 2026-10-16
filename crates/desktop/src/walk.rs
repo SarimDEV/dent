@@ -4831,6 +4831,32 @@ fn composing() -> Vec<(f32, Act)> {
                 10.,
             ),
         ),
+        // ⇧Tab: the chip follows the key at once, whatever the daemon says when.
+        (0.1, Key("shift-tab")),
+        (
+            0.,
+            Until(
+                "⇧Tab shows the next mode on the chip at once",
+                |d, _| {
+                    current(d).is_some_and(|s| {
+                        d.permission_shown(s) == dent_protocol::Permission::Edits
+                    })
+                },
+                0.2,
+            ),
+        ),
+        (0.1, Key("shift-tab")),
+        (0.1, Key("shift-tab")),
+        (
+            0.1,
+            Until(
+                "and round again to Ask",
+                |d, _| {
+                    current(d).is_some_and(|s| s.permission == dent_protocol::Permission::Ask)
+                },
+                5.,
+            ),
+        ),
     ]);
     v
 }

@@ -2626,7 +2626,7 @@ impl Dent {
             .split_once(" · ")
             .map_or(s.agent.as_str(), |(_, m)| m)
             .to_string();
-        let permission = s.permission.label().to_string();
+        let permission = self.permission_shown(s).label().to_string();
         let hint_text = if s.status == Status::Needs {
             s.items
                 .iter()
@@ -3529,7 +3529,7 @@ impl Dent {
                                 }
                                 Menu::SessionPermission => format!(
                                     "Permissions: {}",
-                                    current.map(|s| s.permission).unwrap_or_default().label()
+                                    current.map(|s| self.permission_shown(s)).unwrap_or_default().label()
                                 ),
                                 Menu::Model | Menu::SessionModel => "Model".into(),
                                 Menu::Project => "Project".into(),
