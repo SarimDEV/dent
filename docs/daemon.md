@@ -47,6 +47,7 @@ Every session is an append-only log of typed events in SQLite: user message, ass
 
 - Clients subscribe with "everything after sequence N" and receive a live stream afterwards; reconnecting is the same call.
 - Streaming deltas are never logged: each message's final event replaces what streamed of it, and clients drop the stream when it arrives, so history stays compact while live views stay smooth. A call whose input is still streaming (a long file being written) is a live activity, named by its target once that has streamed.
+- A tool result is logged whole up to 32 KB. Longer output keeps its first 8 KB and last 24 KB, cut at line breaks (never inside a colour code), with a line between them saying how many lines were left out; the whole output stays in the agent's own transcript. A subagent's report (the result of a call that runs one) is its whole answer and keeps up to 64 KB the same way. So one result is at most about 64 KB in the log, and a catch-up batch (64 KB) holds at least one.
 - Session status (working, blocked on approval, idle, done, errored) is derived from events and indexed, so every client can show it without replaying logs.
 - SQLite runs in WAL mode with one writer task per daemon; reads never block writes.
 

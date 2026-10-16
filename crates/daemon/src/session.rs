@@ -213,6 +213,9 @@ struct Session {
     /// Each command's sheet as clients last got it, so a refresh that
     /// changes nothing says nothing.
     sheets: HashMap<String, Vec<Section>>,
+    /// Calls that run a subagent, whose result is its report and is kept
+    /// far longer than other output ([`wire::keep`]).
+    reports: HashSet<String>,
     /// A sign-in finishing in the browser: refresh this command's sheet
     /// now and then until it's done or the time's up.
     watch: Option<Watch>,
@@ -263,6 +266,7 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
         forgot: false,
         stop_asked: false,
         sheets: HashMap::new(),
+        reports: HashSet::new(),
         watch: None,
     };
     s.rebuild();
@@ -1307,6 +1311,13 @@ impl Session {
                 {
                     self.context = Some(c);
                 }
+                for b in &blocks {
+                    if let wire::AssistantBlock::ToolUse { id, name, .. } = b
+                        && claude::runs_subagent(name)
+                    {
+                        self.reports.insert(id.clone());
+                    }
+                }
                 let blocks = claude::blocks(blocks);
                 if parent.is_none() {
                     self.said = true;
@@ -1330,7 +1341,7 @@ impl Session {
                         Body::ToolResult {
                             tool: r.tool_use_id,
                             error: r.is_error,
-                            output: r.output,
+                            output: wire::keep(r.output, false),
                             parent: parent.clone(),
                         },
                         end,
@@ -1339,11 +1350,12 @@ impl Session {
             }
             Inbound::ToolResults { parent, results } => {
                 for r in results {
+                    let report = self.reports.remove(&r.tool_use_id);
                     self.log_from(
                         Body::ToolResult {
                             tool: r.tool_use_id,
                             error: r.is_error,
-                            output: r.output,
+                            output: wire::keep(r.output, report),
                             parent: parent.clone(),
                         },
                         end,

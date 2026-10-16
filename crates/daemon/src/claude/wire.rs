@@ -8,8 +8,13 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-/// Tool output kept in the log; the rest stays in the agent's transcript.
-const OUTPUT_CAP: usize = 4 * 1024;
+/// Tool output kept in the log: its start and its end, where a build or a
+/// test run says how it went. The middle stays in the agent's transcript.
+const HEAD: usize = 8 * 1024;
+const TAIL: usize = 24 * 1024;
+/// A subagent's report is its whole answer, in Markdown: kept far longer.
+const REPORT_HEAD: usize = 56 * 1024;
+const REPORT_TAIL: usize = 8 * 1024;
 
 #[derive(Debug)]
 pub enum Inbound {
@@ -564,7 +569,7 @@ fn usage_bars(report: &Value) -> Option<Vec<dent_protocol::Bar>> {
     (!bars.is_empty()).then_some(bars)
 }
 
-/// A tool result's text, cut to [`OUTPUT_CAP`] on a character boundary.
+/// A tool result's text, whole; [`keep`] cuts it for the log.
 /// An image in it is named, so a result that was only a picture doesn't
 /// read as empty.
 fn output(content: &Value) -> String {
@@ -580,7 +585,7 @@ fn output(content: &Value) -> String {
             .join("\n"),
         _ => String::new(),
     };
-    cap(text)
+    text
 }
 
 /// What a server tool's result says: the search hits, the page fetched,
@@ -600,7 +605,7 @@ fn server_output(content: &Value) -> (String, bool) {
     };
     match content {
         Value::Array(items) => (
-            cap(items.iter().filter_map(one).collect::<Vec<_>>().join("\n")),
+            items.iter().filter_map(one).collect::<Vec<_>>().join("\n"),
             false,
         ),
         Value::Object(_)
@@ -624,21 +629,92 @@ fn server_output(content: &Value) -> (String, bool) {
                     format!("{text}\n{e}")
                 };
             }
-            (cap(text), failed)
+            (text, failed)
         }
         other => (output(other), false),
     }
 }
 
-fn cap(text: String) -> String {
-    if text.len() <= OUTPUT_CAP {
+/// What of a tool's output goes in the log. Long output keeps its start
+/// and its end, cut at line breaks where it can (so never inside a colour
+/// code), with a line between them saying how much was left out. A
+/// subagent's report (`report`) keeps far more.
+pub fn keep(text: String, report: bool) -> String {
+    let (head, tail) = if report {
+        (REPORT_HEAD, REPORT_TAIL)
+    } else {
+        (HEAD, TAIL)
+    };
+    if text.len() <= head + tail {
         return text;
     }
-    let mut end = OUTPUT_CAP;
+    let head_end = cut_back(&text, head);
+    let tail_start = cut_forward(&text, text.len() - tail);
+    let gone = &text[head_end..tail_start];
+    let lines = gone.matches('\n').count();
+    let what = if lines > 0 {
+        format!("{} line{}", group(lines), if lines == 1 { "" } else { "s" })
+    } else {
+        format!("{} characters", group(gone.chars().count()))
+    };
+    // A colour left on at the cut doesn't run into the line.
+    let reset = if text.contains('\x1b') { "\x1b[0m" } else { "" };
+    let mut out = String::with_capacity(head + tail + 64);
+    out.push_str(text[..head_end].trim_end_matches('\n'));
+    out.push_str(&format!("{reset}\n… {what} not kept …\n"));
+    out.push_str(text[tail_start..].trim_start_matches('\n'));
+    out
+}
+
+/// Where the kept start ends: after the last line break before `at` if
+/// one is near, else at a character boundary outside any escape sequence.
+fn cut_back(text: &str, at: usize) -> usize {
+    let mut end = at;
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}…", &text[..end])
+    if let Some(nl) = text[..end].rfind('\n')
+        && end - nl < 2048
+    {
+        return nl + 1;
+    }
+    // Not inside an escape sequence: one starts at the last ESC unless a
+    // final byte closes it before the cut.
+    if let Some(esc) = text[..end].rfind('\x1b')
+        && !text[esc + 1..end]
+            .bytes()
+            .skip(1)
+            .any(|b| (0x40..=0x7e).contains(&b))
+    {
+        return esc;
+    }
+    end
+}
+
+/// Where the kept end starts: after the first line break from `at` if one
+/// is near, else at the next character boundary.
+fn cut_forward(text: &str, at: usize) -> usize {
+    let mut start = at;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    match text[start..].find('\n') {
+        Some(nl) if nl < 2048 => start + nl + 1,
+        _ => start,
+    }
+}
+
+/// 18402 as "18,402".
+fn group(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 // ---- outbound ----
@@ -987,10 +1063,61 @@ mod tests {
     }
 
     #[test]
-    fn long_output_is_cut_on_a_char_boundary() {
-        let long = "é".repeat(OUTPUT_CAP);
-        let out = output(&Value::String(long));
-        assert!(out.len() <= OUTPUT_CAP + 4);
-        assert!(out.ends_with('…'));
+    fn long_output_keeps_its_start_and_end() {
+        // Short output is kept whole.
+        assert_eq!(keep("ok\n".into(), false), "ok\n");
+        // Numbered lines: the first and the last are kept, the middle is
+        // counted.
+        let text: String = (1..=20000).map(|i| format!("{i}\n")).collect();
+        let out = keep(text.clone(), false);
+        assert!(out.len() <= HEAD + TAIL + 64);
+        assert!(out.starts_with("1\n2\n"));
+        assert!(out.ends_with("19999\n20000\n"));
+        let marker = out.lines().find(|l| l.contains("not kept")).unwrap();
+        let kept = out.lines().filter(|l| !l.contains("not kept")).count();
+        let n: usize = marker
+            .trim_matches(['…', ' '])
+            .split(' ')
+            .next()
+            .unwrap()
+            .replace(',', "")
+            .parse()
+            .unwrap();
+        assert_eq!(kept + n, 20000, "{marker}");
+        // Every kept line is whole.
+        for l in out.lines().filter(|l| !l.contains("not kept")) {
+            assert!(l.parse::<u32>().is_ok(), "{l:?}");
+        }
+        // A report keeps much more.
+        let report = "word ".repeat(10_000);
+        assert_eq!(keep(report.clone(), true), report);
+    }
+
+    #[test]
+    fn a_cut_never_splits_a_character_or_an_escape() {
+        // One long line: no line break to cut at.
+        let long = "é".repeat(HEAD + TAIL);
+        let out = keep(long, false);
+        assert!(out.contains("characters not kept"));
+        // Colour codes all the way: the cut lands before an escape, never
+        // inside one, and colour is reset before the marker line.
+        let coloured = "\x1b[31mred\x1b[0m ".repeat(HEAD);
+        let out = keep(coloured, false);
+        let (head, _) = out.split_once("\x1b[0m\n…").unwrap();
+        assert!(
+            head.ends_with(' ') || head.ends_with('m'),
+            "{:?}",
+            &head[head.len() - 8..]
+        );
+        let parsed_ok = |s: &str| !s.contains("\x1b[3\n") && !s.contains("\x1b\n");
+        assert!(parsed_ok(&out));
+    }
+
+    #[test]
+    fn group_puts_in_thousands_separators() {
+        assert_eq!(group(5), "5");
+        assert_eq!(group(1234), "1,234");
+        assert_eq!(group(18402), "18,402");
+        assert_eq!(group(1_000_000), "1,000,000");
     }
 }

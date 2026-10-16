@@ -243,6 +243,11 @@ pub fn default_models() -> Vec<Model> {
     .into()
 }
 
+/// A call that runs a subagent: its result is the subagent's report.
+pub fn runs_subagent(tool: &str) -> bool {
+    matches!(tool, "Task" | "Agent")
+}
+
 /// What a call being written out works on, once its input has streamed
 /// that far: the file, or a subagent's task.
 pub fn target(tool: &str, head: &str) -> Option<String> {

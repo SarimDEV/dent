@@ -272,6 +272,8 @@ pub fn import(path: &Path, media: &Path) -> Option<Imported> {
     let mut bodies = Vec::new();
     // Each prompt opens a turn; the next one, or the end, closes it.
     let mut open = false;
+    // Calls that run a subagent: their result is its report, kept longer.
+    let mut reports = std::collections::HashSet::new();
     let close = |bodies: &mut Vec<Body>, open: &mut bool, outcome: Outcome| {
         if std::mem::take(open) {
             bodies.push(Body::TurnEnded { outcome });
@@ -374,6 +376,13 @@ pub fn import(path: &Path, media: &Path) -> Option<Imported> {
                 close(&mut bodies, &mut open, Outcome::Error { message });
             }
             Ok(wire::Inbound::Assistant { uuid, blocks, .. }) => {
+                for b in &blocks {
+                    if let wire::AssistantBlock::ToolUse { id, name, .. } = b
+                        && claude::runs_subagent(name)
+                    {
+                        reports.insert(id.clone());
+                    }
+                }
                 let blocks = claude::blocks(blocks);
                 if !blocks.is_empty() {
                     bodies.push(Body::Assistant {
@@ -385,10 +394,11 @@ pub fn import(path: &Path, media: &Path) -> Option<Imported> {
             }
             Ok(wire::Inbound::ToolResults { results, .. }) => {
                 for r in results {
+                    let report = reports.remove(&r.tool_use_id);
                     bodies.push(Body::ToolResult {
                         tool: r.tool_use_id,
                         error: r.is_error,
-                        output: r.output,
+                        output: wire::keep(r.output, report),
                         parent: None,
                     });
                 }
