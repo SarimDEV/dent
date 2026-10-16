@@ -320,7 +320,6 @@ impl Dent {
                 crate::ui::ghost(SharedString::from(fold.clone()), label, &t)
                     .self_start()
                     .relative()
-                    .ml(px(-space::S2))
                     .on_press(cx.listener(move |this, _, _, cx| {
                         if !this.expanded.remove(&fold) {
                             this.expanded.insert(fold.clone());
@@ -334,10 +333,16 @@ impl Dent {
         if !d.input.trim().is_empty() {
             let all = self.expanded.contains(&format!("call-in-all-{key}"));
             let text = clip(&d.input, all);
+            // Its label sits on the text's edge, the ghost's padding
+            // hanging out to the left.
             col = col
                 .child(block(format!("call-in-{key}"), text, t.ink))
-                .children(rest("in", &d.input, cx));
+                .children(
+                    rest("in", &d.input, cx).map(|r| div().flex().ml(px(-space::S2)).child(r)),
+                );
         }
+        // The output's "Show more" and the file's actions share one row.
+        let mut out_rest = None;
         if let Some((failed, out)) = &d.output
             && !out.trim().is_empty()
             && !d.edits
@@ -379,8 +384,8 @@ impl Dent {
                     &kept,
                     t.quiet,
                     &t,
-                ))
-                .children(rest("out", plain, cx));
+                ));
+            out_rest = rest("out", plain, cx);
         }
         // Its file: shown in dent when it can be, and its changes.
         let in_diff = d.path.as_ref().and_then(|p| {
@@ -392,12 +397,17 @@ impl Dent {
             .as_ref()
             .filter(|p| crate::data::is_file(std::path::Path::new(p)))
             .cloned();
-        if openable.is_some() || in_diff.is_some() {
+        let review = in_diff.filter(|_| d.edits);
+        if out_rest.is_some() || openable.is_some() || review.is_some() {
             let sid = s.id.clone();
             col = col.child(
                 div()
                     .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .ml(px(-space::S2))
                     .gap(px(space::S1))
+                    .children(out_rest)
                     .when_some(openable, |c, p| {
                         c.child(
                             ghost(
@@ -408,7 +418,7 @@ impl Dent {
                             .on_press(cx.listener(move |this, _, _, cx| this.open_file(&p, cx))),
                         )
                     })
-                    .when_some(in_diff.filter(|_| d.edits), |c, rel| {
+                    .when_some(review, |c, rel| {
                         c.child(
                             ghost(
                                 SharedString::from(format!("call-review-{key}")),
