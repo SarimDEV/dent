@@ -1606,3 +1606,64 @@ fn background_work_outlives_a_setting_change_and_ends_with_its_agent() {
     }
     assert_eq!(c.status(&t), Some(Status::Done), "{:#?}", c.events(&t));
 }
+
+#[test]
+fn a_message_sent_as_an_idle_agent_winds_down_still_runs() {
+    let w = World::new(&[("DENT_IDLE_MS", "200"), ("FAKE_CLAUDE_LINGER_MS", "2000")]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "hi");
+    c.wait_turns(&s, 1);
+    // Its input is closed and it hasn't exited yet.
+    std::thread::sleep(Duration::from_millis(600));
+    c.say(&s, "2", "hi again", false);
+    c.wait_turns(&s, 2);
+    // And a model change in that window is taken by the next agent.
+    std::thread::sleep(Duration::from_millis(600));
+    c.call(Request::SetModel {
+        session: s.clone(),
+        model: "opus".into(),
+    })
+    .unwrap();
+    c.wait(
+        &s,
+        "the model",
+        |b| matches!(b, Body::Settings { model: Some(m), .. } if m == "opus"),
+    );
+}
+
+#[test]
+fn a_setting_the_agent_refuses_is_not_kept() {
+    let w = World::new(&[]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "hi");
+    c.wait_turns(&s, 1);
+    c.call(Request::SetModel {
+        session: s.clone(),
+        model: "unavailable-model".into(),
+    })
+    .unwrap();
+    c.wait(
+        &s,
+        "the refusal",
+        |b| matches!(b, Body::Notice { text } if text.contains("not available")),
+    );
+    c.call(Request::SetModel {
+        session: s.clone(),
+        model: "haiku".into(),
+    })
+    .unwrap();
+    c.wait(
+        &s,
+        "the model",
+        |b| matches!(b, Body::Settings { model: Some(m), .. } if m == "haiku"),
+    );
+    assert_eq!(
+        c.count(
+            &s,
+            |b| matches!(b, Body::Settings { model: Some(m), .. } if m.starts_with("unavailable"))
+        ),
+        0
+    );
+}

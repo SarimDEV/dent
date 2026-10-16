@@ -152,7 +152,9 @@ enum Ctl {
         command: String,
         act: Act,
     },
-    Other,
+    /// A model or permission mode, kept once Claude Code takes it.
+    Model(String),
+    Permission(Permission),
 }
 
 struct Session {
@@ -478,39 +480,31 @@ impl Session {
             }
             Op::Interrupt => self.interrupt().await,
             Op::Answer { id, answer } => self.answer(id, answer).await,
+            // A running agent is asked first, and the change kept when it
+            // agrees; otherwise the next agent starts with it.
             Op::SetModel(model) => {
                 if self.model.as_deref() == Some(model.as_str()) {
                     return Ok(());
                 }
-                if self.proc.is_some() {
-                    self.control("set_model", json!({ "model": model }), Ctl::Other)
-                        .await?;
+                if self.running() {
+                    let extra = json!({ "model": model });
+                    self.control("set_model", extra, Ctl::Model(model)).await?;
+                } else {
+                    self.keep(Ctl::Model(model), None);
                 }
-                self.model = Some(model.clone());
-                self.log(Body::Settings {
-                    effort: None,
-                    model: Some(model),
-                    permission: None,
-                    title: None,
-                });
                 Ok(())
             }
             Op::SetPermission(p) => {
                 if p == self.permission {
                     return Ok(());
                 }
-                if self.proc.is_some() {
-                    let mode = claude::mode_name(p);
-                    self.control("set_permission_mode", json!({ "mode": mode }), Ctl::Other)
+                if self.running() {
+                    let extra = json!({ "mode": claude::mode_name(p) });
+                    self.control("set_permission_mode", extra, Ctl::Permission(p))
                         .await?;
+                } else {
+                    self.keep(Ctl::Permission(p), None);
                 }
-                self.permission = p;
-                self.log(Body::Settings {
-                    effort: None,
-                    model: None,
-                    permission: Some(p),
-                    title: None,
-                });
                 Ok(())
             }
             Op::Act { command, act } => {
@@ -592,6 +586,7 @@ impl Session {
                 if let Some(p) = self.proc.take() {
                     let _ = self.d.store().clear_proc(&self.id);
                     self.background_gone();
+                    self.controls_gone();
                     if self.in_turn {
                         self.end_turn(Outcome::Interrupted {
                             reason: Some("the process holding the agent stopped".into()),
@@ -601,6 +596,48 @@ impl Session {
                 }
                 Ok(())
             }
+        }
+    }
+
+    /// A model or permission mode is now the session's.
+    fn keep(&mut self, setting: Ctl, end: Option<u64>) {
+        let body = match setting {
+            Ctl::Model(m) => {
+                self.model = Some(m.clone());
+                Body::Settings {
+                    effort: None,
+                    model: Some(m),
+                    permission: None,
+                    title: None,
+                }
+            }
+            Ctl::Permission(p) => {
+                self.permission = p;
+                Body::Settings {
+                    effort: None,
+                    model: None,
+                    permission: Some(p),
+                    title: None,
+                }
+            }
+            _ => return,
+        };
+        match end {
+            Some(off) => self.log_from(body, off),
+            None => self.log(body),
+        }
+    }
+
+    /// An agent process that takes messages: there, and not winding down.
+    fn running(&self) -> bool {
+        self.proc.as_ref().is_some_and(|p| !p.stopping)
+    }
+
+    /// The agent process is gone: requests it never answered won't be.
+    /// A setting it hadn't taken yet goes to the next one.
+    fn controls_gone(&mut self) {
+        for (_, c) in std::mem::take(&mut self.controls) {
+            self.keep(c, None);
         }
     }
 
@@ -645,7 +682,9 @@ impl Session {
             return Ok(());
         }
         let working = self.in_turn && self.proc.is_some();
-        let queued = working && !steer;
+        // Nothing can be steered into an agent that's being stopped: it
+        // waits for the turn to end like any other.
+        let queued = working && (!steer || !self.running());
         self.log(Body::User {
             id: id.clone(),
             text: text.clone(),
@@ -692,13 +731,35 @@ impl Session {
             });
             return Err(e);
         }
-        self.write(&wire::user_message(
-            text,
-            &crate::daemon::uuid(),
-            steer,
-            attachments,
-        ))
-        .await?;
+        let msg = wire::user_message(text, &crate::daemon::uuid(), steer, attachments);
+        if let Err(e) = self.write(&msg).await {
+            // The agent went between starting and now. A new message gets
+            // one more go with a new agent; a steer belonged to the turn.
+            let again = if steer {
+                Err(e)
+            } else {
+                eprintln!(
+                    "dent-daemon: {}: agent unreachable, starting another: {e:#}",
+                    self.id
+                );
+                self.retire_proc().await;
+                match self.ensure_proc().await {
+                    Ok(()) => self.write(&msg).await,
+                    Err(e) => Err(e),
+                }
+            };
+            if let Err(e) = again {
+                self.log(Body::Notice {
+                    text: format!("Couldn't reach Claude Code: {e:#}"),
+                });
+                if !steer {
+                    self.end_turn(Outcome::Error {
+                        message: format!("{e:#}"),
+                    });
+                }
+                return Err(e);
+            }
+        }
         self.in_turn = true;
         self.said = false;
         self.idle_at = None;
@@ -801,6 +862,7 @@ impl Session {
         if let Some(p) = self.proc.take() {
             let _ = self.d.store().clear_proc(&self.id);
             self.background_gone();
+            self.controls_gone();
             if let Ok(h) = self.d.holder().await {
                 let _ = h.stop(&p.id, Duration::from_secs(1)).await;
             }
@@ -821,8 +883,16 @@ impl Session {
     }
 
     async fn ensure_proc(&mut self) -> Result<()> {
-        if self.proc.is_some() {
-            return Ok(());
+        if let Some(p) = &self.proc {
+            if !p.stopping {
+                return Ok(());
+            }
+            if self.in_turn {
+                bail!("the agent is stopping; try again in a moment");
+            }
+            // Stopping for being idle, its input already closed: let it
+            // finish on its own and start another.
+            self.retire_proc().await;
         }
         if !std::path::Path::new(&self.cwd).is_dir() {
             bail!("the session's folder {} no longer exists", self.cwd);
@@ -1325,6 +1395,9 @@ impl Session {
                         );
                     }
                 }
+                (Some(c @ (Ctl::Model(_) | Ctl::Permission(_))), true) => {
+                    self.keep(c, Some(end));
+                }
                 (Some(Ctl::Settings), true) => {
                     self.d.catalog(&self.id, |c| {
                         c.effective = body["effective"].clone();
@@ -1413,7 +1486,6 @@ impl Session {
                     Some(Ctl::Interrupt | Ctl::ContextUsage | Ctl::Settings | Ctl::Refresh { .. }),
                     _,
                 )
-                | (Some(Ctl::Other), true)
                 | (None, _) => {}
                 (Some(_), false) => self.log_from(
                     Body::Notice {
@@ -1723,6 +1795,7 @@ impl Session {
         };
         let _ = self.d.store().clear_proc(&self.id);
         self.background_gone();
+        self.controls_gone();
         if let Ok(h) = self.d.holder().await {
             let _ = h.release(proc).await;
         }
