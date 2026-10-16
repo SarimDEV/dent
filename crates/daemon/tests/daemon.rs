@@ -1667,3 +1667,52 @@ fn a_setting_the_agent_refuses_is_not_kept() {
         0
     );
 }
+
+#[test]
+fn a_stop_or_a_stuck_start_is_seen_through_across_a_daemon_restart() {
+    // Stop asked, the agent ignoring it, and the daemon restarting before
+    // the grace is up: the turn still ends.
+    let mut w = World::new(&[("FAKE_CLAUDE_SPEED", "0.5"), ("FAKE_CLAUDE_DEAF", "1")]);
+    let s = {
+        let mut c = w.client();
+        c.subscribe(0);
+        let s = c.create(&w.cwd(), Permission::Ask, "a long answer please");
+        c.wait(&s, "the turn to start", |b| matches!(b, Body::TurnStarted));
+        c.call(Request::Interrupt {
+            session: s.clone(),
+            by: None,
+        })
+        .unwrap();
+        s
+    };
+    w.kill();
+    w.start();
+    let mut c = w.client();
+    c.subscribe(0);
+    c.wait(&s, "the interruption", |b| {
+        matches!(
+            b,
+            Body::TurnEnded {
+                outcome: Outcome::Interrupted { .. }
+            }
+        )
+    });
+    drop(c);
+    drop(w);
+
+    // An agent stuck starting when the daemon restarts still times out.
+    let mut w = World::new(&[("DENT_START_MS", "1000"), ("FAKE_CLAUDE_HANG", "1")]);
+    let s = {
+        let mut c = w.client();
+        c.subscribe(0);
+        c.create(&w.cwd(), Permission::Ask, "hi")
+    };
+    w.kill();
+    w.start();
+    let mut c = w.client();
+    c.subscribe(0);
+    c.wait(&s, "the turn to fail", |b| {
+        matches!(b, Body::TurnEnded { outcome: Outcome::Error { message } }
+            if message.starts_with("Claude Code didn't start"))
+    });
+}

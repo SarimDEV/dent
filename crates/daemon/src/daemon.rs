@@ -52,6 +52,8 @@ pub struct Daemon {
     /// This binary's build stamp, taken at start.
     pub build: String,
     pub machine: String,
+    /// Unique to this start of the daemon.
+    pub boot: String,
     store: Mutex<Store>,
     pub live: broadcast::Sender<Arc<Live>>,
     sessions: Mutex<HashMap<String, mpsc::UnboundedSender<Cmd>>>,
@@ -105,6 +107,7 @@ impl Daemon {
                 .map(|p| dent_protocol::build_stamp(&p))
                 .unwrap_or_default(),
             machine: hostname(),
+            boot: new_id(),
             store: Mutex::new(store),
             live,
             sessions: Mutex::new(HashMap::new()),

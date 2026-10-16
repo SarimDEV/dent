@@ -31,6 +31,7 @@
 //! `FAKE_CLAUDE_SPEED` scales every pause (0 makes it instant);
 //! `FAKE_CLAUDE_LINGER_MS` keeps it running that long after its input
 //! closes. `set_model` refuses models named `unavailable…`.
+//! `FAKE_CLAUDE_DEAF` answers interrupts but carries on regardless.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, Write};
@@ -452,7 +453,7 @@ impl Agent {
                     let interrupt =
                         v["type"] == "control_request" && v["request"]["subtype"] == "interrupt";
                     self.handle(v);
-                    if interrupt {
+                    if interrupt && std::env::var_os("FAKE_CLAUDE_DEAF").is_none() {
                         return Err(Cut::Interrupted);
                     }
                     if std::mem::take(&mut self.steer) {

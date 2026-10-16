@@ -207,6 +207,9 @@ struct Session {
     last: Option<(String, String, Vec<String>)>,
     /// The agent couldn't find the conversation it was asked to resume.
     forgot: bool,
+    /// Stop was asked for the running turn. Kept in the store, so a
+    /// restarted daemon still sees it through.
+    stop_asked: bool,
     /// Each command's sheet as clients last got it, so a refresh that
     /// changes nothing says nothing.
     sheets: HashMap<String, Vec<Section>>,
@@ -258,6 +261,7 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
         outbox: Vec::new(),
         last: None,
         forgot: false,
+        stop_asked: false,
         sheets: HashMap::new(),
         watch: None,
     };
@@ -288,8 +292,14 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
 }
 
 impl Session {
+    /// Where a stop asked for this session is kept.
+    fn stop_key(&self) -> String {
+        format!("stop.{}", self.id)
+    }
+
     /// Recover what's in memory from the log.
     fn rebuild(&mut self) {
+        self.stop_asked = matches!(self.d.store().get(&self.stop_key()), Ok(Some(_)));
         let Ok(events) = self.d.store().session_events(&self.id) else {
             return;
         };
@@ -412,8 +422,16 @@ impl Session {
                 stopping: false,
                 resumed: true,
             });
+            let now = Instant::now();
             if !self.in_turn {
-                self.idle_at = Some(Instant::now() + idle());
+                self.idle_at = Some(now + idle());
+            } else if self.stop_asked {
+                // A stop the last daemon didn't see through: the agent was
+                // asked, so its process goes if the turn doesn't end soon.
+                self.stop_at = Some(now + STOP_GRACE);
+            } else if row.proc_off == 0 {
+                // It has said nothing yet: still starting, or stuck.
+                self.start_by = Some(now + start_limit());
             }
         } else {
             let _ = self.d.store().clear_proc(&self.id);
@@ -974,19 +992,24 @@ impl Session {
         self.d.holder().await?.write(&p.id, &line).await
     }
 
+    /// A control request's id. The daemon's boot is in it, so an answer
+    /// to a request an earlier daemon sent never matches a new one.
+    fn ctl_id(&mut self) -> String {
+        self.next_ctl += 1;
+        format!("dent-{}-{}", self.d.boot, self.next_ctl)
+    }
+
     /// A control request sent once the current output is handled, for
     /// places that can't wait on the write.
     fn control_later(&mut self, subtype: &str, kind: Ctl) {
-        self.next_ctl += 1;
-        let id = format!("dent-{}", self.next_ctl);
+        let id = self.ctl_id();
         self.controls.insert(id.clone(), kind);
         self.outbox
             .push(wire::control_request(&id, subtype, json!({})));
     }
 
     async fn control(&mut self, subtype: &str, extra: Value, kind: Ctl) -> Result<()> {
-        self.next_ctl += 1;
-        let id = format!("dent-{}", self.next_ctl);
+        let id = self.ctl_id();
         self.controls.insert(id.clone(), kind);
         self.write(&wire::control_request(&id, subtype, extra))
             .await
@@ -1007,6 +1030,8 @@ impl Session {
             self.end_turn(Outcome::Interrupted { reason: None });
             return Ok(());
         }
+        self.stop_asked = true;
+        let _ = self.d.store().put(&self.stop_key(), "1");
         // The agent doesn't always end the turn after an interrupt, and one
         // that can't be reached gets its process stopped straight away.
         let asked = self.control("interrupt", json!({}), Ctl::Interrupt).await;
@@ -1170,6 +1195,9 @@ impl Session {
                 permission_mode,
                 ..
             } => {
+                // A steer has been taken in by the time a turn starts: an
+                // abort from here on is a real one.
+                self.steered = false;
                 if self.agent_session.as_deref() != Some(session_id.as_str())
                     && !session_id.is_empty()
                 {
@@ -1746,6 +1774,9 @@ impl Session {
         }
         self.stop_at = None;
         self.start_by = None;
+        if std::mem::take(&mut self.stop_asked) {
+            let _ = self.d.store().del(&self.stop_key());
+        }
         // Approvals still open belonged to the turn that just ended.
         for id in std::mem::take(&mut self.asked).into_keys() {
             self.log(Body::Answered {

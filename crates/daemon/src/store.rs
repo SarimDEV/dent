@@ -242,6 +242,12 @@ impl Store {
         Ok(())
     }
 
+    pub fn del(&self, key: &str) -> Result<()> {
+        self.db
+            .execute("DELETE FROM kv WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
     /// Fold the write-ahead log back into the database.
     pub fn checkpoint(&self) -> Result<()> {
         self.db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
