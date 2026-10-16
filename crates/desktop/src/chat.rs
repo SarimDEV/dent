@@ -1867,7 +1867,11 @@ impl Dent {
             Item::Plan { id: ask, plan } => {
                 let (a, d) = (s.id.clone(), s.id.clone());
                 let (k1, k3) = (ask.clone(), ask.clone());
-                let blocks = self.markdown(plan);
+                // A long plan shows its start until expanded.
+                let fold_key = plan_key(ask);
+                let open = self.expanded.contains(&fold_key);
+                let (shown, long) = plan_shown(plan, open);
+                let blocks = self.markdown(&shown);
                 let mut r = markdown::R {
                     md: self.mdv.clone(),
                     owner: cx.entity_id(),
@@ -1891,7 +1895,29 @@ impl Dent {
                             .bg(t.raised)
                             .border_1()
                             .border_color(t.hairline)
-                            .child(plan_view),
+                            .flex()
+                            .flex_col()
+                            .gap(px(space::S2))
+                            .child(plan_view)
+                            .when(long, |d| {
+                                d.child(
+                                    ghost(
+                                        SharedString::from(format!("plan-fold-{ask}")),
+                                        if open { "Collapse" } else { "Expand plan" },
+                                        &t,
+                                    )
+                                    .self_start()
+                                    .relative()
+                                    .ml(px(-space::S2))
+                                    .on_press(cx.listener(move |this, _, _, cx| {
+                                        if !this.expanded.remove(&fold_key) {
+                                            this.expanded.insert(fold_key.clone());
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child(probe(&self.probes, "plan-fold")),
+                                )
+                            }),
                     )
                     .child(
                         div()
@@ -4317,6 +4343,38 @@ fn sent_attachment(
         )
 }
 
+/// What keeps a plan card opened in full.
+pub fn plan_key(ask: &str) -> String {
+    format!("plan-open-{ask}")
+}
+
+/// A plan as its card shows it, and whether it's long enough to fold: past
+/// 20 lines or 900 characters it shows its first 10 lines (at most 600
+/// characters) until it's expanded, so the card's buttons stay in view.
+pub fn plan_shown(plan: &str, open: bool) -> (std::borrow::Cow<'_, str>, bool) {
+    let long = plan.lines().nth(20).is_some() || plan.chars().count() > 900;
+    if !long || open {
+        return (plan.into(), long);
+    }
+    let mut end = plan
+        .match_indices('\n')
+        .nth(9)
+        .map_or(plan.len(), |(i, _)| i);
+    if let Some((i, _)) = plan[..end].char_indices().nth(600) {
+        end = i;
+    }
+    let mut preview = plan[..end].trim_end().to_string();
+    // A code block cut open is closed, so the rest doesn't read as code.
+    let fences = preview
+        .lines()
+        .filter(|l| l.trim_start().starts_with("```"))
+        .count();
+    if fences % 2 == 1 {
+        preview.push_str("\n```");
+    }
+    (preview.into(), long)
+}
+
 /// The words of a message you sent as drawn, and whether it's long enough
 /// to fold: past 8 lines or 600 characters, folded unless `open`.
 pub fn user_shown(body: &[&str], open: bool) -> (String, bool) {
@@ -4744,6 +4802,24 @@ mod answer_tests {
 
 #[cfg(test)]
 mod clip_tests {
+    #[test]
+    fn a_long_plan_shows_its_start() {
+        let short = "1. Do it\n2. Check it";
+        assert_eq!(super::plan_shown(short, false), (short.into(), false));
+        let long: String = (1..=30).map(|i| format!("{i}. Step {i}\n")).collect();
+        let (shown, folds) = super::plan_shown(&long, false);
+        assert!(folds);
+        assert_eq!(shown.lines().count(), 10);
+        assert_eq!(super::plan_shown(&long, true).0, long.as_str());
+        // A fence cut open is closed.
+        let code = format!("Plan:\n```sh\n{}```\n", "ls\n".repeat(30));
+        let (shown, _) = super::plan_shown(&code, false);
+        assert!(shown.ends_with("\n```"), "{shown:?}");
+        // One long line folds by characters.
+        let wide = "word ".repeat(400);
+        assert!(super::plan_shown(&wide, false).0.chars().count() <= 600);
+    }
+
     /// A line cut short shows `…`, and copies as the whole line.
     #[test]
     fn a_cut_line_copies_whole() {

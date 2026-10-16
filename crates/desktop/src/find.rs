@@ -68,7 +68,7 @@ pub struct Find {
 }
 
 /// The words a chat item draws as text, a piece at a time: your message
-/// (folded as it's shown), a reply or plan as rendered, a note. Folded
+/// and a plan (folded as they're shown), a reply as rendered, a note. Folded
 /// work, cards and waiting messages aren't searched.
 pub fn item_words(
     item: &Item,
@@ -84,9 +84,15 @@ pub fn item_words(
             }
             vec![crate::chat::user_shown(&body, open).0]
         }
-        Item::Text(src) | Item::Plan { plan: src, .. } => {
+        Item::Text(src) => {
             let mut out = Vec::new();
             crate::markdown::drawn(&parse(src), &mut out);
+            out
+        }
+        // A long plan only as far as it shows until it's expanded.
+        Item::Plan { plan, .. } => {
+            let mut out = Vec::new();
+            crate::markdown::drawn(&parse(&crate::chat::plan_shown(plan, open).0), &mut out);
             out
         }
         Item::Note { text, .. } => vec![text.clone()],
@@ -405,12 +411,16 @@ impl Dent {
             .iter()
             .enumerate()
             .map(|(ix, item)| {
-                let open = matches!(item, Item::User { id, .. } if self.expanded.contains(id));
+                let open = match item {
+                    Item::User { id, .. } => self.expanded.contains(id),
+                    Item::Plan { id, .. } => self.expanded.contains(&crate::chat::plan_key(id)),
+                    _ => false,
+                };
                 let mut h = std::hash::DefaultHasher::new();
                 match item {
                     Item::User { text, .. } => (0u8, text, open).hash(&mut h),
                     Item::Text(t) => (1u8, t).hash(&mut h),
-                    Item::Plan { plan, .. } => (2u8, plan).hash(&mut h),
+                    Item::Plan { plan, .. } => (2u8, plan, open).hash(&mut h),
                     Item::Note { text, .. } => (3u8, text).hash(&mut h),
                     _ => return 0,
                 }
