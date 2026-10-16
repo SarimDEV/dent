@@ -1342,7 +1342,12 @@ impl Dent {
                     .get(&s.id)
                     .filter(|(i, _)| *i == ix)
                     .map(|(_, b)| b.clone());
-                let blocks = self.markdown(src);
+                // The reply streaming in: only its unfinished end is parsed.
+                let blocks = if births.is_some() {
+                    self.markdown_live(&s.id, src)
+                } else {
+                    self.markdown(src)
+                };
                 match (births, blocks.as_slice()) {
                     // A reply streaming in: each word fades in over 180 ms.
                     (Some(births), [markdown::Block::Para(inline)]) if !crate::reduce_motion() => {

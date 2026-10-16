@@ -467,7 +467,9 @@ pub enum Block {
     Quote(Option<Callout>, Vec<Block>),
     /// A picture on a line of its own: where it is, and its words.
     Image(String, String),
-    Code(String, String),
+    /// A code block: its language, its code, and whether its fence has
+    /// closed (one still streaming is highlighted only to its last full line).
+    Code(String, String, bool),
     /// Display maths, and whether it is finished (a fence still streaming isn't).
     Math(String, bool),
     /// A Mermaid diagram, and whether its fence has closed.
@@ -614,7 +616,9 @@ fn fence_closed(src: &str) -> bool {
     };
     let n = open.chars().take_while(|c| *c == ch).count();
     lines.next_back().is_some_and(|last| {
-        let last = last.trim();
+        // Inside a quote each line carries its `>` markers.
+        let last = last.trim_start_matches(|c: char| c == '>' || c.is_whitespace());
+        let last = last.trim_end();
         last.len() >= n && last.chars().all(|c| c == ch)
     })
 }
@@ -658,7 +662,8 @@ fn flush(stack: &mut [Frame], cur: &mut Inline) {
     }
 }
 
-pub fn parse(src: &str) -> Vec<Block> {
+/// The Markdown dent reads: CommonMark with GitHub's extensions and maths.
+pub fn options() -> Options {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_TASKLISTS);
@@ -666,6 +671,11 @@ pub fn parse(src: &str) -> Vec<Block> {
     opts.insert(Options::ENABLE_MATH);
     opts.insert(Options::ENABLE_FOOTNOTES);
     opts.insert(Options::ENABLE_GFM);
+    opts
+}
+
+pub fn parse(src: &str) -> Vec<Block> {
+    let opts = options();
     let mut stack: Vec<Frame> = vec![Frame::Root(Vec::new())];
     let mut cur = Inline::default();
     let mut st = Style::default();
@@ -674,6 +684,8 @@ pub fn parse(src: &str) -> Vec<Block> {
     let mut table: Option<TableState> = None;
     // A picture being read: where it is, and its words so far.
     let mut image: Option<(String, String)> = None;
+    // An HTML block being read: the parser hands it over a line at a time.
+    let mut html: Option<String> = None;
     for (ev, range) in Parser::new_ext(src, opts).into_offset_iter() {
         match ev {
             Event::Start(Tag::Strong) => st.strong = true,
@@ -745,12 +757,29 @@ pub fn parse(src: &str) -> Vec<Block> {
             },
             // Raw HTML in the text shows as written: `Vec<String>` stays.
             Event::InlineHtml(h) => cur.push(&h, st),
+            Event::Start(Tag::HtmlBlock) => {
+                flush(&mut stack, &mut cur);
+                html = Some(String::new());
+            }
+            Event::Html(h) if html.is_some() => {
+                if let Some(b) = &mut html {
+                    b.push_str(&h);
+                }
+            }
+            Event::End(TagEnd::HtmlBlock) => {
+                if let Some(h) = html.take() {
+                    let h = h.trim_end();
+                    if !h.is_empty() {
+                        push_block(&mut stack, Block::Code("html".into(), h.to_string(), true));
+                    }
+                }
+            }
             Event::Html(h) => {
                 if code.is_none() {
                     flush(&mut stack, &mut cur);
                     let h = h.trim_end();
                     if !h.is_empty() {
-                        push_block(&mut stack, Block::Code("html".into(), h.to_string()));
+                        push_block(&mut stack, Block::Code("html".into(), h.to_string(), true));
                     }
                 }
             }
@@ -786,7 +815,7 @@ pub fn parse(src: &str) -> Vec<Block> {
                         match lang.as_str() {
                             "math" => Block::Math(body, closed),
                             "mermaid" => Block::Diagram(body, closed),
-                            _ => Block::Code(lang, body),
+                            _ => Block::Code(lang, body, closed),
                         },
                     );
                 }
@@ -1354,7 +1383,7 @@ fn render_in(
                 }
             }
             Block::Image(src, alt) => image_block(src, alt, t, &key, r),
-            Block::Code(lang, body) => code_block(lang, body, t, &key, r),
+            Block::Code(lang, body, closed) => code_block(lang, body, *closed, t, &key, r),
             Block::Math(tex, closed) => display_math(tex, *closed, t, &key, r),
             Block::Diagram(src, closed) => diagram_block(src, *closed, t, &key, r),
             Block::Table(table) => table_block(table, t, &key, r),
@@ -1496,6 +1525,19 @@ fn math_line(md: &Md, list: Rc<DisplayList>, em: f32, face: Face) -> Div {
 /// never wraps and scrolls sideways. `dim` shows source still waiting to
 /// become maths or a diagram.
 fn code_frame(lang: &str, body: &str, t: &Theme, key: &str, dim: bool, r: &R) -> Div {
+    let lines = crate::highlight::block_lines(lang, body);
+    code_frame_with(lang, body, t, key, dim, lines, r)
+}
+
+fn code_frame_with(
+    lang: &str,
+    body: &str,
+    t: &Theme,
+    key: &str,
+    dim: bool,
+    lines: crate::highlight::Lines,
+    r: &R,
+) -> Div {
     let text = body.to_string();
     let copy = copy_button(format!("copy-{key}"), "Copy", move || text.clone(), t, r);
     div()
@@ -1535,7 +1577,6 @@ fn code_frame(lang: &str, body: &str, t: &Theme, key: &str, dim: bool, r: &R) ->
                 .text_color(t.ink)
                 .children({
                     // Highlighted once per block, line by line, then cached.
-                    let lines = crate::highlight::block_lines(lang, body);
                     // Lines copy one to a line, blank ones kept, each with
                     // the block's prefix (inside a list or quote).
                     let prefix = COPY_PREFIX.with(|p| p.borrow().clone());
@@ -1593,8 +1634,13 @@ fn code_frame(lang: &str, body: &str, t: &Theme, key: &str, dim: bool, r: &R) ->
         )
 }
 
-fn code_block(lang: &str, body: &str, t: &Theme, key: &str, r: &mut R) -> AnyElement {
-    code_frame(lang, body, t, key, false, r).into_any_element()
+fn code_block(lang: &str, body: &str, closed: bool, t: &Theme, key: &str, r: &mut R) -> AnyElement {
+    let lines = if closed {
+        crate::highlight::block_lines(lang, body)
+    } else {
+        crate::highlight::open_block_lines(lang, body)
+    };
+    code_frame_with(lang, body, t, key, false, lines, r).into_any_element()
 }
 
 /// Display maths, centred, scrolling sideways when wider than the column.
@@ -2395,7 +2441,39 @@ mod tests {
         let blocks = parse("````mermaid\nA\n```\n");
         assert!(matches!(&blocks[0], Block::Diagram(_, false)));
         let blocks = parse("```rust\nfn main() {}\n```");
-        assert!(matches!(&blocks[0], Block::Code(l, b) if l == "rust" && b == "fn main() {}"));
+        assert!(
+            matches!(&blocks[0], Block::Code(l, b, true) if l == "rust" && b == "fn main() {}")
+        );
+        // In a quote, each line carries its marker, the closing fence too.
+        let blocks = parse("> ```mermaid\n> flowchart LR\n> ```\n");
+        let Block::Quote(_, inner) = &blocks[0] else {
+            panic!()
+        };
+        assert!(matches!(&inner[0], Block::Diagram(_, true)));
+        let blocks = parse("> ```math\n> x\n");
+        let Block::Quote(_, inner) = &blocks[0] else {
+            panic!()
+        };
+        assert!(matches!(&inner[0], Block::Math(_, false)));
+    }
+
+    #[test]
+    fn an_html_block_is_one_block() {
+        let blocks = parse(
+            "<details>\n<summary>More</summary>\n\nInside\n</details>\n\n<div>\n  <b>x</b>\n</div>\n",
+        );
+        let html: Vec<&str> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Code(l, c, _) if l == "html" => Some(c.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(html.contains(&"<div>\n  <b>x</b>\n</div>"), "{html:?}");
+        assert!(
+            html.contains(&"<details>\n<summary>More</summary>"),
+            "{html:?}"
+        );
     }
 
     #[test]
@@ -2428,7 +2506,7 @@ mod tests {
         assert_eq!(items[0].number, Some(1));
         assert!(matches!(&items[0].blocks[0], Block::Para(p) if p.text == "Install:"));
         assert!(
-            matches!(&items[0].blocks[1], Block::Code(l, b) if l == "bash" && b == "cargo test")
+            matches!(&items[0].blocks[1], Block::Code(l, b, _) if l == "bash" && b == "cargo test")
         );
         assert!(matches!(&items[0].blocks[2], Block::Para(p) if p.text == "Then run it."));
         assert_eq!(items[1].number, Some(2));
