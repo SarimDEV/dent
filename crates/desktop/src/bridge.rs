@@ -186,6 +186,12 @@ pub fn session(
         .unwrap_or(v.entries.len())
         .min(built.starts.len())
         .saturating_sub(2);
+    // Entries that draw nothing here (messages waiting in the queue) don't
+    // count towards that: back off past them to one that draws something.
+    let next = |i: usize| built.starts.get(i + 1).copied().unwrap_or(built.body);
+    while start > 0 && start < built.starts.len() && built.starts[start] == next(start) {
+        start -= 1;
+    }
     // An entry whose items can't be rebuilt alone (a note that went in
     // before an earlier entry's line) shares its start with that entry:
     // rebuild from there.
@@ -1402,6 +1408,75 @@ mod tests {
             .filter(|l| l.starts_with("note"))
             .count();
         assert_eq!(notes, 2);
+    }
+
+    /// Messages queued while a call waits for you don't move the note an
+    /// answer leaves: built as events come, it lands where a whole build
+    /// puts it, before the call's line.
+    #[test]
+    fn a_note_after_queued_messages_lands_before_its_line() {
+        use dent_protocol::{Block, Body, Event, Out};
+        let bash = r#"{"command":"ls"}"#;
+        let user = |id: &str, queued: bool| Body::User {
+            id: id.into(),
+            text: id.into(),
+            queued,
+            steer: false,
+            attachments: vec![],
+        };
+        let bodies = vec![
+            user("go", false),
+            Body::TurnStarted,
+            Body::Assistant {
+                parent: None,
+                uuid: None,
+                blocks: vec![Block::Tool {
+                    id: "b".into(),
+                    name: "Bash".into(),
+                    input: bash.into(),
+                }],
+            },
+            user("later 1", true),
+            user("later 2", true),
+            Body::Asked {
+                id: "ab".into(),
+                tool: "Bash".into(),
+                input: bash.into(),
+                description: None,
+                keeps: false,
+                suggestions: None,
+            },
+            Body::Answered {
+                id: "ab".into(),
+                answer: Answer::Allow {
+                    always: true,
+                    project: false,
+                },
+            },
+        ];
+        let cx = || Context {
+            machine: "m",
+            models: &[],
+            diff: None,
+            now_ms: 0,
+        };
+        let mut s = dent_client_core::Sessions::default();
+        let mut built = Built::default();
+        for (n, body) in bodies.into_iter().enumerate() {
+            s.apply(&Out::Events {
+                events: vec![Event {
+                    seq: n as u64 + 1,
+                    session: "s".into(),
+                    at: n as u64 + 1,
+                    body,
+                }],
+            });
+            let v = s.list.get_mut("s").unwrap();
+            let from = v.take_changes();
+            let step = session(v, cx(), &mut built, if n == 0 { Some(0) } else { from });
+            let whole = session(v, cx(), &mut Built::default(), Some(0));
+            assert_eq!(shown(&step.items), shown(&whole.items), "after event {n}");
+        }
     }
 
     #[test]
