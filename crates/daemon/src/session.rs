@@ -388,6 +388,8 @@ impl Session {
 
     async fn reattach(&mut self, row: &Row, held: &[HeldProc]) {
         let Some(proc) = row.proc.clone() else {
+            // No agent, so nothing of its runs in the background.
+            self.background_gone();
             return;
         };
         let alive = held.iter().find(|p| p.id == proc);
@@ -413,6 +415,7 @@ impl Session {
             }
         } else {
             let _ = self.d.store().clear_proc(&self.id);
+            self.background_gone();
             if self.in_turn {
                 self.end_turn(Outcome::Interrupted {
                     reason: Some("dent restarted while the agent was working".into()),
@@ -530,9 +533,10 @@ impl Session {
                     permission: None,
                     title: None,
                 });
-                // Effort is fixed when the agent starts: start a fresh process,
-                // now or once this turn ends; it resumes the same conversation.
-                if self.in_turn {
+                // Effort is fixed when the agent starts: start a fresh process
+                // that resumes the same conversation, now, or with the next
+                // message once this turn and any background work are done.
+                if self.in_turn || !self.background.is_empty() {
                     self.respawn = true;
                 } else {
                     self.retire_proc().await;
@@ -572,9 +576,6 @@ impl Session {
                 if std::mem::take(&mut self.forgot) {
                     self.start_over().await;
                 }
-                if self.respawn && !self.in_turn {
-                    self.retire_proc().await;
-                }
                 if !self.in_turn && self.asked.is_empty() && !self.held.is_empty() {
                     self.deliver_held().await;
                 }
@@ -590,6 +591,7 @@ impl Session {
             Op::HolderLost => {
                 if let Some(p) = self.proc.take() {
                     let _ = self.d.store().clear_proc(&self.id);
+                    self.background_gone();
                     if self.in_turn {
                         self.end_turn(Outcome::Interrupted {
                             reason: Some("the process holding the agent stopped".into()),
@@ -676,6 +678,11 @@ impl Session {
 
     /// Write a message to the agent process, starting one if needed.
     async fn hand_over(&mut self, text: &str, steer: bool, attachments: &[String]) -> Result<()> {
+        // A setting that needs a new process changed: this message starts
+        // one, unless background work is still running in the old one.
+        if self.respawn && !steer && self.background.is_empty() {
+            self.retire_proc().await;
+        }
         if let Err(e) = self.ensure_proc().await {
             self.log(Body::Notice {
                 text: format!("Couldn't start Claude Code: {e:#}"),
@@ -793,10 +800,24 @@ impl Session {
         self.respawn = false;
         if let Some(p) = self.proc.take() {
             let _ = self.d.store().clear_proc(&self.id);
+            self.background_gone();
             if let Ok(h) = self.d.holder().await {
                 let _ = h.stop(&p.id, Duration::from_secs(1)).await;
             }
         }
+    }
+
+    /// The agent process has gone, and the work it ran in the background
+    /// with it.
+    fn background_gone(&mut self) {
+        if self.background.is_empty() {
+            return;
+        }
+        self.background.clear();
+        self.log(Body::Background { tasks: Vec::new() });
+        self.log(Body::Notice {
+            text: "Background work stopped with the agent.".into(),
+        });
     }
 
     async fn ensure_proc(&mut self) -> Result<()> {
@@ -1220,6 +1241,11 @@ impl Session {
                     },
                     end,
                 );
+                // Nothing left to wait for: an agent that stays quiet now
+                // is stopped in time, as after a turn.
+                if self.background.is_empty() && !self.in_turn && self.proc.is_some() {
+                    self.idle_at = Some(Instant::now() + idle());
+                }
             }
             Inbound::CanUseTool {
                 request_id,
@@ -1696,6 +1722,7 @@ impl Session {
             return;
         };
         let _ = self.d.store().clear_proc(&self.id);
+        self.background_gone();
         if let Ok(h) = self.d.holder().await {
             let _ = h.release(proc).await;
         }

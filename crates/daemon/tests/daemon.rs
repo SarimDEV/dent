@@ -1566,3 +1566,43 @@ fn always_allow_for_the_project_survives_a_daemon_restart() {
         "{saved}"
     );
 }
+
+#[test]
+fn background_work_outlives_a_setting_change_and_ends_with_its_agent() {
+    let w = World::new(&[]);
+    let mut c = w.client();
+    c.subscribe(0);
+    // Changing effort waits for the background work instead of stopping it.
+    let s = c.create(&w.cwd(), Permission::Full, "start the background job");
+    c.wait_turns(&s, 1);
+    c.pump(Duration::from_millis(30));
+    assert_eq!(c.status(&s), Some(Status::Background));
+    c.call(Request::SetEffort {
+        session: s.clone(),
+        effort: "max".into(),
+    })
+    .unwrap();
+    c.wait_turns(&s, 2);
+    assert!(c.text(&s).contains("finished cleanly"));
+    c.pump(Duration::from_millis(100));
+    assert_eq!(c.status(&s), Some(Status::Done));
+
+    // When the agent goes, so does its background work.
+    let t = c.create(&w.cwd(), Permission::Full, "start the background job");
+    c.wait_turns(&t, 1);
+    c.pump(Duration::from_millis(30));
+    assert_eq!(c.status(&t), Some(Status::Background));
+    let pid = w.holder_pid().expect("holder running");
+    // SAFETY: kill has no memory preconditions.
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    c.wait(
+        &t,
+        "the work to be let go",
+        |b| matches!(b, Body::Background { tasks } if tasks.is_empty()),
+    );
+    let until = Instant::now() + Duration::from_secs(10);
+    while c.status(&t) == Some(Status::Background) && Instant::now() < until {
+        c.pump(Duration::from_millis(50));
+    }
+    assert_eq!(c.status(&t), Some(Status::Done), "{:#?}", c.events(&t));
+}
