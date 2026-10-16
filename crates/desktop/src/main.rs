@@ -135,6 +135,7 @@ pub fn style_input(input: &Entity<TextareaState>, t: &Theme, cx: &mut App) {
 impl Render for Dent {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.last_frame = Instant::now();
+        crate::ui::set_menu_open(self.context.is_some());
         // DENT_COUNT_FRAMES prints how many frames each 5 s, to find idle redraws.
         if std::env::var_os("DENT_COUNT_FRAMES").is_some() {
             thread_local!(static T: std::cell::Cell<Option<(Instant, u64)>> = const { std::cell::Cell::new(None) });

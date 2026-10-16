@@ -531,6 +531,16 @@ fn tips_warm() -> bool {
     live > 0 || gone.is_some_and(|at| at.elapsed() < TIP_WARM)
 }
 
+thread_local! {
+    /// A right-click menu is open (set as the window draws).
+    static MENU_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Say whether a right-click menu is open, so tooltips stay out of its way.
+pub fn set_menu_open(open: bool) {
+    MENU_OPEN.set(open);
+}
+
 /// Every control's tooltip goes through here, so they all wait and appear
 /// the same way: the first after a moment, arriving; the next ones, while
 /// one is showing or just went, at once and still.
@@ -600,6 +610,11 @@ impl Render for Tip {
         // gpui decides a tooltip's hover by its element's bounds alone, so
         // something covered (by the large picture) would still show its own.
         if !self.above && crate::lightbox::covering() {
+            return div().into_any_element();
+        }
+        // Nor over an open right-click menu: the control under it keeps its
+        // hover, and its tip would cover the menu's rows.
+        if !self.above && MENU_OPEN.get() {
             return div().into_any_element();
         }
         let surface = floating(&t)
