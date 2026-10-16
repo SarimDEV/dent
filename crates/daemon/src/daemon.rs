@@ -876,6 +876,9 @@ pub fn title(text: &str) -> String {
 /// that holds it. Gives up after three minutes.
 fn run_aside(argv: &[String], cwd: &str) -> std::result::Result<(String, Option<String>), String> {
     use std::io::BufRead;
+    if !std::path::Path::new(cwd).is_dir() {
+        return Err(format!("The session's folder {cwd} no longer exists"));
+    }
     let mut child = std::process::Command::new(&argv[0])
         .args(&argv[1..])
         .current_dir(cwd)

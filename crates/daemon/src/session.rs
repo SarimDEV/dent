@@ -795,6 +795,9 @@ impl Session {
         if self.proc.is_some() {
             return Ok(());
         }
+        if !std::path::Path::new(&self.cwd).is_dir() {
+            bail!("the session's folder {} no longer exists", self.cwd);
+        }
         let h = self.d.holder().await?;
         // dent names the agent's session up front, so it can be resumed
         // even if the first process dies before saying anything.
@@ -1149,6 +1152,7 @@ impl Session {
                 uuid,
                 blocks,
                 context,
+                results,
                 ..
             } => {
                 if parent.is_none()
@@ -1166,9 +1170,21 @@ impl Session {
                 if !blocks.is_empty() {
                     self.log_from(
                         Body::Assistant {
-                            parent,
+                            parent: parent.clone(),
                             blocks,
                             uuid,
+                        },
+                        end,
+                    );
+                }
+                // A server tool's result comes with its call.
+                for r in results {
+                    self.log_from(
+                        Body::ToolResult {
+                            tool: r.tool_use_id,
+                            error: r.is_error,
+                            output: r.output,
+                            parent: parent.clone(),
                         },
                         end,
                     );

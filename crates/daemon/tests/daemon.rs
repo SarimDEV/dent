@@ -1507,3 +1507,27 @@ fn clients_joining_mid_reply_see_it_once_and_events_never_skip() {
         "gaps in {seqs:?}"
     );
 }
+
+#[test]
+fn a_session_whose_folder_was_deleted_says_so() {
+    let w = World::new(&[("DENT_IDLE_MS", "200")]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "hi");
+    c.wait_turns(&s, 1);
+    // Let the agent stop, then take its folder away.
+    std::thread::sleep(Duration::from_millis(800));
+    std::fs::remove_dir_all(&w.project).unwrap();
+    let _ = c.call(Request::Send {
+        session: s.clone(),
+        id: "2".into(),
+        text: "hi again".into(),
+        steer: false,
+        attachments: Vec::new(),
+    });
+    c.wait(
+        &s,
+        "the reason",
+        |b| matches!(b, Body::Notice { text } if text.contains("no longer exists")),
+    );
+}
