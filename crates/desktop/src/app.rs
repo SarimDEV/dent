@@ -476,6 +476,8 @@ pub enum Menu {
     SessionEffort,
     /// Sessions started in a terminal, to carry on here.
     Pickup,
+    /// Drafts put aside with ⌘S, to bring one back.
+    Stash,
 }
 
 impl Menu {
@@ -486,7 +488,7 @@ impl Menu {
 
     /// Menus with longer rows: paths, session titles.
     pub fn wide(self) -> bool {
-        matches!(self, Menu::Project | Menu::Pickup)
+        matches!(self, Menu::Project | Menu::Pickup | Menu::Stash)
     }
 
     /// Menus from a chip at the row's end line up with its right edge.
@@ -922,6 +924,8 @@ pub struct Dent {
     /// message that came after it, so sending it again puts it back there
     /// rather than at the end of the queue.
     pub editing_queued: Option<(String, Option<String>)>,
+    /// Drafts put aside with ⌘S, oldest first; kept across launches.
+    pub stashes: Vec<crate::prefs::Stash>,
     /// The message last sent, by session and id, and when: until the turn
     /// it starts shows as running, Esc and ⌘. can still stop it.
     pub sent_at: Option<(String, String, Instant)>,
@@ -1460,6 +1464,7 @@ impl Dent {
             just_sent: None,
             deny_hint: None,
             editing_queued: None,
+            stashes: prefs.stashes.clone(),
             sent_at: None,
             panel_open: true,
             panel_width: prefs.panel_width.unwrap_or(600.),
@@ -2163,7 +2168,10 @@ impl Dent {
                 text,
                 files,
             } => {
-                let atts = files.into_iter().map(|path| Attachment::File { path }).collect();
+                let atts = files
+                    .into_iter()
+                    .map(|path| Attachment::File { path })
+                    .collect();
                 self.restores.push((Some(session), text, atts));
                 self.take_restores(window, cx);
             }
@@ -3133,6 +3141,15 @@ impl Dent {
         {
             return true;
         }
+        // ⌘S in a prompt puts the draft aside, or with the box empty brings
+        // one back. Always claimed, so it never does anything else there.
+        if k.key == "s"
+            && cmd_only
+            && let Some(f @ (Field::Composer | Field::Starter)) = field
+        {
+            self.stash_key(f, window, cx);
+            return true;
+        }
         // ⇧⌘V in a prompt pastes text as it is, never folded into a chip:
         // a long paste to edit in place. Pictures and files attach as with ⌘V.
         if k.key == "v"
@@ -4001,9 +4018,11 @@ impl Dent {
                 .filter(|(n, full)| {
                     let label = crate::compose::fold_label(**n, full);
                     self.drafts.values().any(|d| d.contains(&label))
+                        || self.stashes.iter().any(|s| s.text.contains(&label))
                 })
                 .map(|(n, full)| (*n, full.clone()))
                 .collect(),
+            stashes: self.stashes.clone(),
         };
         if self.saved_prefs.as_ref() != Some(&p) {
             crate::prefs::save(&p);
@@ -4613,6 +4632,76 @@ impl Dent {
         });
         self.waiting.insert(n, Waiting::Unqueue(msg.to_string()));
         self.take_back(id, vec![(msg.to_string(), text, files)], Then::Restore);
+        cx.notify();
+    }
+
+    /// ⌘S in a prompt: a draft (its words, folded pastes and files) is put
+    /// aside and the box emptied; in an empty box the one put aside comes
+    /// back, or with several a menu of them, newest first.
+    pub fn stash_key(&mut self, f: Field, window: &mut Window, cx: &mut Context<Self>) {
+        let field = self.field_entity(f).clone();
+        let text = field.read(cx).value().to_string();
+        let files: Vec<String> = self
+            .attachments
+            .iter()
+            .filter_map(|a| match a {
+                Attachment::File { path } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        if !text.trim().is_empty() || !files.is_empty() {
+            self.stashes.push(crate::prefs::Stash { text, files });
+            self.attachments
+                .retain(|a| !matches!(a, Attachment::File { .. }));
+            field.update(cx, |c, cx| put(c, "", window, cx));
+            self.recall = None;
+            self.toast(
+                ToastAction::Info,
+                "Draft put aside. ⌘S in an empty box brings it back.".into(),
+            );
+            self.save_prefs();
+        } else {
+            match self.stashes.len() {
+                0 => self.toast(
+                    ToastAction::Info,
+                    "Nothing put aside: ⌘S with words in the box puts them aside.".into(),
+                ),
+                1 => self.unstash(0, window, cx),
+                _ => {
+                    self.menu_scroll = ScrollHandle::new();
+                    self.menu = Some(Menu::Stash);
+                    self.menu_ix = None;
+                    self.relight_menu(cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Bring back draft `i` put aside, into the empty prompt, its files
+    /// attached again.
+    pub fn unstash(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if i >= self.stashes.len() {
+            return;
+        }
+        let st = self.stashes.remove(i);
+        let pastes = self.pastes.clone();
+        let field = self.prompt().clone();
+        field.update(cx, |c, cx| {
+            if c.value().trim().is_empty() {
+                put_draft(c, &st.text, &pastes, window, cx);
+            } else {
+                put_beside(c, &st.text, false, window, cx);
+            }
+            c.focus(window, cx);
+        });
+        for path in st.files {
+            let a = Attachment::File { path };
+            if !self.attachments.contains(&a) {
+                self.attachments.push(a);
+            }
+        }
+        self.save_prefs();
         cx.notify();
     }
 

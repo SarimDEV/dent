@@ -4830,11 +4830,7 @@ fn composing() -> Vec<(f32, Act)> {
         (0.1, Type(Field::Composer, "")),
         (
             0.1,
-            Until(
-                "it has stopped",
-                |d, _| !status_is(d, Status::Working),
-                10.,
-            ),
+            Until("it has stopped", |d, _| !status_is(d, Status::Working), 10.),
         ),
         // ⇧Tab: the chip follows the key at once, whatever the daemon says when.
         (0.1, Key("shift-tab")),
@@ -4843,9 +4839,8 @@ fn composing() -> Vec<(f32, Act)> {
             Until(
                 "⇧Tab shows the next mode on the chip at once",
                 |d, _| {
-                    current(d).is_some_and(|s| {
-                        d.permission_shown(s) == dent_protocol::Permission::Edits
-                    })
+                    current(d)
+                        .is_some_and(|s| d.permission_shown(s) == dent_protocol::Permission::Edits)
                 },
                 0.2,
             ),
@@ -4856,9 +4851,7 @@ fn composing() -> Vec<(f32, Act)> {
             0.1,
             Until(
                 "and round again to Ask",
-                |d, _| {
-                    current(d).is_some_and(|s| s.permission == dent_protocol::Permission::Ask)
-                },
+                |d, _| current(d).is_some_and(|s| s.permission == dent_protocol::Permission::Ask),
                 5.,
             ),
         ),
@@ -4950,8 +4943,7 @@ fn composing() -> Vec<(f32, Act)> {
                 |d, _| {
                     let q = queued_ids(d);
                     q.len() == 3
-                        && q
-                            .iter()
+                        && q.iter()
                             .all(|(ix, ..)| drawn(d, &format!("remove-{ix}")).is_some())
                 },
                 5.,
@@ -5033,9 +5025,7 @@ fn composing() -> Vec<(f32, Act)> {
             0.1,
             Until(
                 "stopped, the last waiting one comes back",
-                |d, cx| {
-                    !status_is(d, Status::Working) && composer_is(d, cx, "one edited")
-                },
+                |d, cx| !status_is(d, Status::Working) && composer_is(d, cx, "one edited"),
                 10.,
             ),
         ),
@@ -5048,7 +5038,8 @@ fn composing() -> Vec<(f32, Act)> {
             Call(|d, w, cx| {
                 let png = outside("photo.png");
                 let heic = outside("photo.heic");
-                let _ = image::RgbImage::from_pixel(2600, 1200, image::Rgb([30, 120, 200])).save(&png);
+                let _ =
+                    image::RgbImage::from_pixel(2600, 1200, image::Rgb([30, 120, 200])).save(&png);
                 let _ = std::process::Command::new("sips")
                     .args(["-s", "format", "heic"])
                     .arg(&png)
@@ -5112,7 +5103,9 @@ fn composing() -> Vec<(f32, Act)> {
             0.1,
             Until(
                 "a long line is answered",
-                |d, _| status_is(d, Status::Done) && sent_order(d).last().is_some_and(|t| t == WRAPS),
+                |d, _| {
+                    status_is(d, Status::Done) && sent_order(d).last().is_some_and(|t| t == WRAPS)
+                },
                 20.,
             ),
         ),
@@ -5176,6 +5169,85 @@ fn composing() -> Vec<(f32, Act)> {
                 10.,
             ),
         ),
+    ]);
+    // ⌘S puts a draft aside and brings it back.
+    v.extend([
+        (0., Call(|d, _, _| d.stashes.clear())),
+        (0., Call(save_clipboard)),
+        (0., Call(copy_long_log)),
+        (0.1, Type(Field::Composer, "first thought ")),
+        (0.1, Key("cmd-v")),
+        (
+            0.,
+            Call(|d, w, cx| {
+                let red = outside("red.png");
+                let _ = image::RgbaImage::from_pixel(48, 48, image::Rgba([220, 30, 30, 255]))
+                    .save(&red);
+                d.attach_paths(&[red], w, cx);
+            }),
+        ),
+        (0.2, Key("cmd-s")),
+        (
+            0.1,
+            Until(
+                "⌘S puts the draft aside, paste and file too, and empties the box",
+                |d, cx| {
+                    composer_is(d, cx, "")
+                        && d.attachments.is_empty()
+                        && d.stashes.len() == 1
+                        && d.stashes[0].files.len() == 1
+                        && crate::prefs::load().stashes.len() == 1
+                },
+                2.,
+            ),
+        ),
+        (0.1, Type(Field::Composer, "second thought")),
+        (0.1, Key("cmd-s")),
+        (0.3, Key("cmd-s")),
+        (
+            0.1,
+            Until(
+                "⌘S in the empty box with two put aside lists them",
+                |d, _| d.menu == Some(crate::app::Menu::Stash) && d.stashes.len() == 2,
+                2.,
+            ),
+        ),
+        (0.3, Shot("stash-menu")),
+        (0.1, Key("down")),
+        (0.1, Key("enter")),
+        (
+            0.2,
+            Until(
+                "picking the older one brings it back whole: words, paste chip and file",
+                |d, cx| {
+                    composer_text(d, cx).starts_with("first thought [Pasted text #")
+                        && chips(d, cx).len() == 1
+                        && d.attachments.len() == 1
+                        && d.stashes.len() == 1
+                        && d.menu.is_none()
+                },
+                2.,
+            ),
+        ),
+        (0., Call(restore_clipboard)),
+        (
+            0.,
+            Call(|d, w, cx| {
+                d.attachments.clear();
+                d.composer.update(cx, |c, cx| crate::app::put(c, "", w, cx));
+            }),
+        ),
+        (0.1, Key("cmd-s")),
+        (
+            0.1,
+            Until(
+                "with one left, ⌘S brings it straight back",
+                |d, cx| composer_is(d, cx, "second thought") && d.stashes.is_empty(),
+                2.,
+            ),
+        ),
+        (0.1, Type(Field::Composer, "")),
+        (0., Call(save_now)),
     ]);
     v
 }

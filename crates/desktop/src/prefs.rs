@@ -34,6 +34,8 @@ pub struct Prefs {
     pub attached: std::collections::BTreeMap<String, Vec<String>>,
     /// Long pastes folded into the drafts, by number.
     pub pastes: std::collections::BTreeMap<u32, String>,
+    /// Drafts put aside with ⌘S, oldest first.
+    pub stashes: Vec<Stash>,
     /// Sessions kept at the top of the sidebar, in the order pinned.
     pub pinned: Vec<String>,
     /// The ambient background on the new-session page, by id; none when unset
@@ -41,6 +43,15 @@ pub struct Prefs {
     pub ambient: Option<String>,
     /// The app you picked to open each kind of file (by extension).
     pub open_with: std::collections::BTreeMap<String, String>,
+}
+
+/// A draft put aside with ⌘S: its words (folded pastes as their labels,
+/// as a saved draft keeps them) and the files attached to it.
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
+#[serde(default)]
+pub struct Stash {
+    pub text: String,
+    pub files: Vec<String>,
 }
 
 /// Which theme dent wears.

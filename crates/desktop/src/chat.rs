@@ -2817,6 +2817,7 @@ impl Dent {
                     )
                     .child(probe(&self.probes, "composer"))
                     .children(self.slash_menu(false, cx))
+                    .children(self.stash_menu(false, cx))
                     .children(
                         (self.drop_target(cx) == Some(crate::app::DropTarget::Message)).then(
                             || {
@@ -3504,6 +3505,7 @@ impl Dent {
                             )
                             .child(probe(&self.probes, "starter"))
                             .children(self.slash_menu(true, cx))
+                            .children(self.stash_menu(true, cx))
                             .children(
                                 (self.drop_target(cx) == Some(crate::app::DropTarget::Message))
                                     .then(|| {
@@ -3609,11 +3611,15 @@ impl Dent {
                                 }
                                 Menu::SessionPermission => format!(
                                     "Permissions: {}",
-                                    current.map(|s| self.permission_shown(s)).unwrap_or_default().label()
+                                    current
+                                        .map(|s| self.permission_shown(s))
+                                        .unwrap_or_default()
+                                        .label()
                                 ),
                                 Menu::Model | Menu::SessionModel => "Model".into(),
                                 Menu::Project => "Project".into(),
                                 Menu::Pickup => "Pick up from terminal".into(),
+                                Menu::Stash => "Drafts put aside".into(),
                             },
                             t,
                         ))
@@ -3697,6 +3703,7 @@ impl Dent {
         match which {
             Menu::Project => self.project_entries(cx),
             Menu::Pickup => self.pickup_entries(),
+            Menu::Stash => self.stash_entries(),
             Menu::Model | Menu::SessionModel => {
                 let current = self.menu_model(which, cx);
                 let all = self.models_or_default();
@@ -4040,6 +4047,82 @@ impl Dent {
     /// Sessions started in a terminal, newest first. One still running
     /// there is listed, so you know where it went, but picking it up now
     /// would run it twice.
+    /// Drafts put aside with ⌘S, newest first: each by its first words,
+    /// with what it carries.
+    fn stash_entries(&self) -> Vec<Entry> {
+        let n = self.stashes.len();
+        let rows = self.stashes.iter().enumerate().rev().map(|(i, st)| {
+            let first = st.text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+            let name = if first.chars().count() > 60 {
+                format!("{}…", first.chars().take(60).collect::<String>().trim_end())
+            } else if first.is_empty() {
+                "Files only".to_string()
+            } else {
+                first.to_string()
+            };
+            let lines = st.text.lines().count();
+            let mut note = Vec::new();
+            if lines > 1 {
+                note.push(format!("{lines} lines"));
+            }
+            match st.files.len() {
+                0 => {}
+                1 => note.push("1 file".into()),
+                k => note.push(format!("{k} files")),
+            }
+            let act: Act = Rc::new(
+                move |this: &mut Dent, window: &mut Window, cx: &mut Context<Dent>| {
+                    this.unstash(i, window, cx)
+                },
+            );
+            let remove: Act = Rc::new(
+                move |this: &mut Dent, _: &mut Window, cx: &mut Context<Dent>| {
+                    if i < this.stashes.len() {
+                        this.stashes.remove(i);
+                        this.save_prefs();
+                    }
+                    if this.stashes.len() < 2 {
+                        this.menu = None;
+                    }
+                    this.relight_menu(cx);
+                    cx.notify();
+                },
+            );
+            Entry {
+                remove: Some(("Throw this draft away", remove)),
+                ..Entry::row(
+                    format!("stash-{i}"),
+                    &name,
+                    (!note.is_empty()).then(|| note.join(" · ")),
+                    false,
+                    Some(act),
+                )
+            }
+        });
+        std::iter::once(Entry::note(&format!("{n} drafts put aside")))
+            .chain(rows)
+            .collect()
+    }
+
+    /// The menu of drafts put aside, over the prompt it brings one back to.
+    fn stash_menu(&mut self, below: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.menu != Some(Menu::Stash) {
+            return None;
+        }
+        let list = self.menu_list(Menu::Stash, 320., cx);
+        let menu = div()
+            .absolute()
+            .left(px(-1.))
+            .when(below, |d| d.top(relative(1.)).pt(px(space::S1)))
+            .when(!below, |d| d.bottom(relative(1.)).pb(px(space::S1)))
+            .child(div().child(list).arrive(
+                "stash-arrive",
+                if below { From::Above } else { From::Below },
+                motion::FAST,
+            ));
+        Some(deferred(menu).with_priority(1).into_any_element())
+    }
+
     fn pickup_entries(&self) -> Vec<Entry> {
         let row = |i: usize, r: &dent_protocol::RecentSession| {
             let id = r.agent_session.clone();
