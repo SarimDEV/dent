@@ -164,15 +164,20 @@ impl Store {
         Ok(self.sessions()?.into_iter().find(|r| r.id == id))
     }
 
-    /// Events after `after`, up to about `max_bytes` of them (at least one).
-    pub fn after(&self, after: u64, max_bytes: usize) -> Result<Vec<Event>> {
+    /// Events after `after`, up to about `max_bytes` of them (at least one),
+    /// and the last seq looked at: rows this daemon can't read are skipped,
+    /// so the batch can be empty while the log goes on.
+    pub fn after(&self, after: u64, max_bytes: usize) -> Result<(Vec<Event>, u64)> {
         let mut st = self.db.prepare_cached(
             "SELECT seq, session, at, body FROM events WHERE seq > ?1 ORDER BY seq LIMIT 2000",
         )?;
         let mut rows = st.query(params![after as i64])?;
         let mut out = Vec::new();
         let mut bytes = 0;
+        let mut upto = after;
         while let Some(r) = rows.next()? {
+            let seq = r.get::<_, i64>(0)? as u64;
+            upto = seq;
             let body: String = r.get(3)?;
             bytes += body.len() + 64;
             let Ok(parsed) = serde_json::from_str::<Body>(&body) else {
@@ -180,7 +185,7 @@ impl Store {
                 continue;
             };
             out.push(Event {
-                seq: r.get::<_, i64>(0)? as u64,
+                seq,
                 session: r.get(1)?,
                 at: r.get::<_, i64>(2)? as u64,
                 body: parsed,
@@ -189,7 +194,7 @@ impl Store {
                 break;
             }
         }
-        Ok(out)
+        Ok((out, upto))
     }
 
     /// Every event of one session, oldest first.
@@ -372,8 +377,25 @@ mod tests {
         assert_eq!(row.status, Status::Working);
         assert_eq!(row.proc.as_deref(), Some("a-1"));
         assert_eq!(row.proc_off, 120);
-        assert_eq!(s.after(1, 1 << 20).unwrap().len(), 2);
-        assert_eq!(s.after(0, 1).unwrap().len(), 1);
+        assert_eq!(s.after(1, 1 << 20).unwrap().0.len(), 2);
+        assert_eq!(s.after(0, 1).unwrap().0.len(), 1);
+        // A row this daemon can't read is passed over, not the end.
+        s.db.execute(
+            "INSERT INTO events (session, at, body) VALUES ('a', 4, '{\"type\":\"from_the_future\"}')",
+            [],
+        )
+        .unwrap();
+        let mut s = s;
+        s.append("a", 5, &Body::Reopened, None).unwrap();
+        let (got, upto) = s.after(3, 1 << 20).unwrap();
+        assert_eq!((got.len(), got[0].seq, upto), (1, 5, 5));
+        // Nothing readable left in a batch still says how far it got.
+        s.db.execute(
+            "INSERT INTO events (session, at, body) VALUES ('a', 6, '{\"type\":\"from_the_future\"}')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(s.after(5, 1 << 20).unwrap(), (Vec::new(), 6));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

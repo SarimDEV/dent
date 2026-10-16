@@ -496,7 +496,7 @@ async fn subscribe(
     loop {
         loop {
             let got = d.store().after(after, BATCH_BYTES);
-            let batch = match got {
+            let (batch, upto) = match got {
                 Ok(b) => b,
                 Err(e) => {
                     let _ = tx
@@ -510,8 +510,15 @@ async fn subscribe(
                     return;
                 }
             };
-            let Some(last) = batch.last() else { break };
-            after = last.seq;
+            // Rows this daemon can't read are passed over, not taken for
+            // the end of the log.
+            if upto <= after {
+                break;
+            }
+            after = upto;
+            if batch.is_empty() {
+                continue;
+            }
             if tx
                 .send(encode(0, &Out::Events { events: batch }))
                 .await
