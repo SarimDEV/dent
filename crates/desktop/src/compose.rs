@@ -134,6 +134,22 @@ pub fn unfold(text: &str, pastes: &BTreeMap<u32, String>) -> String {
     out
 }
 
+/// `text` with each folded paste it holds whole shown as its chip label
+/// again: a queued message reads as it did in the box.
+pub fn refold(text: &str, pastes: &BTreeMap<u32, String>) -> String {
+    // Only text this long can hold a folded paste.
+    if text.lines().nth(FOLD_LINES).is_none() && text.len() <= FOLD_BYTES {
+        return text.to_string();
+    }
+    let mut out = text.to_string();
+    for (n, full) in pastes.iter().rev() {
+        if out.contains(full.as_str()) {
+            out = out.replacen(full.as_str(), &fold_label(*n, full), 1);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,5 +225,21 @@ mod tests {
                 .unwrap()
                 .contains("can't see")
         );
+    }
+
+    #[test]
+    fn a_queued_message_shows_its_pastes_folded() {
+        let long: String = (0..60).map(|i| format!("line {i}\n")).collect();
+        let pastes = BTreeMap::from([(1, long.clone()), (2, "short".to_string())]);
+        let sent = unfold(
+            &format!("look at this {} please", fold_label(1, &long)),
+            &pastes,
+        );
+        assert_eq!(
+            refold(&sent, &pastes),
+            "look at this [Pasted text #1 +60 lines] please"
+        );
+        // Short text is left alone, even if a paste's words are in it.
+        assert_eq!(refold("short", &pastes), "short");
     }
 }

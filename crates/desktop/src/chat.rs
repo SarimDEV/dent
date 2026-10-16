@@ -2137,6 +2137,13 @@ impl Dent {
                     Some(Item::Queued { id, .. }) => Some(id.clone()),
                     _ => None,
                 });
+                // Folded pastes show as their chips again, and long text
+                // folds as a sent message does.
+                let open = self.expanded.contains(msg);
+                let refolded = crate::compose::refold(text, &self.pastes);
+                let body: Vec<&str> = refolded.lines().collect();
+                let (shown, long) = user_shown(&body, open);
+                let fold_key = msg.clone();
                 let (sid3, msg3) = (s.id.clone(), msg.clone());
                 let (sid, msg) = (s.id.clone(), msg.clone());
                 let (sid2, msg2) = (s.id.clone(), msg.clone());
@@ -2159,7 +2166,34 @@ impl Dent {
                             .flex()
                             .flex_col()
                             .gap(px(space::S1H))
-                            .when(!text.is_empty(), |d| d.child(text.clone()))
+                            .when(!shown.is_empty(), |d| {
+                                d.child(crate::select::text(
+                                    SharedString::from(format!("queued-text-{ix}")),
+                                    shown,
+                                    &t,
+                                ))
+                            })
+                            .when(long, |d| {
+                                d.child(
+                                    div()
+                                        .id(SharedString::from(format!("queued-fold-{ix}")))
+                                        .ty(UI)
+                                        .text_color(t.quiet)
+                                        .cursor_pointer()
+                                        .hover(|d| d.text_color(t.ink))
+                                        .on_press(cx.listener(move |this, _, _, cx| {
+                                            if !this.expanded.remove(&fold_key) {
+                                                this.expanded.insert(fold_key.clone());
+                                            }
+                                            cx.notify();
+                                        }))
+                                        .child(if open {
+                                            "Show less"
+                                        } else {
+                                            "Show full message"
+                                        }),
+                                )
+                            })
                             // The files it carries, as they'll go with it.
                             .when(!attachments.is_empty(), |d| {
                                 d.child(div().flex().flex_wrap().gap(px(space::S1H)).children(
