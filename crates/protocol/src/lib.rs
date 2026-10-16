@@ -143,6 +143,10 @@ pub enum Body {
         /// it can be allowed for good in this project.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         keeps: bool,
+        /// The rules the agent offered, as JSON, so "always allow" means
+        /// the same after a daemon restart. Absent in older logs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        suggestions: Option<String>,
     },
     Answered {
         id: String,
@@ -702,6 +706,10 @@ pub enum Request {
         session: SessionId,
         #[serde(default)]
         before: Option<String>,
+        /// The client's id for this fork, so a resend after a reconnect
+        /// gets the same session rather than a second one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
     },
     /// Take back a message that's still waiting.
     Unqueue {
@@ -1063,6 +1071,7 @@ mod tests {
                 input: "{}".into(),
                 description: None,
                 keeps: false,
+                suggestions: None,
             },
         };
         let line = serde_json::to_string(&e).unwrap();

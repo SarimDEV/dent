@@ -51,6 +51,9 @@ pub enum Inbound {
         /// Written by Claude Code itself, not the model: a usage limit or an
         /// API error, which the turn's `result` also reports.
         synthetic: bool,
+        /// Results of server tools (web search, web fetch, code execution),
+        /// which come back in the same message as their calls.
+        results: Vec<ToolResult>,
     },
     /// Tool results come back as `user` messages.
     ToolResults {
@@ -286,6 +289,27 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
                         .collect()
                 })
                 .unwrap_or_default();
+            let results = m["content"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter(|b| {
+                            b["type"]
+                                .as_str()
+                                .is_some_and(|t| t.ends_with("_tool_result"))
+                                && b["tool_use_id"].is_string()
+                        })
+                        .map(|b| {
+                            let (output, is_error) = server_output(&b["content"]);
+                            ToolResult {
+                                tool_use_id: s(b, "tool_use_id"),
+                                is_error: is_error || b["is_error"] == true,
+                                output,
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             let u = &m["usage"];
             let context = u["input_tokens"].as_u64().map(|i| {
                 i + u["cache_creation_input_tokens"].as_u64().unwrap_or(0)
@@ -297,6 +321,7 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
                 blocks,
                 context,
                 synthetic: m["model"] == "<synthetic>" || v["isApiErrorMessage"] == true,
+                results,
             }
         }
         ("user", _) => {
@@ -318,10 +343,14 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
                 results,
             }
         }
-        ("rate_limit_event", _) => match serde_json::from_value(v["rate_limit_info"].clone()) {
-            Ok(info) => Inbound::RateLimit(info),
-            Err(_) => Inbound::Other,
-        },
+        // One with no windows says nothing about them: logging it would
+        // wipe the last reading.
+        ("rate_limit_event", _) => {
+            match serde_json::from_value::<RateLimitInfo>(v["rate_limit_info"].clone()) {
+                Ok(info) if !info.unified_windows.is_empty() => Inbound::RateLimit(info),
+                _ => Inbound::Other,
+            }
+        }
         ("control_request", _) if v["request"]["subtype"] == "can_use_tool" => {
             let r = &v["request"];
             Inbound::CanUseTool {
@@ -329,7 +358,12 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
                 tool_name: s(r, "tool_name"),
                 input: r["input"].clone(),
                 description: r["description"].as_str().map(str::to_owned),
-                suggestions: r["permission_suggestions"].clone(),
+                // None offered is known, unlike a question rebuilt from an
+                // older log (`null`).
+                suggestions: match &r["permission_suggestions"] {
+                    Value::Null => json!([]),
+                    s => s.clone(),
+                },
             }
         }
         ("control_request", _) if v["request"]["subtype"] == "request_user_dialog" => {
@@ -376,7 +410,22 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
                 .as_str()
                 .filter(|t| !t.is_empty())
                 .map(str::to_owned)
-                .or_else(|| (!errors.is_empty()).then(|| errors.join("\n")));
+                .or_else(|| (!errors.is_empty()).then(|| errors.join("\n")))
+                .or_else(|| match sub.as_str() {
+                    "error_max_turns" => {
+                        Some("Claude Code stopped: it reached its limit of turns".into())
+                    }
+                    "error_max_budget_usd" => {
+                        Some("Claude Code stopped: it reached its spending limit".into())
+                    }
+                    "error_during_execution" => {
+                        Some("Claude Code hit an error while working".into())
+                    }
+                    s if s.starts_with("error") => {
+                        Some(format!("Claude Code stopped ({})", s.replace('_', " ")))
+                    }
+                    _ => None,
+                });
             Inbound::Result {
                 terminal_reason: v["terminal_reason"].as_str().map(str::to_owned),
                 is_error: v["is_error"].as_bool().unwrap_or(false) || sub.starts_with("error"),
@@ -516,16 +565,72 @@ fn usage_bars(report: &Value) -> Option<Vec<dent_protocol::Bar>> {
 }
 
 /// A tool result's text, cut to [`OUTPUT_CAP`] on a character boundary.
+/// An image in it is named, so a result that was only a picture doesn't
+/// read as empty.
 fn output(content: &Value) -> String {
     let text = match content {
         Value::String(t) => t.clone(),
         Value::Array(parts) => parts
             .iter()
-            .filter_map(|p| p["text"].as_str())
+            .filter_map(|p| match p["type"].as_str() {
+                Some("image") => Some("[image]"),
+                _ => p["text"].as_str(),
+            })
             .collect::<Vec<_>>()
             .join("\n"),
         _ => String::new(),
     };
+    cap(text)
+}
+
+/// What a server tool's result says: the search hits, the page fetched,
+/// the code's output, or the error. True when it failed.
+fn server_output(content: &Value) -> (String, bool) {
+    let one = |c: &Value| -> Option<String> {
+        if let Some(t) = c["title"].as_str() {
+            let url = c["url"].as_str().unwrap_or_default();
+            return Some(format!("{t} — {url}").trim_end_matches(" — ").to_string());
+        }
+        for k in ["url", "text", "stdout", "content"] {
+            if let Some(t) = c[k].as_str().filter(|t| !t.is_empty()) {
+                return Some(t.to_string());
+            }
+        }
+        None
+    };
+    match content {
+        Value::Array(items) => (
+            cap(items.iter().filter_map(one).collect::<Vec<_>>().join("\n")),
+            false,
+        ),
+        Value::Object(_)
+            if content["type"]
+                .as_str()
+                .is_some_and(|t| t.ends_with("_error")) =>
+        {
+            let code = content["error_code"]
+                .as_str()
+                .or(content["type"].as_str())
+                .unwrap_or("error");
+            (code.to_string(), true)
+        }
+        Value::Object(_) => {
+            let failed = content["return_code"].as_i64().is_some_and(|c| c != 0);
+            let mut text = one(content).unwrap_or_default();
+            if let Some(e) = content["stderr"].as_str().filter(|e| !e.is_empty()) {
+                text = if text.is_empty() {
+                    e.to_string()
+                } else {
+                    format!("{text}\n{e}")
+                };
+            }
+            (cap(text), failed)
+        }
+        other => (output(other), false),
+    }
+}
+
+fn cap(text: String) -> String {
     if text.len() <= OUTPUT_CAP {
         return text;
     }
@@ -618,11 +723,13 @@ pub fn keeps(suggestions: &Value) -> bool {
         .is_some_and(|a| a.iter().any(|s| s["type"] == "addRules"))
 }
 
-/// Allow a tool call. With `always`, the agent's own suggestions (or a rule
-/// for the tool) are sent back so the same kind of call is allowed for the
-/// rest of the session. With `project` too, its suggestions go to the
-/// project's local settings, where Claude Code keeps, lists and enforces
-/// them from now on.
+/// Allow a tool call. With `always`, the agent's own suggestions (or, when
+/// it offered none, a rule for the tool) are sent back so the same kind of
+/// call is allowed for the rest of the session. With `project` too, its
+/// suggestions go to the project's local settings, where Claude Code
+/// keeps, lists and enforces them from now on. When what it offered isn't
+/// known (`null`: a question from before a restart, in an older log), the
+/// call is allowed once: never more than the agent offered.
 pub fn allow(
     request_id: &str,
     tool: &str,
@@ -631,7 +738,7 @@ pub fn allow(
     project: bool,
     suggestions: &Value,
 ) -> Value {
-    let always = always || project;
+    let always = (always || project) && !suggestions.is_null();
     let mut r = json!({
         "behavior": "allow",
         "updatedInput": input,
@@ -824,6 +931,59 @@ mod tests {
         for (k, n) in &kinds {
             eprintln!("{n:4}  {k}");
         }
+    }
+
+    #[test]
+    fn server_tool_results_images_and_errors_say_something() {
+        let a = br#"{"type":"assistant","message":{"content":[{"type":"server_tool_use","id":"srv1","name":"web_search","input":{"query":"dent"}},{"type":"web_search_tool_result","tool_use_id":"srv1","content":[{"type":"web_search_result","title":"Dent","url":"https://dent.dev"}]},{"type":"web_fetch_tool_result","tool_use_id":"srv2","content":{"type":"web_fetch_tool_error","error_code":"url_not_accessible"}},{"type":"text","text":"Found it."}]},"parent_tool_use_id":null}"#;
+        match parse(a).unwrap() {
+            Inbound::Assistant {
+                blocks, results, ..
+            } => {
+                assert_eq!(blocks.len(), 2);
+                assert_eq!(results.len(), 2);
+                assert_eq!(results[0].tool_use_id, "srv1");
+                assert_eq!(results[0].output, "Dent — https://dent.dev");
+                assert!(!results[0].is_error);
+                assert_eq!(results[1].output, "url_not_accessible");
+                assert!(results[1].is_error);
+            }
+            other => panic!("{other:?}"),
+        }
+        let r = br#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"x"}}]}]}}"#;
+        match parse(r).unwrap() {
+            Inbound::ToolResults { results, .. } => assert_eq!(results[0].output, "[image]"),
+            other => panic!("{other:?}"),
+        }
+        let m = br#"{"type":"result","subtype":"error_max_turns","is_error":true}"#;
+        match parse(m).unwrap() {
+            Inbound::Result { text, is_error, .. } => {
+                assert!(is_error);
+                assert!(text.unwrap().contains("limit of turns"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let e = br#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#;
+        assert!(matches!(parse(e).unwrap(), Inbound::Other));
+    }
+
+    #[test]
+    fn always_never_allows_more_than_was_offered() {
+        let offered = json!([{"type": "addRules", "behavior": "allow", "destination": "session",
+            "rules": [{"toolName": "Bash", "ruleContent": "npm test:*"}]}]);
+        let r = allow("r", "Bash", &json!({}), true, true, &offered);
+        let p = &r["response"]["response"]["updatedPermissions"];
+        assert_eq!(p[0]["destination"], "localSettings");
+        assert_eq!(p[0]["rules"][0]["ruleContent"], "npm test:*");
+        // Nothing offered: the tool for this session.
+        let r = allow("r", "Write", &json!({}), true, false, &json!([]));
+        let p = &r["response"]["response"]["updatedPermissions"];
+        assert_eq!(p[0]["rules"][0]["toolName"], "Write");
+        // Not known what was offered: once.
+        let r = allow("r", "Bash", &json!({}), true, true, &Value::Null);
+        let resp = &r["response"]["response"];
+        assert!(resp.get("updatedPermissions").is_none());
+        assert_eq!(resp["decisionClassification"], "user_temporary");
     }
 
     #[test]

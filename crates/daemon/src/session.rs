@@ -152,7 +152,9 @@ enum Ctl {
         command: String,
         act: Act,
     },
-    Other,
+    /// A model or permission mode, kept once Claude Code takes it.
+    Model(String),
+    Permission(Permission),
 }
 
 struct Session {
@@ -205,6 +207,9 @@ struct Session {
     last: Option<(String, String, Vec<String>)>,
     /// The agent couldn't find the conversation it was asked to resume.
     forgot: bool,
+    /// Stop was asked for the running turn. Kept in the store, so a
+    /// restarted daemon still sees it through.
+    stop_asked: bool,
     /// Each command's sheet as clients last got it, so a refresh that
     /// changes nothing says nothing.
     sheets: HashMap<String, Vec<Section>>,
@@ -256,6 +261,7 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
         outbox: Vec::new(),
         last: None,
         forgot: false,
+        stop_asked: false,
         sheets: HashMap::new(),
         watch: None,
     };
@@ -286,8 +292,14 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
 }
 
 impl Session {
+    /// Where a stop asked for this session is kept.
+    fn stop_key(&self) -> String {
+        format!("stop.{}", self.id)
+    }
+
     /// Recover what's in memory from the log.
     fn rebuild(&mut self) {
+        self.stop_asked = matches!(self.d.store().get(&self.stop_key()), Ok(Some(_)));
         let Ok(events) = self.d.store().session_events(&self.id) else {
             return;
         };
@@ -314,7 +326,11 @@ impl Session {
                     requeue(&mut self.held, &id, before.as_deref());
                 }
                 Body::Asked {
-                    id, tool, input, ..
+                    id,
+                    tool,
+                    input,
+                    suggestions,
+                    ..
                 } => {
                     let input = serde_json::from_str(&input).unwrap_or(Value::Null);
                     self.asked.insert(
@@ -323,7 +339,11 @@ impl Session {
                             tool,
                             dialog: claude::dialog_values(&input),
                             input,
-                            suggestions: Value::Null,
+                            // Unknown in older logs: "always" then allows
+                            // once rather than more than was offered.
+                            suggestions: suggestions
+                                .and_then(|s| serde_json::from_str(&s).ok())
+                                .unwrap_or(Value::Null),
                         },
                     );
                 }
@@ -380,6 +400,8 @@ impl Session {
 
     async fn reattach(&mut self, row: &Row, held: &[HeldProc]) {
         let Some(proc) = row.proc.clone() else {
+            // No agent, so nothing of its runs in the background.
+            self.background_gone();
             return;
         };
         let alive = held.iter().find(|p| p.id == proc);
@@ -400,11 +422,20 @@ impl Session {
                 stopping: false,
                 resumed: true,
             });
+            let now = Instant::now();
             if !self.in_turn {
-                self.idle_at = Some(Instant::now() + idle());
+                self.idle_at = Some(now + idle());
+            } else if self.stop_asked {
+                // A stop the last daemon didn't see through: the agent was
+                // asked, so its process goes if the turn doesn't end soon.
+                self.stop_at = Some(now + STOP_GRACE);
+            } else if row.proc_off == 0 {
+                // It has said nothing yet: still starting, or stuck.
+                self.start_by = Some(now + start_limit());
             }
         } else {
             let _ = self.d.store().clear_proc(&self.id);
+            self.background_gone();
             if self.in_turn {
                 self.end_turn(Outcome::Interrupted {
                     reason: Some("dent restarted while the agent was working".into()),
@@ -467,39 +498,31 @@ impl Session {
             }
             Op::Interrupt => self.interrupt().await,
             Op::Answer { id, answer } => self.answer(id, answer).await,
+            // A running agent is asked first, and the change kept when it
+            // agrees; otherwise the next agent starts with it.
             Op::SetModel(model) => {
                 if self.model.as_deref() == Some(model.as_str()) {
                     return Ok(());
                 }
-                if self.proc.is_some() {
-                    self.control("set_model", json!({ "model": model }), Ctl::Other)
-                        .await?;
+                if self.running() {
+                    let extra = json!({ "model": model });
+                    self.control("set_model", extra, Ctl::Model(model)).await?;
+                } else {
+                    self.keep(Ctl::Model(model), None);
                 }
-                self.model = Some(model.clone());
-                self.log(Body::Settings {
-                    effort: None,
-                    model: Some(model),
-                    permission: None,
-                    title: None,
-                });
                 Ok(())
             }
             Op::SetPermission(p) => {
                 if p == self.permission {
                     return Ok(());
                 }
-                if self.proc.is_some() {
-                    let mode = claude::mode_name(p);
-                    self.control("set_permission_mode", json!({ "mode": mode }), Ctl::Other)
+                if self.running() {
+                    let extra = json!({ "mode": claude::mode_name(p) });
+                    self.control("set_permission_mode", extra, Ctl::Permission(p))
                         .await?;
+                } else {
+                    self.keep(Ctl::Permission(p), None);
                 }
-                self.permission = p;
-                self.log(Body::Settings {
-                    effort: None,
-                    model: None,
-                    permission: Some(p),
-                    title: None,
-                });
                 Ok(())
             }
             Op::Act { command, act } => {
@@ -522,9 +545,10 @@ impl Session {
                     permission: None,
                     title: None,
                 });
-                // Effort is fixed when the agent starts: start a fresh process,
-                // now or once this turn ends; it resumes the same conversation.
-                if self.in_turn {
+                // Effort is fixed when the agent starts: start a fresh process
+                // that resumes the same conversation, now, or with the next
+                // message once this turn and any background work are done.
+                if self.in_turn || !self.background.is_empty() {
                     self.respawn = true;
                 } else {
                     self.retire_proc().await;
@@ -564,9 +588,6 @@ impl Session {
                 if std::mem::take(&mut self.forgot) {
                     self.start_over().await;
                 }
-                if self.respawn && !self.in_turn {
-                    self.retire_proc().await;
-                }
                 if !self.in_turn && self.asked.is_empty() && !self.held.is_empty() {
                     self.deliver_held().await;
                 }
@@ -582,6 +603,8 @@ impl Session {
             Op::HolderLost => {
                 if let Some(p) = self.proc.take() {
                     let _ = self.d.store().clear_proc(&self.id);
+                    self.background_gone();
+                    self.controls_gone();
                     if self.in_turn {
                         self.end_turn(Outcome::Interrupted {
                             reason: Some("the process holding the agent stopped".into()),
@@ -591,6 +614,48 @@ impl Session {
                 }
                 Ok(())
             }
+        }
+    }
+
+    /// A model or permission mode is now the session's.
+    fn keep(&mut self, setting: Ctl, end: Option<u64>) {
+        let body = match setting {
+            Ctl::Model(m) => {
+                self.model = Some(m.clone());
+                Body::Settings {
+                    effort: None,
+                    model: Some(m),
+                    permission: None,
+                    title: None,
+                }
+            }
+            Ctl::Permission(p) => {
+                self.permission = p;
+                Body::Settings {
+                    effort: None,
+                    model: None,
+                    permission: Some(p),
+                    title: None,
+                }
+            }
+            _ => return,
+        };
+        match end {
+            Some(off) => self.log_from(body, off),
+            None => self.log(body),
+        }
+    }
+
+    /// An agent process that takes messages: there, and not winding down.
+    fn running(&self) -> bool {
+        self.proc.as_ref().is_some_and(|p| !p.stopping)
+    }
+
+    /// The agent process is gone: requests it never answered won't be.
+    /// A setting it hadn't taken yet goes to the next one.
+    fn controls_gone(&mut self) {
+        for (_, c) in std::mem::take(&mut self.controls) {
+            self.keep(c, None);
         }
     }
 
@@ -635,7 +700,9 @@ impl Session {
             return Ok(());
         }
         let working = self.in_turn && self.proc.is_some();
-        let queued = working && !steer;
+        // Nothing can be steered into an agent that's being stopped: it
+        // waits for the turn to end like any other.
+        let queued = working && (!steer || !self.running());
         self.log(Body::User {
             id: id.clone(),
             text: text.clone(),
@@ -668,6 +735,11 @@ impl Session {
 
     /// Write a message to the agent process, starting one if needed.
     async fn hand_over(&mut self, text: &str, steer: bool, attachments: &[String]) -> Result<()> {
+        // A setting that needs a new process changed: this message starts
+        // one, unless background work is still running in the old one.
+        if self.respawn && !steer && self.background.is_empty() {
+            self.retire_proc().await;
+        }
         if let Err(e) = self.ensure_proc().await {
             self.log(Body::Notice {
                 text: format!("Couldn't start Claude Code: {e:#}"),
@@ -677,13 +749,35 @@ impl Session {
             });
             return Err(e);
         }
-        self.write(&wire::user_message(
-            text,
-            &crate::daemon::uuid(),
-            steer,
-            attachments,
-        ))
-        .await?;
+        let msg = wire::user_message(text, &crate::daemon::uuid(), steer, attachments);
+        if let Err(e) = self.write(&msg).await {
+            // The agent went between starting and now. A new message gets
+            // one more go with a new agent; a steer belonged to the turn.
+            let again = if steer {
+                Err(e)
+            } else {
+                eprintln!(
+                    "dent-daemon: {}: agent unreachable, starting another: {e:#}",
+                    self.id
+                );
+                self.retire_proc().await;
+                match self.ensure_proc().await {
+                    Ok(()) => self.write(&msg).await,
+                    Err(e) => Err(e),
+                }
+            };
+            if let Err(e) = again {
+                self.log(Body::Notice {
+                    text: format!("Couldn't reach Claude Code: {e:#}"),
+                });
+                if !steer {
+                    self.end_turn(Outcome::Error {
+                        message: format!("{e:#}"),
+                    });
+                }
+                return Err(e);
+            }
+        }
         self.in_turn = true;
         self.said = false;
         self.idle_at = None;
@@ -750,6 +844,20 @@ impl Session {
         else {
             bail!("no such message");
         };
+        // Already back there, with nothing said since (a resend after a
+        // reconnect or a restart): going again would only put back files
+        // changed by hand since.
+        let last = events.iter().rev().find_map(|e| match &e.body {
+            Body::Rewound { to, files } => Some(Some((to, *files))),
+            Body::User { .. } => Some(None),
+            _ => None,
+        });
+        if let Some(Some((was, had))) = last
+            && *was == to
+            && (had || !files)
+        {
+            return Ok(());
+        }
         if files {
             let commit = events.iter().find_map(|e| match &e.body {
                 Body::Checkpoint { id, commit } if *id == to => Some(commit.clone()),
@@ -785,15 +893,41 @@ impl Session {
         self.respawn = false;
         if let Some(p) = self.proc.take() {
             let _ = self.d.store().clear_proc(&self.id);
+            self.background_gone();
+            self.controls_gone();
             if let Ok(h) = self.d.holder().await {
                 let _ = h.stop(&p.id, Duration::from_secs(1)).await;
             }
         }
     }
 
+    /// The agent process has gone, and the work it ran in the background
+    /// with it.
+    fn background_gone(&mut self) {
+        if self.background.is_empty() {
+            return;
+        }
+        self.background.clear();
+        self.log(Body::Background { tasks: Vec::new() });
+        self.log(Body::Notice {
+            text: "Background work stopped with the agent.".into(),
+        });
+    }
+
     async fn ensure_proc(&mut self) -> Result<()> {
-        if self.proc.is_some() {
-            return Ok(());
+        if let Some(p) = &self.proc {
+            if !p.stopping {
+                return Ok(());
+            }
+            if self.in_turn {
+                bail!("the agent is stopping; try again in a moment");
+            }
+            // Stopping for being idle, its input already closed: let it
+            // finish on its own and start another.
+            self.retire_proc().await;
+        }
+        if !std::path::Path::new(&self.cwd).is_dir() {
+            bail!("the session's folder {} no longer exists", self.cwd);
         }
         let h = self.d.holder().await?;
         // dent names the agent's session up front, so it can be resumed
@@ -872,19 +1006,24 @@ impl Session {
         self.d.holder().await?.write(&p.id, &line).await
     }
 
+    /// A control request's id. The daemon's boot is in it, so an answer
+    /// to a request an earlier daemon sent never matches a new one.
+    fn ctl_id(&mut self) -> String {
+        self.next_ctl += 1;
+        format!("dent-{}-{}", self.d.boot, self.next_ctl)
+    }
+
     /// A control request sent once the current output is handled, for
     /// places that can't wait on the write.
     fn control_later(&mut self, subtype: &str, kind: Ctl) {
-        self.next_ctl += 1;
-        let id = format!("dent-{}", self.next_ctl);
+        let id = self.ctl_id();
         self.controls.insert(id.clone(), kind);
         self.outbox
             .push(wire::control_request(&id, subtype, json!({})));
     }
 
     async fn control(&mut self, subtype: &str, extra: Value, kind: Ctl) -> Result<()> {
-        self.next_ctl += 1;
-        let id = format!("dent-{}", self.next_ctl);
+        let id = self.ctl_id();
         self.controls.insert(id.clone(), kind);
         self.write(&wire::control_request(&id, subtype, extra))
             .await
@@ -905,6 +1044,8 @@ impl Session {
             self.end_turn(Outcome::Interrupted { reason: None });
             return Ok(());
         }
+        self.stop_asked = true;
+        let _ = self.d.store().put(&self.stop_key(), "1");
         // The agent doesn't always end the turn after an interrupt, and one
         // that can't be reached gets its process stopped straight away.
         let asked = self.control("interrupt", json!({}), Ctl::Interrupt).await;
@@ -1068,6 +1209,9 @@ impl Session {
                 permission_mode,
                 ..
             } => {
+                // A steer has been taken in by the time a turn starts: an
+                // abort from here on is a real one.
+                self.steered = false;
                 if self.agent_session.as_deref() != Some(session_id.as_str())
                     && !session_id.is_empty()
                 {
@@ -1149,6 +1293,7 @@ impl Session {
                 uuid,
                 blocks,
                 context,
+                results,
                 ..
             } => {
                 if parent.is_none()
@@ -1166,9 +1311,21 @@ impl Session {
                 if !blocks.is_empty() {
                     self.log_from(
                         Body::Assistant {
-                            parent,
+                            parent: parent.clone(),
                             blocks,
                             uuid,
+                        },
+                        end,
+                    );
+                }
+                // A server tool's result comes with its call.
+                for r in results {
+                    self.log_from(
+                        Body::ToolResult {
+                            tool: r.tool_use_id,
+                            error: r.is_error,
+                            output: r.output,
+                            parent: parent.clone(),
                         },
                         end,
                     );
@@ -1196,6 +1353,11 @@ impl Session {
                     },
                     end,
                 );
+                // Nothing left to wait for: an agent that stays quiet now
+                // is stopped in time, as after a turn.
+                if self.background.is_empty() && !self.in_turn && self.proc.is_some() {
+                    self.idle_at = Some(Instant::now() + idle());
+                }
             }
             Inbound::CanUseTool {
                 request_id,
@@ -1211,6 +1373,7 @@ impl Session {
                         input: input.to_string(),
                         description,
                         keeps: wire::keeps(&suggestions),
+                        suggestions: (!suggestions.is_null()).then(|| suggestions.to_string()),
                     },
                     end,
                 );
@@ -1273,6 +1436,9 @@ impl Session {
                             end,
                         );
                     }
+                }
+                (Some(c @ (Ctl::Model(_) | Ctl::Permission(_))), true) => {
+                    self.keep(c, Some(end));
                 }
                 (Some(Ctl::Settings), true) => {
                     self.d.catalog(&self.id, |c| {
@@ -1362,7 +1528,6 @@ impl Session {
                     Some(Ctl::Interrupt | Ctl::ContextUsage | Ctl::Settings | Ctl::Refresh { .. }),
                     _,
                 )
-                | (Some(Ctl::Other), true)
                 | (None, _) => {}
                 (Some(_), false) => self.log_from(
                     Body::Notice {
@@ -1590,6 +1755,7 @@ impl Session {
                             input: input.to_string(),
                             description: None,
                             keeps: false,
+                            suggestions: None,
                         },
                         end,
                     );
@@ -1622,6 +1788,9 @@ impl Session {
         }
         self.stop_at = None;
         self.start_by = None;
+        if std::mem::take(&mut self.stop_asked) {
+            let _ = self.d.store().del(&self.stop_key());
+        }
         // Approvals still open belonged to the turn that just ended.
         for id in std::mem::take(&mut self.asked).into_keys() {
             self.log(Body::Answered {
@@ -1670,6 +1839,8 @@ impl Session {
             return;
         };
         let _ = self.d.store().clear_proc(&self.id);
+        self.background_gone();
+        self.controls_gone();
         if let Ok(h) = self.d.holder().await {
             let _ = h.release(proc).await;
         }

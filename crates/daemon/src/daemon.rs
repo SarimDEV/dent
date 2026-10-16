@@ -27,6 +27,10 @@ pub enum Live {
         session: String,
         text: String,
         reset: bool,
+        /// Counts every change to the replies in progress, so a client
+        /// that took a snapshot ([`Daemon::partials`]) skips the deltas
+        /// already in it.
+        n: u64,
     },
     Activity {
         session: String,
@@ -48,12 +52,14 @@ pub struct Daemon {
     /// This binary's build stamp, taken at start.
     pub build: String,
     pub machine: String,
+    /// Unique to this start of the daemon.
+    pub boot: String,
     store: Mutex<Store>,
     pub live: broadcast::Sender<Arc<Live>>,
     sessions: Mutex<HashMap<String, mpsc::UnboundedSender<Cmd>>>,
     holder: tokio::sync::Mutex<Option<Arc<Holder>>>,
     /// Each session's reply so far, for clients that subscribe mid-stream.
-    partials: Mutex<HashMap<String, String>>,
+    partials: Mutex<Partials>,
     models: Mutex<Vec<Model>>,
     /// The last usage reading and when it was taken.
     usage: tokio::sync::Mutex<Option<(Vec<dent_protocol::Window>, u64)>>,
@@ -64,6 +70,13 @@ pub struct Daemon {
     catalogs: Mutex<HashMap<String, crate::claude::commands::Catalog>>,
     /// What each session's agent is doing besides talking.
     activities: Mutex<HashMap<String, dent_protocol::Activity>>,
+}
+
+/// The replies streaming now, and how many changes they've had.
+#[derive(Default)]
+struct Partials {
+    text: HashMap<String, String>,
+    n: u64,
 }
 
 pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -94,11 +107,12 @@ impl Daemon {
                 .map(|p| dent_protocol::build_stamp(&p))
                 .unwrap_or_default(),
             machine: hostname(),
+            boot: new_id(),
             store: Mutex::new(store),
             live,
             sessions: Mutex::new(HashMap::new()),
             holder: tokio::sync::Mutex::new(None),
-            partials: Mutex::new(HashMap::new()),
+            partials: Mutex::new(Partials::default()),
             models: Mutex::new(models),
             commands: Mutex::new(HashMap::new()),
             catalogs: Mutex::new(HashMap::new()),
@@ -111,40 +125,55 @@ impl Daemon {
         lock(&self.store)
     }
 
-    /// Write an event and tell every client.
+    /// Write an event and tell every client. The log stays locked until
+    /// the event is on the live feed, so the feed carries events in `seq`
+    /// order: a subscriber skips anything at or below the last seq it
+    /// sent, and an event overtaken by a later one would be lost to it.
     pub fn append(&self, session: &str, body: Body, src: Option<Source<'_>>) -> Result<Event> {
-        let ev = self.store().append(session, now_ms(), &body, src)?;
+        let mut store = self.store();
+        let ev = store.append(session, now_ms(), &body, src)?;
         if matches!(ev.body, Body::Assistant { parent: None, .. }) {
-            lock(&self.partials).remove(session);
+            let mut p = lock(&self.partials);
+            if p.text.remove(session).is_some() {
+                p.n += 1;
+            }
         }
         let _ = self.live.send(Arc::new(Live::Event(ev.clone())));
+        drop(store);
         Ok(ev)
     }
 
     pub fn delta(&self, session: &str, text: &str, reset: bool) {
-        {
-            let mut p = lock(&self.partials);
-            let s = p.entry(session.into()).or_default();
-            if reset {
-                s.clear();
-            }
-            s.push_str(text);
+        // Changed and sent under one lock, so a snapshot's count says
+        // exactly which deltas it holds.
+        let mut p = lock(&self.partials);
+        p.n += 1;
+        let n = p.n;
+        let s = p.text.entry(session.into()).or_default();
+        if reset {
+            s.clear();
         }
+        s.push_str(text);
         let _ = self.live.send(Arc::new(Live::Delta {
             session: session.into(),
             text: text.into(),
             reset,
+            n,
         }));
     }
 
     /// A reply was replaced by its final message, or cut off: clients drop
     /// what streamed so far.
     pub fn clear_partial(&self, session: &str) {
-        if lock(&self.partials).remove(session).is_some() {
+        let mut p = lock(&self.partials);
+        if p.text.remove(session).is_some() {
+            p.n += 1;
+            let n = p.n;
             let _ = self.live.send(Arc::new(Live::Delta {
                 session: session.into(),
                 text: String::new(),
                 reset: true,
+                n,
             }));
         }
     }
@@ -152,17 +181,23 @@ impl Daemon {
     /// What has streamed of the reply in progress.
     pub fn partial(&self, session: &str) -> Option<String> {
         lock(&self.partials)
+            .text
             .get(session)
             .filter(|t| !t.trim().is_empty())
             .cloned()
     }
 
-    pub fn partials(&self) -> Vec<(String, String)> {
-        lock(&self.partials)
+    /// Every reply in progress, and the count of the last delta they
+    /// hold: deltas numbered up to it are already in the snapshot.
+    pub fn partials(&self) -> (Vec<(String, String)>, u64) {
+        let p = lock(&self.partials);
+        let text = p
+            .text
             .iter()
             .filter(|(_, t)| !t.is_empty())
             .map(|(s, t)| (s.clone(), t.clone()))
-            .collect()
+            .collect();
+        (text, p.n)
     }
 
     pub fn models(&self) -> Vec<Model> {
@@ -406,6 +441,25 @@ impl Daemon {
         }
     }
 
+    /// The session request `key` already made, or a new id for it,
+    /// claimed in the same step so a resent request (after a reconnect, or
+    /// a restart) never makes a second session.
+    fn made_once(&self, key: Option<&str>) -> Result<(String, bool)> {
+        let Some(key) = key.filter(|k| !k.is_empty()) else {
+            return Ok((new_id(), false));
+        };
+        let key = format!("made.{key}");
+        let store = self.store();
+        if let Some(s) = store.get(&key)?
+            && store.session(&s)?.is_some()
+        {
+            return Ok((s, true));
+        }
+        let session = new_id();
+        store.put(&key, &session)?;
+        Ok((session, false))
+    }
+
     /// Start a session and send its first message.
     pub async fn create(self: &Arc<Self>, new: NewSession) -> Result<String> {
         let NewSession {
@@ -420,7 +474,23 @@ impl Daemon {
         if !std::path::Path::new(&cwd).is_dir() {
             bail!("{cwd} isn't a folder");
         }
-        let session = new_id();
+        let key = (!id.is_empty()).then(|| format!("create.{id}"));
+        let (session, made) = self.made_once(key.as_deref())?;
+        if made {
+            // Sent again: the session's there; its first message goes if
+            // it hadn't, and is passed over if it had.
+            self.command(
+                &session,
+                Op::Send {
+                    id,
+                    text,
+                    steer: false,
+                    attachments,
+                },
+            )
+            .await?;
+            return Ok(session);
+        }
         self.append(
             &session,
             Body::Created {
@@ -472,8 +542,16 @@ impl Daemon {
     /// A new session that carries on from `parent`: its history up to just
     /// before message `before` (or all of it) is copied over, and its agent
     /// resumes that conversation as a new agent session.
-    pub async fn fork(self: &Arc<Self>, parent: &str, before: Option<&str>) -> Result<String> {
-        self.fork_with(parent, before, None).await
+    /// `id` is the client's for the request: sent again, it gets the same
+    /// fork.
+    pub async fn fork(
+        self: &Arc<Self>,
+        parent: &str,
+        before: Option<&str>,
+        id: Option<&str>,
+    ) -> Result<String> {
+        let key = id.map(|i| format!("fork.{i}"));
+        self.fork_with(parent, before, None, key.as_deref()).await
     }
 
     /// Make side question `id` and its answer into a new session: the
@@ -500,10 +578,13 @@ impl Daemon {
                 _ => None,
             })
             .context("it hasn't been answered yet")?;
+        // One session per side question, however often it's asked for.
+        let key = format!("aside.{parent}.{id}");
         self.fork_with(
             parent,
             None,
             Some((id.to_string(), question, answer, agent)),
+            Some(&key),
         )
         .await
     }
@@ -515,6 +596,7 @@ impl Daemon {
         parent: &str,
         before: Option<&str>,
         aside: Option<(String, String, String, String)>,
+        key: Option<&str>,
     ) -> Result<String> {
         let row = self.store().session(parent)?.context("no such session")?;
         let events = self.store().session_events(parent)?;
@@ -535,7 +617,10 @@ impl Daemon {
                 _ => None,
             })
             .unwrap_or_default();
-        let session = new_id();
+        let (session, made) = self.made_once(key)?;
+        if made {
+            return Ok(session);
+        }
         self.append(
             &session,
             Body::Created {
@@ -844,6 +929,9 @@ pub fn title(text: &str) -> String {
 /// that holds it. Gives up after three minutes.
 fn run_aside(argv: &[String], cwd: &str) -> std::result::Result<(String, Option<String>), String> {
     use std::io::BufRead;
+    if !std::path::Path::new(cwd).is_dir() {
+        return Err(format!("The session's folder {cwd} no longer exists"));
+    }
     let mut child = std::process::Command::new(&argv[0])
         .args(&argv[1..])
         .current_dir(cwd)

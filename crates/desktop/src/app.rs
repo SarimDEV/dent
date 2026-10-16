@@ -4558,6 +4558,7 @@ impl Dent {
         let n = self.live.send(Request::Fork {
             session: session.to_string(),
             before,
+            id: Some(crate::message_id()),
         });
         self.waiting.insert(n, Waiting::Create(None));
         cx.notify();

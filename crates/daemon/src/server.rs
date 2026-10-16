@@ -15,6 +15,12 @@ use tokio::sync::{broadcast, mpsc};
 use crate::daemon::{Daemon, Live};
 use crate::session::Op;
 
+/// Lines waiting to go to one client.
+const OUT_QUEUE: usize = 256;
+
+/// A client that hasn't taken a line in this long is dropped.
+const WRITE_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Files the viewer may open are capped at this size.
 const FILE_CAP: u64 = 32 * 1024 * 1024;
 
@@ -34,11 +40,15 @@ pub async fn serve(d: Arc<Daemon>) -> Result<()> {
 
 async fn conn(d: Arc<Daemon>, stream: UnixStream) -> Result<()> {
     let (r, mut w) = stream.into_split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    // Bounded: a client that stops reading holds the subscription up, so
+    // it falls behind the live feed and catches up from the log instead of
+    // growing a queue here. One that takes too long over a write is let go.
+    let (tx, mut rx) = mpsc::channel::<Vec<u8>>(OUT_QUEUE);
     tokio::spawn(async move {
         while let Some(line) = rx.recv().await {
-            if w.write_all(&line).await.is_err() {
-                break;
+            match tokio::time::timeout(WRITE_LIMIT, w.write_all(&line)).await {
+                Ok(Ok(())) => {}
+                _ => break,
             }
         }
     });
@@ -49,23 +59,27 @@ async fn conn(d: Arc<Daemon>, stream: UnixStream) -> Result<()> {
         let env: Envelope<Request> = match serde_json::from_str(&line) {
             Ok(e) => e,
             Err(e) => {
-                let _ = tx.send(encode(
-                    0,
-                    &Out::Error {
-                        message: format!("bad request: {e}"),
-                    },
-                ));
+                let _ = tx
+                    .send(encode(
+                        0,
+                        &Out::Error {
+                            message: format!("bad request: {e}"),
+                        },
+                    ))
+                    .await;
                 continue;
             }
         };
         let req = env.req;
         if !hello && !matches!(env.body, Request::Hello { .. }) {
-            let _ = tx.send(encode(
-                req,
-                &Out::Error {
-                    message: "hello first".into(),
-                },
-            ));
+            let _ = tx
+                .send(encode(
+                    req,
+                    &Out::Error {
+                        message: "hello first".into(),
+                    },
+                ))
+                .await;
             continue;
         }
         let out = match env.body {
@@ -101,7 +115,7 @@ async fn conn(d: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                 message: format!("{e:#}"),
             },
         };
-        if tx.send(encode(req, &msg)).is_err() {
+        if tx.send(encode(req, &msg)).await.is_err() {
             break;
         }
     }
@@ -167,8 +181,12 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             d.command(&session, Op::Rewind { to, files }).await?;
             Reply::Ok
         }
-        Request::Fork { session, before } => Reply::Created {
-            session: d.fork(&session, before.as_deref()).await?,
+        Request::Fork {
+            session,
+            before,
+            id,
+        } => Reply::Created {
+            session: d.fork(&session, before.as_deref(), id.as_deref()).await?,
         },
         Request::Aside { session, id, text } => {
             d.aside(&session, &id, &text).await?;
@@ -473,49 +491,96 @@ async fn subscribe(
     d: Arc<Daemon>,
     mut after: u64,
     mut rx: broadcast::Receiver<Arc<Live>>,
-    tx: mpsc::UnboundedSender<Vec<u8>>,
+    tx: mpsc::Sender<Vec<u8>>,
 ) {
+    // Sessions this client holds a streaming reply for, and the count of
+    // the last delta its snapshot held.
+    let mut streaming = std::collections::HashSet::new();
+    let mut snapshot: u64;
     loop {
         loop {
-            let batch = match d.store().after(after, BATCH_BYTES) {
+            let got = d.store().after(after, BATCH_BYTES);
+            let (batch, upto) = match got {
                 Ok(b) => b,
                 Err(e) => {
-                    let _ = tx.send(encode(
-                        0,
-                        &Out::Error {
-                            message: format!("{e:#}"),
-                        },
-                    ));
+                    let _ = tx
+                        .send(encode(
+                            0,
+                            &Out::Error {
+                                message: format!("{e:#}"),
+                            },
+                        ))
+                        .await;
                     return;
                 }
             };
-            let Some(last) = batch.last() else { break };
-            after = last.seq;
-            if tx.send(encode(0, &Out::Events { events: batch })).is_err() {
+            // Rows this daemon can't read are passed over, not taken for
+            // the end of the log.
+            if upto <= after {
+                break;
+            }
+            after = upto;
+            if batch.is_empty() {
+                continue;
+            }
+            if tx
+                .send(encode(0, &Out::Events { events: batch }))
+                .await
+                .is_err()
+            {
                 return;
             }
         }
-        if tx.send(encode(0, &Out::CaughtUp { seq: after })).is_err() {
+        if tx
+            .send(encode(0, &Out::CaughtUp { seq: after }))
+            .await
+            .is_err()
+        {
             return;
         }
-        for (session, text) in d.partials() {
-            let _ = tx.send(encode(
-                0,
-                &Out::Delta {
-                    session,
-                    text,
-                    reset: true,
-                },
-            ));
+        // The replies streaming now, whole. Deltas already queued for this
+        // client are in the snapshot, so they're skipped by number; after
+        // a lag, a reply that ended while this client wasn't listening is
+        // dropped.
+        let (now, n) = d.partials();
+        for session in std::mem::take(&mut streaming) {
+            if !now.iter().any(|(s, _)| *s == session) {
+                let _ = tx
+                    .send(encode(
+                        0,
+                        &Out::Delta {
+                            session,
+                            text: String::new(),
+                            reset: true,
+                        },
+                    ))
+                    .await;
+            }
+        }
+        snapshot = n;
+        for (session, text) in now {
+            streaming.insert(session.clone());
+            let _ = tx
+                .send(encode(
+                    0,
+                    &Out::Delta {
+                        session,
+                        text,
+                        reset: true,
+                    },
+                ))
+                .await;
         }
         for (session, activity) in d.activities() {
-            let _ = tx.send(encode(
-                0,
-                &Out::Activity {
-                    session,
-                    activity: Some(activity),
-                },
-            ));
+            let _ = tx
+                .send(encode(
+                    0,
+                    &Out::Activity {
+                        session,
+                        activity: Some(activity),
+                    },
+                ))
+                .await;
         }
         loop {
             match rx.recv().await {
@@ -531,15 +596,24 @@ async fn subscribe(
                         Live::Models(models) => Out::Models {
                             models: models.clone(),
                         },
+                        Live::Delta { n, .. } if *n <= snapshot => continue,
                         Live::Delta {
                             session,
                             text,
                             reset,
-                        } => Out::Delta {
-                            session: session.clone(),
-                            text: text.clone(),
-                            reset: *reset,
-                        },
+                            ..
+                        } => {
+                            if *reset && text.is_empty() {
+                                streaming.remove(session);
+                            } else {
+                                streaming.insert(session.clone());
+                            }
+                            Out::Delta {
+                                session: session.clone(),
+                                text: text.clone(),
+                                reset: *reset,
+                            }
+                        }
                         Live::Activity { session, activity } => Out::Activity {
                             session: session.clone(),
                             activity: activity.clone(),
@@ -550,7 +624,7 @@ async fn subscribe(
                         },
                         Live::Out(out) => out.clone(),
                     };
-                    if tx.send(encode(0, &msg)).is_err() {
+                    if tx.send(encode(0, &msg)).await.is_err() {
                         return;
                     }
                 }

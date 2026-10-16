@@ -28,7 +28,10 @@
 //!   servers turn on and off, reconnect (except `figma`) and sign in
 //! - anything else: a short Markdown reply
 //!
-//! `FAKE_CLAUDE_SPEED` scales every pause (0 makes it instant).
+//! `FAKE_CLAUDE_SPEED` scales every pause (0 makes it instant);
+//! `FAKE_CLAUDE_LINGER_MS` keeps it running that long after its input
+//! closes. `set_model` refuses models named `unavailable…`.
+//! `FAKE_CLAUDE_DEAF` answers interrupts but carries on regardless.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, Write};
@@ -152,6 +155,14 @@ fn main() {
             continue;
         }
         if !a.stdin_open {
+            // Winding down after its input closed, as the real CLI takes a
+            // moment to.
+            if let Some(ms) = std::env::var("FAKE_CLAUDE_LINGER_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+            {
+                std::thread::sleep(Duration::from_millis(ms));
+            }
             return;
         }
         match a.rx.recv() {
@@ -274,7 +285,15 @@ impl Agent {
                         "current_permission_mode": self.mode,
                     }),
                     "set_model" => {
-                        self.model = v["request"]["model"].as_str().unwrap_or("sonnet").into();
+                        let model = v["request"]["model"].as_str().unwrap_or("sonnet");
+                        // A model this account can't use is refused.
+                        if model.starts_with("unavailable") {
+                            out(json!({"type": "control_response", "response": {
+                                "subtype": "error", "request_id": id,
+                                "error": format!("Model {model} is not available")}}));
+                            return None;
+                        }
+                        self.model = model.into();
                         json!({})
                     }
                     "set_permission_mode" => {
@@ -434,7 +453,7 @@ impl Agent {
                     let interrupt =
                         v["type"] == "control_request" && v["request"]["subtype"] == "interrupt";
                     self.handle(v);
-                    if interrupt {
+                    if interrupt && std::env::var_os("FAKE_CLAUDE_DEAF").is_none() {
                         return Err(Cut::Interrupted);
                     }
                     if std::mem::take(&mut self.steer) {

@@ -1156,6 +1156,7 @@ fn a_fork_copies_the_conversation_and_resumes_it_as_a_new_agent_session() {
 
     // Everything so far.
     let f = match c.call(Request::Fork {
+        id: None,
         session: s.clone(),
         before: None,
     }) {
@@ -1180,6 +1181,7 @@ fn a_fork_copies_the_conversation_and_resumes_it_as_a_new_agent_session() {
 
     // Up to just before the second message.
     let g = match c.call(Request::Fork {
+        id: None,
         session: s.clone(),
         before: Some("two".into()),
     }) {
@@ -1472,4 +1474,327 @@ fn commands_compaction_retries_and_dialogs_arrive_by_kind() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn clients_joining_mid_reply_see_it_once_and_events_never_skip() {
+    let w = World::new(&[]);
+    let mut c = w.client();
+    c.subscribe(0);
+    // Two sessions writing at once: the feed still carries every seq, in
+    // order.
+    let a = c.create(&w.cwd(), Permission::Ask, "a long answer please");
+    let b = c.create(&w.cwd(), Permission::Ask, "another long answer please");
+    c.wait(&a, "the turn to start", |x| matches!(x, Body::TurnStarted));
+    // Clients joining while the reply streams get what streamed so far
+    // once, then the rest.
+    let mut late: Vec<Client> = (0..6)
+        .map(|_| {
+            std::thread::sleep(Duration::from_millis(15));
+            let mut l = w.client();
+            l.subscribe(0);
+            l
+        })
+        .collect();
+    c.wait_turns(&a, 1);
+    c.wait_turns(&b, 1);
+    let want = c.text(&a);
+    for l in &mut late {
+        l.wait_turns(&a, 1);
+        assert_eq!(l.partial.get(&a).cloned().unwrap_or_default(), want);
+    }
+    let seqs: Vec<u64> = c.events.lock().unwrap().iter().map(|e| e.seq).collect();
+    assert!(
+        seqs.windows(2).all(|p| p[1] == p[0] + 1),
+        "gaps in {seqs:?}"
+    );
+}
+
+#[test]
+fn a_session_whose_folder_was_deleted_says_so() {
+    let w = World::new(&[("DENT_IDLE_MS", "200")]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "hi");
+    c.wait_turns(&s, 1);
+    // Let the agent stop, then take its folder away.
+    std::thread::sleep(Duration::from_millis(800));
+    std::fs::remove_dir_all(&w.project).unwrap();
+    let _ = c.call(Request::Send {
+        session: s.clone(),
+        id: "2".into(),
+        text: "hi again".into(),
+        steer: false,
+        attachments: Vec::new(),
+    });
+    c.wait(
+        &s,
+        "the reason",
+        |b| matches!(b, Body::Notice { text } if text.contains("no longer exists")),
+    );
+}
+
+#[test]
+fn always_allow_for_the_project_survives_a_daemon_restart() {
+    let mut w = World::new(&[]);
+    let s = {
+        let mut c = w.client();
+        c.subscribe(0);
+        let s = c.create(&w.cwd(), Permission::Ask, "please run it");
+        c.asked(&s);
+        s
+    };
+    w.kill();
+    w.start();
+    let mut c = w.client();
+    c.subscribe(0);
+    let id = c.asked(&s);
+    c.call(Request::Answer {
+        session: s.clone(),
+        id,
+        answer: Answer::Allow {
+            always: true,
+            project: true,
+        },
+    })
+    .unwrap();
+    c.wait_turns(&s, 1);
+    // The rule the agent offered, kept in the project: not all of Bash,
+    // and not only for this session.
+    let saved =
+        std::fs::read_to_string(w.project.join(".claude/settings.local.json")).unwrap_or_default();
+    assert!(
+        saved.contains("Bash(") && !saved.contains("Bash()"),
+        "{saved}"
+    );
+}
+
+#[test]
+fn background_work_outlives_a_setting_change_and_ends_with_its_agent() {
+    // Slow enough (1.5 s of background work) to act while it runs.
+    let w = World::new(&[("FAKE_CLAUDE_SPEED", "1")]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let background = |b: &Body| {
+        matches!(
+            b,
+            Body::Status {
+                status: Status::Background
+            }
+        )
+    };
+    // Changing effort waits for the background work instead of stopping it.
+    let s = c.create(&w.cwd(), Permission::Full, "start the background job");
+    c.wait(&s, "the background work", background);
+    c.call(Request::SetEffort {
+        session: s.clone(),
+        effort: "max".into(),
+    })
+    .unwrap();
+    c.wait_turns(&s, 2);
+    assert!(c.text(&s).contains("finished cleanly"));
+    c.pump(Duration::from_millis(100));
+    assert_eq!(c.status(&s), Some(Status::Done));
+
+    // When the agent goes (here for a rewind), so does its background work.
+    // (Its own first message: the same id would be the same session.)
+    let t = c.create(&w.cwd(), Permission::Full, "start another background job");
+    c.wait(&t, "the background work", background);
+    c.call(Request::Rewind {
+        session: t.clone(),
+        to: "m-start another background job".into(),
+        files: false,
+    })
+    .unwrap();
+    c.wait(
+        &t,
+        "the work to be let go",
+        |b| matches!(b, Body::Notice { text } if text.starts_with("Background work stopped")),
+    );
+    let until = Instant::now() + Duration::from_secs(10);
+    while c.status(&t) == Some(Status::Background) && Instant::now() < until {
+        c.pump(Duration::from_millis(50));
+    }
+    assert_eq!(c.status(&t), Some(Status::Done), "{:#?}", c.events(&t));
+}
+
+#[test]
+fn a_message_sent_as_an_idle_agent_winds_down_still_runs() {
+    let w = World::new(&[("DENT_IDLE_MS", "200"), ("FAKE_CLAUDE_LINGER_MS", "2000")]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "hi");
+    c.wait_turns(&s, 1);
+    // Its input is closed and it hasn't exited yet.
+    std::thread::sleep(Duration::from_millis(600));
+    c.say(&s, "2", "hi again", false);
+    c.wait_turns(&s, 2);
+    // And a model change in that window is taken by the next agent.
+    std::thread::sleep(Duration::from_millis(600));
+    c.call(Request::SetModel {
+        session: s.clone(),
+        model: "opus".into(),
+    })
+    .unwrap();
+    c.wait(
+        &s,
+        "the model",
+        |b| matches!(b, Body::Settings { model: Some(m), .. } if m == "opus"),
+    );
+}
+
+#[test]
+fn a_setting_the_agent_refuses_is_not_kept() {
+    let w = World::new(&[]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "hi");
+    c.wait_turns(&s, 1);
+    c.call(Request::SetModel {
+        session: s.clone(),
+        model: "unavailable-model".into(),
+    })
+    .unwrap();
+    c.wait(
+        &s,
+        "the refusal",
+        |b| matches!(b, Body::Notice { text } if text.contains("not available")),
+    );
+    c.call(Request::SetModel {
+        session: s.clone(),
+        model: "haiku".into(),
+    })
+    .unwrap();
+    c.wait(
+        &s,
+        "the model",
+        |b| matches!(b, Body::Settings { model: Some(m), .. } if m == "haiku"),
+    );
+    assert_eq!(
+        c.count(
+            &s,
+            |b| matches!(b, Body::Settings { model: Some(m), .. } if m.starts_with("unavailable"))
+        ),
+        0
+    );
+}
+
+#[test]
+fn a_stop_or_a_stuck_start_is_seen_through_across_a_daemon_restart() {
+    // Stop asked, the agent ignoring it, and the daemon restarting before
+    // the grace is up: the turn still ends.
+    let mut w = World::new(&[("FAKE_CLAUDE_SPEED", "0.5"), ("FAKE_CLAUDE_DEAF", "1")]);
+    let s = {
+        let mut c = w.client();
+        c.subscribe(0);
+        let s = c.create(&w.cwd(), Permission::Ask, "a long answer please");
+        c.wait(&s, "the turn to start", |b| matches!(b, Body::TurnStarted));
+        c.call(Request::Interrupt {
+            session: s.clone(),
+            by: None,
+        })
+        .unwrap();
+        s
+    };
+    w.kill();
+    w.start();
+    let mut c = w.client();
+    c.subscribe(0);
+    c.wait(&s, "the interruption", |b| {
+        matches!(
+            b,
+            Body::TurnEnded {
+                outcome: Outcome::Interrupted { .. }
+            }
+        )
+    });
+    drop(c);
+    drop(w);
+
+    // An agent stuck starting when the daemon restarts still times out.
+    let mut w = World::new(&[("DENT_START_MS", "1000"), ("FAKE_CLAUDE_HANG", "1")]);
+    let s = {
+        let mut c = w.client();
+        c.subscribe(0);
+        c.create(&w.cwd(), Permission::Ask, "hi")
+    };
+    w.kill();
+    w.start();
+    let mut c = w.client();
+    c.subscribe(0);
+    c.wait(&s, "the turn to fail", |b| {
+        matches!(b, Body::TurnEnded { outcome: Outcome::Error { message } }
+            if message.starts_with("Claude Code didn't start"))
+    });
+}
+
+#[test]
+fn resent_creates_forks_and_rewinds_happen_once() {
+    let mut w = World::new(&[]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let create = Request::Create {
+        cwd: w.cwd(),
+        model: None,
+        permission: Permission::Edits,
+        effort: None,
+        id: "first".into(),
+        text: "hi".into(),
+        attachments: Vec::new(),
+    };
+    let made = |o: Result<Out, String>| match o {
+        Ok(Out::Reply {
+            reply: dent_protocol::Reply::Created { session },
+        }) => session,
+        other => panic!("{other:?}"),
+    };
+    let s = made(c.call(create.clone()));
+    c.wait_turns(&s, 1);
+    c.say(&s, "second", "write notes.md please", false);
+    c.wait_turns(&s, 2);
+    let fork = Request::Fork {
+        session: s.clone(),
+        before: None,
+        id: Some("f1".into()),
+    };
+    let f = made(c.call(fork.clone()));
+    // A restart in between: the same requests again.
+    drop(c);
+    w.kill();
+    w.start();
+    let mut c = w.client();
+    c.subscribe(0);
+    assert_eq!(made(c.call(create)), s);
+    assert_eq!(made(c.call(fork)), f);
+    c.pump(Duration::from_millis(300));
+    assert_eq!(c.count(&s, |b| matches!(b, Body::Created { .. })), 1);
+    assert_eq!(
+        c.count(&s, |b| matches!(b, Body::User { id, .. } if id == "first")),
+        1
+    );
+    let sessions = c
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e.body, Body::Created { .. }))
+        .count();
+    assert_eq!(sessions, 2);
+
+    // Rewound once, files and all; a file changed by hand since stays.
+    let rewind = Request::Rewind {
+        session: s.clone(),
+        to: "second".into(),
+        files: true,
+    };
+    c.call(rewind.clone()).unwrap();
+    assert!(!w.project.join("notes.md").exists());
+    std::fs::write(w.project.join("README.md"), "mine\n").unwrap();
+    c.call(rewind).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(w.project.join("README.md")).unwrap(),
+        "mine\n"
+    );
+    c.pump(Duration::from_millis(100));
+    assert_eq!(c.count(&s, |b| matches!(b, Body::Rewound { .. })), 1);
 }
