@@ -1318,6 +1318,7 @@ mod tests {
             input: input.into(),
             description: None,
             keeps: false,
+            suggestions: None,
         };
         let result = |id: &str| Body::ToolResult {
             tool: id.into(),
