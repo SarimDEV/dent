@@ -87,6 +87,8 @@ struct Piece {
     text: SharedString,
     lead: SharedString,
     swaps: Rc<Vec<(Range<usize>, String)>>,
+    /// ⌘F looks in it (see [`unsearched`]).
+    searched: bool,
 }
 
 impl Piece {
@@ -250,6 +252,24 @@ thread_local! {
     /// What the next text made copies with before it, set by the block
     /// laying it out (a list marker, a quote's `> `).
     static LEAD: RefCell<Option<SharedString>> = const { RefCell::new(None) };
+    /// Text made now isn't searched by ⌘F (see [`unsearched`]).
+    static UNSEARCHED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Text made while this lives copies and selects but isn't searched or
+/// tinted by ⌘F: what's drawn only once scrolled to inside something
+/// (a long table's later rows), which find doesn't count either.
+#[must_use]
+pub struct Unsearched(bool);
+
+pub fn unsearched() -> Unsearched {
+    Unsearched(UNSEARCHED.with(|u| u.replace(true)))
+}
+
+impl Drop for Unsearched {
+    fn drop(&mut self) {
+        UNSEARCHED.with(|u| u.set(self.0));
+    }
 }
 
 /// Where the link under `p` points, if one is.
@@ -954,7 +974,7 @@ fn texts(s: &State, area: Area) -> Vec<(Vec<u32>, SharedString)> {
         .get(&area)
         .into_iter()
         .flatten()
-        .filter(|(path, _)| live(s, area, path))
+        .filter(|(path, p)| p.searched && live(s, area, path))
         .map(|(path, p)| (path.clone(), p.text.clone()))
         .collect()
 }
@@ -1129,6 +1149,7 @@ pub struct Text {
     color: Hsla,
     lead: SharedString,
     swaps: Rc<Vec<(Range<usize>, String)>>,
+    searched: bool,
 }
 
 /// Plain text in the surrounding style.
@@ -1144,6 +1165,7 @@ pub fn text(id: impl Into<ElementId>, text: impl Into<SharedString>, t: &Theme) 
         color: t.selection(),
         lead: take_lead(),
         swaps: Rc::default(),
+        searched: !UNSEARCHED.with(|u| u.get()),
     }
 }
 
@@ -1165,6 +1187,7 @@ pub fn styled(
         color: t.selection(),
         lead: take_lead(),
         swaps: Rc::default(),
+        searched: !UNSEARCHED.with(|u| u.get()),
     }
 }
 
@@ -1252,6 +1275,7 @@ impl Element for Text {
                     text: self.text.clone(),
                     lead: self.lead.clone(),
                     swaps: self.swaps.clone(),
+                    searched: self.searched,
                 },
             );
         });
@@ -1297,7 +1321,10 @@ impl Element for Text {
         let layout = self.styled.layout().clone();
         // What ⌘F found here: every match tinted, the current one strong.
         let marks = with(|s| {
-            let f = s.find.as_ref().filter(|f| f.area == self.key.area)?;
+            let f = s
+                .find
+                .as_ref()
+                .filter(|f| f.area == self.key.area && self.searched)?;
             let item = *self.key.path.first()?;
             let limit = f
                 .limits
@@ -1445,6 +1472,7 @@ mod tests {
             text: text.to_string().into(),
             lead: lead.to_string().into(),
             swaps: Rc::default(),
+            searched: true,
         }
         .copy(range)
     }
@@ -1486,6 +1514,7 @@ mod tests {
             text: "a mmmm b".into(),
             lead: "".into(),
             swaps: Rc::new(vec![(2..6, "$x^2$".into())]),
+            searched: true,
         };
         assert_eq!(c.copy(0..8), "a $x^2$ b");
         // Part of a formula selected copies all of it.

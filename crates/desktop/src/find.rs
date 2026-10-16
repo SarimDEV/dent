@@ -701,4 +701,28 @@ mod tests {
         assert_eq!(n(true), 1);
         assert!(!words(&user, true)[0].contains("Attached"));
     }
+
+    /// A long table scrolls inside the chat and draws only what's in view:
+    /// its rows past those shown at first aren't counted.
+    #[test]
+    fn a_long_table_counts_the_rows_it_shows() {
+        let mut src = String::from("| n | word |\n|---|---|\n");
+        for i in 0..30 {
+            let w = if i == 2 || i == 25 { "foo" } else { "bar" };
+            src.push_str(&format!("| {i} | {w} |\n"));
+        }
+        src.push_str("\nAnd foo after it.");
+        let n: usize = words(&Item::Text(src), false)
+            .iter()
+            .map(|w| crate::select::matches(w, "foo").len())
+            .sum();
+        assert_eq!(n, 2, "row 2 and the paragraph; row 25 is out of view");
+        // A short table counts every row.
+        let short = "| a |\n|---|\n| foo |\n| foo |";
+        let n: usize = words(&Item::Text(short.into()), false)
+            .iter()
+            .map(|w| crate::select::matches(w, "foo").len())
+            .sum();
+        assert_eq!(n, 2);
+    }
 }

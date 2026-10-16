@@ -676,8 +676,11 @@ pub fn drawn(blocks: &[Block], out: &mut Vec<String>) {
             }
             Block::Quote(_, inner) => drawn(inner, out),
             Block::Code(_, body, _) => out.extend(body.split('\n').map(str::to_owned)),
+            // A long table's rows past those it shows before scrolling
+            // inside the chat aren't searched (see `table_block`).
             Block::Table(t) => {
-                for row in std::iter::once(&t.head).chain(&t.rows) {
+                let shown = if capped(t) { TABLE_ROWS } else { t.rows.len() };
+                for row in std::iter::once(&t.head).chain(&t.rows[..shown]) {
                     out.extend(row.iter().map(|c| c.text.clone()));
                 }
             }
@@ -1851,8 +1854,13 @@ pub struct TableData {
 
 impl TableData {
     fn capped(&self) -> bool {
-        self.table.rows.len() > TABLE_ROWS + TABLE_SLACK
+        capped(&self.table)
     }
+}
+
+/// A table long enough to scroll inside the chat.
+fn capped(t: &Table) -> bool {
+    t.rows.len() > TABLE_ROWS + TABLE_SLACK
 }
 
 /// Natural width and longest-word width of a cell, each word measured in its
@@ -2242,6 +2250,10 @@ fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement
             .child(
                 list(state.clone(), move |ix, window, _| {
                     let _place = slot.enter(ix);
+                    // Find counts the rows shown before scrolling; those
+                    // past them aren't tinted either, so its numbering
+                    // stays true.
+                    let _quiet = (ix >= TABLE_ROWS).then(crate::select::unsearched);
                     row(
                         &format!("{k}/r{ix}"),
                         &pre,
