@@ -362,9 +362,22 @@ impl Inline {
                         let descent = window.text_system().descent(id, size).abs();
                         let lh = layout.line_height();
                         for (ix, list, slack) in &placed {
-                            let Some(p) = layout.position_for_index(*ix) else {
+                            let Some(mut p) = layout.position_for_index(*ix) else {
                                 continue;
                             };
+                            // At a wrap, the index is also the end of the
+                            // line before: the stand-in went to the next
+                            // line, so the formula goes there too, at the
+                            // start of its first (one-byte) character.
+                            if let Some(n) = layout.position_for_index(*ix + 1)
+                                && n.y > p.y
+                            {
+                                let w = layout
+                                    .position_for_index(*ix + 2)
+                                    .filter(|m| m.y == n.y)
+                                    .map_or(px(0.), |m| m.x - n.x);
+                                p = point(n.x - w, n.y);
+                            }
                             let baseline = p.y + (lh - ascent - descent) / 2. + ascent;
                             let origin =
                                 point(p.x + px(*slack), baseline - px(list.height as f32 * em));
@@ -1483,7 +1496,7 @@ fn hover_actions(body: impl IntoElement, actions: impl IntoElement, key: &str, t
 
 /// Content that may be wider than the column, in a sideways scroller with a
 /// fade on whichever edge has more to see.
-fn hscroll(md: &Md, key: &str, child: impl IntoElement, bg: Hsla) -> Div {
+fn hscroll(md: &Md, key: &str, child: impl IntoElement, bg: Hsla, ink: Hsla) -> Div {
     let handle = md.hscroll_handle(key);
     let max = handle.max_offset().x.as_f32();
     let x = -handle.offset().x.as_f32();
@@ -1521,6 +1534,41 @@ fn hscroll(md: &Md, key: &str, child: impl IntoElement, bg: Hsla) -> Div {
         )
         .when(max > 0.5 && x < max - 0.5, |d| d.child(fade(true)))
         .when(x > 0.5, |d| d.child(fade(false)))
+        // A thin bar under it, there before anyone scrolls, as a capped
+        // table has: the fade alone didn't say there was more.
+        .when(max > 0.5, |d| d.pb(px(8.)).child(hbar(handle.clone(), ink)))
+}
+
+/// The sideways twin of `scrollbar`, along the bottom of an `hscroll`.
+fn hbar(handle: ScrollHandle, ink: Hsla) -> impl IntoElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let view = bounds.size.width.as_f32();
+            let max = handle.max_offset().x.as_f32();
+            if max <= 0.5 {
+                return;
+            }
+            let x = -handle.offset().x.as_f32();
+            let thumb = (view * view / (view + max)).max(24.);
+            let at = (x / max).clamp(0., 1.) * (view - thumb);
+            window.paint_quad(
+                fill(
+                    Bounds::new(
+                        point(bounds.left() + px(at), bounds.bottom() - px(5.)),
+                        size(px(thumb), px(4.)),
+                    ),
+                    ink.opacity(0.28),
+                )
+                .corner_radii(px(2.)),
+            );
+        },
+    )
+    .absolute()
+    .left_0()
+    .right_0()
+    .bottom_0()
+    .h(px(8.))
 }
 
 /// Inline maths too wide for a line, at text size on a line of its own.
@@ -1545,6 +1593,7 @@ fn math_line(md: &Md, list: Rc<DisplayList>, em: f32, face: Face) -> Div {
             .h(px(hgt)),
         ),
         face.bg,
+        ink,
     )
 }
 
@@ -1704,6 +1753,7 @@ fn display_math(tex: &str, closed: bool, t: &Theme, key: &str, r: &mut R) -> Any
                 .h(px(h)),
             ),
         r.bg,
+        ink,
     );
     let src = tex.trim().to_string();
     let copy = copy_button(
@@ -1771,6 +1821,7 @@ fn diagram_block(src: &str, closed: bool, t: &Theme, key: &str, r: &mut R) -> An
                     )
                     .child(crate::ui::probe(&probes, "md-diagram")),
                 r.bg,
+                t.ink,
             );
             let text = src.to_string();
             let copy = copy_button(
@@ -2306,7 +2357,7 @@ fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement
         .overflow_hidden()
         .child(head)
         .child(body);
-    let scroller = hscroll(&r.md, key, grid, bg);
+    let scroller = hscroll(&r.md, key, grid, bg, t.ink);
     let (a, b) = (table.clone(), table.clone());
     let md = copy_button(
         format!("md-copy-md-{key}"),
