@@ -2118,15 +2118,19 @@ impl Dent {
             // Folded into the footer of the reply above it, when there is one.
             Item::Changed { .. } if folded_change(&s.items, ix) => div().into_any_element(),
             Item::Changed { paths } => self.changed_line(s, ix, paths, cx),
-            Item::Queued { id: msg, text } => {
+            Item::Queued {
+                id: msg,
+                text,
+                attachments,
+            } => {
                 // The waiting message before this one, which it can go ahead of.
                 let ahead = ix.checked_sub(1).and_then(|p| match s.items.get(p) {
                     Some(Item::Queued { id, .. }) => Some(id.clone()),
                     _ => None,
                 });
                 let (sid3, msg3) = (s.id.clone(), msg.clone());
-                let (sid, msg, back) = (s.id.clone(), msg.clone(), text.clone());
-                let (sid2, msg2, now) = (s.id.clone(), msg.clone(), text.clone());
+                let (sid, msg) = (s.id.clone(), msg.clone());
+                let (sid2, msg2) = (s.id.clone(), msg.clone());
                 div()
                     .flex()
                     .flex_col()
@@ -2143,7 +2147,35 @@ impl Dent {
                             .border_color(t.ink.opacity(0.28))
                             .ty(READING)
                             .text_color(t.quiet)
-                            .child(text.clone()),
+                            .flex()
+                            .flex_col()
+                            .gap(px(space::S1H))
+                            .when(!text.is_empty(), |d| d.child(text.clone()))
+                            // The files it carries, as they'll go with it.
+                            .when(!attachments.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .gap(px(space::S1H))
+                                        .children(attachments.iter().map(|p| {
+                                            let a = crate::app::Attachment::File {
+                                                path: p.clone(),
+                                            };
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(space::S1H))
+                                                .max_w(px(320.))
+                                                .h(px(size::CONTROL_SM))
+                                                .px(px(space::S2))
+                                                .rounded(px(radius::SM))
+                                                .bg(t.selected())
+                                                .child(icon(a.icon(), 12., t.quiet))
+                                                .child(div().truncate().ty(UI).child(a.label()))
+                                        })),
+                                )
+                            }),
                     )
                     .child(
                         div()
@@ -2182,8 +2214,8 @@ impl Dent {
                             .child(
                                 ghost(SharedString::from(format!("unqueue-{ix}")), "Edit", &t)
                                     .relative()
-                                    .on_press(cx.listener(move |this, _, window, cx| {
-                                        this.unqueue(&sid, &msg, &back, window, cx)
+                                    .on_press(cx.listener(move |this, _, _, cx| {
+                                        this.unqueue(&sid, &msg, cx)
                                     }))
                                     .child(probe(&self.probes, format!("unqueue-{ix}"))),
                             )
@@ -2191,7 +2223,7 @@ impl Dent {
                                 ghost(SharedString::from(format!("steer-{ix}")), "Send now", &t)
                                     .relative()
                                     .on_press(cx.listener(move |this, _, _, cx| {
-                                        this.steer_queued(&sid2, &msg2, &now, cx)
+                                        this.steer_queued(&sid2, &msg2, cx)
                                     }))
                                     .child(probe(&self.probes, format!("steer-{ix}"))),
                             ),
@@ -4440,6 +4472,7 @@ mod answer_tests {
             Item::Queued {
                 id: "q".into(),
                 text: "next".into(),
+                attachments: Vec::new(),
             },
         ];
         assert!(!is_answer(&q, 0, true));

@@ -240,6 +240,7 @@ impl Render for Dent {
         self.composer_keyed = self.composer.read(cx).focus_handle(cx).is_focused(window);
         self.sync_draft(cx);
         self.take_resend(cx);
+        self.take_restores(window, cx);
         if self.menu.is_none() && !self.dragging && !self.dragging_sidebar && self.walk.is_none() {
             self.save_prefs();
         }
@@ -571,9 +572,10 @@ impl Render for Dent {
                     this.commenting = None;
                     this.composer.update(cx, |c, cx| c.focus(window, cx));
                 } else if this.field_focused(window, cx) == Some(app::Field::Composer)
-                    && let Some(id) = this.selected.clone().filter(|id| {
-                        this.session(id).is_some_and(|s| s.running()) && this.open_ask(id).is_none()
-                    })
+                    && let Some(id) = this
+                        .selected
+                        .clone()
+                        .filter(|id| this.stoppable(id) && this.open_ask(id).is_none())
                 {
                     // Esc in the reply box stops a running turn, like ⌘.; a
                     // draft stays where it is. A waiting card still takes Esc.

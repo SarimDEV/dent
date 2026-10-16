@@ -3599,7 +3599,7 @@ fn queued_ids(d: &Dent) -> Vec<(usize, String, String)> {
             .iter()
             .enumerate()
             .filter_map(|(ix, i)| match i {
-                Item::Queued { id, text } => Some((ix, id.clone(), text.clone())),
+                Item::Queued { id, text, .. } => Some((ix, id.clone(), text.clone())),
                 _ => None,
             })
             .collect()

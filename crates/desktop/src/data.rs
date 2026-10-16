@@ -155,9 +155,11 @@ pub enum Item {
         icon: &'static str,
         text: String,
     },
+    /// A message waiting for the turn to end, with the files it carries.
     Queued {
         id: String,
         text: String,
+        attachments: Vec<String>,
     },
     /// A turn finished: when and how long it took, both in milliseconds.
     /// Drawn as the footer under the turn's last reply, not a row of its own.

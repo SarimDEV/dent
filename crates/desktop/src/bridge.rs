@@ -416,12 +416,14 @@ pub fn session(
             id,
             text,
             queued: true,
+            attachments,
             ..
         } = e
         {
             items.push(Item::Queued {
                 id: id.clone(),
                 text: text.clone(),
+                attachments: attachments.clone(),
             });
         }
     }

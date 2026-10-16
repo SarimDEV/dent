@@ -309,6 +309,33 @@ pub fn put_at(
     cx.emit(InputEvent::Change);
 }
 
+/// Put text in a field as an edit you can undo: ⌘Z brings back what was
+/// there. The caret goes after it.
+pub fn put_undoable(
+    field: &mut TextareaState,
+    text: impl Into<SharedString>,
+    window: &mut Window,
+    cx: &mut Context<TextareaState>,
+) {
+    let text: SharedString = text.into();
+    if field.value() == text {
+        return;
+    }
+    let end = text.len();
+    field.replace_all(text, window, cx);
+    field.set_selected_range(end..end, cx);
+    cx.emit(InputEvent::Change);
+}
+
+/// Words added after a draft, a blank line between.
+pub fn joined(draft: &str, more: &str) -> String {
+    match (draft.is_empty(), more.is_empty()) {
+        (true, _) => more.to_string(),
+        (false, true) => draft.to_string(),
+        (false, false) => format!("{draft}\n\n{more}"),
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Field {
     Composer,
@@ -433,6 +460,27 @@ pub struct Recall {
     pub shown: String,
     /// Files it attached, to take off again if you step past it.
     pub atts: Vec<String>,
+}
+
+/// What becomes of a waiting message once the daemon has taken it out of
+/// its queue.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Then {
+    /// Back to the reply box, files attached again.
+    Restore,
+    /// Into the running turn now.
+    Steer,
+}
+
+/// A waiting message being taken back, held until the daemon says it's out
+/// of the queue: it may have gone to the agent first, and then nothing is
+/// sent twice or brought back.
+pub struct TakingBack {
+    pub session: String,
+    pub text: String,
+    pub files: Vec<String>,
+    pub then: Then,
+    pub at: Instant,
 }
 
 /// Something riding along with the next message.
@@ -573,6 +621,8 @@ pub enum Waiting {
     ProjectMade,
     /// Going back for Try again, in this session.
     Rewind(String),
+    /// Taking a waiting message (by id) back out of the queue.
+    Unqueue(String),
 }
 
 /// The home folder, as a path string.
@@ -743,6 +793,9 @@ pub struct Dent {
     partial_len: HashMap<String, usize>,
     /// Send is inert for a moment after sending, so a double press can't stop.
     pub just_sent: Option<Instant>,
+    /// The message last sent, by session and id, and when: until the turn
+    /// it starts shows as running, Esc and ⌘. can still stop it.
+    pub sent_at: Option<(String, String, Instant)>,
     pub panel_open: bool,
     pub panel_width: f32,
     /// This frame's widths: the viewer gives way before the chat does.
@@ -883,6 +936,12 @@ pub struct Dent {
     pub resend: Option<(String, String, String)>,
     /// A session the daemon just created, to open once its events arrive.
     pub pending_select: Option<String>,
+    /// Waiting messages being taken back out of the queue, by message id.
+    pub taking_back: HashMap<String, TakingBack>,
+    /// Messages to put back in a prompt at the next draw (which has the
+    /// window): the session (`None`: the new-session page), the words and
+    /// what they carried. Nothing is put over a draft; it's added after.
+    pub restores: Vec<(Option<String>, String, Vec<Attachment>)>,
     /// A scripted walkthrough, when running one.
     pub walk: Option<crate::walk::Walk>,
     pub last_frame: Instant,
@@ -1263,6 +1322,7 @@ impl Dent {
             saved_prefs: None,
             partial_len: HashMap::new(),
             just_sent: None,
+            sent_at: None,
             panel_open: true,
             panel_width: prefs.panel_width.unwrap_or(600.),
             sidebar_w: prefs
@@ -1331,6 +1391,8 @@ impl Dent {
             trying_again: None,
             resend: None,
             pending_select: None,
+            taking_back: HashMap::new(),
+            restores: Vec::new(),
             walk: None,
             last_frame: Instant::now(),
         };
@@ -1992,6 +2054,20 @@ impl Dent {
                     if let Out::Events { events } = &out {
                         // A finished turn may have changed files.
                         for e in events {
+                            // A waiting message being taken back: once it's
+                            // out of the queue it's restored or steered;
+                            // gone to the agent instead, it's left be.
+                            match &e.body {
+                                dent_protocol::Body::Unqueued { id } => {
+                                    if let Some(tb) = self.taking_back.remove(id) {
+                                        self.took_back(tb);
+                                    }
+                                }
+                                dent_protocol::Body::Delivered { id } => {
+                                    self.taking_back.remove(id);
+                                }
+                                _ => {}
+                            }
                             if matches!(e.body, dent_protocol::Body::TurnEnded { .. })
                                 && self.core.live
                             {
@@ -2214,10 +2290,106 @@ impl Dent {
                 }
                 self.toast(ToastAction::Info, message);
             }
+            // Already gone to the agent: it isn't sent again or brought back.
+            (Waiting::Unqueue(msg), Out::Error { message }) => {
+                if self.taking_back.remove(&msg).is_some() {
+                    self.toast(
+                        ToastAction::Info,
+                        "That message had already gone to the agent.".into(),
+                    );
+                } else {
+                    self.toast(ToastAction::Info, message);
+                }
+            }
             (_, Out::Error { message }) => self.toast(ToastAction::Info, message),
             _ => {}
         }
         cx.notify();
+    }
+
+    /// A waiting message the daemon has taken out of its queue: into the
+    /// running turn, or back to the reply box with its files.
+    fn took_back(&mut self, tb: TakingBack) {
+        match tb.then {
+            Then::Steer => {
+                self.live.send(Request::Send {
+                    session: tb.session,
+                    id: crate::message_id(),
+                    text: tb.text,
+                    steer: true,
+                    attachments: tb.files,
+                });
+                self.follow();
+            }
+            Then::Restore => {
+                let atts = tb
+                    .files
+                    .into_iter()
+                    .map(|path| Attachment::File { path })
+                    .collect();
+                self.restores.push((Some(tb.session), tb.text, atts));
+            }
+        }
+    }
+
+    /// Take waiting messages back out of the daemon's queue. Nothing more
+    /// happens until it says each is out (see `took_back`).
+    fn take_back(&mut self, session: &str, msgs: Vec<(String, String, Vec<String>)>, then: Then) {
+        for (msg, text, files) in msgs {
+            self.taking_back.insert(
+                msg,
+                TakingBack {
+                    session: session.to_string(),
+                    text,
+                    files,
+                    then,
+                    at: Instant::now(),
+                },
+            );
+        }
+    }
+
+    /// Put back what `restores` holds, after whatever is already typed:
+    /// the open session's box, another session's draft, or the new-session
+    /// field. Files come back attached.
+    pub fn take_restores(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // One the daemon never answered for is let go.
+        self.taking_back
+            .retain(|_, tb| tb.at.elapsed() < Duration::from_secs(30));
+        for (session, text, atts) in std::mem::take(&mut self.restores) {
+            let open = session == self.selected;
+            if open {
+                for a in atts {
+                    if !self.attachments.contains(&a) {
+                        self.attachments.push(a);
+                    }
+                }
+                let field = match session {
+                    Some(_) => self.composer.clone(),
+                    None => self.starter.clone(),
+                };
+                let draft = field.read(cx).value().trim_end().to_string();
+                let text = joined(&draft, &text);
+                field.update(cx, |c, cx| {
+                    put_undoable(c, text, window, cx);
+                    c.focus(window, cx);
+                });
+                // It's yours again to send: no double-press pause on it.
+                self.just_sent = None;
+            } else {
+                let held = self.attached.entry(session.clone()).or_default();
+                for a in atts {
+                    if !held.contains(&a) {
+                        held.push(a);
+                    }
+                }
+                if let Some(id) = session {
+                    let draft = self.drafts.get(&id).cloned().unwrap_or_default();
+                    self.drafts.insert(id, joined(draft.trim_end(), &text));
+                }
+            }
+            cx.notify();
+        }
     }
 
     fn fetch_changes(&mut self, id: &str) {
@@ -3522,9 +3694,11 @@ impl Dent {
             self.reply_to_ask(&id, ask, Answer::Deny { message: text }, cx);
             return;
         }
+        let msg = crate::message_id();
+        self.sent_at = Some((id.clone(), msg.clone(), Instant::now()));
         self.live.send(Request::Send {
             session: id,
-            id: crate::message_id(),
+            id: msg,
             text: message,
             steer,
             attachments: files,
@@ -3594,36 +3768,56 @@ impl Dent {
         cx.notify();
     }
 
-    pub fn stop(&mut self, id: &str, by: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(s) = self.session(id) else { return };
-        if !s.running() {
+    /// Whether session `id` has a turn to stop: one running, or one a
+    /// message just sent is starting (the daemon starts it before it reads
+    /// a stop sent after).
+    pub fn stoppable(&self, id: &str) -> bool {
+        self.session(id).is_some_and(|s| s.running())
+            || self
+                .sent_at
+                .as_ref()
+                .is_some_and(|(s, _, at)| s == id && at.elapsed() < Duration::from_secs(3))
+    }
+
+    pub fn stop(&mut self, id: &str, by: &str, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.stoppable(id) {
             return;
         }
-        // Twice before it has stopped would bring the queued text back twice.
-        if self.pressed_again(format!("stop/{id}")) {
+        let Some(s) = self.sessions.iter().find(|s| s.id == id).cloned() else {
+            return;
+        };
+        // One stop a turn: a second press before it has stopped does
+        // nothing, but a turn started since (a correction) stops at once.
+        let pending = self
+            .sent_at
+            .as_ref()
+            .filter(|(s, ..)| s == id)
+            .map(|(_, m, _)| m.clone());
+        let turn = pending.or_else(|| {
+            s.items.iter().rev().find_map(|i| match i {
+                Item::User { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+        });
+        if self.pressed_again(format!("stop/{id}/{}", turn.unwrap_or_default())) {
             return;
         }
-        let Some(s) = self.session(id) else { return };
-        // Stopping drops messages still waiting their turn: their text comes
-        // back to the composer rather than vanishing.
-        let waiting: Vec<String> = s
+        // Stopping takes messages still waiting their turn out of the queue:
+        // each the daemon says it took out comes back to the composer, files
+        // and all, rather than vanishing.
+        let waiting: Vec<(String, String, Vec<String>)> = s
             .items
             .iter()
             .filter_map(|i| match i {
-                Item::Queued { text, .. } => Some(text.clone()),
+                Item::Queued {
+                    id,
+                    text,
+                    attachments,
+                } => Some((id.clone(), text.clone(), attachments.clone())),
                 _ => None,
             })
             .collect();
-        if !waiting.is_empty() {
-            let draft = self.composer.read(cx).value().trim().to_string();
-            let mut text = waiting.join("\n\n");
-            if !draft.is_empty() {
-                text = format!("{draft}\n\n{text}");
-            }
-            self.composer.update(cx, |c, cx| put(c, text, window, cx));
-            // It's yours again to send: no double-press pause on it.
-            self.just_sent = None;
-        }
+        self.take_back(id, waiting, Then::Restore);
         // The header offers Resume once it has stopped.
         self.live.send(Request::Interrupt {
             session: id.to_string(),
@@ -3877,30 +4071,35 @@ impl Dent {
         true
     }
 
-    /// Take back a message that hasn't gone yet; its text returns to the composer.
-    pub fn unqueue(
-        &mut self,
-        id: &str,
-        msg: &str,
-        text: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// Session `id`'s waiting message `msg`: its words and files.
+    fn queued(&self, id: &str, msg: &str) -> Option<(String, Vec<String>)> {
+        self.session(id)?.items.iter().find_map(|i| match i {
+            Item::Queued {
+                id,
+                text,
+                attachments,
+            } if id == msg => Some((text.clone(), attachments.clone())),
+            _ => None,
+        })
+    }
+
+    /// Take back a message that hasn't gone yet. Once the daemon has it out
+    /// of the queue, its words return to the composer, after anything
+    /// already typed there, and its files come back attached; if it went
+    /// to the agent first, it stays sent and a toast says so.
+    pub fn unqueue(&mut self, id: &str, msg: &str, cx: &mut Context<Self>) {
         if self.pressed_again(format!("queued/{msg}")) {
             return;
         }
-        self.live.send(Request::Unqueue {
+        let Some((text, files)) = self.queued(id, msg) else {
+            return;
+        };
+        let n = self.live.send(Request::Unqueue {
             session: id.to_string(),
             id: msg.to_string(),
         });
-        // Back in the composer, after anything already typed there.
-        let draft = self.composer.read(cx).value().trim().to_string();
-        let text = if draft.is_empty() {
-            text.to_string()
-        } else {
-            format!("{draft}\n\n{text}")
-        };
-        self.composer.update(cx, |c, cx| put(c, text, window, cx));
+        self.waiting.insert(n, Waiting::Unqueue(msg.to_string()));
+        self.take_back(id, vec![(msg.to_string(), text, files)], Then::Restore);
         cx.notify();
     }
 
@@ -3992,12 +4191,12 @@ impl Dent {
         }
         if up
             && browsing.is_none()
-            && let Some((msg, text)) = s.items.iter().rev().find_map(|i| match i {
-                Item::Queued { id, text } => Some((id.clone(), text.clone())),
+            && let Some(msg) = s.items.iter().rev().find_map(|i| match i {
+                Item::Queued { id, .. } => Some(id.clone()),
                 _ => None,
             })
         {
-            self.unqueue(&s.id, &msg, &text, window, cx);
+            self.unqueue(&s.id, &msg, cx);
             return true;
         }
         let mine: Vec<&str> = s
@@ -4154,22 +4353,22 @@ impl Dent {
         cx.notify();
     }
 
-    /// A waiting message goes into the running turn now instead.
-    pub fn steer_queued(&mut self, id: &str, msg: &str, text: &str, cx: &mut Context<Self>) {
+    /// A waiting message goes into the running turn now instead, files and
+    /// all: once the daemon has taken it out of the queue, so a message
+    /// that went meanwhile is never sent twice.
+    pub fn steer_queued(&mut self, id: &str, msg: &str, cx: &mut Context<Self>) {
         if self.pressed_again(format!("queued/{msg}")) {
             return;
         }
-        self.live.send(Request::Unqueue {
+        let Some((text, files)) = self.queued(id, msg) else {
+            return;
+        };
+        let n = self.live.send(Request::Unqueue {
             session: id.to_string(),
             id: msg.to_string(),
         });
-        self.live.send(Request::Send {
-            session: id.to_string(),
-            id: crate::message_id(),
-            text: text.to_string(),
-            steer: true,
-            attachments: Vec::new(),
-        });
+        self.waiting.insert(n, Waiting::Unqueue(msg.to_string()));
+        self.take_back(id, vec![(msg.to_string(), text, files)], Then::Steer);
         cx.notify();
     }
 
@@ -4721,7 +4920,13 @@ impl Dent {
                 )
                     .hash(&mut h)
             }
-            Item::Text(t) | Item::Queued { text: t, .. } => fp(t, &mut h),
+            Item::Text(t) => fp(t, &mut h),
+            Item::Queued {
+                text, attachments, ..
+            } => {
+                fp(text, &mut h);
+                attachments.hash(&mut h);
+            }
             Item::Thinking(t) => {
                 fp(t, &mut h);
                 self.open_calls.contains(&thought_key(t)).hash(&mut h);
