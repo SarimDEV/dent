@@ -9,7 +9,12 @@ use serde::{Deserialize, Serialize};
 pub struct Prefs {
     pub project: Option<String>,
     pub model: Option<String>,
+    /// The permission a new session starts with: Full access until you pick
+    /// another, which then sticks (decision 0048).
     pub permission: Permission,
+    /// Which version of the defaults these prefs were last brought up to;
+    /// 1 moved everyone to Full access once.
+    pub defaults_version: u8,
     pub effort: Option<String>,
     pub panel_width: Option<f32>,
     pub sidebar_width: Option<f32>,
@@ -56,10 +61,24 @@ fn path() -> std::path::PathBuf {
 }
 
 pub fn load() -> Prefs {
-    std::fs::read(path())
+    let mut p: Prefs = std::fs::read(path())
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    upgrade(&mut p);
+    p
+}
+
+/// The defaults dent starts with now.
+pub const DEFAULTS_VERSION: u8 = 1;
+
+/// Brings older (or no) prefs up to today's defaults, once each: a choice
+/// made after that is yours and stays.
+fn upgrade(p: &mut Prefs) {
+    if p.defaults_version < 1 {
+        p.permission = Permission::Full;
+    }
+    p.defaults_version = DEFAULTS_VERSION;
 }
 
 pub fn save(p: &Prefs) {
@@ -71,5 +90,26 @@ pub fn save(p: &Prefs) {
         if std::fs::write(&tmp, json).is_ok() {
             let _ = std::fs::rename(tmp, path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_sessions_start_in_full_access_until_you_choose() {
+        // No prefs yet, or prefs from before: Full access.
+        let mut fresh = Prefs::default();
+        upgrade(&mut fresh);
+        assert_eq!(fresh.permission, Permission::Full);
+        let mut old: Prefs = serde_json::from_str(r#"{"permission":"ask"}"#).unwrap();
+        upgrade(&mut old);
+        assert_eq!(old.permission, Permission::Full);
+        // A choice made since sticks.
+        let mut chosen: Prefs =
+            serde_json::from_str(r#"{"permission":"ask","defaults_version":1}"#).unwrap();
+        upgrade(&mut chosen);
+        assert_eq!(chosen.permission, Permission::Ask);
     }
 }
