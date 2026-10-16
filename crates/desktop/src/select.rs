@@ -196,6 +196,10 @@ pub struct Find {
     pub current: Option<(u32, usize)>,
     pub tint: Hsla,
     pub strong: Hsla,
+    /// How many matches each item may tint, by item, when they were counted
+    /// from what the item draws rather than from what was laid out (a long
+    /// chat): what isn't counted isn't tinted.
+    pub limits: Option<std::rc::Rc<Vec<usize>>>,
 }
 
 /// About a line of text, to keep a match clear of the edge.
@@ -1295,9 +1299,14 @@ impl Element for Text {
         let marks = with(|s| {
             let f = s.find.as_ref().filter(|f| f.area == self.key.area)?;
             let item = *self.key.path.first()?;
+            let limit = f
+                .limits
+                .as_ref()
+                .map_or(usize::MAX, |l| l.get(item as usize).copied().unwrap_or(0));
             let seen = s.found.entry(item).or_default();
             let marks: Vec<(Range<usize>, Hsla)> = matches(&self.text, &f.needle)
                 .into_iter()
+                .take(limit.saturating_sub(*seen))
                 .map(|r| {
                     let on = f.current == Some((item, *seen));
                     *seen += 1;

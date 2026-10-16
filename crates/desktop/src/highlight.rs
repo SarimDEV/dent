@@ -4,8 +4,8 @@
 //!
 //! [decision 0016]: ../../docs/decisions/0016-highlighting-arborium.md
 
+use crate::lru::Lru;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -86,24 +86,60 @@ type Spans = Rc<Vec<(Range<usize>, Tag)>>;
 
 thread_local! {
     static HL: RefCell<Option<arborium::Highlighter>> = const { RefCell::new(None) };
-    static CACHE: RefCell<HashMap<u64, Spans>> = RefCell::new(HashMap::new());
-    static LINES: RefCell<HashMap<u64, Lines>> = RefCell::new(HashMap::new());
+    static CACHE: RefCell<Lru<u64, Spans>> = RefCell::new(Lru::new(512));
+    static LINES: RefCell<Lru<u64, Lines>> = RefCell::new(Lru::new(256));
+    /// The block still streaming in, by language and the code highlighted:
+    /// one slot, so its every prefix doesn't fill the caches above.
+    static OPEN: RefCell<Option<(u64, Lines)>> = const { RefCell::new(None) };
 }
 
 /// Each line's runs of (length, tag), for a whole block.
 pub type Lines = Rc<Vec<Vec<(usize, Option<Tag>)>>>;
 
+fn key(parts: impl std::hash::Hash) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    parts.hash(&mut h);
+    h.finish()
+}
+
 /// A block's lines in runs, worked out in one pass and remembered: a long
 /// block isn't rescanned for every line, every frame.
 pub fn block_lines(lang: &str, code: &str) -> Lines {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    (lang, code).hash(&mut h);
-    let key = h.finish();
-    if let Some(l) = LINES.with(|c| c.borrow().get(&key).cloned()) {
+    let key = key((lang, code));
+    if let Some(l) = LINES.with(|c| c.borrow_mut().get(&key)) {
         return l;
     }
-    let spans = spans(lang, code);
+    let out = Rc::new(lines_of(code, &spans(lang, code)));
+    LINES.with(|c| c.borrow_mut().insert(key, out.clone()));
+    out
+}
+
+/// A block whose fence hasn't closed yet: its finished lines highlighted,
+/// worked out again only when a line is finished, and the line still being
+/// written plain.
+pub fn open_block_lines(lang: &str, code: &str) -> Lines {
+    let Some(nl) = code.rfind('\n') else {
+        return Rc::new(lines_of(code, &[]));
+    };
+    let head = &code[..nl];
+    let key = key((lang, head));
+    let done = OPEN.with(|o| match &*o.borrow() {
+        Some((k, l)) if *k == key => Some(l.clone()),
+        _ => None,
+    });
+    let done = done.unwrap_or_else(|| {
+        let l = Rc::new(lines_of(head, &find(lang, head)));
+        OPEN.with(|o| *o.borrow_mut() = Some((key, l.clone())));
+        l
+    });
+    let mut out = (*done).clone();
+    out.extend(lines_of(&code[nl + 1..], &[]));
+    Rc::new(out)
+}
+
+/// Each line of `code` as runs of (length, tag).
+fn lines_of(code: &str, spans: &[(Range<usize>, Tag)]) -> Vec<Vec<(usize, Option<Tag>)>> {
     let mut tags: Vec<Option<Tag>> = vec![None; code.len()];
     for (r, tag) in spans.iter() {
         for t in &mut tags[r.start.min(code.len())..r.end.min(code.len())] {
@@ -124,14 +160,6 @@ pub fn block_lines(lang: &str, code: &str) -> Lines {
         out.push(runs);
         at += line.len() + 1;
     }
-    let out = Rc::new(out);
-    LINES.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.len() > 256 {
-            c.clear();
-        }
-        c.insert(key, out.clone());
-    });
     out
 }
 
@@ -141,13 +169,20 @@ pub fn spans(lang: &str, code: &str) -> Spans {
     let Some(g) = grammar(lang) else {
         return Rc::default();
     };
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    (g, code).hash(&mut h);
-    let key = h.finish();
-    if let Some(s) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+    let key = key((g, code));
+    if let Some(s) = CACHE.with(|c| c.borrow_mut().get(&key)) {
         return s;
     }
+    let out = Rc::new(find(lang, code));
+    CACHE.with(|c| c.borrow_mut().insert(key, out.clone()));
+    out
+}
+
+/// Token ranges, worked out now.
+fn find(lang: &str, code: &str) -> Vec<(Range<usize>, Tag)> {
+    let Some(g) = grammar(lang) else {
+        return Vec::new();
+    };
     let found = HL.with(|hl| {
         let mut hl = hl.borrow_mut();
         let hl = hl.get_or_insert_with(arborium::Highlighter::new);
@@ -163,14 +198,6 @@ pub fn spans(lang: &str, code: &str) -> Spans {
         .collect();
     // Outer spans first, so inner ones paint over them.
     out.sort_by_key(|(r, _)| (r.start, std::cmp::Reverse(r.end)));
-    let out = Rc::new(out);
-    CACHE.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.len() > 512 {
-            c.clear();
-        }
-        c.insert(key, out.clone());
-    });
     out
 }
 

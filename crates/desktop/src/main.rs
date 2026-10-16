@@ -6,6 +6,7 @@
 
 mod ambient;
 mod anim;
+mod ansi;
 mod app;
 mod assets;
 mod bridge;
@@ -22,8 +23,10 @@ mod highlight;
 mod keys;
 mod lightbox;
 mod live;
+mod lru;
 mod markdown;
 mod math;
+mod mdstream;
 mod notify;
 mod open;
 mod palette;

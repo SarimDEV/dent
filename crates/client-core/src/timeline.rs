@@ -762,19 +762,7 @@ impl SessionView {
                 let took = self.working_since.map_or(0, |s| e.at.saturating_sub(s));
                 self.working_since = None;
                 self.partial.clear();
-                // A call the turn ended under (the agent stopped or crashed
-                // mid-call) won't finish now: it stops reading as running.
-                // Subagents may work on in the background.
-                let from = self.turn_from.min(self.entries.len());
-                for e in &mut self.entries[from..] {
-                    if let Entry::Tools { calls } = e {
-                        for c in calls.iter_mut().filter(|c| {
-                            c.result.is_none() && !matches!(c.name.as_str(), "Task" | "Agent")
-                        }) {
-                            c.result = Some((true, "Stopped before it finished".into()));
-                        }
-                    }
-                }
+                self.stop_unfinished();
                 // What the turn edited, to review in one place.
                 let mut paths: Vec<String> = Vec::new();
                 for e in self.entries.get(self.turn_from..).unwrap_or_default() {
@@ -869,6 +857,7 @@ impl SessionView {
                     Status::Working | Status::NeedsYou | Status::Background
                 ) {
                     self.finish_agents(|_| false);
+                    self.stop_unfinished();
                 }
                 if !matches!(status, Status::Working | Status::NeedsYou) {
                     self.working_since = None;
@@ -886,11 +875,21 @@ impl SessionView {
                 if let Some(ix) = self.user_ix(to) {
                     self.entries.truncate(ix);
                     self.reindex(ix);
-                    self.made.retain(|m| {
-                        self.entries
+                    // A file keeps only the versions written before that
+                    // message, so its stepper forgets the abandoned ones.
+                    for m in &mut self.made {
+                        let kept = self
+                            .entries
                             .iter()
-                            .any(|e| matches!(e, Entry::Made { path, .. } if *path == m.path))
-                    });
+                            .filter_map(|e| match e {
+                                Entry::Made { path, version } if *path == m.path => Some(*version),
+                                _ => None,
+                            })
+                            .max()
+                            .unwrap_or(0);
+                        m.versions.truncate(kept);
+                    }
+                    self.made.retain(|m| !m.versions.is_empty());
                 }
                 self.partial.clear();
                 self.working_since = None;
@@ -936,6 +935,48 @@ impl SessionView {
                     self.calls.insert(c.id.clone(), (ix, at));
                 }
             }
+        }
+    }
+
+    /// Calls the turn ended under (the agent stopped or crashed mid-call,
+    /// or dent restarted under it) won't finish now: they stop reading as
+    /// running, a subagent working in the foreground too. A subagent sent
+    /// to the background, and what it does, works on past the turn.
+    fn stop_unfinished(&mut self) {
+        let from = self.turn_from.min(self.entries.len());
+        let live: Vec<&String> = self.agents.values().collect();
+        let mut touched = None;
+        for (ix, e) in self.entries.iter_mut().enumerate().skip(from) {
+            let Entry::Tools { calls } = e else { continue };
+            // Live while it, or a call it sits under, is a background
+            // subagent still at work.
+            let under_live = |c: &Call| {
+                let mut id = Some(&c.id);
+                for _ in 0..16 {
+                    let Some(i) = id else { return false };
+                    if live.contains(&i) {
+                        return true;
+                    }
+                    id = calls
+                        .iter()
+                        .find(|x| &x.id == i)
+                        .and_then(|x| x.parent.as_ref());
+                }
+                false
+            };
+            let stop: Vec<usize> = calls
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.result.is_none() && !under_live(c))
+                .map(|(i, _)| i)
+                .collect();
+            for i in stop {
+                calls[i].result = Some((true, "Stopped before it finished".into()));
+                touched.get_or_insert(ix);
+            }
+        }
+        if let Some(ix) = touched {
+            self.touch(ix);
         }
     }
 
@@ -1232,6 +1273,11 @@ mod tests {
             other => panic!("{other:?}"),
         };
         assert_eq!(agent(&s).result, None, "still at work");
+        let step = |s: &Sessions| match &s.list["s"].entries[0] {
+            Entry::Tools { calls } => calls[1].clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(step(&s).result, None, "its steps work on too");
         s.apply(&Out::Events {
             events: vec![
                 ev(
@@ -1251,6 +1297,75 @@ mod tests {
             agent(&s).result,
             Some((false, "Plaid charges per Item.".into()))
         );
+    }
+
+    /// A subagent working in the foreground when the turn ends (stopped,
+    /// crashed, restarted under) won't report now: it and its steps read
+    /// as stopped, never as working.
+    #[test]
+    fn a_foreground_subagent_stops_with_its_turn() {
+        let s = feed(vec![
+            Body::TurnStarted,
+            tool("t", "Task", r#"{"description":"Survey"}"#, None),
+            tool("b", "Read", r#"{"file_path":"x"}"#, Some("t")),
+            Body::TurnEnded {
+                outcome: Outcome::Interrupted { reason: None },
+            },
+        ]);
+        let Entry::Tools { calls } = &s.list["s"].entries[0] else {
+            panic!()
+        };
+        assert!(calls.iter().all(|c| matches!(c.result, Some((true, _)))));
+        // Nothing running any more says the same without a turn's end.
+        let s = feed(vec![
+            Body::TurnStarted,
+            tool("t", "Agent", r#"{"description":"Survey"}"#, None),
+            Body::Status {
+                status: Status::Interrupted,
+            },
+        ]);
+        let Entry::Tools { calls } = &s.list["s"].entries[0] else {
+            panic!()
+        };
+        assert!(calls[0].result.is_some());
+    }
+
+    /// Rewinding forgets the versions written after the message.
+    #[test]
+    fn rewinding_drops_later_versions() {
+        let write = |id: &str, content: &str| {
+            tool(
+                id,
+                "Write",
+                &format!(r#"{{"file_path":"a.md","content":"{content}"}}"#),
+                None,
+            )
+        };
+        let user = |id: &str| Body::User {
+            id: id.into(),
+            text: id.into(),
+            queued: false,
+            steer: false,
+            attachments: Vec::new(),
+        };
+        let s = feed(vec![
+            user("u1"),
+            write("w1", "one"),
+            result("w1"),
+            user("u2"),
+            write("w2", "two"),
+            result("w2"),
+            write("w3", "three"),
+            result("w3"),
+            Body::Rewound {
+                to: "u2".into(),
+                files: false,
+            },
+        ]);
+        let v = &s.list["s"];
+        assert_eq!(v.made.len(), 1);
+        assert_eq!(v.made[0].versions.len(), 1);
+        assert_eq!(v.made[0].versions[0].content.as_deref(), Some("one"));
     }
 
     /// Each message streams from empty: what streamed before its final

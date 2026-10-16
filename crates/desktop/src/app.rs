@@ -843,8 +843,8 @@ pub struct Dent {
     /// When the session being made was asked for: a daemon that never
     /// answers doesn't hold Start, Fork and the rest off for good.
     pub creating_at: Instant,
-    /// Length of the streaming reply last drawn, by session.
-    partial_len: HashMap<String, usize>,
+    /// The streaming reply last drawn, by session.
+    partial_seen: HashMap<String, String>,
     /// Send is inert for a moment after sending, so a double press can't stop.
     pub just_sent: Option<Instant>,
     /// The message last sent, by session and id, and when: until the turn
@@ -947,8 +947,9 @@ pub struct Dent {
     pub diff_file_key: u64,
     /// The visible width of the diff, for notes and the comment box.
     pub diff_view_w: f32,
-    /// Parsed Markdown by source, so a redraw never parses again.
-    pub md: HashMap<u64, Rc<Vec<Block>>>,
+    /// Parsed Markdown by source, so a redraw never parses again; a reply
+    /// streaming in parses only its unfinished end.
+    pub md: crate::mdstream::Cache,
     /// What rendered Markdown remembers between frames: maths, diagrams,
     /// scroll positions of wide blocks and tall tables.
     pub mdv: crate::markdown::Md,
@@ -1380,7 +1381,7 @@ impl Dent {
             open_calls: HashSet::new(),
             built: HashMap::new(),
             saved_prefs: None,
-            partial_len: HashMap::new(),
+            partial_seen: HashMap::new(),
             just_sent: None,
             sent_at: None,
             panel_open: true,
@@ -1435,7 +1436,7 @@ impl Dent {
             diff_key: 0,
             diff_file_key: 0,
             diff_view_w: 400.,
-            md: HashMap::new(),
+            md: Default::default(),
             mdv: crate::markdown::Md::default(),
             pictures: HashMap::new(),
             popouts: HashMap::new(),
@@ -3667,8 +3668,13 @@ impl Dent {
         }
         // A reply streaming in fades in word by word.
         let len = partial_len;
-        let was = self.partial_len.insert(id.to_string(), len).unwrap_or(0);
-        if len > was && len > 0 {
+        let was = self
+            .partial_seen
+            .insert(id.to_string(), partial_now.clone())
+            .unwrap_or_default();
+        // More of the same reply, or a new one (its words all new).
+        let more = crate::mdstream::new_words(&was, &partial_now);
+        if len > 0 && (more.is_none() || len > was.len()) {
             let ix = s
                 .items
                 .iter()
@@ -3678,11 +3684,13 @@ impl Dent {
                 .births
                 .entry(id.to_string())
                 .or_insert((ix, Vec::new()));
-            if entry.0 != ix || was == 0 {
+            if entry.0 != ix || more.is_none() || was.is_empty() {
                 *entry = (ix, Vec::new());
             }
             let now = Instant::now();
-            let words = partial_now[was.min(len)..].matches(' ').count().max(1);
+            let words = more
+                .unwrap_or_else(|| partial_now.matches(' ').count())
+                .max(1);
             for _ in 0..words {
                 entry.1.push((len, now));
             }
@@ -5107,17 +5115,14 @@ impl Dent {
 
     /// Parsed Markdown for `src`, parsed once.
     pub fn markdown(&mut self, src: &str) -> Rc<Vec<Block>> {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        src.hash(&mut h);
-        let key = h.finish();
-        if self.md.len() > 512 {
-            self.md.clear();
-        }
-        self.md
-            .entry(key)
-            .or_insert_with(|| Rc::new(crate::markdown::parse(src)))
-            .clone()
+        self.md.get(src)
+    }
+
+    /// A reply still streaming in at `at`: its finished blocks are kept and
+    /// only its end is parsed again, tidied so it doesn't flip from raw to
+    /// formatted as it arrives.
+    pub fn markdown_live(&mut self, at: &str, src: &str) -> Rc<Vec<Block>> {
+        self.md.live(at, src)
     }
 
     /// A document version, parsed once: a big file isn't copied and hashed
