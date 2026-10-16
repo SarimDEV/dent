@@ -4953,25 +4953,73 @@ impl Dent {
     ) {
         for p in paths {
             let path = p.display().to_string();
-            if !self
+            if self
                 .attachments
                 .iter()
                 .any(|a| matches!(a, Attachment::File { path: x } if *x == path))
             {
-                // A picture the agent won't see as one still goes, by its
-                // path; you're told so.
-                let size = std::fs::metadata(p).map_or(0, |m| m.len());
-                if let Some(note) = crate::compose::picture_note(&path, size) {
-                    self.toast(ToastAction::Info, note);
-                }
-                self.attachments.push(Attachment::File { path });
+                continue;
             }
+            // A picture the agent can't see as it is (an iPhone's HEIC, a
+            // TIFF, one over 5 MB) goes as a JPEG copy, made off the main
+            // thread; if that fails it goes by its path, and a toast says so.
+            let size = std::fs::metadata(p).map_or(0, |m| m.len());
+            if crate::compose::wants_jpeg(&path, size) {
+                self.attach_as_jpeg(p.clone(), cx);
+                continue;
+            }
+            self.attachments.push(Attachment::File { path });
         }
         match &self.selected {
             Some(_) => self.composer.update(cx, |c, cx| c.focus(window, cx)),
             None => self.starter.update(cx, |c, cx| c.focus(window, cx)),
         }
         cx.notify();
+    }
+
+    /// Attach a JPEG copy of the picture at `src` to the message being
+    /// written where it was dropped, once made; or the file itself, said
+    /// so, if it can't be.
+    fn attach_as_jpeg(&mut self, src: std::path::PathBuf, cx: &mut Context<Self>) {
+        let session = self.selected.clone();
+        let dir = crate::scratch_dir()
+            .with_file_name("attachments")
+            .join(crate::message_id());
+        let made = cx.background_executor().spawn({
+            let src = src.clone();
+            async move { crate::compose::to_jpeg(&src, &dir) }
+        });
+        cx.spawn(async move |this, cx| {
+            let made = made.await;
+            let _ = this.update(cx, |this, cx| {
+                let name = src
+                    .file_name()
+                    .map_or(String::new(), |n| n.to_string_lossy().into_owned());
+                let path = match made {
+                    Ok(jpg) => jpg.display().to_string(),
+                    Err(why) => {
+                        this.toast(
+                            ToastAction::Info,
+                            format!(
+                                "Couldn't turn {name} into a JPEG the agent can see ({why}), so it gets the file's path."
+                            ),
+                        );
+                        src.display().to_string()
+                    }
+                };
+                let held = if this.selected == session {
+                    &mut this.attachments
+                } else {
+                    this.attached.entry(session).or_default()
+                };
+                let a = Attachment::File { path };
+                if !held.contains(&a) {
+                    held.push(a);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Whether `at` is over the terminal drawn this frame.

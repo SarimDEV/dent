@@ -66,25 +66,75 @@ fn encode(img: &image::DynamicImage, format: image::ImageFormat) -> Result<Vec<u
     Ok(out.into_inner())
 }
 
-/// What to tell you about a file attached as a picture the agent won't see
-/// as one: too big, or a kind it can't read. It still goes, by its path.
-pub fn picture_note(path: &str, size: u64) -> Option<String> {
+/// Picture kinds the agent can't read that the Mac turns into JPEG: an
+/// iPhone's HEIC and HEIF, TIFF and BMP.
+fn converts(ext: &str) -> bool {
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "heic" | "heif" | "tif" | "tiff" | "bmp"
+    )
+}
+
+/// The longest side a picture made into a JPEG keeps.
+pub const JPEG_EDGE: u32 = 2000;
+
+/// Whether a picture attached from disk goes as a JPEG copy so the agent
+/// sees it: a kind it can't read, or one too big for it to be shown.
+pub fn wants_jpeg(path: &str, size: u64) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
-    let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase())?;
-    let picture = matches!(
-        ext.as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "tif" | "tiff" | "bmp" | "heic" | "heif"
-    );
-    if !picture {
-        return None;
+    let Some((_, ext)) = name.rsplit_once('.') else {
+        return false;
+    };
+    converts(ext) || agent_reads(ext) && size > PICTURE_MAX
+}
+
+/// A JPEG copy of the picture at `src`, made in `dir` by the Mac's own
+/// `sips`, no longer than `JPEG_EDGE` on its long side (a smaller one keeps
+/// its size). The error says why, for a toast.
+pub fn to_jpeg(src: &std::path::Path, dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    use std::process::Command;
+    // sips says nothing useful in its exit code: a file it can't read
+    // still exits 0. What it reports, and what it writes, tell.
+    let probe = Command::new("sips")
+        .args(["-g", "pixelWidth", "-g", "pixelHeight"])
+        .arg(src)
+        .output()
+        .map_err(|e| format!("couldn't run sips: {e}"))?;
+    let report = String::from_utf8_lossy(&probe.stdout);
+    let side = |key: &str| -> u32 {
+        report
+            .lines()
+            .find_map(|l| l.trim().strip_prefix(key)?.trim().parse().ok())
+            .unwrap_or(0)
+    };
+    let long = side("pixelWidth:").max(side("pixelHeight:"));
+    if long == 0 {
+        return Err("it isn't a picture the Mac can read".into());
     }
-    if !agent_reads(&ext) {
-        return Some(format!(
-            "The agent can't see {name} as a picture (it reads PNG, JPEG, GIF and WebP), so it gets the file's path."
-        ));
+    std::fs::create_dir_all(dir).map_err(|e| format!("couldn't make a folder for it: {e}"))?;
+    let stem = src
+        .file_stem()
+        .map_or("picture".into(), |s| s.to_string_lossy().into_owned());
+    let out = dir.join(format!("{stem}.jpg"));
+    let mut sips = Command::new("sips");
+    sips.args(["-s", "format", "jpeg", "-s", "formatOptions", "85"]);
+    if long > JPEG_EDGE {
+        sips.args(["-Z", &JPEG_EDGE.to_string()]);
     }
-    (size > PICTURE_MAX)
-        .then(|| format!("{name} is over 5 MB, so the agent gets its path, not the picture."))
+    let ran = sips
+        .arg(src)
+        .arg("--out")
+        .arg(&out)
+        .output()
+        .map_err(|e| format!("couldn't run sips: {e}"))?;
+    match std::fs::metadata(&out) {
+        Ok(m) if m.len() > 0 => Ok(out),
+        _ => Err(String::from_utf8_lossy(&ran.stderr)
+            .lines()
+            .next()
+            .unwrap_or("sips made nothing")
+            .to_string()),
+    }
 }
 
 /// Pasted text this long folds into one line in the box.
@@ -309,19 +359,45 @@ mod tests {
     }
 
     #[test]
-    fn says_when_a_picture_goes_by_path() {
-        assert!(picture_note("/a/shot.png", 1000).is_none());
-        assert!(picture_note("/a/notes.txt", 10 << 20).is_none());
-        assert!(
-            picture_note("/a/shot.png", 6 << 20)
-                .unwrap()
-                .contains("over 5 MB")
-        );
-        assert!(
-            picture_note("/a/scan.tiff", 1000)
-                .unwrap()
-                .contains("can't see")
-        );
+    fn pictures_the_agent_cant_see_go_as_jpeg() {
+        assert!(!wants_jpeg("/a/shot.png", 1000));
+        assert!(!wants_jpeg("/a/notes.txt", 10 << 20));
+        assert!(wants_jpeg("/a/shot.png", 6 << 20));
+        assert!(wants_jpeg("/a/IMG_0042.HEIC", 1000));
+        assert!(wants_jpeg("/a/scan.tiff", 1000));
+        assert!(!wants_jpeg("/a/no-extension", 6 << 20));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_mac_turns_a_heic_into_a_jpeg_no_longer_than_its_edge() {
+        let dir = std::env::temp_dir().join(format!("dent-jpeg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("wide.png");
+        image::RgbImage::from_pixel(3000, 1000, image::Rgb([200, 30, 30]))
+            .save(&png)
+            .unwrap();
+        let heic = dir.join("wide.heic");
+        std::process::Command::new("sips")
+            .args(["-s", "format", "heic"])
+            .arg(&png)
+            .arg("--out")
+            .arg(&heic)
+            .output()
+            .unwrap();
+        let jpg = to_jpeg(&heic, &dir.join("out")).unwrap();
+        let img = image::open(&jpg).unwrap();
+        assert_eq!((img.width(), img.height()), (2000, 666));
+        // A small one keeps its size.
+        let small = dir.join("small.png");
+        image::RgbImage::new(100, 50).save(&small).unwrap();
+        let jpg = to_jpeg(&small, &dir.join("out")).unwrap();
+        assert_eq!(image::open(&jpg).unwrap().width(), 100);
+        // Not a picture: an error, not an empty file.
+        let txt = dir.join("notes.heic");
+        std::fs::write(&txt, "not a picture").unwrap();
+        assert!(to_jpeg(&txt, &dir.join("out")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

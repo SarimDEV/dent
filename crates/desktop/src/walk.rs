@@ -5036,6 +5036,46 @@ fn composing() -> Vec<(f32, Act)> {
         ),
         (0.1, Type(Field::Composer, "")),
     ]);
+    // An iPhone photo (HEIC) attached goes as a JPEG the agent can see.
+    v.extend([
+        (
+            0.,
+            Call(|d, w, cx| {
+                let png = outside("photo.png");
+                let heic = outside("photo.heic");
+                let _ = image::RgbImage::from_pixel(2600, 1200, image::Rgb([30, 120, 200])).save(&png);
+                let _ = std::process::Command::new("sips")
+                    .args(["-s", "format", "heic"])
+                    .arg(&png)
+                    .arg("--out")
+                    .arg(&heic)
+                    .output();
+                d.attach_paths(&[heic], w, cx);
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "a HEIC photo attaches as a JPEG copy, no wider than 2000 px",
+                |d, _| {
+                    d.attachments.iter().any(|a| {
+                        matches!(a, crate::app::Attachment::File { path }
+                            if path.ends_with("/photo.jpg")
+                                && image::image_dimensions(path).is_ok_and(|(w, _)| w == 2000))
+                    })
+                },
+                5.,
+            ),
+        ),
+        (0.3, Shot("heic-attached")),
+        (
+            0.,
+            Call(|d, _, cx| {
+                d.attachments.clear();
+                cx.notify();
+            }),
+        ),
+    ]);
     v
 }
 
