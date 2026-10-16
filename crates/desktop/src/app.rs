@@ -6066,7 +6066,11 @@ impl Dent {
                 };
                 let mut score = 0;
                 for w in &words {
-                    if meta.contains(w) {
+                    // A whole word ranks above part of one: "number 7"
+                    // finds "hello number 7" before "hello number 17".
+                    if has_word(&meta, w) {
+                        score += 4;
+                    } else if meta.contains(w) {
                         score += 3;
                     } else if body.contains(w) {
                         score += 1;
@@ -6510,5 +6514,25 @@ mod tests {
         assert_eq!(joined("", "back"), "back");
         assert_eq!(joined("mine", ""), "mine");
         assert_eq!(joined("mine", "back"), "mine\n\nback");
+    }
+}
+
+/// Whether `w` stands in `hay` as a word of its own, not inside a longer one.
+fn has_word(hay: &str, w: &str) -> bool {
+    let alnum = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+    hay.match_indices(w).any(|(at, _)| {
+        !alnum(hay[..at].chars().next_back()) && !alnum(hay[at + w.len()..].chars().next())
+    })
+}
+
+#[cfg(test)]
+mod word_tests {
+    #[test]
+    fn a_whole_word_is_told_from_part_of_one() {
+        assert!(super::has_word("hello number 7", "7"));
+        assert!(!super::has_word("hello number 17", "7"));
+        assert!(super::has_word("fix (cache) now", "cache"));
+        assert!(!super::has_word("caches", "cache"));
+        assert!(super::has_word("日本語 タイトル", "タイトル"));
     }
 }
