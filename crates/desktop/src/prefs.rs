@@ -27,8 +27,13 @@ pub struct Prefs {
     /// Files opened from links in each session's viewer, by path.
     pub opened: std::collections::BTreeMap<String, Vec<String>>,
     pub closed_tabs: std::collections::BTreeMap<String, std::collections::BTreeMap<String, usize>>,
-    /// What you'd typed in each session and not sent, so quitting loses nothing.
+    /// What you'd typed in each session and not sent, so quitting loses
+    /// nothing; under "" what was typed for a new session.
     pub drafts: std::collections::BTreeMap<String, String>,
+    /// Files attached to each draft and not yet sent, by the same keys.
+    pub attached: std::collections::BTreeMap<String, Vec<String>>,
+    /// Long pastes folded into the drafts, by number.
+    pub pastes: std::collections::BTreeMap<u32, String>,
     /// Sessions kept at the top of the sidebar, in the order pinned.
     pub pinned: Vec<String>,
     /// The ambient background on the new-session page, by id; none when unset

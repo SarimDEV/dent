@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui_kit::base::input::{InputEvent, TextareaState};
+use gpui_kit::base::input::{InlineToken, InputContent, InputEvent, TextareaState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -327,6 +327,40 @@ pub fn put_undoable(
     cx.emit(InputEvent::Change);
 }
 
+/// Put a draft back in a field, its folded pastes folded again.
+pub fn put_draft(
+    field: &mut TextareaState,
+    text: &str,
+    pastes: &std::collections::BTreeMap<u32, String>,
+    window: &mut Window,
+    cx: &mut Context<TextareaState>,
+) {
+    let mut content = InputContent::new(text.to_string());
+    for (r, n) in crate::compose::folded_in(text, pastes) {
+        let token = InlineToken::new(format!("paste-{n}"), text[r.clone()].to_string());
+        if let Ok(c) = content.clone().with_token(r, token) {
+            content = c;
+        }
+    }
+    field.set_value(content, window, cx);
+    field.set_selected_range(text.len()..text.len(), cx);
+    cx.emit(InputEvent::Change);
+}
+
+/// Where the new-session page keeps its draft and files among the
+/// sessions' (in `drafts` and the prefs).
+pub const NEW_DRAFT: &str = "";
+
+/// The files a saved draft carried, as attachments.
+fn files_of(paths: Option<&Vec<String>>) -> Vec<Attachment> {
+    paths
+        .into_iter()
+        .flatten()
+        .filter(|p| std::path::Path::new(p).exists())
+        .map(|p| Attachment::File { path: p.clone() })
+        .collect()
+}
+
 /// Words added after a draft, a blank line between.
 pub fn joined(draft: &str, more: &str) -> String {
     match (draft.is_empty(), more.is_empty()) {
@@ -615,7 +649,9 @@ pub enum Waiting {
     Changes(String, Option<String>),
     /// Putting back a file or hunk, in this session.
     Discard(String),
-    Create,
+    /// A new session; one started from the new-session page carries what
+    /// was typed and attached there, to put back if it fails.
+    Create(Option<(String, Vec<Attachment>)>),
     /// The folders for a typed path, as typed.
     Folders(String),
     ProjectMade,
@@ -658,6 +694,9 @@ pub struct Dent {
     /// The session whose name is being edited in the header.
     pub renaming: Option<String>,
     pub drafts: HashMap<String, String>,
+    /// Long pastes folded into a line in a prompt, by number: they open back
+    /// up when sent.
+    pub pastes: std::collections::BTreeMap<u32, String>,
     /// What each session's next message carries, kept while you look
     /// elsewhere (`None`: the new-session page).
     pub attached: HashMap<Option<String>, Vec<Attachment>>,
@@ -1224,6 +1263,7 @@ impl Dent {
             rename_input: rename_input.clone(),
             renaming: None,
             drafts: prefs.drafts.clone().into_iter().collect(),
+            pastes: prefs.pastes.clone(),
             appearance: prefs.appearance,
             pinned: prefs.pinned.clone(),
             forced_dark: forced,
@@ -1348,8 +1388,14 @@ impl Dent {
             updated_at: HashMap::new(),
             live_words: Default::default(),
             meter_open: false,
-            attachments: Vec::new(),
-            attached: HashMap::new(),
+            // The new-session page shows first: its files, as you left them.
+            attachments: files_of(prefs.attached.get(NEW_DRAFT)),
+            attached: prefs
+                .attached
+                .iter()
+                .filter(|(k, _)| k.as_str() != NEW_DRAFT)
+                .map(|(k, v)| (Some(k.clone()), files_of(Some(v))))
+                .collect(),
             dragging_files: None,
             drag_at: None,
             diff_file: HashMap::new(),
@@ -1399,6 +1445,12 @@ impl Dent {
         this.mdv = crate::markdown::Md::new(this.probes.clone());
         for input in this.fields() {
             crate::style_input(input, &this.t, cx);
+        }
+        // What you were typing for a new session, as you left it.
+        if let Some(draft) = this.drafts.get(NEW_DRAFT).cloned() {
+            let pastes = this.pastes.clone();
+            this.starter
+                .update(cx, |c, cx| put_draft(c, &draft, &pastes, window, cx));
         }
         // Files you had opened come back as tabs, if they're still there.
         for (sid, paths) in &prefs.opened {
@@ -1824,7 +1876,9 @@ impl Dent {
             .and_then(|i| self.drafts.get(i))
             .cloned()
             .unwrap_or_default();
-        self.composer.update(cx, |c, cx| put(c, draft, window, cx));
+        let pastes = self.pastes.clone();
+        self.composer
+            .update(cx, |c, cx| put_draft(c, &draft, &pastes, window, cx));
         if let Some(new) = id.clone()
             && !self.commands.contains_key(&new)
         {
@@ -2264,7 +2318,7 @@ impl Dent {
                 self.rebuild(&id);
             }
             (
-                Waiting::Create,
+                Waiting::Create(_),
                 Out::Reply {
                     reply: Reply::Created { session },
                 },
@@ -2275,9 +2329,13 @@ impl Dent {
                 }
                 self.pending_select = Some(session);
             }
-            (Waiting::Create, Out::Error { message }) => {
+            (Waiting::Create(typed), Out::Error { message }) => {
                 self.creating = false;
                 self.adopting = None;
+                // What you typed and attached comes back, to try again.
+                if let Some((text, atts)) = typed {
+                    self.restores.push((None, text, atts));
+                }
                 self.toast(ToastAction::Info, message);
             }
             // Put back: what Changes shows is read again.
@@ -2358,35 +2416,44 @@ impl Dent {
             .retain(|_, tb| tb.at.elapsed() < Duration::from_secs(30));
         for (session, text, atts) in std::mem::take(&mut self.restores) {
             let open = session == self.selected;
-            if open {
-                for a in atts {
-                    if !self.attachments.contains(&a) {
-                        self.attachments.push(a);
-                    }
-                }
-                let field = match session {
-                    Some(_) => self.composer.clone(),
-                    None => self.starter.clone(),
-                };
-                let draft = field.read(cx).value().trim_end().to_string();
-                let text = joined(&draft, &text);
-                field.update(cx, |c, cx| {
-                    put_undoable(c, text, window, cx);
-                    c.focus(window, cx);
-                });
-                // It's yours again to send: no double-press pause on it.
-                self.just_sent = None;
+            let held = if open {
+                &mut self.attachments
             } else {
-                let held = self.attached.entry(session.clone()).or_default();
-                for a in atts {
-                    if !held.contains(&a) {
-                        held.push(a);
+                self.attached.entry(session.clone()).or_default()
+            };
+            for a in atts {
+                if !held.contains(&a) {
+                    held.push(a);
+                }
+            }
+            // The new-session field keeps its text while a session shows;
+            // the open session's box is the composer; any other session's
+            // is its saved draft.
+            let field = match &session {
+                None => Some(self.starter.clone()),
+                Some(_) if open => Some(self.composer.clone()),
+                Some(_) => None,
+            };
+            match (field, session) {
+                (Some(field), _) => {
+                    let draft = field.read(cx).value().trim_end().to_string();
+                    let text = joined(&draft, &text);
+                    field.update(cx, |c, cx| {
+                        put_undoable(c, text, window, cx);
+                        if open {
+                            c.focus(window, cx);
+                        }
+                    });
+                    // It's yours again to send: no double-press pause on it.
+                    if open {
+                        self.just_sent = None;
                     }
                 }
-                if let Some(id) = session {
+                (None, Some(id)) => {
                     let draft = self.drafts.get(&id).cloned().unwrap_or_default();
                     self.drafts.insert(id, joined(draft.trim_end(), &text));
                 }
+                (None, None) => {}
             }
             cx.notify();
         }
@@ -2843,7 +2910,7 @@ impl Dent {
             && !k.modifiers.shift
             && self.palette.is_none()
             && matches!(field, None | Some(Field::Composer | Field::Starter))
-            && self.paste_attachment(window, cx)
+            && (self.paste_attachment(window, cx) || self.paste_folded(field, window, cx))
         {
             return true;
         }
@@ -3062,7 +3129,7 @@ impl Dent {
         let n = self.live.send(Request::Adopt {
             agent_session: agent_session.to_string(),
         });
-        self.waiting.insert(n, Waiting::Create);
+        self.waiting.insert(n, Waiting::Create(None));
         self.creating = true;
         self.creating_at = Instant::now();
         self.adopting = Some(agent_session.to_string());
@@ -3564,12 +3631,17 @@ impl Dent {
     /// Remember the current defaults and layout for next time, when they change.
     /// The open session's draft is what its composer holds right now.
     pub fn sync_draft(&mut self, cx: &App) {
-        let Some(id) = &self.selected else { return };
-        let text = self.composer.read(cx).value();
-        if text.trim().is_empty() {
-            self.drafts.remove(id);
-        } else if self.drafts.get(id).is_none_or(|d| *d != *text) {
-            self.drafts.insert(id.clone(), text.to_string());
+        let starter = self.starter.read(cx).value();
+        let open = self
+            .selected
+            .clone()
+            .map(|id| (id, self.composer.read(cx).value()));
+        for (id, text) in [(NEW_DRAFT.to_string(), starter)].into_iter().chain(open) {
+            if text.trim().is_empty() {
+                self.drafts.remove(&id);
+            } else if self.drafts.get(&id).is_none_or(|d| *d != *text) {
+                self.drafts.insert(id, text.to_string());
+            }
         }
     }
 
@@ -3617,6 +3689,32 @@ impl Dent {
                 .filter(|(_, d)| !d.trim().is_empty())
                 .map(|(id, d)| (id.clone(), d.clone()))
                 .collect(),
+            attached: self
+                .attached
+                .iter()
+                .chain([(&self.selected, &self.attachments)])
+                .map(|(k, atts)| {
+                    let files: Vec<String> = atts
+                        .iter()
+                        .filter_map(|a| match a {
+                            Attachment::File { path } => Some(path.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    (k.clone().unwrap_or_default(), files)
+                })
+                .filter(|(_, f)| !f.is_empty())
+                .collect(),
+            // Only the pastes a draft still holds.
+            pastes: self
+                .pastes
+                .iter()
+                .filter(|(n, full)| {
+                    let label = crate::compose::fold_label(**n, full);
+                    self.drafts.values().any(|d| d.contains(&label))
+                })
+                .map(|(n, full)| (*n, full.clone()))
+                .collect(),
         };
         if self.saved_prefs.as_ref() != Some(&p) {
             crate::prefs::save(&p);
@@ -3652,6 +3750,8 @@ impl Dent {
             return;
         };
         let text = self.composer.read(cx).value().trim().to_string();
+        // Folded pastes go in full.
+        let text = crate::compose::unfold(&text, &self.pastes);
         if text.is_empty() && self.attachments.is_empty() {
             return;
         }
@@ -3746,22 +3846,23 @@ impl Dent {
                 scratch.display().to_string()
             }
         };
+        let atts = std::mem::take(&mut self.attachments);
         let n = self.live.send(Request::Create {
             cwd,
             model: d.model,
             permission: d.permission,
             effort: d.effort,
             id: crate::message_id(),
-            text,
-            attachments: std::mem::take(&mut self.attachments)
-                .into_iter()
+            text: crate::compose::unfold(&text, &self.pastes),
+            attachments: atts
+                .iter()
                 .filter_map(|a| match a {
-                    Attachment::File { path } => Some(path),
+                    Attachment::File { path } => Some(path.clone()),
                     _ => None,
                 })
                 .collect(),
         });
-        self.waiting.insert(n, Waiting::Create);
+        self.waiting.insert(n, Waiting::Create(Some((text, atts))));
         self.creating = true;
         self.creating_at = Instant::now();
         self.starter.update(cx, |c, cx| put(c, "", window, cx));
@@ -4071,6 +4172,57 @@ impl Dent {
         true
     }
 
+    /// ⌘V of long text in a prompt folds it into one line, which opens back
+    /// up when sent (or when clicked). Returns whether it did.
+    pub fn paste_folded(
+        &mut self,
+        field: Option<Field>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(f @ (Field::Composer | Field::Starter)) = field else {
+            return false;
+        };
+        let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) else {
+            return false;
+        };
+        if !crate::compose::folds(&text) {
+            return false;
+        }
+        let n = self.pastes.keys().next_back().map_or(1, |n| n + 1);
+        let label = crate::compose::fold_label(n, &text);
+        self.pastes.insert(n, text);
+        let token = InlineToken::new(format!("paste-{n}"), label);
+        self.field_entity(f)
+            .clone()
+            .update(cx, |c, cx| c.replace_with_token(token, window, cx))
+            .is_ok()
+    }
+
+    /// A folded paste clicked in a prompt opens to its full text there.
+    pub fn open_paste(
+        &mut self,
+        field: &Entity<TextareaState>,
+        id: &str,
+        at: std::ops::Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(full) = id
+            .strip_prefix("paste-")
+            .and_then(|n| n.parse::<u32>().ok())
+            .and_then(|n| self.pastes.get(&n))
+            .cloned()
+        else {
+            return;
+        };
+        field.update(cx, |c, cx| {
+            c.set_selected_range(at, cx);
+            c.replace(full, window, cx);
+            cx.emit(InputEvent::Change);
+        });
+    }
+
     /// Session `id`'s waiting message `msg`: its words and files.
     fn queued(&self, id: &str, msg: &str) -> Option<(String, Vec<String>)> {
         self.session(id)?.items.iter().find_map(|i| match i {
@@ -4256,7 +4408,7 @@ impl Dent {
             session: session.to_string(),
             before,
         });
-        self.waiting.insert(n, Waiting::Create);
+        self.waiting.insert(n, Waiting::Create(None));
         cx.notify();
     }
 
@@ -4606,7 +4758,7 @@ impl Dent {
             session: session.to_string(),
             id: id.to_string(),
         });
-        self.waiting.insert(n, Waiting::Create);
+        self.waiting.insert(n, Waiting::Create(None));
         cx.notify();
     }
 

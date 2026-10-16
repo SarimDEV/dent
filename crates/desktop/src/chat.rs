@@ -2865,11 +2865,31 @@ impl Dent {
         field: &Entity<gpui_kit::base::input::TextareaState>,
         cx: &mut Context<Self>,
     ) -> Div {
+        // A folded paste opens to its full text when clicked.
+        let me = cx.entity().downgrade();
+        let f = field.clone();
+        let t = self.t;
         div()
             .ty(READING)
             .text_color(self.t.ink)
             .capture_any_mouse_up(cx.listener(|_, _, _, cx| cx.notify()))
-            .child(Textarea::new(field))
+            .child(
+                Textarea::new(field)
+                    .token(move |tok, _, _| {
+                        div()
+                            .px(px(space::S1H))
+                            .rounded(px(radius::SM))
+                            .bg(t.selected())
+                            .text_color(t.quiet)
+                            .cursor_pointer()
+                            .child(tok.token().label().clone())
+                    })
+                    .on_token_click(move |e, window, cx| {
+                        let id = e.token().id().to_string();
+                        let at = e.range();
+                        let _ = me.update(cx, |this, cx| this.open_paste(&f, &id, at, window, cx));
+                    }),
+            )
     }
 
     /// The prompt's menu: commands after a `/` that opens it, files and
