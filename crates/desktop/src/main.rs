@@ -44,6 +44,7 @@ mod walk;
 mod web;
 
 use crate::ui::Arrive;
+use crate::ui::FocusField;
 use crate::ui::Tipped;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -257,7 +258,7 @@ impl Render for Dent {
             || self.term_focus.is_focused(window) && shown != Some(Tab::Terminal)
         {
             let prompt = self.prompt().clone();
-            prompt.update(cx, |c, cx| c.focus(window, cx));
+            prompt.update(cx, |c, cx| c.focus_field(window, cx));
         }
         self.inbox_focused = self.inbox_focus.is_focused(window);
         self.ask_keyed = self.ask_focus.is_focused(window);
@@ -318,13 +319,13 @@ impl Render for Dent {
                 .is_some_and(|id| self.open_ask(&id).is_some())
         {
             let composer = self.composer.clone();
-            composer.update(cx, |c, cx| c.focus(window, cx));
+            composer.update(cx, |c, cx| c.focus_field(window, cx));
         }
         // A menu's field gives the keyboard back to the prompt however the
         // menu closed: a choice, Esc, a click away.
         if self.menu.is_none() && self.menu_query.read(cx).focus_handle(cx).is_focused(window) {
             let prompt = self.prompt().clone();
-            prompt.update(cx, |f, cx| f.focus(window, cx));
+            prompt.update(cx, |f, cx| f.focus_field(window, cx));
         }
         let sidebar = (!self.sidebar_hidden).then(|| self.sidebar(cx));
         let main = self.main_column(window, cx);
@@ -602,7 +603,7 @@ impl Render for Dent {
                     // the reply box.
                     this.renaming = None;
                     this.commenting = None;
-                    this.composer.update(cx, |c, cx| c.focus(window, cx));
+                    this.composer.update(cx, |c, cx| c.focus_field(window, cx));
                 } else if this.field_focused(window, cx) == Some(app::Field::Composer)
                     && let Some(id) = this
                         .selected
@@ -697,9 +698,9 @@ impl Render for Dent {
             }))
             .on_action(cx.listener(|this, _: &InboxOpen, window, cx| {
                 if this.selected.is_some() {
-                    this.composer.update(cx, |c, cx| c.focus(window, cx))
+                    this.composer.update(cx, |c, cx| c.focus_field(window, cx))
                 } else {
-                    this.starter.update(cx, |c, cx| c.focus(window, cx))
+                    this.starter.update(cx, |c, cx| c.focus_field(window, cx))
                 }
             }))
             .on_action(cx.listener(|this, _: &InboxClose, window, cx| {
@@ -969,7 +970,7 @@ fn main() {
                 d
             });
             let starter = view.read(cx).starter.clone();
-            starter.update(cx, |c, cx| c.focus(window, cx));
+            starter.update(cx, |c, cx| c.focus_field(window, cx));
             view
         })
         .expect("open window");

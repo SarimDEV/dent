@@ -6,6 +6,7 @@
 //! `scripts/walk.sh checks|stills` sets up a scratch home, state and project
 //! and runs `dent-desktop --walk NAME`. Each check prints PASS or FAIL.
 
+use crate::ui::FocusField;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -516,7 +517,7 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
                 input.update(cx, |i, cx| {
                     // As typed: the caret ends up after the text.
                     crate::app::put(i, text, window, cx);
-                    i.focus(window, cx);
+                    i.focus_field(window, cx);
                 });
                 cx.notify();
             });
@@ -1326,7 +1327,7 @@ fn checks() -> Vec<(f32, Act)> {
                 d.renaming = d.selected.clone();
                 d.rename_input.update(cx, |i, cx| {
                     i.set_value("Greeting test", w, cx);
-                    i.focus(w, cx);
+                    i.focus_field(w, cx);
                 });
                 cx.notify();
             }),
@@ -2187,7 +2188,7 @@ fn typing() -> Vec<(f32, Act)> {
             Call(|d, w, cx| {
                 d.starter.update(cx, |s, cx| {
                     s.set_value("", w, cx);
-                    s.focus(w, cx);
+                    s.focus_field(w, cx);
                 })
             }),
         ),
@@ -4268,7 +4269,7 @@ fn attaching() -> Vec<(f32, Act)> {
         (0.5, Shot("output-all")),
         (
             0.2,
-            Call(|d, w, cx| d.composer.update(cx, |c, cx| c.focus(w, cx))),
+            Call(|d, w, cx| d.composer.update(cx, |c, cx| c.focus_field(w, cx))),
         ),
         (0.2, Key("home")),
         (

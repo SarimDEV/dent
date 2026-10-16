@@ -4,6 +4,7 @@
 //! out; Return and ⇧Return (or ⌘G and ⇧⌘G) step through them, scrolling
 //! to each, and Esc puts the bar away.
 
+use crate::ui::FocusField;
 use std::hash::{Hash, Hasher};
 
 use gpui_kit::base::input::Textarea;
@@ -197,7 +198,7 @@ impl Dent {
         self.find_input.update(cx, |f, cx| {
             let n = f.value().len();
             f.set_selected_range(0..n, cx);
-            f.focus(window, cx);
+            f.focus_field(window, cx);
         });
         self.refresh_find(true, cx);
         cx.notify();
@@ -215,7 +216,7 @@ impl Dent {
         if f.scope == Scope::Terminal {
             window.focus(&self.term_focus, cx);
         } else {
-            self.composer.update(cx, |c, cx| c.focus(window, cx));
+            self.composer.update(cx, |c, cx| c.focus_field(window, cx));
         }
         cx.notify();
         true

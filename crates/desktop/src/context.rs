@@ -1,6 +1,7 @@
 //! Right-click menus: a short list of actions at the pointer. One is open
 //! at a time; a click anywhere else or Esc closes it.
 
+use crate::ui::FocusField;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -120,7 +121,7 @@ impl Dent {
         let caret = text.len();
         self.composer.update(cx, |c, cx| {
             crate::app::put_at(c, text, caret, window, cx);
-            c.focus(window, cx);
+            c.focus_field(window, cx);
         });
         crate::select::clear(window);
     }

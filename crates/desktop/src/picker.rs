@@ -3,6 +3,7 @@
 //! folder, with its subfolders to complete; "New project…" makes one from a
 //! name and "Clone a Git URL…" clones one, both into `~/dent/projects`.
 
+use crate::ui::FocusField;
 use std::rc::Rc;
 
 use dent_protocol::{Project, Request};
@@ -323,7 +324,7 @@ impl Dent {
         self.folders = None;
         self.menu_query.update(cx, |f, cx| {
             put(f, "", window, cx);
-            f.focus(window, cx);
+            f.focus_field(window, cx);
         });
     }
 
@@ -332,7 +333,8 @@ impl Dent {
         self.project_mode = mode;
         self.project_error = None;
         self.menu_ix = None;
-        self.menu_query.update(cx, |f, cx| f.focus(window, cx));
+        self.menu_query
+            .update(cx, |f, cx| f.focus_field(window, cx));
         self.project_query_changed(cx);
     }
 

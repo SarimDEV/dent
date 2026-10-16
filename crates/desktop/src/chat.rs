@@ -2,6 +2,7 @@
 //! page where you start by typing.
 
 use crate::app::Scope;
+use crate::ui::FocusField;
 use crate::ui::Tipped;
 use crate::ui::{Arrive, From};
 use gpui_kit::base::input::Textarea;
@@ -1019,7 +1020,7 @@ impl Dent {
                         .child(div().flex_1().ty(UI).text_color(t.quiet).child("Closed. It stays searchable, and reopening puts it back in your inbox."))
                         .child(button("reopen", "Reopen", true, &t).on_press(cx.listener(move |this, _, window, cx| {
                             this.reopen(&id, cx);
-                            this.composer.update(cx, |c, cx| c.focus(window, cx));
+                            this.composer.update(cx, |c, cx| c.focus_field(window, cx));
                         }))),
                 )
                 .into_any_element()

@@ -53,6 +53,29 @@ pub trait Press: StatefulInteractiveElement + Sized {
 }
 impl<T: StatefulInteractiveElement> Press for T {}
 
+/// Give a prompt field the keyboard. The field's own `focus` starts its
+/// caret blinking at once, but GPUI tells a field it lost the keyboard only
+/// while the window is in front: a field focused while dent is behind (and
+/// every one a walk focuses, its window never in front) would blink, and
+/// repaint the window, for good. Behind, this only moves the keyboard;
+/// GPUI tells the field it has it when the window comes to the front, which
+/// starts the blink then.
+pub trait FocusField {
+    fn focus_field(&self, window: &mut Window, cx: &mut Context<Self>)
+    where
+        Self: Sized;
+}
+
+impl FocusField for gpui_kit::base::input::TextareaState {
+    fn focus_field(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.is_window_active() {
+            self.focus(window, cx);
+        } else {
+            window.focus(&self.focus_handle(cx), cx);
+        }
+    }
+}
+
 pub fn icon(name: &str, px_size: f32, color: Hsla) -> Svg {
     svg()
         .path(format!("icons/{name}.svg"))

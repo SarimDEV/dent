@@ -1,6 +1,7 @@
 //! The window's state and everything that changes it. Rendering lives in
 //! sidebar.rs, chat.rs and viewer.rs.
 
+use crate::ui::FocusField;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -1145,7 +1146,7 @@ impl Dent {
                 // Return saves, and so does clicking away, as in Finder.
                 InputEvent::PressEnter { .. } => {
                     this.commit_rename(window, cx);
-                    this.composer.update(cx, |c, cx| c.focus(window, cx));
+                    this.composer.update(cx, |c, cx| c.focus_field(window, cx));
                 }
                 InputEvent::Blur => this.commit_rename(window, cx),
                 _ => {}
@@ -1951,7 +1952,7 @@ impl Dent {
         // attachments, draft and place stay as they are.
         if id.is_some() && id == self.selected {
             self.menu = None;
-            self.composer.update(cx, |c, cx| c.focus(window, cx));
+            self.composer.update(cx, |c, cx| c.focus_field(window, cx));
             cx.notify();
             return;
         }
@@ -2022,8 +2023,8 @@ impl Dent {
         self.end_pick();
         self.commenting = None;
         match &self.selected {
-            Some(_) => self.composer.update(cx, |c, cx| c.focus(window, cx)),
-            None => self.starter.update(cx, |c, cx| c.focus(window, cx)),
+            Some(_) => self.composer.update(cx, |c, cx| c.focus_field(window, cx)),
+            None => self.starter.update(cx, |c, cx| c.focus_field(window, cx)),
         }
         cx.notify();
     }
@@ -2052,7 +2053,7 @@ impl Dent {
         let title = title.to_string();
         self.rename_input.update(cx, |i, cx| {
             put(i, title, window, cx);
-            i.focus(window, cx);
+            i.focus_field(window, cx);
             i.select_all(window, cx);
         });
         cx.notify();
@@ -2600,7 +2601,7 @@ impl Dent {
                     field.update(cx, |c, cx| {
                         put_beside(c, &text, false, window, cx);
                         if open {
-                            c.focus(window, cx);
+                            c.focus_field(window, cx);
                         }
                     });
                     // It's yours again to send: no double-press pause on it.
@@ -3661,7 +3662,7 @@ impl Dent {
         field.update(cx, |f, cx| {
             let caret = caret.saturating_sub(value.len() - value.trim_start().len());
             put_at(f, value.trim_start().to_string(), caret, window, cx);
-            f.focus(window, cx);
+            f.focus_field(window, cx);
         });
         self.slash_ix = 0;
         self.slash_moved = false;
@@ -4704,7 +4705,7 @@ impl Dent {
             } else {
                 put_beside(c, &st.text, false, window, cx);
             }
-            c.focus(window, cx);
+            c.focus_field(window, cx);
         });
         for path in st.files {
             let a = Attachment::File { path };
@@ -4819,7 +4820,7 @@ impl Dent {
             } else {
                 put_undoable(c, words, window, cx);
             }
-            c.focus(window, cx);
+            c.focus_field(window, cx);
         });
         added
     }
@@ -5097,8 +5098,8 @@ impl Dent {
             self.attachments.push(Attachment::File { path });
         }
         match &self.selected {
-            Some(_) => self.composer.update(cx, |c, cx| c.focus(window, cx)),
-            None => self.starter.update(cx, |c, cx| c.focus(window, cx)),
+            Some(_) => self.composer.update(cx, |c, cx| c.focus_field(window, cx)),
+            None => self.starter.update(cx, |c, cx| c.focus_field(window, cx)),
         }
         cx.notify();
     }
@@ -5328,7 +5329,8 @@ impl Dent {
             return;
         }
         self.show_tab(Tab::Aside, cx);
-        self.aside_input.update(cx, |i, cx| i.focus(window, cx));
+        self.aside_input
+            .update(cx, |i, cx| i.focus_field(window, cx));
     }
 
     /// Ask what's in the side chat's box.
@@ -5550,7 +5552,7 @@ impl Dent {
                     if self.popouts.contains_key(art) {
                         cx.notify();
                     } else {
-                        self.composer.update(cx, |c, cx| c.focus(window, cx));
+                        self.composer.update(cx, |c, cx| c.focus_field(window, cx));
                     }
                 }
                 PageEvent::PickCancel => self.picking = false,
@@ -5910,7 +5912,7 @@ impl Dent {
         self.commenting = Some((file, line));
         self.comment_input.update(cx, |c, cx| {
             put(c, "", window, cx);
-            c.focus(window, cx);
+            c.focus_field(window, cx);
         });
         cx.notify();
     }
@@ -5925,7 +5927,7 @@ impl Dent {
         }
         self.comment_input
             .update(cx, |c, cx| put(c, "", window, cx));
-        self.composer.update(cx, |c, cx| c.focus(window, cx));
+        self.composer.update(cx, |c, cx| c.focus_field(window, cx));
         cx.notify();
     }
 
@@ -6007,7 +6009,7 @@ impl Dent {
         self.palette = Some(0);
         self.search.update(cx, |s, cx| {
             put(s, "", window, cx);
-            s.focus(window, cx);
+            s.focus_field(window, cx);
         });
         cx.notify();
     }
@@ -6015,8 +6017,8 @@ impl Dent {
     pub fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.palette = None;
         match &self.selected {
-            Some(_) => self.composer.update(cx, |c, cx| c.focus(window, cx)),
-            None => self.starter.update(cx, |c, cx| c.focus(window, cx)),
+            Some(_) => self.composer.update(cx, |c, cx| c.focus_field(window, cx)),
+            None => self.starter.update(cx, |c, cx| c.focus_field(window, cx)),
         }
         cx.notify();
     }
@@ -6180,7 +6182,7 @@ impl Dent {
             // Over a draft as an edit ⌘Z undoes.
             self.starter.update(cx, |s, cx| {
                 put_undoable(s, query.clone(), window, cx);
-                s.focus(window, cx);
+                s.focus_field(window, cx);
             });
         } else {
             self.close_palette(window, cx);
@@ -6377,7 +6379,7 @@ impl Dent {
         let text = format!("/{name} ");
         self.composer.clone().update(cx, |f, cx| {
             put_undoable(f, text.clone(), window, cx);
-            f.focus(window, cx);
+            f.focus_field(window, cx);
         });
         cx.notify();
     }
