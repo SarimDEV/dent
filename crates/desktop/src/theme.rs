@@ -221,7 +221,7 @@ pub const PAIRINGS: &[Fonts] = &[
         sans: "IBM Plex Sans",
         body: "Literata",
         mono: "CommitMono",
-        label: "CommitMono",
+        label: "IBM Plex Sans",
         serif: "Instrument Serif",
     },
     Fonts {
@@ -229,7 +229,7 @@ pub const PAIRINGS: &[Fonts] = &[
         sans: "Geist",
         body: "Geist",
         mono: "Geist Mono",
-        label: "Geist Mono",
+        label: "Geist",
         serif: "Instrument Serif",
     },
     Fonts {
@@ -237,7 +237,7 @@ pub const PAIRINGS: &[Fonts] = &[
         sans: "IBM Plex Sans",
         body: "IBM Plex Sans",
         mono: "IBM Plex Mono",
-        label: "IBM Plex Mono",
+        label: "IBM Plex Sans",
         serif: "Instrument Serif",
     },
     Fonts {
@@ -245,7 +245,7 @@ pub const PAIRINGS: &[Fonts] = &[
         sans: "Atkinson Hyperlegible Next",
         body: "Atkinson Hyperlegible Next",
         mono: "Atkinson Hyperlegible Mono",
-        label: "Atkinson Hyperlegible Mono",
+        label: "Atkinson Hyperlegible Next",
         serif: "Instrument Serif",
     },
     Fonts {
@@ -253,7 +253,7 @@ pub const PAIRINGS: &[Fonts] = &[
         sans: "Fira Sans",
         body: "Fira Sans",
         mono: "Fira Mono",
-        label: "Departure Mono",
+        label: "Fira Sans",
         serif: "Instrument Serif",
     },
 ];

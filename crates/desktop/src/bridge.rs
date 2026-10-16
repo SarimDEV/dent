@@ -619,8 +619,9 @@ fn detail(v: &SessionView) -> String {
             if !v.partial.is_empty() {
                 return "Writing".into();
             }
-            // The plan's current step says it best; then the call still
-            // running, else the latest.
+            // A call still running says what's happening now; between
+            // calls, the plan's current step, else it's thinking. A call
+            // already done would read in the past tense mid-turn.
             let step = todos(v)
                 .into_iter()
                 .find(|(st, ..)| st == "in_progress")
@@ -628,12 +629,7 @@ fn detail(v: &SessionView) -> String {
             match v.entries.last() {
                 Some(Entry::Tools { calls }) => {
                     let top = |c: &&Call| c.parent.is_none() && !plans(&c.name);
-                    let call = calls
-                        .iter()
-                        .rev()
-                        .filter(top)
-                        .find(|c| c.result.is_none())
-                        .or_else(|| calls.iter().rev().find(top));
+                    let call = calls.iter().rev().filter(top).find(|c| c.result.is_none());
                     call.map(|c| {
                         // A subagent at work: its latest step too.
                         let step = calls
@@ -646,7 +642,7 @@ fn detail(v: &SessionView) -> String {
                         }
                     })
                     .or(step)
-                    .unwrap_or_else(|| "Working".into())
+                    .unwrap_or_else(|| "Thinking".into())
                 }
                 _ => step.unwrap_or_else(|| "Thinking".into()),
             }

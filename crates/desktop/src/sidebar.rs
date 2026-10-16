@@ -12,7 +12,7 @@ use crate::ui::RevealOnHover;
 use crate::anim;
 use crate::app::Dent;
 use crate::data::Session;
-use crate::ds::{LABEL, Typed, UI, motion, radius, size, space};
+use crate::ds::{LABEL, NUMERAL, Typed, UI, motion, radius, size, space};
 use crate::theme::{Status, status_square_at};
 use crate::ui::{icon, icon_button, kbd, probe, section_label, tip};
 
@@ -413,7 +413,7 @@ impl Dent {
             .justify_end()
             .child(
                 div()
-                    .ty(LABEL)
+                    .ty(NUMERAL)
                     .text_color(t.faint)
                     .when(has_button, |d| d.hide_on_hover(group.clone()))
                     .child(age),

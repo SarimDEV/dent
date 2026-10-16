@@ -13,6 +13,9 @@ Status: accepted (2026-10-15) · Spec: [desktop.md](../desktop.md), [chat-render
 - Group lines name one or two changed files and end with a diffstat in the line's own inks; a lone subagent is named by its task.
 - Allowing once leaves no note; lasting allows and denials do.
 - Approvals lead with the agent's reason.
+- Metadata labels use the interface face, not mono; mono stays for code, commands and numbers that tick (`type.numeral`). Four faces on screen became three.
+- The working line shows a running call in the present tense; between calls, the plan's current step, else "Thinking", never a finished step in the past tense.
+- A turn's footer is one line: time, duration, the changes and Review, Copy and Try again.
 - dent gives each Claude Code session a plan tool of its own, `update_plan`: a few lines of MCP served by `dent-daemon plan-tool` (no new dependency), passed with `--mcp-config` and allowed up front. The session prompt asks the agent to keep its plan there and to describe every command. The plan shows open, as a checklist card above the composer, while the agent works; Claude Code's own todo list, where a version still has one, reads the same way.
 
 ## Why

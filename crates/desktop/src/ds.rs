@@ -146,6 +146,14 @@ pub const LABEL: Type = Type {
     line: 16.,
     zooms: false,
 };
+/// A number that ticks (a timer, an age): the mono face at label size, so
+/// every digit is the same width and nothing shifts as it counts.
+pub const NUMERAL: Type = Type {
+    family: mono,
+    size: 11.,
+    line: 16.,
+    zooms: false,
+};
 
 pub trait Typed: Styled + Sized {
     fn ty(self, t: Type) -> Self {

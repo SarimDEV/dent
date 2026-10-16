@@ -56,13 +56,14 @@ Five sizes, two weights, three inks. Line heights sit on the 4 px grid.
 | `type.reading` | Literata | 15 / 24 | Agent replies, user messages, docs body, composer |
 | `type.ui` | IBM Plex Sans | 13 / 20 | Sidebar titles, buttons, menus, tool lines, the working line |
 | `type.code` | Commit Mono | 12 / 20 | Code, diffs, commands, a tool call's input and output |
-| `type.label` | Commit Mono | 11 / 16 | Metadata and section labels |
+| `type.label` | IBM Plex Sans | 11 / 16 | Metadata and section labels |
+| `type.numeral` | Commit Mono | 11 / 16 | Numbers that tick: the working line's timer, a row's age |
 
 - **Text size (⌘+ / ⌘−) scales `type.reading` and `type.code` only**, lines rounded to whole pixels; display, UI and label sizes, and every control and gutter, stay as designed. Anything measured from those two types reads them through `Type::zoomed()`.
 - **Tool lines are two inks:** the verb in `quiet`, what it worked on in `secondary` (between `quiet` and `ink`), both to `ink` on hover. A count of work ("Edited 2 files, read 3 files") is one quiet phrase. The chevron trails the label.
 - **Hierarchy comes from ink and weight before size.** Inks: `ink` (content), `quiet` (secondary, metadata), `faint` (line numbers, placeholders, separators). Weights: regular and medium only.
 - **Uppercase is for section labels only** (`PROJECTS`, `NEEDS YOU`). Inline metadata (`claude · mac-mini · 100,003 events`) stays lowercase.
-- **Numbers that change** (usage, counts, timers) are set in Commit Mono so every digit is the same width and nothing shifts as they update.
+- **Numbers that tick** (timers, ages) are set in Commit Mono (`type.numeral`) so every digit is the same width and nothing shifts as they count. Everything else small is the interface face: mono is for code, commands and those numbers, so a screen carries three faces, not four ([0047](decisions/0047-calmer-work.md)).
 - `·` separates metadata, in `faint`.
 
 ## Shape

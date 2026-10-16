@@ -21,7 +21,7 @@ use dent_protocol::Permission;
 
 use crate::data::{Item, Kind, Session};
 use crate::ds::{
-    CODE, DISPLAY, DISPLAY_COMPACT, LABEL, READING, Typed, UI, motion, radius, size, space,
+    CODE, DISPLAY, DISPLAY_COMPACT, LABEL, NUMERAL, READING, Typed, UI, motion, radius, size, space,
 };
 use crate::markdown;
 use crate::theme::{self, Status, status_square};
@@ -503,6 +503,63 @@ impl Dent {
         }))
     }
 
+    /// What a turn changed, as one line that opens Changes on that turn:
+    /// "5 files changed +12 −6 Review".
+    fn changed_line(
+        &self,
+        s: &Session,
+        ix: usize,
+        paths: &[String],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.t;
+        let (added, removed) = turn_counts(s, ix, paths);
+        let n = paths.len();
+        let (sid, first) = (s.id.clone(), paths[0].clone());
+        // The turn it ends: your message before it, if there's a
+        // snapshot from just before it to compare with.
+        let turn = s.items[..ix]
+            .iter()
+            .rev()
+            .find_map(|i| match i {
+                Item::User { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .filter(|m| s.checkpoints.contains(m));
+        div()
+            .id(SharedString::from(format!("changed-{ix}")))
+            .relative()
+            .flex()
+            .items_center()
+            .gap(px(space::S2))
+            .ty(UI)
+            .text_color(t.quiet)
+            .cursor_pointer()
+            .hover(|d| d.text_color(t.ink))
+            // Opens Changes on just this turn, at its first file.
+            .on_press(cx.listener(move |this, _, _, cx| {
+                this.review_turn(&sid, turn.clone(), Some(first.clone()), cx)
+            }))
+            .child(icon("git-compare", 13., t.quiet))
+            // The files are named just above, by the steps that changed
+            // them; this sums the turn up.
+            .child(if n == 1 {
+                "1 file changed".to_string()
+            } else {
+                format!("{n} files changed")
+            })
+            .when(added + removed > 0, |d| {
+                d.child(
+                    div()
+                        .text_color(t.faint)
+                        .child(format!("+{added} −{removed}")),
+                )
+            })
+            .child(div().text_color(t.ink).child("Review"))
+            .child(probe(&self.probes, format!("changed-{ix}")))
+            .into_any_element()
+    }
+
     /// The last reply of a turn, with the turn's time and actions under
     /// it: shown on hover, and always on the latest turn.
     fn with_reply_footer(
@@ -590,37 +647,58 @@ impl Dent {
                 )
         } else {
             let sid = s.id.clone();
+            // What the turn changed leads the line and always shows; the
+            // time and actions follow, on hover for an older turn.
+            let changed = change_after(&s.items, ix).and_then(|c| match &s.items[c] {
+                Item::Changed { paths } => Some(self.changed_line(s, c, paths, cx)),
+                _ => None,
+            });
+            let has_changes = changed.is_some();
             div()
                 .flex()
                 .items_center()
-                .gap(px(space::S1))
+                .gap(px(space::S3))
                 .mt(px(space::S1))
                 .h(px(size::CONTROL_SM))
-                .when(!latest, |d| d.reveal_on_hover(group.clone()))
-                // In line with the reply's text.
+                .children(changed)
                 .child(
                     div()
-                        .pr(px(space::S2))
-                        .ty(LABEL)
-                        .text_color(t.quiet)
-                        .child(when),
-                )
-                .child(self.copy_ghost(format!("copy-reply-{ix}"), move || said.join("\n\n"), cx))
-                .when(can_try, |d| {
-                    d.child(
-                        ghost("try-again", "Try again", &t)
-                            .relative()
-                            .with_tip(tip(
-                                "Go back to before your last message and send it again",
-                                None,
-                                t,
-                            ))
-                            .on_press(
-                                cx.listener(move |this, _, _, cx| this.try_again(&sid, None, cx)),
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S1))
+                        .when(!latest, |d| d.reveal_on_hover(group.clone()))
+                        .when(has_changes, |d| {
+                            d.child(div().ty(UI).text_color(t.faint).child("·"))
+                        })
+                        // In line with the reply's text.
+                        .child(
+                            div()
+                                .pr(px(space::S2))
+                                .ty(LABEL)
+                                .text_color(t.quiet)
+                                .child(when),
+                        )
+                        .child(self.copy_ghost(
+                            format!("copy-reply-{ix}"),
+                            move || said.join("\n\n"),
+                            cx,
+                        ))
+                        .when(can_try, |d| {
+                            d.child(
+                                ghost("try-again", "Try again", &t)
+                                    .relative()
+                                    .with_tip(tip(
+                                        "Go back to before your last message and send it again",
+                                        None,
+                                        t,
+                                    ))
+                                    .on_press(cx.listener(move |this, _, _, cx| {
+                                        this.try_again(&sid, None, cx)
+                                    }))
+                                    .child(probe(&self.probes, "try-again")),
                             )
-                            .child(probe(&self.probes, "try-again")),
-                    )
-                })
+                        }),
+                )
         };
         div()
             .group(group)
@@ -694,7 +772,7 @@ impl Dent {
                             })
                             .pb(px(if ix + 1 == count {
                                 space::S8
-                            } else if marker {
+                            } else if marker || folded_change(&s.items, ix) {
                                 0.
                             } else if ends_turn
                                 || matches!(s.items.get(ix), Some(Item::User { .. }))
@@ -969,7 +1047,7 @@ impl Dent {
                     })
                     .when_some(elapsed, |d, e| {
                         d.child(div().flex_none().text_color(t.faint).child("·"))
-                            .child(div().flex_none().ty(LABEL).text_color(t.faint).child(e))
+                            .child(div().flex_none().ty(NUMERAL).text_color(t.faint).child(e))
                     }),
             )
             .into_any_element()
@@ -1985,53 +2063,9 @@ impl Dent {
             } => self.command_card(s, ix, name, args, text, outcome, view.as_ref(), window, cx),
             // Its time and actions sit under the turn's last reply.
             Item::TurnEnd { .. } => div().into_any_element(),
-            Item::Changed { paths } => {
-                let (added, removed) = turn_counts(s, ix, paths);
-                let n = paths.len();
-                let (sid, first) = (s.id.clone(), paths[0].clone());
-                // The turn it ends: your message before it, if there's a
-                // snapshot from just before it to compare with.
-                let turn = s.items[..ix]
-                    .iter()
-                    .rev()
-                    .find_map(|i| match i {
-                        Item::User { id, .. } => Some(id.clone()),
-                        _ => None,
-                    })
-                    .filter(|m| s.checkpoints.contains(m));
-                div()
-                    .id(SharedString::from(format!("changed-{ix}")))
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .gap(px(space::S2))
-                    .ty(CODE)
-                    .text_color(t.quiet)
-                    .cursor_pointer()
-                    .hover(|d| d.text_color(t.ink))
-                    // Opens Changes on just this turn, at its first file.
-                    .on_press(cx.listener(move |this, _, _, cx| {
-                        this.review_turn(&sid, turn.clone(), Some(first.clone()), cx)
-                    }))
-                    .child(icon("git-compare", 13., t.quiet))
-                    // The files are named just above, by the steps
-                    // that changed them; this sums the turn up.
-                    .child(if n == 1 {
-                        "1 file changed".to_string()
-                    } else {
-                        format!("{n} files changed")
-                    })
-                    .when(added + removed > 0, |d| {
-                        d.child(
-                            div()
-                                .text_color(t.faint)
-                                .child(format!("+{added} −{removed}")),
-                        )
-                    })
-                    .child(div().ty(UI).text_color(t.ink).child("Review"))
-                    .child(probe(&self.probes, format!("changed-{ix}")))
-                    .into_any_element()
-            }
+            // Folded into the footer of the reply above it, when there is one.
+            Item::Changed { .. } if folded_change(&s.items, ix) => div().into_any_element(),
+            Item::Changed { paths } => self.changed_line(s, ix, paths, cx),
             Item::Queued { id: msg, text } => {
                 // The waiting message before this one, which it can go ahead of.
                 let ahead = ix.checked_sub(1).and_then(|p| match s.items.get(p) {
@@ -4203,6 +4237,30 @@ fn ask_keys(keyed: bool, on: &'static str, off: &'static str, t: &theme::Theme) 
         .ty(LABEL)
         .text_color(if keyed { t.ink } else { t.quiet })
         .child(if keyed { on } else { off })
+}
+
+/// The changes line that belongs to the reply at `ix`: the turn's Changed
+/// item, when nothing but its end lies between them.
+pub fn change_after(items: &[Item], ix: usize) -> Option<usize> {
+    turn_end_after(items, ix)?;
+    for (j, i) in items.iter().enumerate().skip(ix + 1) {
+        match i {
+            Item::Changed { .. } => return Some(j),
+            Item::TurnEnd { .. } | Item::Note { .. } => {}
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Whether the Changed item at `ix` shows in the footer of the reply
+/// above it, rather than on a line of its own.
+fn folded_change(items: &[Item], ix: usize) -> bool {
+    matches!(items.get(ix), Some(Item::Changed { .. }))
+        && items[..ix]
+            .iter()
+            .rposition(|i| matches!(i, Item::Text(_)))
+            .is_some_and(|r| change_after(items, r) == Some(ix))
 }
 
 /// Whether the reply at `ix` is a turn's answer: nothing but notes follow it

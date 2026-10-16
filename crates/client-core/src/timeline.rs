@@ -240,24 +240,52 @@ impl Call {
 /// the moment: "Running the tests" while it runs, "Ran the tests" after. A
 /// description that doesn't start with a verb we know reads as written.
 pub fn tensed(desc: &str, running: bool) -> String {
-    let (first, rest) = desc.split_once(' ').unwrap_or((desc, ""));
-    let Some(&(_, doing, did)) = TENSES
-        .iter()
-        .find(|(base, ..)| base.eq_ignore_ascii_case(first))
-    else {
+    let tense = |word: &str| {
+        TENSES
+            .iter()
+            .find(|(base, ..)| base.eq_ignore_ascii_case(word))
+            .map(|&(_, doing, did)| if running { doing } else { did })
+    };
+    let mut words: Vec<String> = desc.split(' ').map(str::to_owned).collect();
+    let Some(first) = words.first().and_then(|w| tense(w)) else {
         return desc.to_string();
     };
-    let verb = if running { doing } else { did };
-    if rest.is_empty() {
-        verb.to_string()
-    } else {
-        format!("{verb} {rest}")
+    words[0] = first.to_string();
+    // A verb joined on by "and" or "then" ("… and summarize it", "…, then
+    // rerun") takes the same tense, so the line reads as one sentence. After
+    // a bare comma it may be a noun in a list ("config, test results").
+    for i in 1..words.len() {
+        let joined = matches!(words[i - 1].as_str(), "and" | "then");
+        if joined && let Some(v) = tense(&words[i]) {
+            words[i] = v.to_lowercase();
+        }
     }
+    words.join(" ")
 }
 
 /// The verbs command descriptions start with: base, doing, done.
 const TENSES: &[(&str, &str, &str)] = &[
     ("Add", "Adding", "Added"),
+    ("Append", "Appending", "Appended"),
+    ("Capture", "Capturing", "Captured"),
+    ("Diff", "Diffing", "Diffed"),
+    ("Edit", "Editing", "Edited"),
+    ("Extract", "Extracting", "Extracted"),
+    ("Filter", "Filtering", "Filtered"),
+    ("Generate", "Generating", "Generated"),
+    ("Locate", "Locating", "Located"),
+    ("Measure", "Measuring", "Measured"),
+    ("Parse", "Parsing", "Parsed"),
+    ("Patch", "Patching", "Patched"),
+    ("Record", "Recording", "Recorded"),
+    ("Report", "Reporting", "Reported"),
+    ("Revert", "Reverting", "Reverted"),
+    ("Review", "Reviewing", "Reviewed"),
+    ("Sort", "Sorting", "Sorted"),
+    ("Summarise", "Summarising", "Summarised"),
+    ("Summarize", "Summarizing", "Summarized"),
+    ("Trace", "Tracing", "Traced"),
+    ("Validate", "Validating", "Validated"),
     ("Apply", "Applying", "Applied"),
     ("Build", "Building", "Built"),
     ("Check", "Checking", "Checked"),
@@ -1097,7 +1125,21 @@ mod tests {
         assert_eq!(tensed("Run the tests", true), "Running the tests");
         assert_eq!(
             tensed("Stage all changes and commit", false),
-            "Staged all changes and commit"
+            "Staged all changes and committed"
+        );
+        assert_eq!(
+            tensed("Run audit tool and summarize its output", false),
+            "Ran audit tool and summarized its output"
+        );
+        assert_eq!(
+            tensed("Fix the parser, then rerun tests", true),
+            "Fixing the parser, then rerunning tests"
+        );
+        // A verb-like word that isn't joined on stays as it is.
+        assert_eq!(tensed("Show test results", false), "Showed test results");
+        assert_eq!(
+            tensed("Print config, test results", false),
+            "Printed config, test results"
         );
         assert_eq!(
             tensed("Rerun tests after the fix", false),
