@@ -1335,6 +1335,17 @@ impl Dent {
                     .get(&s.id)
                     .filter(|(i, _)| *i == ix)
                     .map(|(_, b)| b.clone());
+                // What its tables, wide blocks and diagrams remember is kept
+                // under which reply it is, not its place in the list: a
+                // thought or a note can land in front of it.
+                let at = format!(
+                    "{}/t{}",
+                    s.id,
+                    s.items[..ix]
+                        .iter()
+                        .filter(|i| matches!(i, Item::Text(_)))
+                        .count()
+                );
                 // The reply streaming in: only its unfinished end is parsed.
                 let blocks = if births.is_some() {
                     self.markdown_live(&s.id, src)
@@ -1359,7 +1370,7 @@ impl Dent {
                             .ty(READING)
                             .text_color(t.ink)
                             .child(inline.element(
-                                &format!("{}/{ix}/0", s.id),
+                                &format!("{at}/0"),
                                 &t,
                                 face,
                                 Some(&fade),
@@ -1374,7 +1385,7 @@ impl Dent {
                             owner: cx.entity_id(),
                             window,
                             cx,
-                            scope: format!("{}/{ix}", s.id),
+                            scope: at.clone(),
                             bg: t.surface,
                             base: Some(std::path::PathBuf::from(&s.cwd)),
                         };
@@ -1821,7 +1832,7 @@ impl Dent {
                     owner: cx.entity_id(),
                     window,
                     cx,
-                    scope: format!("{}/{ix}/plan", s.id),
+                    scope: format!("{}/plan-{ask}", s.id),
                     bg: t.raised,
                     base: Some(std::path::PathBuf::from(&s.cwd)),
                 };
@@ -4068,7 +4079,7 @@ impl Dent {
             owner: cx.entity_id(),
             window,
             cx,
-            scope: format!("{}/{ix}/report-{call}", s.id),
+            scope: format!("{}/report-{call}", s.id),
             bg: t.surface,
             base: Some(std::path::PathBuf::from(&s.cwd)),
         };
