@@ -28,6 +28,12 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 
 ## Open
 
+### Real walkthroughs used for every visual check
+- Seen: 2026-10-15. Each UI tweak in the chat-polish round was checked with a full real-agent `walk.sh compare` run (Haiku, ~40 tool calls): six runs at ~3 min plus build each, and the owner waited on every one ("the walk is so annoying… it takes forever").
+- Cost: ~25 min of waiting in one session, plus real usage limits.
+- Fix: a fake-agent scene that replays one recorded real turn (narration, tool rows, plan, approval, end) and stills it in both themes in under 30 s; the real walk only for a final check, once.
+- Check: a visual tweak goes from edit to still in under a minute.
+
 ### Real walkthroughs stall while the Mac is locked
 - Seen: 2026-10-15. A `scripts/walk.sh compare` run sat at "Starting dent…" for 14 min: the owner was away, the screen had locked after ~48 min idle, and a window that isn't drawn never ticks the walk. It printed nothing, so it looked like a hang. Re-run under `caffeinate -dimsu`, it finished in ~3 min.
 - Cost: 14 min plus a wasted real-agent run, each time a long walk starts while the owner is away.
