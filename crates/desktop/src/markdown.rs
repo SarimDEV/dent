@@ -1454,7 +1454,8 @@ fn copy_button(
         .relative()
         .px(px(space::S1H))
         .rounded(px(radius::SM))
-        .ty(LABEL)
+        // A button: `type.ui`, as Copy under a reply is.
+        .ty(UI)
         .text_color(if copied { t.ink } else { t.quiet })
         .cursor_pointer()
         .hover(|d| d.bg(t.hover()).text_color(t.ink))
