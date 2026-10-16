@@ -2496,8 +2496,17 @@ impl Dent {
     /// the open session's box, another session's draft, or the new-session
     /// field. Files come back attached.
     pub fn take_restores(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // While the daemon can't be reached, nothing waits in vain: its
+        // answer comes after reconnecting (the request is sent again), so
+        // the wait starts over.
+        if self.connection.is_err() {
+            for tb in self.taking_back.values_mut() {
+                tb.at = Instant::now();
+            }
+        }
         // One the daemon never answered for comes back to the box rather
-        // than being lost: never sent, it's still yours.
+        // than being lost: never sent, it's still yours. One the log shows
+        // went to the agent stays sent, never in the box as well.
         let stale: Vec<String> = self
             .taking_back
             .iter()
@@ -2506,6 +2515,18 @@ impl Dent {
             .collect();
         for id in stale {
             if let Some(mut tb) = self.taking_back.remove(&id) {
+                let delivered = self.core.list.get(&tb.session).is_some_and(|v| {
+                    v.entries.iter().any(|e| {
+                        matches!(e, dent_client_core::Entry::User { id: m, queued: false, .. } if *m == id)
+                    })
+                });
+                if delivered {
+                    self.toast(
+                        ToastAction::Info,
+                        "That message had already gone to the agent.".into(),
+                    );
+                    continue;
+                }
                 tb.then = Then::Restore;
                 self.took_back(tb);
             }
