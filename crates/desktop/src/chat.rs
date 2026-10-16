@@ -4586,6 +4586,9 @@ fn output_lines(
                 f.style = FontStyle::Italic;
             }
             color = match st.fg {
+                // Grey is a program saying "less important": a step below
+                // the output's own quiet ink, as dim is.
+                Some(crate::ansi::Colour::Indexed(8)) => t.faint,
                 Some(crate::ansi::Colour::Indexed(i)) => crate::shell::indexed(t, i),
                 Some(crate::ansi::Colour::Rgb(r, g, b)) => {
                     gpui_kit::rgb((u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)).into()
@@ -4593,7 +4596,11 @@ fn output_lines(
                 None => ink,
             };
             if st.dim {
-                color = color.opacity(0.6);
+                color = if st.fg.is_none() {
+                    t.faint
+                } else {
+                    color.opacity(0.6)
+                };
             }
         }
         TextRun {
