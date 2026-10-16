@@ -2,6 +2,7 @@
 # Walk through the real desktop app against a daemon running the fake agent.
 #   scripts/walk.sh checks [--dark] [--size WxH] [--shots DIR]
 #   scripts/walk.sh stills --shots DIR [--dark] [--size WxH]
+#   scripts/walk.sh pickup --shots DIR [--dark] [--size WxH]   (the new-session page with many terminal sessions)
 #   scripts/walk.sh markdown [--shots DIR] [--dark] [--size WxH]   (only the maths, diagram and table reply)
 #   DENT_WALK_PROMPT=... [DENT_WALK_REPO=DIR] [DENT_WALK_PERMISSION=full] scripts/walk.sh compare --shots DIR [--size WxH]
 #     (the real agent on one long turn, a still in each theme every ~2s; uses your limits)
@@ -34,6 +35,17 @@ cat > "$root/home/.claude/projects/-proj/22222222-3333-4444-8555-666666666666.js
 {"type":"ai-title","aiTitle":"README cleanup"}
 JSONL
 touch -t 202601010000 "$root/home/.claude/projects/-proj/"*.jsonl
+# Enough terminal sessions to fill the room below a new session.
+if [[ "$name" == pickup ]]; then
+  for i in 1 2 3 4 5 6 7; do
+    cat > "$root/home/.claude/projects/-proj/4444444$i-3333-4444-8555-666666666666.jsonl" <<JSONL
+{"type":"user","entrypoint":"cli","cwd":"$root/proj","uuid":"p$i","message":{"role":"user","content":"Look into issue $i"}}
+{"type":"assistant","uuid":"q$i","message":{"content":[{"type":"text","text":"Done with issue $i."}]}}
+{"type":"ai-title","aiTitle":"Issue $i follow-up"}
+JSONL
+    touch -t 20260101000$i "$root/home/.claude/projects/-proj/4444444$i-3333-4444-8555-666666666666.jsonl"
+  done
+fi
 # A locked or sleeping screen draws no windows, so a walk would stop dead
 # with nothing to say why: say so now. While it runs, the display stays awake.
 if [[ "$(uname)" == Darwin ]]; then

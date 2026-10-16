@@ -3246,10 +3246,28 @@ impl Dent {
                                     }),
                             ),
                     )
-                    .child(over(chips.into_any_element(), false))
-                    .children(self.terminal_sessions(cx).map(|e| over(e, false))),
+                    .child(over(chips.into_any_element(), false)),
             )
-            .child(div().flex_1())
+            // Terminal sessions live in the room below and never push the
+            // composer up: as many whole rows as fit, the rest left out.
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(probe(&self.probes, "pickup-room"))
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(size::COLUMN + space::S8 * 2.))
+                            .mx_auto()
+                            .px(px(space::S8))
+                            .flex()
+                            .flex_col()
+                            .children(self.terminal_sessions(cx).map(|e| over(e, false))),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -3259,10 +3277,26 @@ impl Dent {
             return None;
         }
         let t = self.t;
+        // Whole rows only, as many as the room below the composer holds,
+        // measured last frame; the header and its gap come off the top.
+        let fit = {
+            let probes = self.probes.borrow();
+            let row = probes
+                .get("adopt-0")
+                .map_or(44., |b| b.size.height.as_f32());
+            probes.get("pickup-room").map_or(3, |b| {
+                let room = b.size.height.as_f32() - space::S6 - 28. - space::S4;
+                (room / (row + space::S1)).floor().max(0.) as usize
+            })
+        };
+        let fit = fit.min(6);
+        if fit == 0 {
+            return None;
+        }
         let rows: Vec<AnyElement> = self
             .recent
             .iter()
-            .take(6)
+            .take(fit)
             .enumerate()
             .map(|(i, r)| {
                 let id = r.agent_session.clone();

@@ -166,6 +166,22 @@ impl Walk {
                 v.extend(file_links());
                 v
             }
+            "pickup" => vec![
+                (
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                ),
+                (0.3, Key("cmd-n")),
+                (
+                    0.1,
+                    Until(
+                        "terminal sessions are listed",
+                        |d, _| d.recent.len() >= 6,
+                        5.,
+                    ),
+                ),
+                (1.0, Shot("pickup")),
+            ],
             "attach" => {
                 let mut v = vec![(
                     0.,
