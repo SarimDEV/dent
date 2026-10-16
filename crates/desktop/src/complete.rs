@@ -389,7 +389,9 @@ pub fn names(path: &str, query: &str) -> bool {
     let path = path.trim_end_matches('/');
     let name = path.rsplit('/').next().unwrap_or(path);
     let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
-    [path, name, stem].iter().any(|n| n.eq_ignore_ascii_case(query))
+    [path, name, stem]
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case(query))
 }
 
 #[cfg(test)]

@@ -141,20 +141,14 @@ pub enum Item {
         keeps: bool,
     },
     /// The agent's plan, waiting for a go-ahead.
-    Plan {
-        id: String,
-        plan: String,
-    },
+    Plan { id: String, plan: String },
     /// Questions with choices; the reply is one click each.
     Question {
         id: String,
         questions: Vec<Question>,
     },
     /// One quiet line: Allowed, Stopped, an error…
-    Note {
-        icon: &'static str,
-        text: String,
-    },
+    Note { icon: &'static str, text: String },
     /// A message waiting for the turn to end, with the files it carries.
     Queued {
         id: String,
@@ -163,14 +157,9 @@ pub enum Item {
     },
     /// A turn finished: when and how long it took, both in milliseconds.
     /// Drawn as the footer under the turn's last reply, not a row of its own.
-    TurnEnd {
-        at: u64,
-        took: u64,
-    },
+    TurnEnd { at: u64, took: u64 },
     /// Files a turn edited; opens Changes.
-    Changed {
-        paths: Vec<String>,
-    },
+    Changed { paths: Vec<String> },
     /// The conversation was summarised to make room: a divider.
     Compacted {
         auto: bool,

@@ -25,13 +25,17 @@ pub fn agent_reads(ext: &str) -> bool {
 /// agent reads (`ext` names one) stay as they are; others (TIFF from
 /// Preview, BMP) become PNG, as the agent can't read them; and one too big
 /// to be shown is scaled down until it fits.
-pub fn ready_picture(bytes: &[u8], ext: Option<&'static str>) -> Result<(Vec<u8>, &'static str), String> {
+pub fn ready_picture(
+    bytes: &[u8],
+    ext: Option<&'static str>,
+) -> Result<(Vec<u8>, &'static str), String> {
     if let Some(ext) = ext
         && (bytes.len() as u64) <= PICTURE_MAX
     {
         return Ok((bytes.to_vec(), ext));
     }
-    let img = image::load_from_memory(bytes).map_err(|e| format!("couldn't read the picture: {e}"))?;
+    let img =
+        image::load_from_memory(bytes).map_err(|e| format!("couldn't read the picture: {e}"))?;
     let png = encode(&img, image::ImageFormat::Png)?;
     if png.len() <= PASTE_TARGET {
         return Ok((png, "png"));
@@ -79,9 +83,8 @@ pub fn picture_note(path: &str, size: u64) -> Option<String> {
             "The agent can't see {name} as a picture (it reads PNG, JPEG, GIF and WebP), so it gets the file's path."
         ));
     }
-    (size > PICTURE_MAX).then(|| {
-        format!("{name} is over 5 MB, so the agent gets its path, not the picture.")
-    })
+    (size > PICTURE_MAX)
+        .then(|| format!("{name} is over 5 MB, so the agent gets its path, not the picture."))
 }
 
 /// Pasted text this long folds into one line in the box.
@@ -161,7 +164,10 @@ mod tests {
         let tiff = encode(&img, image::ImageFormat::Tiff).unwrap();
         let (bytes, ext) = ready_picture(&tiff, None).unwrap();
         assert_eq!(ext, "png");
-        assert_eq!(image::guess_format(&bytes).unwrap(), image::ImageFormat::Png);
+        assert_eq!(
+            image::guess_format(&bytes).unwrap(),
+            image::ImageFormat::Png
+        );
         // A PNG stays as it was.
         let png = encode(&img, image::ImageFormat::Png).unwrap();
         assert_eq!(ready_picture(&png, Some("png")).unwrap(), (png, "png"));
@@ -179,7 +185,11 @@ mod tests {
             x ^= x << 5;
             *p = image::Rgb([x as u8, (x >> 8) as u8, (x >> 16) as u8]);
         }
-        let png = encode(&image::DynamicImage::ImageRgb8(img), image::ImageFormat::Png).unwrap();
+        let png = encode(
+            &image::DynamicImage::ImageRgb8(img),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
         assert!(png.len() as u64 > PICTURE_MAX);
         let (bytes, _) = ready_picture(&png, Some("png")).unwrap();
         assert!(bytes.len() <= PASTE_TARGET);
@@ -189,7 +199,15 @@ mod tests {
     fn says_when_a_picture_goes_by_path() {
         assert!(picture_note("/a/shot.png", 1000).is_none());
         assert!(picture_note("/a/notes.txt", 10 << 20).is_none());
-        assert!(picture_note("/a/shot.png", 6 << 20).unwrap().contains("over 5 MB"));
-        assert!(picture_note("/a/scan.tiff", 1000).unwrap().contains("can't see"));
+        assert!(
+            picture_note("/a/shot.png", 6 << 20)
+                .unwrap()
+                .contains("over 5 MB")
+        );
+        assert!(
+            picture_note("/a/scan.tiff", 1000)
+                .unwrap()
+                .contains("can't see")
+        );
     }
 }

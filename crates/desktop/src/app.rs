@@ -2780,7 +2780,9 @@ impl Dent {
             && matches!(field, Some(Field::Composer | Field::Starter))
             && !k.modifiers.platform
             && !k.modifiers.control
-            && k.key_char.as_deref().is_some_and(|c| !c.is_empty() && !c.chars().any(char::is_control))
+            && k.key_char
+                .as_deref()
+                .is_some_and(|c| !c.is_empty() && !c.chars().any(char::is_control))
         {
             self.menu = None;
             self.menu_ix = None;
@@ -2931,7 +2933,9 @@ impl Dent {
             }
             let send = whole
                 || slash && !named && !chosen
-                || mention && !self.slash_moved && !complete::names(&c.items[at].name, &c.token.query);
+                || mention
+                    && !self.slash_moved
+                    && !complete::names(&c.items[at].name, &c.token.query);
             if !(k.key == "enter" && send) {
                 match k.key.as_str() {
                     "up" => {
@@ -3532,7 +3536,10 @@ impl Dent {
             let at = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as u64);
-            self.ran_own.entry(id).or_default().push((at, text.to_string()));
+            self.ran_own
+                .entry(id)
+                .or_default()
+                .push((at, text.to_string()));
         }
         self.prompt()
             .clone()
@@ -5391,7 +5398,13 @@ impl Dent {
     /// Send a message dent wrote for you (fix this error, address these
     /// comments) with only its own attachments, leaving the draft and the
     /// files attached to it as they are.
-    fn send_aside_draft(&mut self, id: &str, text: &str, atts: &[Attachment], cx: &mut Context<Self>) {
+    fn send_aside_draft(
+        &mut self,
+        id: &str,
+        text: &str,
+        atts: &[Attachment],
+        cx: &mut Context<Self>,
+    ) {
         let files: Vec<String> = atts
             .iter()
             .filter_map(|a| match a {
@@ -5922,19 +5935,17 @@ fn with_attachments(text: &str, atts: &[Attachment]) -> String {
     if !text.is_empty() {
         lines.push(text.to_string());
     }
-    lines.extend(atts
-        .iter()
-        .map(|a| match a {
-            Attachment::Element {
-                file,
-                tag,
-                text,
-                selector,
-            } => format!("› {file} · {tag} “{text}” ({selector})"),
-            Attachment::Error { file, message } => format!("› {file} · {message}"),
-            Attachment::Comment { file, line, text } => format!("› {file}:{line} · {text}"),
-            Attachment::File { path } => format!("› Attached · {path}"),
-        }));
+    lines.extend(atts.iter().map(|a| match a {
+        Attachment::Element {
+            file,
+            tag,
+            text,
+            selector,
+        } => format!("› {file} · {tag} “{text}” ({selector})"),
+        Attachment::Error { file, message } => format!("› {file} · {message}"),
+        Attachment::Comment { file, line, text } => format!("› {file}:{line} · {text}"),
+        Attachment::File { path } => format!("› Attached · {path}"),
+    }));
     lines.join("\n")
 }
 

@@ -2153,28 +2153,22 @@ impl Dent {
                             .when(!text.is_empty(), |d| d.child(text.clone()))
                             // The files it carries, as they'll go with it.
                             .when(!attachments.is_empty(), |d| {
-                                d.child(
-                                    div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .gap(px(space::S1H))
-                                        .children(attachments.iter().map(|p| {
-                                            let a = crate::app::Attachment::File {
-                                                path: p.clone(),
-                                            };
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(space::S1H))
-                                                .max_w(px(320.))
-                                                .h(px(size::CONTROL_SM))
-                                                .px(px(space::S2))
-                                                .rounded(px(radius::SM))
-                                                .bg(t.selected())
-                                                .child(icon(a.icon(), 12., t.quiet))
-                                                .child(div().truncate().ty(UI).child(a.label()))
-                                        })),
-                                )
+                                d.child(div().flex().flex_wrap().gap(px(space::S1H)).children(
+                                    attachments.iter().map(|p| {
+                                        let a = crate::app::Attachment::File { path: p.clone() };
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(space::S1H))
+                                            .max_w(px(320.))
+                                            .h(px(size::CONTROL_SM))
+                                            .px(px(space::S2))
+                                            .rounded(px(radius::SM))
+                                            .bg(t.selected())
+                                            .child(icon(a.icon(), 12., t.quiet))
+                                            .child(div().truncate().ty(UI).child(a.label()))
+                                    }),
+                                ))
                             }),
                     )
                     .child(
