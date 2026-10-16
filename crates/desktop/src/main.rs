@@ -12,6 +12,7 @@ mod bridge;
 mod cards;
 mod chat;
 mod complete;
+mod compose;
 mod context;
 mod data;
 mod diagram;

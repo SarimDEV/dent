@@ -4394,6 +4394,12 @@ impl Dent {
                 .iter()
                 .any(|a| matches!(a, Attachment::File { path: x } if *x == path))
             {
+                // A picture the agent won't see as one still goes, by its
+                // path; you're told so.
+                let size = std::fs::metadata(p).map_or(0, |m| m.len());
+                if let Some(note) = crate::compose::picture_note(&path, size) {
+                    self.toast(ToastAction::Info, note);
+                }
                 self.attachments.push(Attachment::File { path });
             }
         }
@@ -4484,17 +4490,33 @@ impl Dent {
                 ClipboardEntry::String(_) => {}
                 ClipboardEntry::ExternalPaths(p) => paths.extend(p.paths().iter().cloned()),
                 ClipboardEntry::Image(img) => {
-                    let ext = match img.format() {
-                        ImageFormat::Jpeg => "jpg",
-                        ImageFormat::Gif => "gif",
-                        ImageFormat::Webp => "webp",
-                        ImageFormat::Svg => "svg",
-                        _ => "png",
+                    // Saved as what it is: kinds the agent reads as they
+                    // came, others (TIFF, BMP) as PNG, and one too big to
+                    // be shown scaled down. An SVG goes by its path.
+                    let ready = match img.format() {
+                        ImageFormat::Svg => Ok((img.bytes().to_vec(), "svg")),
+                        f => crate::compose::ready_picture(
+                            img.bytes(),
+                            match f {
+                                ImageFormat::Png => Some("png"),
+                                ImageFormat::Jpeg => Some("jpg"),
+                                ImageFormat::Gif => Some("gif"),
+                                ImageFormat::Webp => Some("webp"),
+                                _ => None,
+                            },
+                        ),
+                    };
+                    let (bytes, ext) = match ready {
+                        Ok(r) => r,
+                        Err(why) => {
+                            self.toast(ToastAction::Info, format!("The pasted picture {why}."));
+                            cx.notify();
+                            return true;
+                        }
                     };
                     let dir = crate::scratch_dir().with_file_name("attachments");
                     let path = dir.join(format!("pasted-{}.{ext}", crate::message_id()));
-                    if std::fs::create_dir_all(&dir).is_ok()
-                        && std::fs::write(&path, img.bytes()).is_ok()
+                    if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&path, bytes).is_ok()
                     {
                         paths.push(path);
                     }

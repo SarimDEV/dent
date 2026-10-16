@@ -577,24 +577,38 @@ pub fn control_request(request_id: &str, subtype: &str, mut extra: Value) -> Val
     json!({ "type": "control_request", "request_id": request_id, "request": extra })
 }
 
-/// Images the model reads directly, up to 5 MB.
+/// Images the model reads directly, up to 5 MB. The kind is read from the
+/// file's first bytes, not its name: a TIFF called `.png` sent as PNG would
+/// be refused, and fail every turn after it too.
 fn image_block(path: &str) -> Option<Value> {
     let ext = path.rsplit('.').next()?.to_ascii_lowercase();
-    let media = match ext.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        _ => return None,
-    };
+    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") {
+        return None;
+    }
     let bytes = std::fs::read(path).ok()?;
     if bytes.len() > 5 * 1024 * 1024 {
         return None;
     }
+    let media = picture_kind(&bytes)?;
     Some(json!({
         "type": "image",
         "source": { "type": "base64", "media_type": media, "data": dent_protocol::b64::encode(&bytes) },
     }))
+}
+
+/// A picture's media type from its first bytes, for the kinds the model reads.
+fn picture_kind(b: &[u8]) -> Option<&'static str> {
+    if b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if b.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if b.len() >= 12 && &b[..4] == b"RIFF" && &b[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
 }
 
 /// Whether the agent offered a rule it can save for this kind of call.
@@ -697,6 +711,24 @@ fn control_success(request_id: &str, response: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_picture_goes_as_what_its_bytes_say() {
+        assert_eq!(picture_kind(b"\x89PNG\r\n\x1a\nrest"), Some("image/png"));
+        assert_eq!(picture_kind(b"RIFF\0\0\0\0WEBPVP8 "), Some("image/webp"));
+        // A TIFF, whatever it's called, isn't sent as a picture.
+        assert_eq!(picture_kind(b"MM\0*\0\0\0\x08"), None);
+        let dir = std::env::temp_dir().join(format!("dent-wire-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("shot.png");
+        std::fs::write(&fake, b"II*\0\x08\0\0\0").unwrap();
+        assert!(image_block(fake.to_str().unwrap()).is_none());
+        let real = dir.join("real.jpg");
+        std::fs::write(&real, b"\x89PNG\r\n\x1a\n").unwrap();
+        let b = image_block(real.to_str().unwrap()).unwrap();
+        assert_eq!(b["source"]["media_type"], "image/png");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn parses_the_recorded_shapes() {
