@@ -358,7 +358,12 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
                 tool_name: s(r, "tool_name"),
                 input: r["input"].clone(),
                 description: r["description"].as_str().map(str::to_owned),
-                suggestions: r["permission_suggestions"].clone(),
+                // None offered is known, unlike a question rebuilt from an
+                // older log (`null`).
+                suggestions: match &r["permission_suggestions"] {
+                    Value::Null => json!([]),
+                    s => s.clone(),
+                },
             }
         }
         ("control_request", _) if v["request"]["subtype"] == "request_user_dialog" => {
@@ -704,11 +709,13 @@ pub fn keeps(suggestions: &Value) -> bool {
         .is_some_and(|a| a.iter().any(|s| s["type"] == "addRules"))
 }
 
-/// Allow a tool call. With `always`, the agent's own suggestions (or a rule
-/// for the tool) are sent back so the same kind of call is allowed for the
-/// rest of the session. With `project` too, its suggestions go to the
-/// project's local settings, where Claude Code keeps, lists and enforces
-/// them from now on.
+/// Allow a tool call. With `always`, the agent's own suggestions (or, when
+/// it offered none, a rule for the tool) are sent back so the same kind of
+/// call is allowed for the rest of the session. With `project` too, its
+/// suggestions go to the project's local settings, where Claude Code
+/// keeps, lists and enforces them from now on. When what it offered isn't
+/// known (`null`: a question from before a restart, in an older log), the
+/// call is allowed once: never more than the agent offered.
 pub fn allow(
     request_id: &str,
     tool: &str,
@@ -717,7 +724,7 @@ pub fn allow(
     project: bool,
     suggestions: &Value,
 ) -> Value {
-    let always = always || project;
+    let always = (always || project) && !suggestions.is_null();
     let mut r = json!({
         "behavior": "allow",
         "updatedInput": input,
@@ -925,6 +932,25 @@ mod tests {
         }
         let e = br#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#;
         assert!(matches!(parse(e).unwrap(), Inbound::Other));
+    }
+
+    #[test]
+    fn always_never_allows_more_than_was_offered() {
+        let offered = json!([{"type": "addRules", "behavior": "allow", "destination": "session",
+            "rules": [{"toolName": "Bash", "ruleContent": "npm test:*"}]}]);
+        let r = allow("r", "Bash", &json!({}), true, true, &offered);
+        let p = &r["response"]["response"]["updatedPermissions"];
+        assert_eq!(p[0]["destination"], "localSettings");
+        assert_eq!(p[0]["rules"][0]["ruleContent"], "npm test:*");
+        // Nothing offered: the tool for this session.
+        let r = allow("r", "Write", &json!({}), true, false, &json!([]));
+        let p = &r["response"]["response"]["updatedPermissions"];
+        assert_eq!(p[0]["rules"][0]["toolName"], "Write");
+        // Not known what was offered: once.
+        let r = allow("r", "Bash", &json!({}), true, true, &Value::Null);
+        let resp = &r["response"]["response"];
+        assert!(resp.get("updatedPermissions").is_none());
+        assert_eq!(resp["decisionClassification"], "user_temporary");
     }
 
     #[test]

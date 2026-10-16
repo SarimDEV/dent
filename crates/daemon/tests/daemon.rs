@@ -1531,3 +1531,38 @@ fn a_session_whose_folder_was_deleted_says_so() {
         |b| matches!(b, Body::Notice { text } if text.contains("no longer exists")),
     );
 }
+
+#[test]
+fn always_allow_for_the_project_survives_a_daemon_restart() {
+    let mut w = World::new(&[]);
+    let s = {
+        let mut c = w.client();
+        c.subscribe(0);
+        let s = c.create(&w.cwd(), Permission::Ask, "please run it");
+        c.asked(&s);
+        s
+    };
+    w.kill();
+    w.start();
+    let mut c = w.client();
+    c.subscribe(0);
+    let id = c.asked(&s);
+    c.call(Request::Answer {
+        session: s.clone(),
+        id,
+        answer: Answer::Allow {
+            always: true,
+            project: true,
+        },
+    })
+    .unwrap();
+    c.wait_turns(&s, 1);
+    // The rule the agent offered, kept in the project: not all of Bash,
+    // and not only for this session.
+    let saved =
+        std::fs::read_to_string(w.project.join(".claude/settings.local.json")).unwrap_or_default();
+    assert!(
+        saved.contains("Bash(") && !saved.contains("Bash()"),
+        "{saved}"
+    );
+}

@@ -314,7 +314,11 @@ impl Session {
                     requeue(&mut self.held, &id, before.as_deref());
                 }
                 Body::Asked {
-                    id, tool, input, ..
+                    id,
+                    tool,
+                    input,
+                    suggestions,
+                    ..
                 } => {
                     let input = serde_json::from_str(&input).unwrap_or(Value::Null);
                     self.asked.insert(
@@ -323,7 +327,11 @@ impl Session {
                             tool,
                             dialog: claude::dialog_values(&input),
                             input,
-                            suggestions: Value::Null,
+                            // Unknown in older logs: "always" then allows
+                            // once rather than more than was offered.
+                            suggestions: suggestions
+                                .and_then(|s| serde_json::from_str(&s).ok())
+                                .unwrap_or(Value::Null),
                         },
                     );
                 }
@@ -1227,6 +1235,7 @@ impl Session {
                         input: input.to_string(),
                         description,
                         keeps: wire::keeps(&suggestions),
+                        suggestions: (!suggestions.is_null()).then(|| suggestions.to_string()),
                     },
                     end,
                 );
@@ -1606,6 +1615,7 @@ impl Session {
                             input: input.to_string(),
                             description: None,
                             keeps: false,
+                            suggestions: None,
                         },
                         end,
                     );

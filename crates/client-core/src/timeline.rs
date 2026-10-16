@@ -733,6 +733,7 @@ impl SessionView {
                 input,
                 description,
                 keeps,
+                ..
             } => self.push(Entry::Ask {
                 id: id.clone(),
                 tool: tool.clone(),
