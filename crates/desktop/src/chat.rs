@@ -2258,6 +2258,7 @@ impl Dent {
                 let (sid3, msg3) = (s.id.clone(), msg.clone());
                 let (sid, msg) = (s.id.clone(), msg.clone());
                 let (sid2, msg2) = (s.id.clone(), msg.clone());
+                let (sid4, msg4) = (s.id.clone(), msg.clone());
                 div()
                     .flex()
                     .flex_col()
@@ -2373,6 +2374,14 @@ impl Dent {
                                         this.steer_queued(&sid2, &msg2, cx)
                                     }))
                                     .child(probe(&self.probes, format!("steer-{ix}"))),
+                            )
+                            .child(
+                                ghost(SharedString::from(format!("remove-{ix}")), "Remove", &t)
+                                    .relative()
+                                    .on_press(cx.listener(move |this, _, _, cx| {
+                                        this.remove_queued(&sid4, &msg4, cx)
+                                    }))
+                                    .child(probe(&self.probes, format!("remove-{ix}"))),
                             ),
                     )
                     .into_any_element()

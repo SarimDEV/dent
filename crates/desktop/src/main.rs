@@ -332,7 +332,9 @@ impl Render for Dent {
         let toast =
             self.toast.clone().map(|toast| {
                 let label = match toast.action {
-                    ToastAction::Undo(_) | ToastAction::UnhideProject(_) => "Undo",
+                    ToastAction::Undo(_)
+                    | ToastAction::UnhideProject(_)
+                    | ToastAction::Unremove { .. } => "Undo",
                     ToastAction::Resume(_) => "Resume",
                     ToastAction::Info => "OK",
                 };
@@ -367,6 +369,7 @@ impl Render for Dent {
                                 match toast.action {
                                     ToastAction::Undo(_) => "archive",
                                     ToastAction::UnhideProject(_) => "folder",
+                                    ToastAction::Unremove { .. } => "x",
                                     ToastAction::Resume(_) => "square",
                                     ToastAction::Info => "info",
                                 },

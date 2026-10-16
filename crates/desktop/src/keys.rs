@@ -33,6 +33,7 @@ pub const SHEET: &[(&str, &[(&str, &str)])] = &[
             ("Send now, into the running turn", "⌘ ↩"),
             ("Stop", "⌘ .  Esc"),
             ("Bring back what you sent", "↑"),
+            ("Edit the newest waiting message", "⌥ ↑"),
             ("Cycle the permission mode", "⇧ Tab"),
             ("Answer a waiting card", "Esc, then 1–4"),
             ("Deny with the note typed", "⌘ ↩"),

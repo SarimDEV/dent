@@ -510,6 +510,12 @@ pub enum ToastAction {
     Resume(String),
     /// Put a project taken off the list back on it.
     UnhideProject(String),
+    /// A waiting message removed from the queue, back to its session's box.
+    Unremove {
+        session: String,
+        text: String,
+        files: Vec<String>,
+    },
     /// Just a message, like a request the daemon refused.
     Info,
 }
@@ -517,7 +523,10 @@ pub enum ToastAction {
 impl ToastAction {
     /// Its button undoes something, and so does ⌘Z while it shows.
     pub fn undoes(&self) -> bool {
-        matches!(self, Self::Undo(_) | Self::UnhideProject(_))
+        matches!(
+            self,
+            Self::Undo(_) | Self::UnhideProject(_) | Self::Unremove { .. }
+        )
     }
 }
 
@@ -714,6 +723,10 @@ pub enum Waiting {
     Rewind(String),
     /// Taking a waiting message (by id) back out of the queue.
     Unqueue(String),
+    /// A message edited out of the queue, put back in its place: if it
+    /// went at once instead (the turn ended meanwhile), there's no place
+    /// to keep and nothing to say.
+    Requeue,
 }
 
 /// The home folder, as a path string.
@@ -905,6 +918,10 @@ pub struct Dent {
     /// Return was pressed with a note while an approval or plan waited:
     /// when, so the box says for a moment that ⌘↩ is what sends it.
     pub deny_hint: Option<Instant>,
+    /// A waiting message taken back to edit: its session, and the waiting
+    /// message that came after it, so sending it again puts it back there
+    /// rather than at the end of the queue.
+    pub editing_queued: Option<(String, Option<String>)>,
     /// The message last sent, by session and id, and when: until the turn
     /// it starts shows as running, Esc and ⌘. can still stop it.
     pub sent_at: Option<(String, String, Instant)>,
@@ -1442,6 +1459,7 @@ impl Dent {
             partial_seen: HashMap::new(),
             just_sent: None,
             deny_hint: None,
+            editing_queued: None,
             sent_at: None,
             panel_open: true,
             panel_width: prefs.panel_width.unwrap_or(600.),
@@ -2140,6 +2158,15 @@ impl Dent {
             }
             ToastAction::Resume(id) => self.resume(&id, cx),
             ToastAction::UnhideProject(path) => self.hide_project(&path, false, cx),
+            ToastAction::Unremove {
+                session,
+                text,
+                files,
+            } => {
+                let atts = files.into_iter().map(|path| Attachment::File { path }).collect();
+                self.restores.push((Some(session), text, atts));
+                self.take_restores(window, cx);
+            }
             ToastAction::Info => {}
         }
     }
@@ -2421,6 +2448,7 @@ impl Dent {
             // Put back: what Changes shows is read again.
             (Waiting::Discard(id), Out::Reply { .. }) => self.fetch_changes(&id),
             (Waiting::Discard(_), Out::Error { message }) => self.toast(ToastAction::Info, message),
+            (Waiting::Requeue, _) => {}
             // Going back failed: nothing is sent again.
             (Waiting::Rewind(id), Out::Error { message }) => {
                 if self.resend.as_ref().is_some_and(|r| r.0 == id) {
@@ -3077,6 +3105,19 @@ impl Dent {
             && in_composer
             && matches!(k.key.as_str(), "up" | "down")
             && self.step_recall(k.key == "up", window, cx)
+        {
+            return true;
+        }
+        // ⌥↑ in the empty reply box brings back the newest waiting message
+        // to edit, keeping its place in the queue.
+        if k.modifiers.alt
+            && !k.modifiers.platform
+            && !k.modifiers.shift
+            && k.key == "up"
+            && in_composer
+            && self.composer.read(cx).value().is_empty()
+            && self.attachments.is_empty()
+            && self.edit_last_queued(cx)
         {
             return true;
         }
@@ -4033,13 +4074,36 @@ impl Dent {
         }
         let msg = crate::message_id();
         self.sent_at = Some((id.clone(), msg.clone(), Instant::now()));
+        // A waiting message taken back to edit goes back to its place, if
+        // the one after it is still waiting and this one will wait too.
+        let place = self
+            .editing_queued
+            .take()
+            .filter(|(sid, _)| *sid == id && !steer)
+            .and_then(|(_, next)| next)
+            .filter(|next| {
+                self.session(&id).is_some_and(|s| {
+                    s.running()
+                        && s.items
+                            .iter()
+                            .any(|i| matches!(i, Item::Queued { id, .. } if id == next))
+                })
+            });
         self.live.send(Request::Send {
-            session: id,
-            id: msg,
+            session: id.clone(),
+            id: msg.clone(),
             text: message,
             steer,
             attachments: files,
         });
+        if let Some(next) = place {
+            let n = self.live.send(Request::Requeue {
+                session: id,
+                id: msg,
+                before: Some(next),
+            });
+            self.waiting.insert(n, Waiting::Requeue);
+        }
         self.follow();
         cx.notify();
     }
@@ -4512,6 +4576,18 @@ impl Dent {
         let Some((text, files)) = self.queued(id, msg) else {
             return;
         };
+        // Its place: sent again, it goes back before the one after it.
+        let next = self.session(id).and_then(|s| {
+            s.items
+                .iter()
+                .filter_map(|i| match i {
+                    Item::Queued { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .skip_while(|q| q != msg)
+                .nth(1)
+        });
+        self.editing_queued = Some((id.to_string(), next));
         let n = self.live.send(Request::Unqueue {
             session: id.to_string(),
             id: msg.to_string(),
@@ -4519,6 +4595,48 @@ impl Dent {
         self.waiting.insert(n, Waiting::Unqueue(msg.to_string()));
         self.take_back(id, vec![(msg.to_string(), text, files)], Then::Restore);
         cx.notify();
+    }
+
+    /// Take a waiting message out of the queue for good. A toast offers
+    /// it back, into the box.
+    pub fn remove_queued(&mut self, id: &str, msg: &str, cx: &mut Context<Self>) {
+        if self.pressed_again(format!("queued/{msg}")) {
+            return;
+        }
+        let Some((text, files)) = self.queued(id, msg) else {
+            return;
+        };
+        let n = self.live.send(Request::Unqueue {
+            session: id.to_string(),
+            id: msg.to_string(),
+        });
+        self.waiting.insert(n, Waiting::Unqueue(msg.to_string()));
+        self.toast = Some(Toast {
+            text: "Removed from the queue".into(),
+            action: ToastAction::Unremove {
+                session: id.to_string(),
+                text,
+                files,
+            },
+            at: Instant::now(),
+        });
+        cx.notify();
+    }
+
+    /// ⌥↑ in the empty reply box: the newest waiting message comes back to
+    /// edit, keeping its place. True if there was one.
+    pub fn edit_last_queued(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(s) = self.current_rc() else {
+            return false;
+        };
+        let Some(msg) = s.items.iter().rev().find_map(|i| match i {
+            Item::Queued { id, .. } => Some(id.clone()),
+            _ => None,
+        }) else {
+            return false;
+        };
+        self.unqueue(&s.id, &msg, cx);
+        true
     }
 
     /// Go back to just before message `msg`: the chat, and with `files` the

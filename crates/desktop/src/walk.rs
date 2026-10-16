@@ -4925,6 +4925,117 @@ fn composing() -> Vec<(f32, Act)> {
             ),
         ),
     ]);
+    // The queue: Remove, ⌥↑, and an edited message keeping its place.
+    fn waiting_texts(d: &Dent) -> Vec<String> {
+        queued_ids(d).into_iter().map(|(_, _, t)| t).collect()
+    }
+    v.extend(new_session("a long answer, slowly"));
+    v.extend([
+        (0.1, Until("it streams", |d, _| streaming(d), 10.)),
+        (0.1, Type(Field::Composer, "one")),
+        (0.1, Key("enter")),
+        (0.2, Type(Field::Composer, "two")),
+        (0.1, Key("enter")),
+        (0.2, Type(Field::Composer, "three")),
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until(
+                "three wait, each with Remove",
+                |d, _| {
+                    let q = queued_ids(d);
+                    q.len() == 3
+                        && q
+                            .iter()
+                            .all(|(ix, ..)| drawn(d, &format!("remove-{ix}")).is_some())
+                },
+                5.,
+            ),
+        ),
+        (0.2, Call(to_end)),
+        (0.3, Shot("queued-remove")),
+        (
+            0.,
+            Call(|d, _, cx| {
+                let sid = d.selected.clone().unwrap_or_default();
+                if let Some((_, msg, _)) = queued_ids(d).last().cloned() {
+                    d.remove_queued(&sid, &msg, cx);
+                }
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "Remove takes it out of the queue, with Undo",
+                |d, _| {
+                    waiting_texts(d) == ["one", "two"]
+                        && d.toast.as_ref().is_some_and(|t| {
+                            matches!(t.action, crate::app::ToastAction::Unremove { .. })
+                        })
+                },
+                3.,
+            ),
+        ),
+        (0.1, Key("cmd-z")),
+        (
+            0.1,
+            Until(
+                "⌘Z puts it back in the box",
+                |d, cx| composer_is(d, cx, "three") && waiting_texts(d) == ["one", "two"],
+                2.,
+            ),
+        ),
+        (0.1, Type(Field::Composer, "")),
+        (
+            0.,
+            Call(|d, _, cx| {
+                let sid = d.selected.clone().unwrap_or_default();
+                if let Some((_, msg, _)) = queued_ids(d).first().cloned() {
+                    d.unqueue(&sid, &msg, cx);
+                }
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "Edit brings the first back to the box",
+                |d, cx| composer_is(d, cx, "one") && waiting_texts(d) == ["two"],
+                3.,
+            ),
+        ),
+        (0.1, Keys(" edited")),
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until(
+                "sent again, it goes back to its place, ahead of the one after it",
+                |d, _| waiting_texts(d) == ["one edited", "two"],
+                3.,
+            ),
+        ),
+        (0.2, Key("alt-up")),
+        (
+            0.1,
+            Until(
+                "⌥↑ in the empty box edits the newest waiting message",
+                |d, cx| composer_is(d, cx, "two") && waiting_texts(d) == ["one edited"],
+                3.,
+            ),
+        ),
+        (0.1, Type(Field::Composer, "")),
+        (0.1, Key("cmd-.")),
+        (
+            0.1,
+            Until(
+                "stopped, the last waiting one comes back",
+                |d, cx| {
+                    !status_is(d, Status::Working) && composer_is(d, cx, "one edited")
+                },
+                10.,
+            ),
+        ),
+        (0.1, Type(Field::Composer, "")),
+    ]);
     v
 }
 
