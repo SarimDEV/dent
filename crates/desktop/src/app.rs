@@ -3334,6 +3334,11 @@ impl Dent {
             self.births.remove(id);
         }
         let old_status = old.map(|o| o.0);
+        // Once stopped, the next turn can be stopped at once: the guard
+        // against a second Stop is only for while the first is landing.
+        if !s.running() {
+            self.pressed.remove(&format!("stop/{id}"));
+        }
         // Tell the person when something needs them or is done, unless
         // they're already looking at it.
         let looking = self.window_active && self.selected.as_deref() == Some(id);

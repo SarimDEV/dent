@@ -1463,6 +1463,21 @@ fn checks() -> Vec<(f32, Act)> {
             ),
         ),
         (0.3, Shot("stopped")),
+        (0.2, Type(Field::Composer, "a long answer please")),
+        (0.1, Key("enter")),
+        (0.1, Until("streams again", |d, _| streaming(d), 10.)),
+        (0.1, Type(Field::Composer, "keep this draft")),
+        (0.1, Key("escape")),
+        (
+            0.1,
+            Until(
+                "Esc in the reply box stops it too, right after the last stop, and the draft stays",
+                |d, cx| {
+                    status_is(d, Status::Idle) && d.composer.read(cx).value() == "keep this draft"
+                },
+                3.,
+            ),
+        ),
         (0.2, Type(Field::Composer, "")),
         (0.2, Wheel("reply", 2400.)),
         (

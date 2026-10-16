@@ -506,8 +506,12 @@ impl Render for Dent {
                     cx.stop_propagation();
                     return;
                 }
+                // Esc acts once too: one held to stop a turn would otherwise
+                // run on past it and throw the keyboard out of the reply box.
                 if k.key == "escape" && !k.modifiers.modified() {
-                    window.dispatch_action(Box::new(Escape), cx);
+                    if !e.is_held {
+                        window.dispatch_action(Box::new(Escape), cx);
+                    }
                     cx.stop_propagation();
                 }
             }))
@@ -566,6 +570,14 @@ impl Render for Dent {
                     this.renaming = None;
                     this.commenting = None;
                     this.composer.update(cx, |c, cx| c.focus(window, cx));
+                } else if this.field_focused(window, cx) == Some(app::Field::Composer)
+                    && let Some(id) = this.selected.clone().filter(|id| {
+                        this.session(id).is_some_and(|s| s.running()) && this.open_ask(id).is_none()
+                    })
+                {
+                    // Esc in the reply box stops a running turn, like ⌘.; a
+                    // draft stays where it is. A waiting card still takes Esc.
+                    this.stop(&id, "Esc", window, cx);
                 } else if this
                     .field_focused(window, cx)
                     .is_some_and(|f| matches!(f, app::Field::Composer | app::Field::Starter))
