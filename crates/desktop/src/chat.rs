@@ -284,11 +284,13 @@ impl Dent {
         // Long text shows its start, and a line that opens the rest: held
         // to so many lines, and so many characters, so one enormous line
         // can't stall the chat.
-        let clip = |text: &str, all: bool| -> String {
+        let clip = |text: &str, all: bool| {
             let (kept, ..) = crate::ansi::clip(text, all);
             clipped(text, &kept)
         };
-        let block = |id: String, text: String, ink: Hsla| code_lines(id, text, d.edits, ink, &t);
+        let block = |id: String, (text, swaps): (String, Vec<_>), ink: Hsla| {
+            code_lines(id, text, swaps, d.edits, ink, &t)
+        };
         let mut col = div()
             .flex()
             .flex_col()
@@ -345,14 +347,30 @@ impl Dent {
             let parsed = crate::ansi::parsed(out);
             let (plain, spans) = (&parsed.0, &parsed.1);
             let (kept, ..) = crate::ansi::clip(plain, all);
+            // Copy takes everything kept, not just what's shown.
+            let whole = parsed.clone();
             col = col
                 .child(
                     div()
-                        .ty(LABEL)
-                        // Magenta means only "needs you": a failure is said
-                        // in words, in ink.
-                        .text_color(if *failed { t.ink } else { t.faint })
-                        .child(if *failed { "Failed" } else { "Output" }),
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .ty(LABEL)
+                                // Magenta means only "needs you": a failure is
+                                // said in words, in ink.
+                                .text_color(if *failed { t.ink } else { t.faint })
+                                .child(if *failed { "Failed" } else { "Output" }),
+                        )
+                        .child(
+                            self.copy_ghost(
+                                format!("call-copy-{key}"),
+                                move || whole.0.clone(),
+                                cx,
+                            )
+                            .mr(px(-space::S2)),
+                        ),
                 )
                 .child(output_lines(
                     format!("call-out-{key}"),
@@ -1763,6 +1781,7 @@ impl Dent {
                                 .child(code_lines(
                                     format!("ask-text-{ask}"),
                                     command.clone(),
+                                    Vec::new(),
                                     *diff,
                                     t.ink,
                                     &t,
@@ -4311,19 +4330,32 @@ pub fn user_shown(body: &[&str], open: bool) -> (String, bool) {
 }
 
 /// The parts of `text` that [`crate::ansi::clip`] kept, a line each, with
-/// `…` where a line was cut short.
-fn clipped(text: &str, kept: &[std::ops::Range<usize>]) -> String {
+/// `…` where a line was cut short; and, for copying, each `…` and the rest
+/// of its line it stands for.
+fn clipped(
+    text: &str,
+    kept: &[std::ops::Range<usize>],
+) -> (String, Vec<(std::ops::Range<usize>, String)>) {
     let mut out = String::new();
+    let mut swaps = Vec::new();
     for (k, r) in kept.iter().enumerate() {
         if k > 0 {
             out.push('\n');
         }
         out.push_str(&text[r.clone()]);
         if cut_short(text, r) {
+            let at = out.len();
             out.push('…');
+            swaps.push((at..out.len(), rest_of_line(text, r).to_string()));
         }
     }
-    out
+    (out, swaps)
+}
+
+/// What a kept stretch left off the end of its line.
+fn rest_of_line<'a>(text: &'a str, r: &std::ops::Range<usize>) -> &'a str {
+    let rest = &text[r.end..];
+    &rest[..rest.find('\n').unwrap_or(rest.len())]
 }
 
 /// A kept stretch stops before its line ends.
@@ -4378,6 +4410,7 @@ fn output_lines(
     };
     let mut out = String::new();
     let mut runs = Vec::new();
+    let mut swaps = Vec::new();
     // Spans are in order and don't overlap; walk them alongside.
     let mut j = 0;
     for (k, r) in kept.iter().enumerate() {
@@ -4404,19 +4437,30 @@ fn output_lines(
         }
         out.push_str(&text[r.clone()]);
         if cut_short(text, r) {
+            // Copied, it's the rest of the line again.
+            let at = out.len();
             out.push('…');
             runs.push(run('…'.len_utf8(), None));
+            swaps.push((at..out.len(), rest_of_line(text, r).to_string()));
         }
     }
     div()
         .min_w_0()
         .whitespace_normal()
-        .child(crate::select::styled(id, out, runs, t))
+        .child(crate::select::styled(id, out, runs, t).swaps(swaps))
 }
 
 /// Lines of code or output that select and copy; with `diff`, removed
 /// ("- ") and added ("+ ") lines take the diff's colours.
-pub fn code_lines(id: String, text: String, diff: bool, ink: Hsla, t: &crate::theme::Theme) -> Div {
+/// `swaps` are stand-ins and what they copy as (a cut line's `…`).
+pub fn code_lines(
+    id: String,
+    text: String,
+    swaps: Vec<(std::ops::Range<usize>, String)>,
+    diff: bool,
+    ink: Hsla,
+    t: &crate::theme::Theme,
+) -> Div {
     // A trailing line break would leave a blank line at the bottom.
     let text = text.trim_end_matches('\n').to_string();
     let mut runs = Vec::new();
@@ -4440,7 +4484,7 @@ pub fn code_lines(id: String, text: String, diff: bool, ink: Hsla, t: &crate::th
     div()
         .min_w_0()
         .whitespace_normal()
-        .child(crate::select::styled(id, text, runs, t))
+        .child(crate::select::styled(id, text, runs, t).swaps(swaps))
 }
 
 /// Lines added and removed in `paths`, for the turn whose edits end at
@@ -4689,5 +4733,23 @@ mod answer_tests {
         ];
         assert!(is_answer(&older, 0, true));
         assert!(!is_answer(&older, 3, true));
+    }
+}
+
+#[cfg(test)]
+mod clip_tests {
+    /// A line cut short shows `…`, and copies as the whole line.
+    #[test]
+    fn a_cut_line_copies_whole() {
+        let long = format!("cargo test {}", "x".repeat(400));
+        let text = format!("{long}\nshort");
+        let (kept, ..) = crate::ansi::clip(&text, false);
+        let (shown, swaps) = super::clipped(&text, &kept);
+        assert!(shown.contains('…'));
+        assert_eq!(swaps.len(), 1);
+        let (r, with) = &swaps[0];
+        assert_eq!(&shown[r.clone()], "…");
+        let copied = format!("{}{with}{}", &shown[..r.start], &shown[r.end..]);
+        assert_eq!(copied, text);
     }
 }
