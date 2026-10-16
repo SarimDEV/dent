@@ -3717,7 +3717,7 @@ impl Dent {
             }
             let now = Instant::now();
             let words = more
-                .unwrap_or_else(|| partial_now.matches(' ').count())
+                .unwrap_or_else(|| partial_now.matches([' ', '\n']).count())
                 .max(1);
             for _ in 0..words {
                 entry.1.push((len, now));

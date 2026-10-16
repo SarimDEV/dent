@@ -1382,9 +1382,15 @@ impl Dent {
                 match (births, blocks.as_slice()) {
                     // A reply streaming in: each word fades in over 180 ms.
                     (Some(births), [markdown::Block::Para(inline)]) if !crate::reduce_motion() => {
-                        let rendered = inline.text.clone();
+                        // Where each word ends, counted as births are (by
+                        // spaces and line breaks), found by halving.
+                        let breaks: Vec<usize> = inline
+                            .text
+                            .match_indices([' ', '\n'])
+                            .map(|(i, _)| i)
+                            .collect();
                         let fade = move |off: usize| {
-                            let k = rendered[..off.min(rendered.len())].matches(' ').count();
+                            let k = breaks.partition_point(|&b| b < off);
                             births
                                 .get(k)
                                 .map(|(_, at)| anim::ease_out(anim::progress(*at, motion::BASE)))

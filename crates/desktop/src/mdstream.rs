@@ -84,6 +84,9 @@ pub struct Stream {
     /// every later parse so a `[text][1]` after its definition is a link.
     defs: String,
     out: Rc<Vec<Block>>,
+    /// How many of `committed` `out` starts with: each chunk changes only
+    /// what follows, so the finished blocks aren't copied every time.
+    shared: usize,
 }
 
 impl Stream {
@@ -107,21 +110,25 @@ impl Stream {
                 self.defs.push_str(&found.join("\n"));
                 self.defs.push('\n');
                 self.committed = parse(&src[..self.done + cut]);
+                self.shared = 0;
             }
             self.done += cut;
         }
         let tail = terminate(&src[self.done..]);
-        let blocks = if self.done > 0 && !definitions(&tail).is_empty() {
+        if self.done > 0 && !definitions(&tail).is_empty() {
             // A definition still in the unfinished part (a footnote's runs
             // on until the reply ends): read it with what came before.
-            parse(&format!("{}{tail}", &src[..self.done]))
+            self.out = Rc::new(parse(&format!("{}{tail}", &src[..self.done])));
+            self.shared = 0;
         } else {
-            let mut blocks = self.committed.clone();
-            blocks.extend(parse(&with(&tail, &self.defs)));
-            blocks
-        };
+            // Copied only if a drawing still holds the last result.
+            let out = Rc::make_mut(&mut self.out);
+            out.truncate(self.shared);
+            out.extend(self.committed[self.shared..].iter().cloned());
+            out.extend(parse(&with(&tail, &self.defs)));
+            self.shared = self.committed.len();
+        }
         self.src = src.to_string();
-        self.out = Rc::new(blocks);
         self.out.clone()
     }
 }
@@ -165,25 +172,39 @@ fn definitions(src: &str) -> Vec<&str> {
 
 /// Where the last top-level block of `tail` starts, when everything before
 /// it is finished: the line that starts it is complete, so a half-typed
-/// line ("2" before "2.") can't still join the block above.
+/// line ("2" before "2.") can't still join the block above. While that
+/// line is still being typed, everything before the block above it is
+/// finished: a line only ever changes the block just before it (a list it
+/// continues, a paragraph it underlines or runs on from).
 fn commit_point(tail: &str) -> Option<usize> {
     let mut depth = 0usize;
-    let mut last = None;
+    // The last two top-level blocks' starts.
+    let (mut prev, mut last) = (None, None);
+    let mut start = |at: usize| {
+        if last != Some(at) {
+            prev = last;
+            last = Some(at);
+        }
+    };
     for (ev, range) in Parser::new_ext(tail, options()).into_offset_iter() {
         match ev {
             Event::Start(_) => {
                 if depth == 0 {
-                    last = Some(range.start);
+                    start(range.start);
                 }
                 depth += 1;
             }
             Event::End(_) => depth = depth.saturating_sub(1),
-            _ if depth == 0 => last = Some(range.start),
+            _ if depth == 0 => start(range.start),
             _ => {}
         }
     }
-    let at = last.filter(|&at| at > 0)?;
-    tail[at..].contains('\n').then_some(at)
+    let at = last?;
+    if at > 0 && tail[at..].contains('\n') {
+        Some(at)
+    } else {
+        prev.filter(|&p| p > 0)
+    }
 }
 
 /// A line without what holds it: indentation, quote markers, a list marker.
@@ -564,10 +585,12 @@ fn close_inline(p: &str) -> (usize, String) {
 }
 
 /// Words that arrived since `was` was drawn, for fading them in; `None`
-/// when `now` isn't more of `was` (a new reply started streaming).
+/// when `now` isn't more of `was` (a new reply started streaming). Words
+/// end at a space or a line break, as the drawn text counts them (a line
+/// break inside a paragraph is drawn as a space).
 pub fn new_words(was: &str, now: &str) -> Option<usize> {
     let more = now.strip_prefix(was)?;
-    Some(more.matches(' ').count())
+    Some(more.matches([' ', '\n']).count())
 }
 
 #[cfg(test)]
@@ -754,6 +777,20 @@ mod tests {
         assert!(prev_committed > 3, "finished blocks were kept");
     }
 
+    /// While a long line is being typed, the blocks before the one above it
+    /// are already finished: a chunk's cost doesn't grow with the reply.
+    #[test]
+    fn finished_blocks_commit_while_a_line_is_typed() {
+        let mut s = Stream::default();
+        s.update("One.\n\nTwo.\n\nThree is being");
+        assert_eq!(s.done, "One.\n\n".len());
+        assert_eq!(s.committed.len(), 1);
+        // The block just above can still change ("2" continuing a list).
+        let mut s = Stream::default();
+        s.update("Intro.\n\n1. one\n2");
+        assert_eq!(s.done, "Intro.\n\n".len());
+    }
+
     #[test]
     fn a_new_reply_starts_over() {
         let mut s = Stream::default();
@@ -768,5 +805,46 @@ mod tests {
         assert_eq!(new_words("Hello", "Hello there you"), Some(2));
         assert_eq!(new_words("héllo wörld", "€uro"), None);
         assert_eq!(new_words("", "a b"), Some(1));
+        // A line break inside a paragraph is a word's end, as drawn.
+        assert_eq!(new_words("one", "one\ntwo three"), Some(2));
+    }
+
+    /// What one chunk of a long reply costs, near its end: run with
+    /// `cargo test --release -p dent-desktop stream_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn stream_cost() {
+        let para = "Some words with **bold**, `code` and [a link](https://x.y) in them. ";
+        let mut doc = String::new();
+        for i in 0..400 {
+            doc.push_str(&format!(
+                "## Part {i}\n\n{}\n\n- one\n- two\n\n",
+                para.repeat(4)
+            ));
+        }
+        let mut s = Stream::default();
+        let step = 30;
+        let mut at = 0;
+        let mut times = Vec::new();
+        while at < doc.len() {
+            at = (at + step).min(doc.len());
+            while !doc.is_char_boundary(at) {
+                at += 1;
+            }
+            let t = std::time::Instant::now();
+            std::hint::black_box(s.update(&doc[..at]));
+            times.push(t.elapsed());
+        }
+        let last: std::time::Duration = times[times.len() - 100..]
+            .iter()
+            .sum::<std::time::Duration>()
+            / 100;
+        let first: std::time::Duration = times[..100].iter().sum::<std::time::Duration>() / 100;
+        eprintln!(
+            "reply {} KB, {} blocks: a chunk costs {first:?} at the start, {last:?} at the end (tail {} bytes)",
+            doc.len() / 1024,
+            s.out.len(),
+            doc.len() - s.done
+        );
     }
 }
