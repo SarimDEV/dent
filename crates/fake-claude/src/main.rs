@@ -323,7 +323,7 @@ impl Agent {
                                 {"name": "Skills", "tokens": 5_900, "kind": "used"},
                                 {"name": "Messages", "tokens": messages, "kind": "used"},
                                 {"name": "MCP tools (deferred)", "tokens": 3_800, "kind": "deferred", "isDeferred": true},
-                                {"name": "Free space", "tokens": 200_000 - self.context, "kind": "free"},
+                                {"name": "Free space", "tokens": 200_000u64.saturating_sub(self.context), "kind": "free"},
                                 {"name": "Autocompact buffer", "tokens": 33_000, "kind": "buffer"}]})
                     }
                     "get_status" => json!({"sections": [
@@ -638,6 +638,40 @@ impl Agent {
 
     /// Stream `parts` a few characters at a time, stopping for a while
     /// after each but the last, then the whole message.
+    /// A reply streamed in the pieces given, one delta each, `ms` apart.
+    fn say_parts(&mut self, parts: &[&str], ms: u64) -> Result<String, Cut> {
+        let text = parts.concat();
+        self.context += text.len() as u64 / 3 + 200;
+        let msg_id = format!("msg_fake_p{}", new_id());
+        let ev = |e: Value| json!({"type": "stream_event", "event": e});
+        out(self.envelope(
+            ev(json!({"type": "message_start", "message": {
+                "id": msg_id, "role": "assistant", "content": [], "usage": self.usage()}})),
+            None,
+        ));
+        out(self.envelope(
+            ev(json!({"type": "content_block_start", "index": 0,
+                "content_block": {"type": "text", "text": ""}})),
+            None,
+        ));
+        for part in parts {
+            out(self.envelope(
+                ev(json!({"type": "content_block_delta", "index": 0,
+                    "delta": {"type": "text_delta", "text": part}})),
+                None,
+            ));
+            self.pause(ms)?;
+        }
+        out(self.envelope(
+            json!({"type": "assistant", "message": {"id": msg_id, "role": "assistant", "model": self.model,
+                "content": [{"type": "text", "text": text}], "usage": self.usage()}}),
+            None,
+        ));
+        out(self.envelope(ev(json!({"type": "content_block_stop", "index": 0})), None));
+        out(self.envelope(ev(json!({"type": "message_stop"})), None));
+        Ok(text)
+    }
+
     fn say_held(&mut self, parts: &[&str]) -> Result<String, Cut> {
         let text = parts.concat();
         let msg_id = format!("msg_fake_h{}", new_id());
@@ -886,6 +920,30 @@ impl Agent {
         self.pause(250)?;
         if lower.starts_with('/') {
             return self.command(text);
+        }
+        // Edges, checked before anything else so the odd words in them
+        // can't set off another script.
+        if lower.contains("odd content") {
+            let reply = odd_content();
+            let parts: Vec<&str> = reply.split_inclusive("\n\n").collect();
+            let text = self.say_parts(&parts, 80)?;
+            self.end(&text, false);
+            return Ok(());
+        }
+        if lower.contains("ten thousand lines") {
+            let mut reply = String::from("All of it:\n\n```text\n");
+            for n in 1..=10_000 {
+                reply.push_str(&format!(
+                    "line {n:05}: the quick brown fox jumps over the lazy dog\n"
+                ));
+            }
+            reply.push_str("```\n\nThat's ten thousand lines.");
+            let parts: Vec<&str> = reply.split_inclusive("dog\n").collect();
+            let chunks: Vec<String> = parts.chunks(500).map(|c| c.concat()).collect();
+            let chunks: Vec<&str> = chunks.iter().map(String::as_str).collect();
+            let text = self.say_parts(&chunks, 80)?;
+            self.end(&text, false);
+            return Ok(());
         }
         if lower.contains("retry") {
             for (attempt, delay) in [(1, 1500), (2, 3000)] {
@@ -1314,6 +1372,52 @@ fn coloured_output() -> String {
     }
     s.push('\n');
     s.push_str("\x1b[1m\x1b[31merror\x1b[0m: test failed, to rerun pass `--lib`\n");
+    s
+}
+
+/// Long words and links, scripts of every direction, nesting, a wide table.
+fn odd_content() -> String {
+    let mut s = String::from("Odd content, for the edges.\n\n");
+    s.push_str("A link with no spaces: https://example.com/a/very/deep/path/that/keeps/going/and/going/without/a/single/space/anywhere/in/it/so/the/line/has/to/break/somewhere?query=");
+    s.push_str(&"a".repeat(90));
+    s.push_str("&page=2\n\n");
+    s.push_str("One word longer than the column: ");
+    s.push_str(&"Pneumonoultramicroscopicsilicovolcanoconiosis".repeat(5));
+    s.push_str(".\n\nAnd in code: `");
+    s.push_str(&"very_long_identifier_".repeat(12));
+    s.push_str("`.\n\n");
+    s.push_str("Families 👩‍👩‍👧‍👦 flags 🇯🇵🇧🇷 and skin tones 👋🏽 ✅; 日本語の文章には単語の間に空白がありません、だから折り返しはどこでも起こります。中文也没有空格。한국어 문장도 있습니다.\n\n");
+    s.push_str("مرحبا بالعالم، هذا نص من اليمين إلى اليسار مع كلمة English في الوسط.\n\nשלום עולם, עברית גם כן.\n\n");
+    s.push_str("Combining marks: e\u{301}te\u{301}, n\u{303}, Z\u{337}\u{322}\u{353}a\u{338}l\u{335}g\u{334}o\u{336}.\n\n");
+    for depth in 1..=6 {
+        s.push_str(&"> ".repeat(depth));
+        s.push_str(&format!("Quoted at depth {depth}.\n"));
+    }
+    s.push_str("\n");
+    for depth in 0..8 {
+        s.push_str(&"  ".repeat(depth));
+        s.push_str(&format!(
+            "- Listed at depth {}, with enough words after it to wrap at a narrow width\n",
+            depth + 1
+        ));
+    }
+    s.push_str("\n|");
+    for c in 1..=16 {
+        s.push_str(&format!(" Column {c} |"));
+    }
+    s.push_str("\n|");
+    for _ in 1..=16 {
+        s.push_str(" --- |");
+    }
+    s.push('\n');
+    for r in 1..=40 {
+        s.push('|');
+        for c in 1..=16 {
+            s.push_str(&format!(" r{r}c{c} |"));
+        }
+        s.push('\n');
+    }
+    s.push_str("\nThat's the lot.");
     s
 }
 
