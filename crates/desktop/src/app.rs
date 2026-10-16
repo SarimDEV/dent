@@ -824,6 +824,9 @@ pub struct Dent {
     /// The permission mode last asked for, by session, and when: until the
     /// daemon says it's in effect, ⇧Tab steps on from it.
     pub asked_permission: Option<(String, Permission, Instant)>,
+    /// dent's own commands you ran in each session (`/model`, `/rename`…),
+    /// with when: they never reach the agent's log, but ↑ brings them back.
+    pub ran_own: HashMap<String, Vec<(u64, String)>>,
     /// The key last pressed and not yet let go, and when it last came: a
     /// held key keeps coming back, and a card is never answered by one.
     pub held_key: Option<(String, Instant)>,
@@ -1364,6 +1367,7 @@ impl Dent {
             slash_ix: 0,
             slash_moved: false,
             held_key: None,
+            ran_own: HashMap::new(),
             ask_shown: None,
             asked_permission: None,
             expanded: HashSet::new(),
@@ -3523,6 +3527,13 @@ impl Dent {
             return false;
         }
         let name = name.to_string();
+        // ↑ brings it back like anything else you sent here.
+        if let Some(id) = self.selected.clone() {
+            let at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            self.ran_own.entry(id).or_default().push((at, text.to_string()));
+        }
         self.prompt()
             .clone()
             .update(cx, |f, cx| put(f, "", window, cx));
@@ -4457,15 +4468,42 @@ impl Dent {
             self.unqueue(&s.id, &msg, cx);
             return true;
         }
-        let mine: Vec<&str> = s
-            .items
-            .iter()
-            .rev()
-            .filter_map(|i| match i {
-                Item::User { text, .. } => Some(text.as_str()),
-                _ => None,
+        // Everything you sent, commands included (in the chat a command
+        // that answered shows as its card, not your message), and dent's
+        // own commands run here, newest first.
+        let mut mine: Vec<(u64, String)> = self
+            .core
+            .list
+            .get(&s.id)
+            .map(|v| {
+                v.entries
+                    .iter()
+                    .filter_map(|e| match e {
+                        dent_client_core::Entry::User {
+                            text,
+                            attachments,
+                            queued: false,
+                            at,
+                            ..
+                        } => Some((
+                            *at,
+                            attachments
+                                .iter()
+                                .map(|p| format!("› Attached · {p}"))
+                                .chain((!text.is_empty()).then(|| text.clone()))
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        )),
+                        _ => None,
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
+        mine.extend(self.ran_own.get(&s.id).into_iter().flatten().cloned());
+        // Newest first; where times tie, the later one written first.
+        mine.reverse();
+        mine.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+        let mine: Vec<String> = mine.into_iter().map(|(_, t)| t).collect();
         let back = browsing.unwrap_or(0);
         let to = if up { back + 1 } else { back.saturating_sub(1) };
         if up && to > mine.len() {
@@ -4480,7 +4518,7 @@ impl Dent {
         if to == 0 {
             self.composer.update(cx, |c, cx| put(c, "", window, cx));
         } else {
-            let atts = self.restore_message(mine[to - 1], &s.cwd, false, window, cx);
+            let atts = self.restore_message(&mine[to - 1], &s.cwd, false, window, cx);
             let shown = self.composer.read(cx).value().to_string();
             self.recall = Some(Recall {
                 session: s.id.clone(),
