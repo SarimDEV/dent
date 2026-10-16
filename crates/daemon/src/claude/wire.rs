@@ -573,7 +573,7 @@ fn usage_bars(report: &Value) -> Option<Vec<dent_protocol::Bar>> {
 /// An image in it is named, so a result that was only a picture doesn't
 /// read as empty.
 fn output(content: &Value) -> String {
-    let text = match content {
+    match content {
         Value::String(t) => t.clone(),
         Value::Array(parts) => parts
             .iter()
@@ -584,8 +584,7 @@ fn output(content: &Value) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         _ => String::new(),
-    };
-    text
+    }
 }
 
 /// What a server tool's result says: the search hits, the page fetched,
@@ -709,7 +708,7 @@ fn group(n: usize) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
