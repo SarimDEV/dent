@@ -584,7 +584,13 @@ fn preparing(tool: &str, what: Option<&str>) -> String {
             None => "Briefing a subagent".into(),
         },
         ("Bash", _) => "Writing a command".into(),
-        (t, _) => format!("Preparing {t}"),
+        (PLAN_TOOL | "TodoWrite", _) => "Updating the plan".into(),
+        // Another server's tool, by its own name ("mcp__github__create_issue"
+        // is "create issue").
+        (t, _) => match t.strip_prefix("mcp__").and_then(|n| n.split_once("__")) {
+            Some((_, name)) => format!("Preparing {}", name.replace('_', " ")),
+            None => format!("Preparing {t}"),
+        },
     }
 }
 
