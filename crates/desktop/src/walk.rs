@@ -1011,8 +1011,17 @@ fn last_sent(d: &Dent) -> Option<String> {
     })
 }
 
+/// A file in the walk's scratch project. Scenes write and commit there, so
+/// without one set (a walk started without scripts/walk.sh) they would land
+/// in whatever folder the app runs from, the dent checkout included: stop.
 fn in_project(name: &str) -> std::path::PathBuf {
-    std::path::Path::new(&std::env::var("DENT_WALK_PROJECT").unwrap_or_default()).join(name)
+    match std::env::var("DENT_WALK_PROJECT") {
+        Ok(dir) if !dir.is_empty() => std::path::Path::new(&dir).join(name),
+        _ => panic!(
+            "walk: DENT_WALK_PROJECT is not set; run walks through scripts/walk.sh, \
+             which makes a scratch project (scenes write and commit files there)"
+        ),
+    }
 }
 
 /// Kill the daemon, as a crash or an upgrade would.
