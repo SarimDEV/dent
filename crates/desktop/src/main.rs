@@ -238,6 +238,7 @@ impl Render for Dent {
         }
         self.inbox_focused = self.inbox_focus.is_focused(window);
         self.ask_keyed = self.ask_focus.is_focused(window);
+        self.note_ask_shown();
         self.composer_keyed = self.composer.read(cx).focus_handle(cx).is_focused(window);
         self.sync_draft(cx);
         self.take_resend(cx);
@@ -487,6 +488,10 @@ impl Render for Dent {
                 if let Some(id) = this.selected.clone() {
                     this.stop(&id, "⌘.", window, cx);
                 }
+            }))
+            // A key let go: its next press is a fresh one (see `intercept`).
+            .capture_key_up(cx.listener(|this, e: &KeyUpEvent, _, _| {
+                this.key_up(&e.keystroke.key);
             }))
             // Esc reaches the app before a text field swallows it.
             .capture_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {

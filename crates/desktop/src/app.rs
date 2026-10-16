@@ -824,6 +824,12 @@ pub struct Dent {
     /// The permission mode last asked for, by session, and when: until the
     /// daemon says it's in effect, ⇧Tab steps on from it.
     pub asked_permission: Option<(String, Permission, Instant)>,
+    /// The key last pressed and not yet let go, and when it last came: a
+    /// held key keeps coming back, and a card is never answered by one.
+    pub held_key: Option<(String, Instant)>,
+    /// The waiting approval, plan or question, and when it showed: its
+    /// keys answer only once it has been seen.
+    pub ask_shown: Option<(String, Instant)>,
     /// The arrows have moved through the prompt's menu since it last
     /// changed: Return picks the lit row then.
     pub slash_moved: bool,
@@ -1357,6 +1363,8 @@ impl Dent {
             recent: Vec::new(),
             slash_ix: 0,
             slash_moved: false,
+            held_key: None,
+            ask_shown: None,
             asked_permission: None,
             expanded: HashSet::new(),
             acting: Vec::new(),
@@ -2549,6 +2557,20 @@ impl Dent {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        // A key held down comes back again and again with no key-up between:
+        // a repeat. (A key-up missed while away is outlived by a pause.)
+        let repeat = self
+            .held_key
+            .as_ref()
+            .is_some_and(|(key, at)| *key == k.key && at.elapsed() < Duration::from_millis(2100));
+        self.held_key = Some((k.key.clone(), Instant::now()));
+        // A card's keys can't be taken back: never from a held key, and
+        // only once the card has been up long enough to be read.
+        let card_keys = !repeat
+            && self
+                .ask_shown
+                .as_ref()
+                .is_some_and(|(_, at)| at.elapsed() >= Duration::from_millis(150));
         // Your terminal takes every key but ⌘ while it has focus.
         if self.shell_key(k, window, cx) {
             return true;
@@ -2812,6 +2834,7 @@ impl Dent {
         if plain
             && field.is_none()
             && k.key.len() == 1
+            && card_keys
             && let Some(d) = k.key.chars().next().and_then(|c| c.to_digit(10))
             && d > 0
             && let Some(id) = self.selected.clone()
@@ -2835,6 +2858,10 @@ impl Dent {
             && let Some(id) = self.selected.clone()
             && let Some(item @ (Item::Approval { .. } | Item::Plan { .. })) = self.open_ask(&id)
         {
+            // A held or early key does nothing here, and goes nowhere else.
+            if !card_keys {
+                return matches!(k.key.as_str(), "enter" | "1" | "2" | "3" | "4");
+            }
             let plan = matches!(item, Item::Plan { .. });
             let keeps = matches!(item, Item::Approval { keeps: true, .. });
             // The keys follow the buttons, left to right.
@@ -2851,6 +2878,7 @@ impl Dent {
         if plain
             && k.key == "enter"
             && self.ask_focus.is_focused(window)
+            && card_keys
             && let Some(id) = self.selected.clone()
             && let Some(Item::Question { id: ask, questions }) = self.open_ask(&id)
         {
@@ -2975,6 +3003,30 @@ impl Dent {
             return true;
         }
         false
+    }
+
+    /// A key let go: the next press of it is a fresh one.
+    pub fn key_up(&mut self, key: &str) {
+        if self.held_key.as_ref().is_some_and(|(k, _)| k == key) {
+            self.held_key = None;
+        }
+    }
+
+    /// Notes when the waiting approval, plan or question first showed.
+    pub fn note_ask_shown(&mut self) {
+        let ask = self
+            .selected
+            .clone()
+            .and_then(|id| self.open_ask(&id))
+            .and_then(|i| match i {
+                Item::Approval { id, .. } | Item::Plan { id, .. } | Item::Question { id, .. } => {
+                    Some(id)
+                }
+                _ => None,
+            });
+        if self.ask_shown.as_ref().map(|(a, _)| a) != ask.as_ref() {
+            self.ask_shown = ask.map(|a| (a, Instant::now()));
+        }
     }
 
     /// Which of dent's text fields has the keyboard, if any.
