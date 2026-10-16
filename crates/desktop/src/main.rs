@@ -240,6 +240,18 @@ impl Render for Dent {
             self.composer
                 .update(cx, |c, cx| c.set_placeholder(want, window, cx));
         }
+        // The side chat's box, a comment or your terminal put away with the
+        // viewer (⌘\, another tab) gives the keyboard back to the prompt,
+        // so typing never goes nowhere.
+        let shown = self.current().map(|s| self.tab(s)).filter(|_| self.panel_open);
+        let field = self.field_focused(window, cx);
+        if field == Some(app::Field::Aside) && shown != Some(Tab::Aside)
+            || field == Some(app::Field::Comment) && !self.panel_open
+            || self.term_focus.is_focused(window) && shown != Some(Tab::Terminal)
+        {
+            let prompt = self.prompt().clone();
+            prompt.update(cx, |c, cx| c.focus(window, cx));
+        }
         self.inbox_focused = self.inbox_focus.is_focused(window);
         self.ask_keyed = self.ask_focus.is_focused(window);
         self.note_ask_shown();
