@@ -80,6 +80,9 @@ pub struct Stream {
     /// Bytes of `src` whose blocks are finished.
     done: usize,
     committed: Vec<Block>,
+    /// The link reference definitions among the finished blocks, given to
+    /// every later parse so a `[text][1]` after its definition is a link.
+    defs: String,
     out: Rc<Vec<Block>>,
 }
 
@@ -94,15 +97,70 @@ impl Stream {
         }
         let tail = &src[self.done..];
         if let Some(cut) = commit_point(tail) {
-            self.committed.extend(parse(&tail[..cut]));
+            let chunk = &tail[..cut];
+            let found = definitions(chunk);
+            if found.is_empty() {
+                self.committed.extend(parse(&with(chunk, &self.defs)));
+            } else {
+                // A definition: what came before may use it, so the
+                // finished part is read again, once, as a whole.
+                self.defs.push_str(&found.join("\n"));
+                self.defs.push('\n');
+                self.committed = parse(&src[..self.done + cut]);
+            }
             self.done += cut;
         }
-        let mut blocks = self.committed.clone();
-        blocks.extend(parse(&terminate(&src[self.done..])));
+        let tail = terminate(&src[self.done..]);
+        let blocks = if self.done > 0 && !definitions(&tail).is_empty() {
+            // A definition still in the unfinished part (a footnote's runs
+            // on until the reply ends): read it with what came before.
+            parse(&format!("{}{tail}", &src[..self.done]))
+        } else {
+            let mut blocks = self.committed.clone();
+            blocks.extend(parse(&with(&tail, &self.defs)));
+            blocks
+        };
         self.src = src.to_string();
         self.out = Rc::new(blocks);
         self.out.clone()
     }
+}
+
+/// `src` with the definitions after it, which add no blocks of their own.
+fn with<'a>(src: &'a str, defs: &str) -> Cow<'a, str> {
+    if defs.is_empty() {
+        Cow::Borrowed(src)
+    } else {
+        Cow::Owned(format!("{src}\n\n{defs}"))
+    }
+}
+
+/// The lines in `src` that define a link reference (`[1]: https://…`) or
+/// a footnote (`[^1]: …`). Only link references are returned: a footnote's
+/// definition is a block of its own and is found only by reading the
+/// whole again.
+fn definitions(src: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut any = false;
+    for line in src.lines() {
+        let l = line.trim_start();
+        if line.len() - l.len() > 3 || !l.starts_with('[') {
+            continue;
+        }
+        let Some(end) = l.find("]:") else { continue };
+        if end < 2 || l[1..end].contains(['[', ']']) {
+            continue;
+        }
+        any = true;
+        if !l.starts_with("[^") {
+            out.push(line);
+        }
+    }
+    if any && out.is_empty() {
+        // A footnote alone still needs the read again.
+        out.push("");
+    }
+    out
 }
 
 /// Where the last top-level block of `tail` starts, when everything before
@@ -182,12 +240,6 @@ fn undecided(line: &str) -> bool {
     c.len() < l.len() && matches!(c, "" | "[" | "[ " | "[ ]" | "[x" | "[x]" | "[X" | "[X]")
 }
 
-/// A table's delimiter row: `|---|:--:|`.
-fn delimiter_row(line: &str) -> bool {
-    let l = content(line).trim();
-    l.contains('-') && l.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
-}
-
 /// The unfinished end of a reply, tidied so it parses as it will once
 /// finished: open emphasis, code spans and link targets are closed;
 /// delimiters with nothing after them yet, an unresolved `[` or `$`, a fence
@@ -224,25 +276,46 @@ pub fn terminate(src: &str) -> Cow<'_, str> {
     if !last.is_empty() && (undecided(last) || fence(last).is_some() || c.starts_with('|')) {
         keep = last_start;
     }
-    // The paragraph being written: from the last blank line.
-    let mut para = 0;
+    // The block being written: from the last blank line, list item or
+    // heading, or the line after a heading. What opened in an earlier block
+    // ended with it.
+    let mut block = 0;
     let mut at = 0;
+    let mut after_heading = false;
     for line in src[..keep].split_inclusive('\n') {
         if content(line).trim().is_empty() {
-            para = at + line.len();
+            block = at + line.len();
+            after_heading = false;
+        } else {
+            if after_heading || starts_block(line) {
+                block = at;
+            }
+            after_heading = heading(line);
         }
         at += line.len();
     }
-    // A table's header shows once its delimiter row is in.
-    if content(&src[para..keep]).starts_with('|') {
-        let mut lines = src[para..keep].lines();
-        let _head = lines.next();
-        if !lines.next().is_some_and(delimiter_row) {
-            keep = para;
+    // A table's header shows once its delimiter row is in: a row ending in
+    // a pipe with nothing under it yet waits, after a line of text too.
+    // Lines that only start with a pipe ("|x| is…") show.
+    let mut rows: Vec<(usize, &str)> = Vec::new();
+    let mut at = block;
+    for line in src[block..keep].split_inclusive('\n') {
+        if content(line).starts_with('|') {
+            rows.push((at, line));
+        } else {
+            rows.clear();
+        }
+        at += line.len();
+    }
+    if let [(start, head)] = rows[..] {
+        let h = content(head).trim_end();
+        if h.len() > 1 && h.ends_with('|') {
+            keep = start;
         }
     }
-    let (cut, closers) = close_inline(&src[para..keep]);
-    keep = para + cut;
+    let block = block.min(keep);
+    let (cut, closers) = close_inline(&src[block..keep]);
+    keep = block + cut;
     if keep == src.len() && closers.is_empty() {
         return Cow::Borrowed(src);
     }
@@ -251,8 +324,56 @@ pub fn terminate(src: &str) -> Cow<'_, str> {
     Cow::Owned(format!("{words}{closers}{}", &body[words.len()..]))
 }
 
-/// What closes the paragraph `p`'s open inline spans, and where to cut it
-/// first to drop what can't be shown yet.
+/// A line that starts a block of its own: a list item or a heading.
+fn starts_block(line: &str) -> bool {
+    let mut quoted = line.trim_start();
+    while let Some(r) = quoted.strip_prefix('>') {
+        quoted = r.trim_start();
+    }
+    content(line).len() != quoted.len() || heading(line)
+}
+
+/// An ATX heading line: one to six `#`, then a space or nothing.
+fn heading(line: &str) -> bool {
+    let l = content(line);
+    let n = l.bytes().take_while(|b| *b == b'#').count();
+    (1..=6).contains(&n) && l[n..].chars().next().is_none_or(char::is_whitespace)
+}
+
+/// Whether a `$` before `rest` plausibly opens maths: not a price (`$5`),
+/// a shell variable (`$HOME`, `$name then`) or substitution (`$(pwd)`).
+fn maths_opens(rest: &str) -> bool {
+    let Some(c) = rest.chars().next() else {
+        // A lone `$` at the end waits for what follows.
+        return true;
+    };
+    if c.is_whitespace() || c.is_ascii_digit() || c == '(' || c == '{' {
+        return false;
+    }
+    let word = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(rest.len());
+    if word >= 2 {
+        let w = &rest[..word];
+        if w.bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        {
+            return false;
+        }
+        return match rest[word..].chars().next() {
+            None => true,
+            Some(n) => !(n.is_whitespace() || "/.,;:!?\"')]".contains(n)),
+        };
+    }
+    true
+}
+
+/// What closes the block `p`'s open inline spans, and where to cut it
+/// first to drop what can't be shown yet. Only a delimiter that could
+/// plausibly open a span counts: one after a space or an opening mark and
+/// before a word, so globs (`*.rs`), sums (`2*3`) and paths (`/_x`) stay
+/// text. A `$` or `[` that hasn't resolved by the end of its line (or, for
+/// `[`, within 80 bytes or before a `)`) was text.
 fn close_inline(p: &str) -> (usize, String) {
     let b = p.as_bytes();
     let ch_before = |i: usize| p[..i].chars().next_back();
@@ -282,6 +403,19 @@ fn close_inline(p: &str) -> (usize, String) {
             }
             continue;
         }
+        // A line break ends what a `$` or `[` might have started.
+        if c == b'\n' {
+            math = None;
+            if let Some((_, _, false)) = link {
+                link = None;
+            }
+        }
+        // Brackets that run long or close with `)` aren't a link's words.
+        if let Some((start, None, false)) = link
+            && (i - start > 80 || c == b')')
+        {
+            link = None;
+        }
         // A `]` not followed by `(` was just brackets.
         if let Some((_, Some(close), false)) = link
             && i == close + 1
@@ -301,6 +435,18 @@ fn close_inline(p: &str) -> (usize, String) {
                 i += 2;
                 continue;
             }
+            // An autolink or a tag: nothing inside it is formatting.
+            b'<' if b.get(i + 1).is_some_and(u8::is_ascii_alphabetic) => {
+                let rest = &p[i + 1..];
+                match rest.find(|c: char| c == '>' || c.is_whitespace()) {
+                    Some(e) if rest[e..].starts_with('>') => {
+                        i += e + 2;
+                        continue;
+                    }
+                    Some(_) => {}
+                    None => break,
+                }
+            }
             b'`' => {
                 let r = run(b'`');
                 code = Some((i, r));
@@ -310,7 +456,13 @@ fn close_inline(p: &str) -> (usize, String) {
             b'*' | b'_' | b'~' => {
                 let r = run(c);
                 let (before, after) = (ch_before(i), ch_after(i + r));
-                let opens = after.is_none_or(|a| !a.is_whitespace());
+                // Opens only where a span plausibly starts.
+                let opens = before.is_none_or(|a| a.is_whitespace() || "([{\"'*_~".contains(a))
+                    && after.is_none_or(|a| {
+                        a.is_alphanumeric()
+                            || "*_~`[(\"'\\".contains(a)
+                            || (!a.is_ascii() && !a.is_whitespace())
+                    });
                 let closes = before.is_some_and(|a| !a.is_whitespace());
                 let intraword = c == b'_'
                     && before.is_some_and(char::is_alphanumeric)
@@ -365,12 +517,7 @@ fn close_inline(p: &str) -> (usize, String) {
             }
             b'$' => match math {
                 Some(_) => math = None,
-                // A price is text, never maths.
-                None if !ch_after(i + 1)
-                    .is_some_and(|a| a.is_ascii_digit() || a.is_whitespace()) =>
-                {
-                    math = Some(i)
-                }
+                None if maths_opens(&p[i + 1..]) => math = Some(i),
                 None => {}
             },
             _ => {}
@@ -464,6 +611,89 @@ mod tests {
         // A table waits for its delimiter row, then shows complete rows.
         assert_eq!(t("| a | b |\n|--"), "");
         assert_eq!(t("| a | b |\n|---|---|\n| 1 | 2"), "| a | b |\n|---|---|\n");
+    }
+
+    /// Text that only looks like the start of formatting shows as it comes,
+    /// and nothing opened in one block closes in the next.
+    #[test]
+    fn plain_text_that_looks_like_formatting_shows() {
+        for s in [
+            // Globs, arithmetic and paths aren't emphasis.
+            "Match *.rs files and then",
+            "2*3 = 6 and so",
+            "**/*.rs is a glob and",
+            "See https://x.com/_private and more",
+            "<https://x.com/*foo> and bar",
+            // Opened in one block, never closed in the next.
+            "- Use *.rs files\n- Next item",
+            "- Use *it here\n- Next item",
+            "# Title with *star\nThen text",
+            "- a `b \n- c",
+            // Shell variables, command substitution and ranges aren't maths
+            // or links.
+            "Set $HOME then run make and",
+            "- Set $PATH\n- second item\n- third",
+            "Use $(pwd) as the root and",
+            "Set $name then run make",
+            "Ranges like [0, 10) are half-open and",
+            "a [note\nthat goes on",
+            // Pipes that aren't a table.
+            "|x| is the absolute value\nof x and",
+        ] {
+            assert_eq!(t(s), s, "{s:?}");
+        }
+        // Real formatting still closes, in its own block.
+        assert_eq!(t("- one\n- an *aside"), "- one\n- an *aside*");
+        assert_eq!(t("## Use `cargo"), "## Use `cargo`");
+        assert_eq!(t("Area is $\\pi r^2"), "Area is ");
+        assert_eq!(t("so $x"), "so ");
+        assert_eq!(t("see $O(n)"), "see ");
+    }
+
+    #[test]
+    fn a_table_header_waits_even_after_a_line() {
+        assert_eq!(t("Intro:\n| a | b |\n"), "Intro:\n");
+        assert_eq!(
+            t("Intro:\n| a | b |\n|---|---|\n"),
+            "Intro:\n| a | b |\n|---|---|\n"
+        );
+    }
+
+    /// A reference link or footnote whose definition comes later turns into
+    /// a link once the definition is in, not only when the reply ends.
+    #[test]
+    fn references_resolve_once_defined() {
+        let mut s = Stream::default();
+        let doc = "See [the docs][1] now.\n\nMore text.\n\n[1]: https://x.y\n\nAnd [again][1] here.\n\nEnd";
+        let mut out = s.update(&doc[..1]);
+        for (i, _) in doc.char_indices().skip(2) {
+            out = s.update(&doc[..i]);
+        }
+        let texts: Vec<_> = out
+            .iter()
+            .filter_map(|b| match b {
+                Block::Para(i) => Some(i.text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts[0], "See the docs now.");
+        assert_eq!(texts[2], "And again here.");
+        // A footnote's mark, likewise.
+        let mut s = Stream::default();
+        let doc = "Fact[^1] here.\n\nMore.\n\n[^1]: Source.\n\nEnd";
+        let mut out = s.update(&doc[..1]);
+        for (i, _) in doc.char_indices().skip(2) {
+            out = s.update(&doc[..i]);
+        }
+        let first = match &out[0] {
+            Block::Para(i) => i.text.clone(),
+            _ => String::new(),
+        };
+        let whole = match &parse(doc)[0] {
+            Block::Para(i) => i.text.clone(),
+            _ => String::new(),
+        };
+        assert_eq!(first, whole);
     }
 
     #[test]
