@@ -1639,13 +1639,20 @@ fn checks() -> Vec<(f32, Act)> {
                 1.,
             ),
         ),
+        (0., Call(|d, _, _| NARROWED.with(|n| n.set(d.panel_width)))),
         (0.05, MoveBy(-250., 0.)),
         (0.05, Release),
         (
             0.1,
             Until(
                 "and back out wider, the page returning",
-                |d, _| d.panel_width > 520. && !d.dragging && d.preview_visible(),
+                // As wide as the window lets it be: a narrow window
+                // keeps the chat its minimum.
+                |d, _| {
+                    d.panel_width > NARROWED.with(|n| n.get()) + 5.
+                        && !d.dragging
+                        && d.preview_visible()
+                },
                 1.,
             ),
         ),
@@ -6115,8 +6122,8 @@ fn edges() -> Vec<(f32, Act)> {
         (0.1, Call(to_end)),
         (0.4, Shot("edge-queued-restart")),
     ]);
-    // Stopping while the daemon is away: the waiting message comes back to
-    // the box once, and isn't sent.
+    // Stopping while the daemon is away (and the agent with it): the
+    // waiting message comes back to the box once, and isn't sent.
     v.extend(new_session("a long answer, slowly"));
     v.extend([
         (0.1, Until("it streams", |d, _| streaming(d), 10.)),
@@ -6124,13 +6131,13 @@ fn edges() -> Vec<(f32, Act)> {
         (0.1, Key("enter")),
         (0.1, Until("the message waits", |d, _| queued_now(d), 5.)),
         (0.1, Call(|d, _, _| d.drops = 0)),
-        (0.1, Call(kill_daemon)),
+        (0.1, Call(kill_daemon_and_holder)),
         (0.1, Until("the daemon goes", |d, _| d.drops > 0, 5.)),
         (0.1, Key("cmd-.")),
         (
             0.1,
             Until(
-                "stopped across a restart, the waiting message comes back to the box once and isn't sent",
+                "stopped across a restart that lost the agent, the waiting message comes back to the box once and isn't sent",
                 |d, cx| {
                     d.connection.is_ok()
                         && !status_is(d, Status::Working)
@@ -6253,6 +6260,8 @@ fn stills() -> Vec<(f32, Act)> {
 }
 
 thread_local! {
+    /// The viewer's width once dragged narrower.
+    static NARROWED: std::cell::Cell<f32> = const { std::cell::Cell::new(0.) };
     /// Where the composer was before the pick-up menu opened.
     static PICKUP_TOP: std::cell::Cell<f32> = const { std::cell::Cell::new(f32::NAN) };
 }

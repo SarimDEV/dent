@@ -28,12 +28,6 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 
 ## Open
 
-### The idle walk check is flaky: carets keep blinking in fields that lost focus
-- Seen: 2026-10-16. "idle, the window draws no more than a caret blink" read 2.3–6.0 frames a second across 15 runs, failing on `main` as well as the chat-fixes branch (main: 1 of 6, the branch: 5 of 9). Logging each field's repaints showed four fields blinking at once (composer, new-session field, side chat, rename), though none had focus. The cause is in gpui-base 0.7.1 and gpui-pre 0.3.8: `TextareaState::focus` starts the blink directly, but GPUI only sends a blur while the window is active (`window.rs`, `WindowFocusEvent` drops the previous path for an inactive window), and walk windows are never active. So every field a walk focuses blinks for the rest of the run, and the check passes or fails on whether their 500 ms timers line up. In real use the same happens to a field focused while dent is in the background, and window deactivation doesn't stop a blinking caret either: ~2 repaints a second while dent isn't in front.
-- Cost: a false failure in about half the branch's runs; about 2 needless repaints a second per stray caret.
-- Fix: stop the blink when the window deactivates, or when its field isn't focused at a blink, in gpui-base. That needs a patched copy of the pinned crate, which needs a decision record. Meanwhile the check could count only frames not caused by a field's blink.
-- Check: 10 runs of `walk.sh checks` all read ≤ 2.5 frames a second; dent in the background with a draft open repaints 0 times a second.
-
 ### Real walkthroughs used for every visual check
 - Seen: 2026-10-15. Each UI tweak in the chat-polish round was checked with a full real-agent `walk.sh compare` run (Haiku, ~40 tool calls): six runs at ~3 min plus build each, and the owner waited on every one ("the walk is so annoying… it takes forever").
 - Cost: ~25 min of waiting in one session, plus real usage limits.
@@ -127,6 +121,18 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 - Check: lines read per walkthrough change.
 
 ## Done
+
+### Walk agents died on every late daemon restart
+- Seen: 2026-10-16. In full stills runs (about 50 sessions by then, debug build) the edges scene's restart checks failed in all three sizes while the scene passed alone twice. The daemon log showed "agent unreachable ... stdin closed": walks set the holder's orphan time to 2 s, and a debug daemon restoring that many sessions took longer than that to reconnect, so the holder cut the agents off. The default is 600 s.
+- Cost: 4 false failures per full run, and the restart checks tested agent loss instead of reattaching.
+- Fix: walks use 10 s (`DENT_HOLDER_ORPHAN_MS=10000`); the scenes that mean to lose the agent kill the holder themselves.
+- Result: see the chat review record, round 3 (final `checks` run).
+
+### The idle walk check is flaky: carets keep blinking in fields that lost focus
+- Seen: 2026-10-16. "idle, the window draws no more than a caret blink" read 2.3–6.0 frames a second across 15 runs, failing on `main` as well as the chat-fixes branch (main: 1 of 6, the branch: 5 of 9). Four fields blinked at once (composer, new-session field, side chat, rename) though none had focus. `TextareaState::focus` (gpui-base 0.7.1) starts the blink directly, but GPUI (gpui-pre 0.3.8) tells a field it lost focus only while the window is active, and walk windows never are; in real use, any field dent focused while in the background blinked for good.
+- Cost: a false failure in about half the branch's runs; about 2 needless repaints a second per stray caret.
+- Fix: without touching the crate. dent focuses its fields through `ui::FocusField::focus_field`: with the window in front it calls the field's `focus` as before; behind, it only moves the keyboard (`Window::focus`), and GPUI's focus-in on activation starts the blink. Deactivating already blurs the focused field.
+- Result: the edges walk's rest after thirty sessions' fields had the keyboard drew 0.3 frames a second in each of its runs (720x600 light, 900x700 dark, 720x600 light again; limit 0.5). The full `checks` run's original idle check: see the chat review record, round 3.
 
 ### walk.sh died before building on the Mac's bash
 - Seen: 2026-10-16. Every `scripts/walk.sh` run without `DENT_WALK_RELEASE` stopped at once with "release[@]: unbound variable": macOS bash 3.2 treats an empty array as unset under `set -u`. The wrapper exited 0, so a run looked like it passed with no checks run.

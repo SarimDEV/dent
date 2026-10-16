@@ -22,6 +22,10 @@ use crate::store::{Row, Source};
 
 /// An agent with nothing to do is stopped after this long, and resumed from
 /// its transcript on the next message.
+/// How long messages left waiting across a restart wait for reconnecting
+/// clients before they go.
+const RELEASE_GRACE: Duration = Duration::from_secs(5);
+
 fn idle() -> Duration {
     std::env::var("DENT_IDLE_MS")
         .ok()
@@ -198,6 +202,9 @@ struct Session {
     context: Option<u64>,
     max_context: Option<u64>,
     idle_at: Option<Instant>,
+    /// When messages left waiting across a restart go, if nothing has
+    /// taken them back by then.
+    release_at: Option<Instant>,
     stop_at: Option<Instant>,
     /// When a starting agent must have answered by.
     start_by: Option<Instant>,
@@ -259,6 +266,7 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
         context: None,
         max_context: None,
         idle_at: None,
+        release_at: None,
         stop_at: None,
         start_by: None,
         outbox: Vec::new(),
@@ -424,9 +432,7 @@ impl Session {
                     reason: Some("dent restarted while the agent was starting".into()),
                 });
             }
-            if self.asked.is_empty() && !self.held.is_empty() {
-                self.deliver_held().await;
-            }
+            self.release_held_soon();
             return;
         };
         let alive = held.iter().find(|p| p.id == proc);
@@ -467,11 +473,17 @@ impl Session {
                 });
             }
         }
-        // Messages waiting on a turn that ended while dent was away (or
-        // ended above, its agent gone) go now, as after a crash; else they
-        // would wait for a turn that never comes.
-        if !self.in_turn && self.asked.is_empty() && !self.held.is_empty() {
-            self.deliver_held().await;
+        self.release_held_soon();
+    }
+
+    /// Messages waiting on a turn that ended while dent was away (or that
+    /// ended as it came back, its agent gone) go as after a crash; else they
+    /// would wait for a turn that never comes. Not at once: a client
+    /// reconnecting sends again what it asked meanwhile (a Stop or Edit
+    /// that takes them back), and that comes first.
+    fn release_held_soon(&mut self) {
+        if !self.in_turn && !self.held.is_empty() {
+            self.release_at = Some(Instant::now() + RELEASE_GRACE);
         }
     }
 
@@ -479,6 +491,7 @@ impl Session {
         loop {
             let deadline = [
                 self.idle_at,
+                self.release_at,
                 self.stop_at,
                 self.start_by,
                 self.watch.as_ref().map(|w| w.next),
@@ -1072,12 +1085,14 @@ impl Session {
     /// Stop always ends the turn: by asking, then by stopping the process,
     /// then by letting go of it.
     async fn interrupt(&mut self) -> Result<()> {
-        if !self.in_turn {
-            return Ok(());
-        }
-        // Stop means nothing more arrives: held messages come back.
+        // Stop means nothing more arrives: held messages come back, those
+        // left waiting across a restart (about to go) too.
+        self.release_at = None;
         for (id, _, _) in std::mem::take(&mut self.held) {
             self.log(Body::Unqueued { id });
+        }
+        if !self.in_turn {
+            return Ok(());
         }
         self.steered = false;
         if self.proc.is_none() {
@@ -1137,6 +1152,12 @@ impl Session {
 
     async fn timers(&mut self) {
         let now = Instant::now();
+        if self.release_at.is_some_and(|t| t <= now) {
+            self.release_at = None;
+            if !self.in_turn && self.asked.is_empty() && !self.held.is_empty() {
+                self.deliver_held().await;
+            }
+        }
         if self.stop_at.is_some_and(|t| t <= now) {
             self.stop_at = None;
             if self.in_turn

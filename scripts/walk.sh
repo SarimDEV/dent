@@ -67,7 +67,7 @@ bin=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys;
 if [[ "$name" == "real" || "$name" == "compare" ]]; then
   # The real agent on its smallest model, signed in as you: your own home.
   status=0
-  DENT_STATE="$root/state" DENT_WALK_PROJECT="${DENT_WALK_REPO:-$root/proj}" DENT_HOLDER_ORPHAN_MS=2000 \
+  DENT_STATE="$root/state" DENT_WALK_PROJECT="${DENT_WALK_REPO:-$root/proj}" DENT_HOLDER_ORPHAN_MS=10000 \
     "$bin/dent-desktop" --walk "$name" "$@" || status=$?
   # Leave no trace in your Claude Code history: only this run's scratch
   # project's transcripts go.
@@ -85,7 +85,7 @@ cat > "$root/home/.claude/projects/-proj/33333333-4444-4555-8666-777777777777.js
 JSONL
 HOME="$root/home" \
 DENT_STATE="$root/state" \
-DENT_HOLDER_ORPHAN_MS=2000 \
+DENT_HOLDER_ORPHAN_MS=10000 \
 DENT_CLAUDE="$bin/dent-fake-claude" \
 DENT_WALK_PROJECT="$root/proj" \
 DENT_WALK_OUTSIDE="$root/outside" \
