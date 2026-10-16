@@ -194,6 +194,22 @@ impl Item {
     }
 }
 
+/// The command a one-line message of yours runs (`/compact`,
+/// `/model opus`, `/mcp__x__y`): its name. A message that only starts with
+/// a slash, like a pasted path (`/Users/me/app/crash.log why…`), isn't one.
+pub fn command_name(text: &str) -> Option<&str> {
+    if text.contains('\n') {
+        return None;
+    }
+    let rest = text.strip_prefix('/')?;
+    let name = rest.split(char::is_whitespace).next()?;
+    (!name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ':')))
+    .then_some(name)
+}
+
 /// Whether `path` is a file, asked of the disk at most every few seconds:
 /// drawing asks every frame, for every line that names one.
 pub fn is_file(path: &std::path::Path) -> bool {
@@ -569,6 +585,23 @@ pub fn machine_shown(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_path_is_a_message_not_a_command() {
+        use super::command_name;
+        assert_eq!(command_name("/compact"), Some("compact"));
+        assert_eq!(command_name("/model opus"), Some("model"));
+        assert_eq!(command_name("/mcp__x__y"), Some("mcp__x__y"));
+        assert_eq!(command_name("/plugin:cmd arg"), Some("plugin:cmd"));
+        assert_eq!(
+            command_name("/Users/me/app/crash.log why does this crash?"),
+            None
+        );
+        assert_eq!(command_name("/notes.md"), None);
+        assert_eq!(command_name("/ hello"), None);
+        assert_eq!(command_name("/compact\nand more"), None);
+        assert_eq!(command_name("hello /compact"), None);
+    }
+
     #[test]
     fn resuming_in_a_terminal_starts_in_its_folder() {
         let mut s = super::Session::placeholder("x");

@@ -1097,7 +1097,7 @@ impl Dent {
         let t = self.t;
         match item {
             // A command, as it was run, until its answer comes.
-            Item::User { text, .. } if text.starts_with('/') && !text.contains('\n') => {
+            Item::User { text, .. } if crate::data::command_name(text).is_some() => {
                 crate::cards::command_line(text, "terminal", t.quiet, &t).into_any_element()
             }
             Item::User { id: msg, text, at } => {
@@ -1160,8 +1160,7 @@ impl Dent {
                                 let (shown, long) = user_shown(&body, open);
                                 let key = msg.clone();
                                 // A slash command reads as one.
-                                let command = shown.starts_with('/')
-                                    && !shown.contains('\n')
+                                let command = crate::data::command_name(&shown).is_some()
                                     && shown.len() < 80;
                                 d.child(
                                     div()

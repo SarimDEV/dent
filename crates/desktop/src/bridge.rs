@@ -228,7 +228,8 @@ pub fn session(
             } => {
                 // A command that answered as a command: its card says what
                 // was run, so the message isn't shown twice.
-                let answered = text.starts_with('/')
+                let answered = crate::data::command_name(text.lines().next().unwrap_or(""))
+                    .is_some()
                     && attachments.is_empty()
                     && v.entries[start + k + 1..]
                         .iter()

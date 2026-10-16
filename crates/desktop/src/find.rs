@@ -76,7 +76,7 @@ pub fn item_words(
     parse: impl FnOnce(&str) -> std::rc::Rc<Vec<crate::markdown::Block>>,
 ) -> Vec<String> {
     match item {
-        Item::User { text, .. } if text.starts_with('/') && !text.contains('\n') => Vec::new(),
+        Item::User { text, .. } if crate::data::command_name(text).is_some() => Vec::new(),
         Item::User { text, .. } => {
             let (_, body) = crate::data::attachment_lines(text);
             if body.is_empty() {
