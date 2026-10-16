@@ -3,6 +3,8 @@
 #   scripts/walk.sh checks [--dark] [--size WxH] [--shots DIR]
 #   scripts/walk.sh stills --shots DIR [--dark] [--size WxH]
 #   scripts/walk.sh markdown [--shots DIR] [--dark] [--size WxH]   (only the maths, diagram and table reply)
+#   DENT_WALK_PROMPT=... [DENT_WALK_REPO=DIR] [DENT_WALK_PERMISSION=full] scripts/walk.sh compare --shots DIR [--size WxH]
+#     (the real agent on one long turn, a still in each theme every ~2s; uses your limits)
 # Everything runs in a scratch home, state and project, so no account, real
 # project or setting is touched. The window opens in the background and
 # never takes focus. Stills need WINID (a build of crates/desktop/tools/winid.swift).
@@ -30,11 +32,11 @@ JSONL
 touch -t 202601010000 "$root/home/.claude/projects/-proj/"*.jsonl
 cargo build -q -p dent-desktop -p dent-daemon -p dent-session-holder -p dent-fake-claude
 bin=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug
-if [[ "$name" == "real" ]]; then
+if [[ "$name" == "real" || "$name" == "compare" ]]; then
   # The real agent on its smallest model, signed in as you: your own home.
   status=0
-  DENT_STATE="$root/state" DENT_WALK_PROJECT="$root/proj" DENT_HOLDER_ORPHAN_MS=2000 \
-    "$bin/dent-desktop" --walk real "$@" || status=$?
+  DENT_STATE="$root/state" DENT_WALK_PROJECT="${DENT_WALK_REPO:-$root/proj}" DENT_HOLDER_ORPHAN_MS=2000 \
+    "$bin/dent-desktop" --walk "$name" "$@" || status=$?
   # Leave no trace in your Claude Code history: only this run's scratch
   # project's transcripts go.
   sleep 3

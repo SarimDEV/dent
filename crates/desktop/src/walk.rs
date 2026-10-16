@@ -136,6 +136,7 @@ impl Walk {
         let steps = match name {
             "stills" => stills(),
             "real" => real(),
+            "compare" => compare(),
             "sweep" => sweep(),
             "markdown" => markdown(),
             "motion" => motion(),
@@ -4072,6 +4073,101 @@ fn real() -> Vec<(f32, Act)> {
         (0.3, Key("cmd-n")),
         (0.6, Shot("real-new")),
     ]);
+    v
+}
+
+/// One long real turn, photographed in both themes every couple of seconds
+/// until it settles, then read back from the top: frames to set beside
+/// another app's. `DENT_WALK_PROMPT` is what to send and
+/// `DENT_WALK_PERMISSION=full` never asks; otherwise an approval is
+/// answered after it has been on screen a few seconds.
+fn compare() -> Vec<(f32, Act)> {
+    thread_local! {
+        static ASKED: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+        static SETTLED: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    }
+    fn theme(d: &mut Dent, dark: bool, w: &mut Window, cx: &mut Context<Dent>) {
+        d.forced_dark = Some(dark);
+        d.apply_theme(w, cx);
+        cx.notify();
+    }
+    fn scroll(d: &mut Dent, at: fn(usize) -> usize, cx: &mut Context<Dent>) {
+        let n = current(d).map_or(0, |s| s.items.len());
+        d.transcript.scroll_to(ListOffset {
+            item_ix: at(n).min(n.saturating_sub(1)),
+            offset_in_item: px(0.),
+        });
+        cx.notify();
+    }
+    fn both(v: &mut Vec<(f32, Act)>, name: &str) {
+        v.extend([
+            (0.0, Call(|d, w, cx| theme(d, false, w, cx))),
+            (0.35, Shot(leak(format!("{name}-light")))),
+            (0.2, Call(|d, w, cx| theme(d, true, w, cx))),
+            (0.35, Shot(leak(format!("{name}-dark")))),
+            (0.2, Call(|d, w, cx| theme(d, false, w, cx))),
+        ]);
+    }
+    fn pace(d: &mut Dent, _: &mut Window, _: &mut Context<Dent>) {
+        let now = Instant::now();
+        let asking = has(d, |i| matches!(i, Item::Approval { .. }));
+        let ended = status_is(d, Status::Done) && current(d).is_some_and(|s| s.items.len() > 4);
+        let Some(walk) = d.walk.as_mut() else { return };
+        if asking {
+            let since = ASKED.with(|a| *a.get().get_or_insert(now));
+            ASKED.with(|a| a.set(Some(since)));
+            if now - since > Duration::from_secs(6) {
+                ASKED.with(|a| a.set(None));
+                walk.steps.insert(walk.ix + 1, (0.1, Click("allow")));
+            }
+            return;
+        }
+        ASKED.with(|a| a.set(None));
+        if !ended {
+            SETTLED.with(|s| s.set(None));
+            return;
+        }
+        let since = SETTLED.with(|s| *s.get().get_or_insert(now));
+        SETTLED.with(|s| s.set(Some(since)));
+        if now - since < Duration::from_secs(6) {
+            return;
+        }
+        // Settled: read it back from the top, a third at a time.
+        walk.steps.truncate(walk.ix + 1);
+        let mut v = Vec::new();
+        let stops: [(&str, Call); 4] = [
+            ("end-1-top", |d, _, cx| scroll(d, |_| 0, cx)),
+            ("end-2-third", |d, _, cx| scroll(d, |n| n / 3, cx)),
+            ("end-3-two-thirds", |d, _, cx| scroll(d, |n| n * 2 / 3, cx)),
+            ("end-4-bottom", |d, _, cx| scroll(d, |n| n, cx)),
+        ];
+        for (name, go) in stops {
+            v.push((0.3, Call(go)));
+            both(&mut v, name);
+        }
+        walk.steps.extend(v);
+    }
+    fn setup(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
+        d.defaults.model = Some("haiku".into());
+        d.defaults.permission = match std::env::var("DENT_WALK_PERMISSION").as_deref() {
+            Ok("full") => dent_protocol::Permission::Full,
+            _ => dent_protocol::Permission::Ask,
+        };
+        cx.notify();
+    }
+    let prompt = leak(std::env::var("DENT_WALK_PROMPT").unwrap_or_default());
+    let mut v: Vec<(f32, Act)> = vec![
+        (
+            0.,
+            Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+        ),
+        (0.2, Call(setup)),
+    ];
+    v.extend(new_session(prompt));
+    for i in 0..600 {
+        both(&mut v, &format!("{i:03}"));
+        v.push((0.9, Call(pace)));
+    }
     v
 }
 
