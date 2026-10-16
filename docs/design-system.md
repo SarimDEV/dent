@@ -5,7 +5,7 @@ The rules every dent surface follows: spacing, sizes, type, shape, colour, eleva
 ## Principles
 
 1. **The page comes first.** Chat and docs are set like a book page; chrome is quieter, smaller and lower in contrast, so the eye lands on the reading column.
-2. **One loud thing.** Magenta means "needs you" and nothing else. Primary actions are ink, focus is ink, selection is a neutral tint.
+2. **One loud thing.** Magenta means "needs you" and nothing else. Primary actions are ink, focus is ink, a selected row is a neutral tint. Selected text is the one exception: a calm blue (`selection`, hue 212°, 22% on Paper, 30% on Carbon), as the Mac tints a selection in the active window, since a grey one reads as a window in the background.
 3. **Structure by hairline, elevation only for what floats.** Everything in the page plane is flat with 1px hairlines. Only menus, tooltips, the palette and toasts get a shadow.
 4. **Motion explains a change, it never decorates.** Things that happen tens of times a day, or from the keyboard, are instant. Rare and important things (an approval arriving, a theme switch) earn motion.
 5. **Effects fit the frame budget.** Motion is opacity, offset, colour and flat quads. No live blur, no animated shadows, no relayout of text per frame. An animation stops requesting frames the moment it settles, so a quiet window costs nothing.
