@@ -96,7 +96,7 @@ pub fn argv(
 }
 
 /// Added to every session's system prompt.
-const PLAN_NUDGE: &str = "Before you start any task with three or more steps, call the update_plan tool (from the dent server) with the whole plan, one short line per step. Call it again whenever a step starts or finishes, marking it in_progress or completed, so the plan always shows where you are. Give every Bash command a short description of what it is for, starting with a verb.";
+const PLAN_NUDGE: &str = "Before you start any task with three or more steps, call the update_plan tool (from the dent server) with the whole plan, one short line per step. Call it again whenever a step starts or finishes, marking it in_progress or completed, so the plan always shows where you are, and mark every step completed before your final answer. Give every Bash command a short description of what it is for, starting with a verb.";
 
 /// A one-off side question: the conversation `agent_session` so far, forked
 /// so the original never sees it, answered without changing anything.

@@ -2515,14 +2515,15 @@ impl Dent {
             .into_any_element()
     }
 
-    /// The agent's plan above the composer: a checklist card while it's
-    /// open (the default), one line ("Step 5 of 12 · what's at hand") when
-    /// folded. Done steps step back, the current one wears the working
+    /// The agent's plan above the composer while it works: a checklist
+    /// card while it's open (the default), one line ("Step 5 of 12 · what's
+    /// at hand") when folded. Done steps step back, the current one wears the working
     /// square, the rest wait in the secondary ink.
     fn plan_strip(&self, s: &Session, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if s.todos.is_empty()
-            || s.todos.iter().all(|(st, ..)| st == "completed") && s.status != Status::Working
-        {
+        // A plan is for watching work happen: it shows while the agent works
+        // or waits on you, and goes when the turn ends, ticked off or not.
+        let live = s.running() || s.status == Status::Needs;
+        if s.todos.is_empty() || !live {
             return None;
         }
         let t = self.t;
