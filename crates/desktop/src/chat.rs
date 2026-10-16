@@ -645,11 +645,14 @@ impl Dent {
         };
         let footer = if asking {
             let (s1, s2) = (s.id.clone(), s.id.clone());
+            // Asked as going back to a message is: the question, then the
+            // choices in the Mac order, the destructive one alone on the
+            // left and Cancel beside the default on the right, so Return
+            // never lands on the destructive one.
             div()
                 .mt(px(space::S2))
                 .flex()
-                .flex_wrap()
-                .items_center()
+                .flex_col()
                 .gap(px(space::S2))
                 .child(
                     div()
@@ -657,32 +660,37 @@ impl Dent {
                         .text_color(t.ink)
                         .child("It changed files. Undo those too before trying again?"),
                 )
-                .child(div().flex_1())
-                // The Mac order: the destructive choice leads, the default
-                // trails, so Return never lands on it.
                 .child(
-                    button("try-again-files", "Undo them and try again", false, &t)
-                        .relative()
-                        .on_press(
-                            cx.listener(move |this, _, _, cx| this.try_again(&s1, Some(true), cx)),
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(space::S2))
+                        .child(
+                            button("try-again-files", "Undo them and try again", false, &t)
+                                .relative()
+                                .on_press(cx.listener(move |this, _, _, cx| {
+                                    this.try_again(&s1, Some(true), cx)
+                                }))
+                                .child(probe(&self.probes, "try-again-files")),
                         )
-                        .child(probe(&self.probes, "try-again-files")),
-                )
-                .child(
-                    ghost("try-again-cancel", "Cancel", &t).on_press(cx.listener(
-                        |this, _, _, cx| {
-                            this.trying_again = None;
-                            cx.notify();
-                        },
-                    )),
-                )
-                .child(
-                    button("try-again-keep", "Try again", true, &t)
-                        .relative()
-                        .on_press(
-                            cx.listener(move |this, _, _, cx| this.try_again(&s2, Some(false), cx)),
+                        .child(div().flex_1())
+                        .child(
+                            ghost("try-again-cancel", "Cancel", &t).on_press(cx.listener(
+                                |this, _, _, cx| {
+                                    this.trying_again = None;
+                                    cx.notify();
+                                },
+                            )),
                         )
-                        .child(probe(&self.probes, "try-again-keep")),
+                        .child(
+                            button("try-again-keep", "Try again", true, &t)
+                                .relative()
+                                .on_press(cx.listener(move |this, _, _, cx| {
+                                    this.try_again(&s2, Some(false), cx)
+                                }))
+                                .child(probe(&self.probes, "try-again-keep")),
+                        ),
                 )
         } else {
             let sid = s.id.clone();
@@ -1255,7 +1263,7 @@ impl Dent {
                     .map(|d| {
                         if asking {
                             // Going back asks once, in place.
-                            d.pb(px(size::CONTROL_SM)).child(div().ty(UI).text_color(t.quiet).child(if busy {
+                            d.pb(px(size::CONTROL_SM)).child(div().ty(UI).text_color(t.ink).child(if busy {
                                 "Stop it first, then go back"
                             } else {
                                 "Go back to before this message? It goes back into the reply box."
