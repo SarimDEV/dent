@@ -4367,7 +4367,12 @@ fn output_lines(
             font: f,
             color,
             background_color: None,
-            underline: None,
+            // As the terminal tab draws it.
+            underline: st.filter(|st| st.underline).map(|_| UnderlineStyle {
+                thickness: px(1.),
+                color: Some(color),
+                wavy: false,
+            }),
             strikethrough: None,
         }
     };
