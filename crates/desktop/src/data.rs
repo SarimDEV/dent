@@ -191,12 +191,7 @@ impl Item {
     /// (thinking, tools) has none.
     pub fn plain(&self) -> Option<String> {
         match self {
-            Item::User { text, .. } => Some(
-                text.lines()
-                    .filter(|l| !l.starts_with("› "))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
+            Item::User { text, .. } => Some(attachment_lines(text).1.join("\n")),
             Item::Text(t) | Item::Note { text: t, .. } | Item::Plan { plan: t, .. } => {
                 Some(t.clone())
             }
@@ -206,6 +201,20 @@ impl Item {
             _ => None,
         }
     }
+}
+
+/// A message you sent, split into the lines that say what went with it
+/// (files, a picked element, a page error, a review comment, as the
+/// composer writes them: `› what · detail`) and its words. Those lines
+/// lead the message; a line of your own that happens to start with `›`,
+/// after your words or without the ` · `, stays yours.
+pub fn attachment_lines(text: &str) -> (Vec<&str>, Vec<&str>) {
+    let lines: Vec<&str> = text.lines().collect();
+    let n = lines
+        .iter()
+        .take_while(|l| l.strip_prefix("› ").is_some_and(|r| r.contains(" · ")))
+        .count();
+    (lines[..n].to_vec(), lines[n..].to_vec())
 }
 
 /// One line of an opened tool group. Subagents' work sits under the call
@@ -559,6 +568,20 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn only_leading_attachment_lines_are_attachments() {
+        let (a, w) = attachment_lines("› Attached · a.png\n› x.rs:4 · why?\nLook at these");
+        assert_eq!(a, ["› Attached · a.png", "› x.rs:4 · why?"]);
+        assert_eq!(w, ["Look at these"]);
+        // Your own words that start with the mark stay yours.
+        let (a, w) = attachment_lines("› quoting the reply\nwhat does it mean?");
+        assert!(a.is_empty());
+        assert_eq!(w.len(), 2);
+        let (a, w) = attachment_lines("first\n› Attached · later.png");
+        assert!(a.is_empty());
+        assert_eq!(w.len(), 2);
+    }
 
     #[test]
     fn spans_read_as_words() {

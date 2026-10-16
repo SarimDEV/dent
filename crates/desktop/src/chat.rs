@@ -1087,8 +1087,7 @@ impl Dent {
                 crate::cards::command_line(text, "terminal", t.quiet, &t).into_any_element()
             }
             Item::User { id: msg, text, at } => {
-                let (atts, body): (Vec<&str>, Vec<&str>) =
-                    text.lines().partition(|l| l.starts_with("› "));
+                let (atts, body) = crate::data::attachment_lines(text);
                 let asking = self
                     .rewinding
                     .as_ref()
@@ -1143,20 +1142,8 @@ impl Dent {
                             })
                             .when(!body.is_empty(), |d| {
                                 // Long messages fold, so the reply stays in view.
-                                let full = body.join("\n");
-                                let long = body.len() > 8 || full.chars().count() > 600;
                                 let open = self.expanded.contains(msg);
-                                let shown = if long && !open {
-                                    let mut short: String = body[..body.len().min(8)]
-                                        .join("\n")
-                                        .chars()
-                                        .take(600)
-                                        .collect();
-                                    short.push('…');
-                                    short
-                                } else {
-                                    full
-                                };
+                                let (shown, long) = user_shown(&body, open);
                                 let key = msg.clone();
                                 // A slash command reads as one.
                                 let command = shown.starts_with('/')
@@ -4189,6 +4176,24 @@ fn sent_attachment(
                 .child(div().ty(LABEL).text_color(t.quiet).child(place.to_string()))
                 .child(div().text_color(t.ink).child(what.to_string())),
         )
+}
+
+/// The words of a message you sent as drawn, and whether it's long enough
+/// to fold: past 8 lines or 600 characters, folded unless `open`.
+pub fn user_shown(body: &[&str], open: bool) -> (String, bool) {
+    let full = body.join("\n");
+    let long = body.len() > 8 || full.chars().count() > 600;
+    if long && !open {
+        let mut short: String = body[..body.len().min(8)]
+            .join("\n")
+            .chars()
+            .take(600)
+            .collect();
+        short.push('…');
+        (short, long)
+    } else {
+        (full, long)
+    }
 }
 
 /// Lines of code or output that select and copy; with `diff`, removed

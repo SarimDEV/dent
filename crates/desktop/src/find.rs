@@ -57,6 +57,37 @@ pub struct Find {
     pub cells: Vec<alacritty_terminal::term::search::Match>,
     /// In a page: how many matches it last said it has.
     pub page_count: usize,
+    /// In the chat: how many matches each item draws, and each item's count
+    /// by its words, so only what changed is counted again.
+    chat: std::rc::Rc<Vec<usize>>,
+    memo: std::collections::HashMap<u64, usize>,
+}
+
+/// The words a chat item draws as text, a piece at a time: your message
+/// (folded as it's shown), a reply or plan as rendered, a note. Folded
+/// work, cards and waiting messages aren't searched.
+pub fn item_words(
+    item: &Item,
+    open: bool,
+    parse: impl FnOnce(&str) -> std::rc::Rc<Vec<crate::markdown::Block>>,
+) -> Vec<String> {
+    match item {
+        Item::User { text, .. } if text.starts_with('/') && !text.contains('\n') => Vec::new(),
+        Item::User { text, .. } => {
+            let (_, body) = crate::data::attachment_lines(text);
+            if body.is_empty() {
+                return Vec::new();
+            }
+            vec![crate::chat::user_shown(&body, open).0]
+        }
+        Item::Text(src) | Item::Plan { plan: src, .. } => {
+            let mut out = Vec::new();
+            crate::markdown::drawn(&parse(src), &mut out);
+            out
+        }
+        Item::Note { text, .. } => vec![text.clone()],
+        _ => Vec::new(),
+    }
 }
 
 impl Dent {
@@ -142,6 +173,8 @@ impl Dent {
                 reveal: false,
                 cells: Vec::new(),
                 page_count: 0,
+                chat: Default::default(),
+                memo: Default::default(),
             });
         }
         self.find_input.update(cx, |f, cx| {
@@ -183,17 +216,12 @@ impl Dent {
             return Vec::new();
         }
         match scope {
+            // Counted by `chat_counts`, from what each item draws.
             Scope::Chat => each(
-                s.items
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, item)| {
-                        let n = item
-                            .plain()
-                            .map_or(0, |t| crate::select::matches(&t, query).len());
-                        (ix, n)
-                    })
-                    .collect(),
+                self.find
+                    .as_ref()
+                    .map(|f| f.chat.iter().copied().enumerate().collect())
+                    .unwrap_or_default(),
             ),
             // Rows of the diff, drawn or not: the text of each line.
             Scope::Changes => {
@@ -263,13 +291,21 @@ impl Dent {
         let mut h = std::hash::DefaultHasher::new();
         let mut counted = None;
         match scope {
+            // Every item's words by their length (a reply above waiting
+            // messages still streams), and whether a long message is open.
             Scope::Chat => {
                 s.items.len().hash(&mut h);
-                s.items
-                    .last()
-                    .and_then(Item::plain)
-                    .map_or(0, |t| t.len())
-                    .hash(&mut h);
+                for i in s.items.iter() {
+                    match i {
+                        Item::User { id, text, .. } => {
+                            (text.len(), self.expanded.contains(id)).hash(&mut h)
+                        }
+                        Item::Text(t) | Item::Plan { plan: t, .. } | Item::Note { text: t, .. } => {
+                            t.len().hash(&mut h)
+                        }
+                        _ => 0.hash(&mut h),
+                    }
+                }
             }
             Scope::Changes => {
                 self.diff_selected(&s).hash(&mut h);
@@ -293,6 +329,9 @@ impl Dent {
         }
         let sig = (query, h.finish());
         if sig != f.sig {
+            if scope == Scope::Chat {
+                self.chat_counts(&s, &sig.0);
+            }
             if scope == Scope::Terminal {
                 let cells = self
                     .shells
@@ -341,6 +380,54 @@ impl Dent {
             }
         }
         self.paint_find(cx);
+    }
+
+    /// Count the matches of `query` in each chat item's drawn words, again
+    /// only for items whose words changed.
+    fn chat_counts(&mut self, s: &Session, query: &str) {
+        let Some(mut f) = self.find.take() else {
+            return;
+        };
+        if f.sig.0 != query {
+            f.memo.clear();
+        }
+        // The reply streaming in is drawn from its stream, not the cache.
+        let live = self.births.get(&s.id).map(|(ix, _)| *ix);
+        if f.memo.len() > 2 * s.items.len() + 64 {
+            f.memo.clear();
+        }
+        let counts = s
+            .items
+            .iter()
+            .enumerate()
+            .map(|(ix, item)| {
+                let open = matches!(item, Item::User { id, .. } if self.expanded.contains(id));
+                let mut h = std::hash::DefaultHasher::new();
+                match item {
+                    Item::User { text, .. } => (0u8, text, open).hash(&mut h),
+                    Item::Text(t) => (1u8, t).hash(&mut h),
+                    Item::Plan { plan, .. } => (2u8, plan).hash(&mut h),
+                    Item::Note { text, .. } => (3u8, text).hash(&mut h),
+                    _ => return 0,
+                }
+                let key = h.finish();
+                let md = &mut self.md;
+                *f.memo.entry(key).or_insert_with(|| {
+                    item_words(item, open, |src| {
+                        if live == Some(ix) {
+                            md.live(&s.id, src)
+                        } else {
+                            md.get(src)
+                        }
+                    })
+                    .iter()
+                    .map(|w| crate::select::matches(w, query).len())
+                    .sum()
+                })
+            })
+            .collect();
+        f.chat = std::rc::Rc::new(counts);
+        self.find = Some(f);
     }
 
     /// Step to the next match, or the previous, round the ends.
@@ -446,6 +533,7 @@ impl Dent {
             current: f.hits.get(f.at).map(|&(ix, k)| (ix as u32, k)),
             tint,
             strong,
+            limits: (f.scope == Scope::Chat).then(|| f.chat.clone()),
         }));
     }
 
@@ -559,4 +647,41 @@ impl Dent {
 pub fn query_changed(this: &mut Dent, cx: &mut Context<Dent>) {
     this.refresh_find(false, cx);
     cx.notify();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::item_words;
+    use crate::data::Item;
+
+    fn words(item: &Item, open: bool) -> Vec<String> {
+        let mut md = crate::mdstream::Cache::default();
+        item_words(item, open, |src| md.get(src))
+    }
+
+    /// Find counts what's drawn: a reply's words without its Markdown, and
+    /// a long message only as far as it's shown.
+    #[test]
+    fn counts_what_is_drawn() {
+        let reply =
+            Item::Text("Use **`cargo`** and [the docs](https://x.y).\n\n```sh\nls\n```".into());
+        let w = words(&reply, false).join("\n");
+        assert!(!w.contains("**") && !w.contains("https://x.y") && !w.contains("```"));
+        assert!(w.contains("cargo") && w.contains("the docs") && w.contains("ls"));
+        let long = format!("start {} needle", "word ".repeat(200));
+        let user = Item::User {
+            id: "u".into(),
+            text: format!("› Attached · a.png\n{long}"),
+            at: 0,
+        };
+        let n = |open| {
+            words(&user, open)
+                .iter()
+                .map(|w| crate::select::matches(w, "needle").len())
+                .sum::<usize>()
+        };
+        assert_eq!(n(false), 0, "folded away");
+        assert_eq!(n(true), 1);
+        assert!(!words(&user, true)[0].contains("Attached"));
+    }
 }

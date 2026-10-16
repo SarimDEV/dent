@@ -662,6 +662,30 @@ fn flush(stack: &mut [Frame], cur: &mut Inline) {
     }
 }
 
+/// The words `blocks` draw as text, a piece at a time, in the order they're
+/// drawn: what ⌘F counts, so the count agrees with the tints. Maths and
+/// diagrams draw as pictures, not text.
+pub fn drawn(blocks: &[Block], out: &mut Vec<String>) {
+    for b in blocks {
+        match b {
+            Block::Heading(_, i) | Block::Para(i) => out.push(i.text.clone()),
+            Block::List(items) => {
+                for item in items {
+                    drawn(&item.blocks, out);
+                }
+            }
+            Block::Quote(_, inner) => drawn(inner, out),
+            Block::Code(_, body, _) => out.extend(body.split('\n').map(str::to_owned)),
+            Block::Table(t) => {
+                for row in std::iter::once(&t.head).chain(&t.rows) {
+                    out.extend(row.iter().map(|c| c.text.clone()));
+                }
+            }
+            Block::Image(..) | Block::Math(..) | Block::Diagram(..) | Block::Rule => {}
+        }
+    }
+}
+
 /// The Markdown dent reads: CommonMark with GitHub's extensions and maths.
 pub fn options() -> Options {
     let mut opts = Options::empty();
