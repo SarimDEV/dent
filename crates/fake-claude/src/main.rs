@@ -6,13 +6,15 @@
 //! What it does depends on words in the message:
 //!
 //! - `run` or `approve`: a Bash call that needs approval
-//! - `present a plan`: a plan to approve, as plan mode ends
+//! - `present a plan`: a plan to approve, as plan mode ends (`long`: a plan
+//!   of 30 steps)
 //! - `ask`: a question with choices (`ask several`: more than one answer)
 //! - `write <path>`: writes the file in its directory (asks first in Ask mode)
 //! - `background`: starts background work, ends the turn, then follows up
 //! - `subagent`: a Task call whose steps nest under it
 //! - `dev server`: serves a page on a free port and prints its address
-//! - `long`: a long reply, for stopping halfway (`slowly`: ten times slower)
+//! - `long`: a long reply, for stopping halfway (`slowly`: ten times slower;
+//!   with `make a plan`, each step holds ten times longer)
 //! - `colour output`: a Bash call whose output is coloured, with a
 //!   progress line and one very long line
 //! - `half-typed`: a reply that stops for a while each time bold, a link,
@@ -988,10 +990,16 @@ impl Agent {
                     .collect();
                 json!({"todos": todos})
             };
+            // `slowly` holds each step long enough to look at.
+            let hold = if lower.contains("slowly") {
+                12_000
+            } else {
+                1200
+            };
             for done in 0..2 {
                 let id = self.tool("TodoWrite", todo(done), None);
                 self.result(&id, "Todos updated", false, None);
-                self.pause(1200)?;
+                self.pause(hold)?;
             }
             self.say("One of three done; adding the rate limit now.", None)?;
             self.end("done", false);
@@ -1083,9 +1091,16 @@ impl Agent {
             self.end("done", false);
             return Ok(());
         }
-        if lower.contains("present a plan") {
-            let input =
-                json!({"plan": "1. Read the handler.\n2. Add the rate limit.\n3. Run the tests."});
+        if lower.contains("present a plan") || lower.contains("present a long plan") {
+            let plan = if lower.contains("long") {
+                (1..=30)
+                    .map(|n| format!("{n}. Step {n}: change part {n} of the handler and test it."))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                "1. Read the handler.\n2. Add the rate limit.\n3. Run the tests.".to_string()
+            };
+            let input = json!({ "plan": plan });
             match self.guarded("ExitPlanMode", input, true)? {
                 Some(why) => self.say(&format!("Okay, I'll keep planning: {why}"), None)?,
                 None => self.say("Building it now.", None)?,

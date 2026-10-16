@@ -1890,7 +1890,8 @@ fn checks() -> Vec<(f32, Act)> {
             ),
         ),
     ]);
-    v.extend(new_session("make a plan please"));
+    // Slowly, so the plan is still up for its stills.
+    v.extend(new_session("make a plan slowly please"));
     v.extend([
         (
             0.1,
@@ -1912,6 +1913,14 @@ fn checks() -> Vec<(f32, Act)> {
                 cx.notify();
             }),
         ),
+        (
+            0.,
+            Until(
+                "folded, the plan is one line while the turn runs",
+                |d, _| status_is(d, Status::Working) && !d.plan_open,
+                1.,
+            ),
+        ),
         (0.3, Shot("plan-folded")),
         (
             0.1,
@@ -1930,7 +1939,7 @@ fn checks() -> Vec<(f32, Act)> {
                             s.todos.iter().filter(|(st, ..)| st == "completed").count() == 1
                         })
                 },
-                10.,
+                20.,
             ),
         ),
         (
@@ -3159,6 +3168,30 @@ fn answer_keys() -> Vec<(f32, Act)> {
             ),
         ),
     ]);
+    // A long plan folds to its start, its actions still in view.
+    v.extend(new_session("present a long plan"));
+    v.extend([
+        (
+            0.1,
+            Until(
+                "a long plan waits",
+                |d, _| has(d, |i| matches!(i, Item::Plan { .. })),
+                10.,
+            ),
+        ),
+        (0.2, Call(to_end)),
+        (0.4, Shot("plan-long")),
+        (0.1, Key("escape")),
+        (0.2, Key("enter")),
+        (
+            0.1,
+            Until(
+                "and starts building like a short one",
+                |d, _| done_saying(d, "Building it now"),
+                10.,
+            ),
+        ),
+    ]);
     v
 }
 
@@ -3448,9 +3481,13 @@ fn view_choices() -> Vec<(f32, Act)> {
         (0.1, Key("cmd--")),
         (0.1, Until("⌘− makes it smaller", |_, _| zoom_is(0.92), 1.)),
         (0.1, Key("cmd-0")),
+        // The walk's own theme (`--dark` or not) is kept, to put back after.
         (
             0.1,
-            Call(|d, w, cx| d.set_appearance(crate::prefs::Appearance::Dark, w, cx)),
+            Call(|d, w, cx| {
+                WALK_DARK.with(|k| k.set(d.forced_dark));
+                d.set_appearance(crate::prefs::Appearance::Dark, w, cx)
+            }),
         ),
         (
             0.1,
@@ -3463,6 +3500,16 @@ fn view_choices() -> Vec<(f32, Act)> {
         (
             0.1,
             Until("Light Appearance wears Paper", |d, _| !d.t.dark, 1.),
+        ),
+        // Back to the theme the walk was asked for, so the stills after
+        // this are in it too.
+        (
+            0.,
+            Call(|d, w, cx| {
+                d.set_appearance(crate::prefs::Appearance::System, w, cx);
+                d.forced_dark = WALK_DARK.with(|k| k.get());
+                d.apply_theme(w, cx);
+            }),
         ),
         (0.1, Key("cmd-/")),
         (
@@ -4397,7 +4444,13 @@ fn copy_long_log(_: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
     cx.write_to_clipboard(ClipboardItem::new_string(log));
 }
 
+thread_local! {
+    /// The theme a walk was started in, while a scene changes it.
+    static WALK_DARK: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
 /// The composer's folded pastes, by their labels.
+
 fn chips(d: &Dent, cx: &App) -> Vec<String> {
     d.composer
         .read(cx)
@@ -4602,6 +4655,29 @@ fn visuals() -> Vec<(f32, Act)> {
         ),
         (0.2, Call(to_end)),
         (0.4, Shot("queued-picture")),
+        // A long paste waits as its chip.
+        (0., Call(save_clipboard)),
+        (0., Call(copy_long_log)),
+        (0.1, Key("cmd-v")),
+        (0.1, Keys(" what changed here?")),
+        (0.1, Key("enter")),
+        (
+            0.2,
+            Until(
+                "a waiting message shows its paste as a chip, not 60 lines",
+                |d, _| {
+                    current(d).is_some_and(|s| {
+                        s.items.iter().any(|i| {
+                            matches!(i, Item::Queued { text, .. } if text.contains("applied event 60"))
+                        })
+                    })
+                },
+                5.,
+            ),
+        ),
+        (0., Call(restore_clipboard)),
+        (0.2, Call(to_end)),
+        (0.4, Shot("queued-paste")),
         (
             0.1,
             Until(
