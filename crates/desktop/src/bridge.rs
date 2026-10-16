@@ -528,12 +528,27 @@ fn plans(name: &str) -> bool {
 /// dent's plan tool as the agent calls it (the daemon serves it).
 const PLAN_TOOL: &str = "mcp__dent__update_plan";
 
-/// The agent's latest plan, from its last plan call.
+/// The agent's plan for the current turn, from its last plan call since
+/// your latest message: an earlier turn's plan is history, not this one's.
 fn todos(v: &SessionView) -> Vec<(String, String, String)> {
-    let last = v.entries.iter().rev().find_map(|e| match e {
-        Entry::Tools { calls } => calls.iter().rev().find(|c| plans(&c.name)),
-        _ => None,
-    });
+    let last = v
+        .entries
+        .iter()
+        .rev()
+        .take_while(|e| {
+            !matches!(
+                e,
+                Entry::User {
+                    queued: false,
+                    steer: false,
+                    ..
+                }
+            )
+        })
+        .find_map(|e| match e {
+            Entry::Tools { calls } => calls.iter().rev().find(|c| plans(&c.name)),
+            _ => None,
+        });
     let Some(c) = last else { return Vec::new() };
     let input = c.input();
     input["todos"]
@@ -909,7 +924,11 @@ fn summary(calls: &[Call], cwd: &Path) -> String {
         let kind = match c.name.trim_start_matches("waiting:") {
             _ if agent && c.result.is_none() => (2, "working"),
             n @ ("Write" | "Edit" | "MultiEdit" | "NotebookEdit") => {
-                let k = if n == "Write" { "created" } else { "edited" };
+                let k = if n == "Write" && !c.overwrote() {
+                    "created"
+                } else {
+                    "edited"
+                };
                 // A file counts once, however many times it was changed.
                 let p = c.path().unwrap_or_default();
                 if touched.iter().any(|(q, j)| *q == p && *j == k) {
@@ -967,9 +986,13 @@ fn summary(calls: &[Call], cwd: &Path) -> String {
             "ran" => format!("ran {}", count("a command", "commands")),
             // One subagent is named by its task.
             "agents" | "working" if n == 1 => {
+                // The one this phrase counts: still running, or finished.
                 let task = top
                     .iter()
-                    .find(|c| matches!(c.name.as_str(), "Task" | "Agent"))
+                    .find(|c| {
+                        matches!(c.name.as_str(), "Task" | "Agent")
+                            && c.result.is_none() == (kind == "working")
+                    })
                     .and_then(|c| c.input()["description"].as_str().map(str::to_owned))
                     .unwrap_or_else(|| "a task".into());
                 let doing = if kind == "working" { " (working)" } else { "" };
@@ -1016,29 +1039,50 @@ fn summary(calls: &[Call], cwd: &Path) -> String {
 }
 
 /// Lines added and taken out by a group's edits that went through, like
-/// "+9 −5"; nothing when it changed no file.
+/// "+9 −5"; nothing when it changed no file. A new file counts all its
+/// lines; a file rewritten whole counts nothing, since what it replaced
+/// isn't known here.
 fn diffstat(calls: &[&Call]) -> Option<String> {
     let (mut add, mut del) = (0, 0);
     for c in calls {
         if !matches!(c.result, Some((false, _))) {
             continue;
         }
-        let Some(text) = edit_text(c.name.trim_start_matches("waiting:"), &c.input()) else {
-            continue;
-        };
-        if c.name == "Write" {
-            add += text.lines().count();
-            continue;
-        }
-        for l in text.lines() {
-            if l.starts_with("+ ") || l == "+" {
-                add += 1;
-            } else if l.starts_with("- ") || l == "-" {
-                del += 1;
+        let v = c.input();
+        let s = |e: &Value, k: &str| e[k].as_str().unwrap_or_default().to_string();
+        match c.name.as_str() {
+            "Write" if !c.overwrote() => add += s(&v, "content").lines().count(),
+            "Edit" => {
+                let (a, d) = changed_lines(&s(&v, "old_string"), &s(&v, "new_string"));
+                add += a;
+                del += d;
             }
+            "MultiEdit" => {
+                for e in v["edits"].as_array().into_iter().flatten() {
+                    let (a, d) = changed_lines(&s(e, "old_string"), &s(e, "new_string"));
+                    add += a;
+                    del += d;
+                }
+            }
+            _ => {}
         }
     }
     (add + del > 0).then(|| format!("+{add} −{del}"))
+}
+
+/// Lines an edit adds and takes out, leaving out the lines it keeps at
+/// either end (the context an edit carries to find its place), as git
+/// would count a single change.
+fn changed_lines(old: &str, new: &str) -> (usize, usize) {
+    let (o, n): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
+    let head = o.iter().zip(&n).take_while(|(a, b)| a == b).count();
+    let tail = o[head..]
+        .iter()
+        .rev()
+        .zip(n[head..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    (n.len() - head - tail, o.len() - head - tail)
 }
 
 fn ask(
@@ -1193,6 +1237,15 @@ fn answered(tool: &str, input: &Value, a: &Answer, cwd: &Path) -> Item {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_edit_counts_only_the_lines_it_changes() {
+        // One line changed amid its context.
+        assert_eq!(super::changed_lines("a\nb\nc\nd", "a\nB\nc\nd"), (1, 1));
+        assert_eq!(super::changed_lines("a\nc", "a\nb\nc"), (1, 0));
+        assert_eq!(super::changed_lines("same", "same"), (0, 0));
+        assert_eq!(super::changed_lines("", "x\ny"), (2, 0));
+    }
+
     use super::*;
 
     #[test]

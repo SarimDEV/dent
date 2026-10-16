@@ -867,7 +867,7 @@ impl Agent {
             });
             let id = self.tool(
                 "Bash",
-                json!({"command": "npm run dev", "run_in_background": true}),
+                json!({"command": "npm run dev", "description": "Start the dev server", "run_in_background": true}),
                 None,
             );
             self.pause(300)?;
@@ -1034,7 +1034,7 @@ impl Agent {
             );
             let run = self.tool(
                 "Bash",
-                json!({"command": "cargo test db -- --report-time"}),
+                json!({"command": "cargo test db -- --report-time", "description": "Run the db tests with timings"}),
                 Some(&inner),
             );
             self.pause(200)?;
@@ -1124,7 +1124,7 @@ impl Agent {
         if lower.contains("background") {
             let id = self.tool(
                 "Bash",
-                json!({"command": "sleep 2", "run_in_background": true}),
+                json!({"command": "sleep 2", "description": "Wait two seconds", "run_in_background": true}),
                 None,
             );
             self.result(&id, "Started in the background (task b1)", false, None);

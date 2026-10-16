@@ -12,9 +12,6 @@ pub struct Prefs {
     /// The permission a new session starts with: Full access until you pick
     /// another, which then sticks (decision 0048).
     pub permission: Permission,
-    /// Which version of the defaults these prefs were last brought up to;
-    /// 1 moved everyone to Full access once.
-    pub defaults_version: u8,
     pub effort: Option<String>,
     pub panel_width: Option<f32>,
     pub sidebar_width: Option<f32>,
@@ -65,20 +62,30 @@ pub fn load() -> Prefs {
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
-    upgrade(&mut p);
+    // A marker beside the prefs, not a field in them: an older build
+    // rewriting the prefs can't drop it and so undo a choice made since.
+    let marker = path().with_file_name(FULL_ACCESS_MARKER);
+    if upgrade(&mut p, marker.exists()) {
+        if let Some(dir) = marker.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&marker, "");
+    }
     p
 }
 
-/// The defaults dent starts with now.
-pub const DEFAULTS_VERSION: u8 = 1;
+/// Present once new sessions have been moved to Full access.
+const FULL_ACCESS_MARKER: &str = "desktop-full-access-default";
 
-/// Brings older (or no) prefs up to today's defaults, once each: a choice
-/// made after that is yours and stays.
-fn upgrade(p: &mut Prefs) {
-    if p.defaults_version < 1 {
-        p.permission = Permission::Full;
+/// Moves older (or no) prefs to Full access, once: `done` says it
+/// happened before. True when it moved them now; a choice made after that
+/// is yours and stays.
+fn upgrade(p: &mut Prefs, done: bool) -> bool {
+    if done {
+        return false;
     }
-    p.defaults_version = DEFAULTS_VERSION;
+    p.permission = Permission::Full;
+    true
 }
 
 pub fn save(p: &Prefs) {
@@ -101,15 +108,14 @@ mod tests {
     fn new_sessions_start_in_full_access_until_you_choose() {
         // No prefs yet, or prefs from before: Full access.
         let mut fresh = Prefs::default();
-        upgrade(&mut fresh);
+        assert!(upgrade(&mut fresh, false));
         assert_eq!(fresh.permission, Permission::Full);
         let mut old: Prefs = serde_json::from_str(r#"{"permission":"ask"}"#).unwrap();
-        upgrade(&mut old);
+        assert!(upgrade(&mut old, false));
         assert_eq!(old.permission, Permission::Full);
-        // A choice made since sticks.
-        let mut chosen: Prefs =
-            serde_json::from_str(r#"{"permission":"ask","defaults_version":1}"#).unwrap();
-        upgrade(&mut chosen);
+        // A choice made since sticks, whatever rewrote the prefs meanwhile.
+        let mut chosen: Prefs = serde_json::from_str(r#"{"permission":"ask"}"#).unwrap();
+        assert!(!upgrade(&mut chosen, true));
         assert_eq!(chosen.permission, Permission::Ask);
     }
 }

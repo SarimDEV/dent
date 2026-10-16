@@ -1199,10 +1199,10 @@ fn checks() -> Vec<(f32, Act)> {
         (
             0.1,
             Until(
-                "allowing runs it and the turn finishes",
+                "allowing runs it and the turn finishes, leaving no note of its own",
                 |d, _| {
                     done_saying(d, "Ran it")
-                        && has(
+                        && !has(
                             d,
                             |i| matches!(i, Item::Note { text, .. } if text.starts_with("Allowed")),
                         )
@@ -1658,7 +1658,7 @@ fn checks() -> Vec<(f32, Act)> {
         Until("a subagent's own subagent sits a level deeper, with its report", |d, _| {
             has(d, |i| matches!(i, Item::Tools { lines, .. }
                 if lines.iter().any(|l| l.depth == 0 && l.text.contains("Time the db tests"))
-                && lines.iter().any(|l| l.depth == 1 && l.text.contains("cargo test db"))
+                && lines.iter().any(|l| l.depth == 1 && l.text.contains("db tests with timings"))
                 && lines.iter().any(|l| l.depth == 0 && l.report.as_deref().is_some_and(|r| r.contains("Slow tests")))))
         }, 3.),
     ), (
@@ -2848,12 +2848,8 @@ fn answer_keys() -> Vec<(f32, Act)> {
         (
             0.1,
             Until(
-                "1 on the card allows once",
-                |d, _| {
-                    done_saying(d, "Ran it")
-                        && noted(d, "Allowed")
-                        && !noted(d, "Allowed echo hello > hello.txt for")
-                },
+                "1 on the card allows once: no lasting rule, no note",
+                |d, _| done_saying(d, "Ran it") && !noted(d, "Allowed"),
                 10.,
             ),
         ),

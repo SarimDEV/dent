@@ -13,6 +13,9 @@ name=${1:-checks}; shift || true
 root=$(mktemp -d "${TMPDIR:-/tmp}/dent-walk.XXXXXX")
 trap 'pkill -f "dent-daemon --state $root/state" 2>/dev/null || true; rm -rf "$root"' EXIT
 mkdir -p "$root/home" "$root/state" "$root/proj" "$root/outside"
+# Walks check approvals, so new sessions keep asking: skip the one-time
+# move to Full access (decision 0048).
+touch "$root/state/desktop-full-access-default"
 # A page's own files, in a folder outside the project.
 echo 'body{margin:40px;font:16px system-ui} h1{color:rgb(200,30,30)}' > "$root/outside/style.css"
 printf 'GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\x00\x00\x00\x00\x00!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;' > "$root/outside/dot.gif"

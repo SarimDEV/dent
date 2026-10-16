@@ -656,10 +656,13 @@ impl Dent {
             let has_changes = changed.is_some();
             div()
                 .flex()
+                // A narrow column wraps the time and actions under the
+                // changes rather than running past its edge.
+                .flex_wrap()
                 .items_center()
-                .gap(px(space::S3))
+                .gap_x(px(space::S3))
                 .mt(px(space::S1))
-                .h(px(size::CONTROL_SM))
+                .min_h(px(size::CONTROL_SM))
                 .children(changed)
                 .child(
                     div()
@@ -971,7 +974,12 @@ impl Dent {
             Some(dent_protocol::Activity::Retrying { .. }) => "retrying",
             Some(dent_protocol::Activity::Preparing { .. }) | None => "working",
         };
-        let live = self.live_words(&s.id, kind, &detail);
+        // The plan's current step, as the working line would say it.
+        let step = s
+            .todos
+            .iter()
+            .any(|(st, what, doing)| st == "in_progress" && (*what == detail || *doing == detail));
+        let live = self.live_words(&s.id, kind, &detail, step);
         let still = crate::reduce_motion();
         let k = if still {
             1.
@@ -1327,6 +1335,8 @@ impl Dent {
                         };
                         let face = markdown::Face::of(READING, theme::body(), t.ink, t.surface);
                         div()
+                            // The measure it settles into once finished.
+                            .max_w(px(crate::ds::measure()))
                             .ty(READING)
                             .text_color(t.ink)
                             .child(inline.element(
@@ -2522,7 +2532,15 @@ impl Dent {
     fn plan_strip(&self, s: &Session, cx: &mut Context<Self>) -> Option<AnyElement> {
         // A plan is for watching work happen: it shows while the agent works
         // or waits on you, and goes when the turn ends, ticked off or not.
-        let live = s.running() || s.status == Status::Needs;
+        // (Waiting on you means a question it asked; an error also reads
+        // as needing you, but the turn is over.)
+        let asking = s.items.iter().rev().any(|i| {
+            matches!(
+                i,
+                Item::Approval { .. } | Item::Question { .. } | Item::Plan { .. }
+            )
+        });
+        let live = s.running() || asking;
         if s.todos.is_empty() || !live {
             return None;
         }
@@ -4268,10 +4286,16 @@ fn folded_change(items: &[Item], ix: usize) -> bool {
 /// before your next message, and its turn has ended. Everything else said in
 /// a turn is narration of the work.
 pub fn is_answer(items: &[Item], ix: usize, running: bool) -> bool {
+    // While the agent works, the turn it's in has no answer yet, whatever
+    // you queue or steer into it meanwhile.
+    let open = running
+        && !items[ix + 1..]
+            .iter()
+            .any(|i| matches!(i, Item::TurnEnd { .. }));
     for i in items.iter().skip(ix + 1) {
         match i {
-            Item::User { .. } | Item::Queued { .. } => return true,
             Item::TurnEnd { .. } => return true,
+            Item::User { .. } | Item::Queued { .. } => return !open,
             Item::Text(_) | Item::Tools { .. } | Item::Thinking(_) => return false,
             _ => {}
         }
@@ -4323,4 +4347,42 @@ fn tool_text(text: &str, hover: Option<SharedString>, t: &theme::Theme) -> Div {
         .when(!rest.trim().is_empty(), |d| {
             d.child(part(div().min_w_0().truncate(), t.secondary()).child(rest.to_string()))
         })
+}
+
+#[cfg(test)]
+mod answer_tests {
+    use super::is_answer;
+    use crate::data::Item;
+
+    #[test]
+    fn narration_is_never_the_answer_while_its_turn_runs() {
+        let text = || Item::Text("words".into());
+        let end = Item::TurnEnd { at: 0, took: 0 };
+        // A queued message after the latest words: still working, not the answer.
+        let q = vec![
+            text(),
+            Item::Queued {
+                id: "q".into(),
+                text: "next".into(),
+            },
+        ];
+        assert!(!is_answer(&q, 0, true));
+        // The turn ended: the last words are its answer, narration before isn't.
+        let done = vec![text(), Item::Thinking(String::new()), text(), end.clone()];
+        assert!(is_answer(&done, 2, false));
+        assert!(!is_answer(&done, 0, false));
+        // An older turn's answer stays one while a new turn runs.
+        let older = vec![
+            text(),
+            end,
+            Item::User {
+                id: "u".into(),
+                text: "more".into(),
+                at: 0,
+            },
+            text(),
+        ];
+        assert!(is_answer(&older, 0, true));
+        assert!(!is_answer(&older, 3, true));
+    }
 }

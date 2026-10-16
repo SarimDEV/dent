@@ -21,9 +21,7 @@ use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
 use ratex_types::display_item::DisplayList;
 
 use crate::diagram;
-use crate::ds::{
-    CODE, DISPLAY, DISPLAY_COMPACT, LABEL, READING, Type, Typed, UI, radius, size, space,
-};
+use crate::ds::{CODE, DISPLAY, DISPLAY_COMPACT, LABEL, READING, Type, Typed, UI, radius, space};
 use crate::math;
 use crate::theme::{self, Theme};
 
@@ -1166,7 +1164,7 @@ fn render_in(
             Block::Para(i) => {
                 let f = face(READING, reading, ink);
                 div()
-                    .max_w(px(size::MEASURE))
+                    .max_w(px(crate::ds::measure()))
                     .ty(READING)
                     .text_color(ink)
                     .child(i.element(&key, t, f, None, &r.md, r.window))
@@ -1231,7 +1229,7 @@ fn render_in(
                     );
                 }
                 div()
-                    .max_w(px(size::MEASURE))
+                    .max_w(px(crate::ds::measure()))
                     .flex()
                     .flex_col()
                     .gap(px(space::S1))

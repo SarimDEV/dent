@@ -35,6 +35,12 @@ pub mod size {
     pub const MEASURE: f32 = 540.;
 }
 
+/// The measure at the chosen text size: it scales with the reading face,
+/// so a line holds about the same number of characters at any zoom.
+pub fn measure() -> f32 {
+    size::MEASURE * zoom()
+}
+
 pub mod radius {
     pub const SM: f32 = 4.;
     pub const MD: f32 = 6.;

@@ -177,6 +177,12 @@ impl Call {
             .map(str::to_owned)
     }
 
+    /// A Write that replaced a file already there, as its result says.
+    pub fn overwrote(&self) -> bool {
+        self.name == "Write"
+            && matches!(&self.result, Some((false, out)) if out.contains("has been updated"))
+    }
+
     /// One plain line: what it did, to what.
     pub fn line(&self) -> String {
         let v = self.input();
@@ -209,7 +215,10 @@ impl Call {
                 Some((false, _)) => "Ran",
             },
             "Read" => tense("Reading", "Read"),
-            "Write" => tense("Creating", "Created"),
+            // Write also replaces a file that was there; its result says which.
+            "Write" if running => "Writing",
+            "Write" if self.overwrote() => "Rewrote",
+            "Write" => "Created",
             "Edit" | "MultiEdit" | "NotebookEdit" => tense("Editing", "Edited"),
             "Grep" => tense("Searching for", "Searched for"),
             "Glob" => tense("Looking for files", "Looked for files"),
@@ -380,6 +389,8 @@ const VERBS: &[&str] = &[
     "Subagent:",
     "Creating",
     "Created",
+    "Writing",
+    "Rewrote",
     "Editing",
     "Edited",
     "Reading",
@@ -748,6 +759,19 @@ impl SessionView {
                 let took = self.working_since.map_or(0, |s| e.at.saturating_sub(s));
                 self.working_since = None;
                 self.partial.clear();
+                // A call the turn ended under (the agent stopped or crashed
+                // mid-call) won't finish now: it stops reading as running.
+                // Subagents may work on in the background.
+                let from = self.turn_from.min(self.entries.len());
+                for e in &mut self.entries[from..] {
+                    if let Entry::Tools { calls } = e {
+                        for c in calls.iter_mut().filter(|c| {
+                            c.result.is_none() && !matches!(c.name.as_str(), "Task" | "Agent")
+                        }) {
+                            c.result = Some((true, "Stopped before it finished".into()));
+                        }
+                    }
+                }
                 // What the turn edited, to review in one place.
                 let mut paths: Vec<String> = Vec::new();
                 for e in self.entries.get(self.turn_from..).unwrap_or_default() {

@@ -13,4 +13,4 @@ The owner's call. Supervised asked before every command and edit, burying a run 
 ## Consequences
 
 - Shift+Tab still steps Ask → Edits → Plan and never into Full.
-- The prefs file records which defaults it was brought up to (`defaults_version`), so later default changes can migrate once in the same way.
+- The one-time move is recorded by a marker file beside the prefs (`desktop-full-access-default`), not a field in them, so an older build rewriting the prefs can't undo a choice made since. Walkthroughs create the marker up front, since they check approvals.

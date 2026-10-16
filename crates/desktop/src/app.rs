@@ -3213,6 +3213,9 @@ impl Dent {
             }
             None => {
                 self.working_since.remove(id);
+                // Its working line is gone: words waiting to show would
+                // otherwise keep asking for frames with nothing to draw.
+                self.live_words.borrow_mut().remove(id);
             }
         }
         let following = self.selected.as_deref() == Some(id);
@@ -3244,7 +3247,6 @@ impl Dent {
             project: self.defaults.project.clone(),
             model: self.defaults.model.clone(),
             permission: self.defaults.permission,
-            defaults_version: crate::prefs::DEFAULTS_VERSION,
             effort: self.defaults.effort.clone(),
             panel_width: Some(self.panel_width),
             sidebar_width: Some(self.sidebar_w),
@@ -5016,8 +5018,10 @@ impl Dent {
                 .values()
                 .any(|t| t.elapsed() < Duration::from_secs(3))
             || self.dragging
-            || self.live_words.borrow().values().any(|w| {
-                w.next.is_some()
+            // Words waiting their turn need frames only where they'll show:
+            // the open session's working line.
+            || self.live_words.borrow().iter().any(|(id, w)| {
+                (w.next.is_some() && self.selected.as_deref() == Some(id.as_str()))
                     || w.at.elapsed() < Duration::from_millis(crate::ds::motion::BASE as u64 + 40)
             })
     }
@@ -5026,7 +5030,7 @@ impl Dent {
     /// it is now, and when it changed. New words wait until the old ones
     /// have been up long enough to read and have themselves held still a
     /// moment, so a run of quick calls never flickers.
-    pub fn live_words(&self, session: &str, kind: &str, words: &str) -> LiveWords {
+    pub fn live_words(&self, session: &str, kind: &str, words: &str, step: bool) -> LiveWords {
         use crate::ds::motion::{DWELL, DWELL_STEP, SETTLE};
         let key = format!("{kind}\u{1f}{words}");
         let now = Instant::now();
@@ -5038,6 +5042,7 @@ impl Dent {
             // The first words are just there.
             at: now - Duration::from_secs(1),
             next: None,
+            step,
         });
         if w.key == key {
             w.next = None;
@@ -5046,11 +5051,9 @@ impl Dent {
                 Some((k, _)) if *k == key => {}
                 _ => w.next = Some((key.clone(), now)),
             }
-            let held = if w.words.is_empty() {
-                DWELL
-            } else {
-                DWELL_STEP
-            };
+            // A plan step is up for a while, so it reads; a call's words
+            // only long enough not to flicker.
+            let held = if w.step { DWELL_STEP } else { DWELL };
             let up = w.at.elapsed().as_millis() as f32;
             let still = w
                 .next
@@ -5061,6 +5064,7 @@ impl Dent {
                 w.key = key;
                 w.at = now;
                 w.next = None;
+                w.step = step;
             }
         }
         w.clone()
@@ -5145,4 +5149,6 @@ pub struct LiveWords {
     pub was: String,
     pub at: Instant,
     next: Option<(String, Instant)>,
+    /// The words shown are the plan's current step.
+    step: bool,
 }
