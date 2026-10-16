@@ -182,10 +182,17 @@ pub fn session(
         .collect();
     // Back off two entries: an answer's note slots in before the entry
     // ahead of it.
-    let start = from
+    let mut start = from
         .unwrap_or(v.entries.len())
         .min(built.starts.len())
         .saturating_sub(2);
+    // An entry whose items can't be rebuilt alone (a note that went in
+    // before an earlier entry's line) shares its start with that entry:
+    // rebuild from there.
+    while start > 0 && start < built.starts.len() && built.starts[start - 1] == built.starts[start]
+    {
+        start -= 1;
+    }
     let items = Rc::make_mut(&mut built.items);
     let keep = built.starts.get(start).copied().unwrap_or(built.body);
     items.truncate(keep);
@@ -335,7 +342,21 @@ pub fn session(
                         let note = answered(tool, &input, a, cwd);
                         match items.last() {
                             Some(Item::Tools { .. }) if items.len() > keep => {
-                                items.insert(items.len() - 1, note)
+                                let at = items.len() - 1;
+                                items.insert(at, note);
+                                // The note now sits among the items of the
+                                // entry that made that line: this entry and
+                                // the ones between start where it does, so a
+                                // rebuild from any of them redoes both.
+                                let here = start + k;
+                                let owner = built.starts[..here]
+                                    .iter()
+                                    .rposition(|&s| s <= at)
+                                    .unwrap_or(0);
+                                let from = built.starts[owner];
+                                for s in &mut built.starts[owner + 1..=here] {
+                                    *s = from;
+                                }
                             }
                             _ => items.push(note),
                         }
@@ -1248,6 +1269,132 @@ mod tests {
     }
 
     use super::*;
+
+    /// What an item shows, enough to tell two builds apart.
+    fn shown(items: &[Item]) -> Vec<String> {
+        items
+            .iter()
+            .map(|i| match i {
+                Item::User { text, .. } => format!("user {text}"),
+                Item::Text(t) => format!("text {t}"),
+                Item::Thinking(t) => format!("thinking {t}"),
+                Item::Tools { summary, lines, .. } => format!("tools {summary} {}", lines.len()),
+                Item::Note { text, .. } => format!("note {text}"),
+                Item::Approval { id, .. } | Item::Plan { id, .. } | Item::Question { id, .. } => {
+                    format!("ask {id}")
+                }
+                Item::Queued { text, .. } => format!("queued {text}"),
+                Item::TurnEnd { .. } => "end".into(),
+                _ => "other".into(),
+            })
+            .collect()
+    }
+
+    /// Built a little at a time, as events arrive, the chat reads the same
+    /// as built whole: an answer's note, which goes in before the line of
+    /// the call it let through, never doubles or drops that line.
+    #[test]
+    fn building_as_it_comes_matches_building_whole() {
+        use dent_protocol::{Block, Body, Event, Out};
+        let tool = |id: &str, name: &str, input: &str| Body::Assistant {
+            parent: None,
+            uuid: None,
+            blocks: vec![Block::Tool {
+                id: id.into(),
+                name: name.into(),
+                input: input.into(),
+            }],
+        };
+        let text = |t: &str| Body::Assistant {
+            parent: None,
+            uuid: None,
+            blocks: vec![Block::Text { text: t.into() }],
+        };
+        let asked = |id: &str, tool: &str, input: &str| Body::Asked {
+            id: id.into(),
+            tool: tool.into(),
+            input: input.into(),
+            description: None,
+            keeps: false,
+        };
+        let result = |id: &str| Body::ToolResult {
+            tool: id.into(),
+            error: false,
+            output: "ok".into(),
+            parent: None,
+        };
+        let bash = r#"{"command":"ls"}"#;
+        let plan = r#"{"plan":"Do it"}"#;
+        let bodies = vec![
+            Body::User {
+                id: "u".into(),
+                text: "go".into(),
+                queued: false,
+                steer: false,
+                attachments: vec![],
+            },
+            Body::TurnStarted,
+            tool("r", "Read", r#"{"file_path":"/w/a.rs"}"#),
+            result("r"),
+            tool("p", "ExitPlanMode", plan),
+            asked("ap", "ExitPlanMode", plan),
+            Body::Answered {
+                id: "ap".into(),
+                answer: Answer::Allow {
+                    always: false,
+                    project: false,
+                },
+            },
+            result("p"),
+            text("Building it."),
+            text("Step one."),
+            tool("b", "Bash", bash),
+            asked("ab", "Bash", bash),
+            Body::Answered {
+                id: "ab".into(),
+                answer: Answer::Allow {
+                    always: true,
+                    project: false,
+                },
+            },
+            result("b"),
+            text("Ran it."),
+            text("All done."),
+            tool("c", "Read", r#"{"file_path":"/w/b.rs"}"#),
+            result("c"),
+            text("Really done."),
+        ];
+        let cx = || Context {
+            machine: "m",
+            models: &[],
+            diff: None,
+            now_ms: 0,
+        };
+        let mut s = dent_client_core::Sessions::default();
+        let mut built = Built::default();
+        for (n, body) in bodies.into_iter().enumerate() {
+            s.apply(&Out::Events {
+                events: vec![Event {
+                    seq: n as u64 + 1,
+                    session: "s".into(),
+                    at: n as u64 + 1,
+                    body,
+                }],
+            });
+            let v = s.list.get_mut("s").unwrap();
+            let from = v.take_changes();
+            let first = n == 0;
+            let step = session(v, cx(), &mut built, if first { Some(0) } else { from });
+            let whole = session(v, cx(), &mut Built::default(), Some(0));
+            assert_eq!(shown(&step.items), shown(&whole.items), "after event {n}");
+        }
+        let whole = session(&s.list["s"], cx(), &mut Built::default(), Some(0));
+        let notes = shown(&whole.items)
+            .into_iter()
+            .filter(|l| l.starts_with("note"))
+            .count();
+        assert_eq!(notes, 2);
+    }
 
     #[test]
     fn paths_read_relative_through_links() {
