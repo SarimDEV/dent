@@ -2371,12 +2371,25 @@ impl Dent {
             }
             // Already gone to the agent: it isn't sent again or brought back.
             (Waiting::Unqueue(msg), Out::Error { message }) => {
-                if self.taking_back.remove(&msg).is_some() {
+                // Refused because it went to the agent: let it be. Refused
+                // for another reason (a resend after reconnecting, whose
+                // first copy worked), its Unqueued may still be on the way,
+                // so it stays waiting; `take_restores` brings it back if
+                // nothing comes.
+                let delivered = self.taking_back.get(&msg).is_some_and(|tb| {
+                    self.core.list.get(&tb.session).is_some_and(|v| {
+                        v.entries.iter().any(|e| {
+                            matches!(e, dent_client_core::Entry::User { id, queued: false, .. } if *id == msg)
+                        })
+                    })
+                });
+                if delivered {
+                    self.taking_back.remove(&msg);
                     self.toast(
                         ToastAction::Info,
                         "That message had already gone to the agent.".into(),
                     );
-                } else {
+                } else if !self.taking_back.contains_key(&msg) {
                     self.toast(ToastAction::Info, message);
                 }
             }
@@ -2432,9 +2445,20 @@ impl Dent {
     /// the open session's box, another session's draft, or the new-session
     /// field. Files come back attached.
     pub fn take_restores(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // One the daemon never answered for is let go.
-        self.taking_back
-            .retain(|_, tb| tb.at.elapsed() < Duration::from_secs(30));
+        // One the daemon never answered for comes back to the box rather
+        // than being lost: never sent, it's still yours.
+        let stale: Vec<String> = self
+            .taking_back
+            .iter()
+            .filter(|(_, tb)| tb.at.elapsed() >= Duration::from_secs(30))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in stale {
+            if let Some(mut tb) = self.taking_back.remove(&id) {
+                tb.then = Then::Restore;
+                self.took_back(tb);
+            }
+        }
         for (session, text, atts) in std::mem::take(&mut self.restores) {
             let open = session == self.selected;
             let held = if open {
@@ -2564,11 +2588,14 @@ impl Dent {
     ) -> bool {
         // A key held down comes back again and again with no key-up between:
         // a repeat. (A key-up missed while away is outlived by a pause.)
+        // The whole keystroke counts, so Return after ⌘↩ (whose key-up
+        // macOS may never send) is a fresh press.
+        let stroke = k.unparse();
         let repeat = self
             .held_key
             .as_ref()
-            .is_some_and(|(key, at)| *key == k.key && at.elapsed() < Duration::from_millis(2100));
-        self.held_key = Some((k.key.clone(), Instant::now()));
+            .is_some_and(|(key, at)| *key == stroke && at.elapsed() < Duration::from_millis(2100));
+        self.held_key = Some((stroke, Instant::now()));
         // A card's keys can't be taken back: never from a held key, and
         // only once the card has been up long enough to be read.
         let card_keys = !repeat
@@ -3014,11 +3041,9 @@ impl Dent {
         false
     }
 
-    /// A key let go: the next press of it is a fresh one.
-    pub fn key_up(&mut self, key: &str) {
-        if self.held_key.as_ref().is_some_and(|(k, _)| k == key) {
-            self.held_key = None;
-        }
+    /// A key let go: the next press is a fresh one.
+    pub fn key_up(&mut self) {
+        self.held_key = None;
     }
 
     /// Notes when the waiting approval, plan or question first showed.

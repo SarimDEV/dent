@@ -1025,8 +1025,14 @@ impl Session {
     async fn control(&mut self, subtype: &str, extra: Value, kind: Ctl) -> Result<()> {
         let id = self.ctl_id();
         self.controls.insert(id.clone(), kind);
-        self.write(&wire::control_request(&id, subtype, extra))
-            .await
+        let wrote = self
+            .write(&wire::control_request(&id, subtype, extra))
+            .await;
+        // Never sent, so never answered: it mustn't apply later either.
+        if wrote.is_err() {
+            self.controls.remove(&id);
+        }
+        wrote
     }
 
     /// Stop always ends the turn: by asking, then by stopping the process,

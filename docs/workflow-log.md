@@ -122,6 +122,12 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 
 ## Done
 
+### walk.sh died before building on the Mac's bash
+- Seen: 2026-10-16. Every `scripts/walk.sh` run without `DENT_WALK_RELEASE` stopped at once with "release[@]: unbound variable": macOS bash 3.2 treats an empty array as unset under `set -u`. The wrapper exited 0, so a run looked like it passed with no checks run.
+- Cost: every walkthrough since the `DENT_WALK_RELEASE` switch landed; one wasted run found it.
+- Fix: expand the array as `${release[@]+"${release[@]}"}`.
+- Result: `walk.sh checks` builds and runs again.
+
 ### Ambient walk padded with settle time
 - Seen: 2026-10-15. `just ambient-walk` took 35 s with a warm build (52 s cold): 1.6 s of waiting before each of 13 stills (~21 s) and a 3 s idle check. The owner asked why it took so long. The backgrounds prefill their history, and the longest fade-in is 0.5 s.
 - Cost: ~13 s per run, on demand only.

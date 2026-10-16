@@ -493,8 +493,8 @@ impl Render for Dent {
                 }
             }))
             // A key let go: its next press is a fresh one (see `intercept`).
-            .capture_key_up(cx.listener(|this, e: &KeyUpEvent, _, _| {
-                this.key_up(&e.keystroke.key);
+            .capture_key_up(cx.listener(|this, _: &KeyUpEvent, _, _| {
+                this.key_up();
             }))
             // Esc reaches the app before a text field swallows it.
             .capture_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {

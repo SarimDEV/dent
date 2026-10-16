@@ -226,11 +226,15 @@ pub fn is_file(path: &std::path::Path) -> bool {
 /// after your words or without the ` · `, stays yours.
 pub fn attachment_lines(text: &str) -> (Vec<&str>, Vec<&str>) {
     let lines: Vec<&str> = text.lines().collect();
-    let n = lines
-        .iter()
-        .take_while(|l| l.strip_prefix("› ").is_some_and(|r| r.contains(" · ")))
-        .count();
-    (lines[..n].to_vec(), lines[n..].to_vec())
+    let att = |l: &&&str| l.strip_prefix("› ").is_some_and(|r| r.contains(" · "));
+    // Files lead (the daemon writes them first); notes trail the words, so
+    // a command stays first.
+    let head = lines.iter().take_while(att).count();
+    let tail = lines[head..].iter().rev().take_while(att).count();
+    let end = lines.len() - tail;
+    let mut atts = lines[..head].to_vec();
+    atts.extend_from_slice(&lines[end..]);
+    (atts, lines[head..end].to_vec())
 }
 
 /// One line of an opened tool group. Subagents' work sits under the call
@@ -586,7 +590,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_leading_attachment_lines_are_attachments() {
+    fn attachment_lines_lead_or_trail_the_words() {
         let (a, w) = attachment_lines("› Attached · a.png\n› x.rs:4 · why?\nLook at these");
         assert_eq!(a, ["› Attached · a.png", "› x.rs:4 · why?"]);
         assert_eq!(w, ["Look at these"]);
@@ -594,9 +598,14 @@ mod tests {
         let (a, w) = attachment_lines("› quoting the reply\nwhat does it mean?");
         assert!(a.is_empty());
         assert_eq!(w.len(), 2);
-        let (a, w) = attachment_lines("first\n› Attached · later.png");
+        // Notes trail the words, files lead them.
+        let (a, w) = attachment_lines("› Attached · a.png\n/review now\n› a.rs:3 · why?");
+        assert_eq!(a, ["› Attached · a.png", "› a.rs:3 · why?"]);
+        assert_eq!(w, ["/review now"]);
+        // A mark in the middle stays yours.
+        let (a, w) = attachment_lines("first\n› a · b\nlast");
         assert!(a.is_empty());
-        assert_eq!(w.len(), 2);
+        assert_eq!(w.len(), 3);
     }
 
     #[test]
