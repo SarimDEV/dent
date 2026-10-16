@@ -633,6 +633,12 @@ impl Dent {
             )
         });
         let can_try = latest && !errored && !s.closed && !s.running() && start > 0;
+        // Fork from here: a new session carrying the conversation up to
+        // the end of this turn, before the message that came next.
+        let next_mine = s.items[ix..].iter().find_map(|i| match i {
+            Item::User { id, .. } => Some(id.clone()),
+            _ => None,
+        });
         let asking = can_try && self.trying_again.as_deref() == Some(s.id.as_str());
         let when = if took >= 1000 {
             format!(
@@ -733,6 +739,25 @@ impl Dent {
                             move || said.join("\n\n"),
                             cx,
                         ))
+                        .child({
+                            let name = if latest {
+                                "fork-reply".to_string()
+                            } else {
+                                format!("fork-reply-{ix}")
+                            };
+                            let fsid = s.id.clone();
+                            ghost(SharedString::from(name.clone()), "Fork from here", &t)
+                                .relative()
+                                .with_tip(tip(
+                                    "A new session carrying the conversation up to this reply",
+                                    None,
+                                    t,
+                                ))
+                                .on_press(cx.listener(move |this, _, _, cx| {
+                                    this.fork(&fsid, next_mine.clone(), cx)
+                                }))
+                                .child(probe(&self.probes, name))
+                        })
                         .when(can_try, |d| {
                             d.child(
                                 ghost("try-again", "Try again", &t)
