@@ -425,6 +425,8 @@ pub fn menu_row(
     name: &str,
     note: Option<String>,
     on: bool,
+    ticks: bool,
+    off: bool,
     t: &Theme,
 ) -> Stateful<Div> {
     let id: SharedString = id.into();
@@ -442,16 +444,22 @@ pub fn menu_row(
         .items_center()
         .gap(px(space::S2))
         .rounded(px(radius::MD))
-        .cursor_pointer()
         .control()
-        .hover(|s| s.bg(t.hover()))
-        .active(|s| s.bg(t.press()))
-        .child(
-            div()
-                .w(px(14.))
-                .flex_none()
-                .when(on, |d| d.child(icon("check", 14., t.ink))),
-        )
+        // Listed but not to be chosen now: dimmed, and nothing lights.
+        .when(off, |d| d.opacity(0.55).cursor_not_allowed())
+        .when(!off, |d| {
+            d.cursor_pointer()
+                .hover(|s| s.bg(t.hover()))
+                .active(|s| s.bg(t.press()))
+        })
+        .when(ticks, |d| {
+            d.child(
+                div()
+                    .w(px(14.))
+                    .flex_none()
+                    .when(on, |d| d.child(icon("check", 14., t.ink))),
+            )
+        })
         .child(
             div()
                 .flex_1()

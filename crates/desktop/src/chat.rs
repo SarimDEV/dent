@@ -3102,11 +3102,21 @@ impl Dent {
             .unwrap_or_else(|| "No project".into());
         let model = crate::bridge::model_name(&self.models, d.model.as_deref());
         // Everything is already chosen; each choice is one click to change.
+        // Sessions from a terminal wait behind one chip at the row's end;
+        // its menu floats, so opening it moves nothing.
+        let pickup = (!self.recent.is_empty()).then(|| {
+            let label = if self.adopting.is_some() {
+                "Opening…"
+            } else {
+                "Pick up from terminal"
+            };
+            self.chip(Menu::Pickup, "square-terminal", label, true, cx)
+        });
         let chips = div()
             .flex()
             .flex_wrap()
             .gap(px(space::S1))
-            .ml(px(-space::S2))
+            .mx(px(-space::S2))
             .child(self.chip(Menu::Project, "folder", &project, d.project.is_none(), cx))
             .child(self.chip(Menu::Model, "claude", &model, false, cx))
             .child(self.chip(Menu::Permission, "shield", d.permission.label(), false, cx))
@@ -3117,6 +3127,9 @@ impl Dent {
                 false,
                 cx,
             ));
+        // Last, at the row's end: it wraps with the rest and keeps its
+        // whole label.
+        let chips = chips.children(pickup.map(|p| div().flex_none().ml_auto().child(p)));
         let ready = if self.creating() {
             Ready::No("Starting the session…")
         } else if empty {
@@ -3186,7 +3199,8 @@ impl Dent {
                     }
                 },
             ))
-            .child(div().flex_1().max_h(px(180.)))
+            // The title and composer sit in the middle of the page.
+            .child(div().flex_1())
             .child(
                 div()
                     .w_full()
@@ -3248,160 +3262,10 @@ impl Dent {
                     )
                     .child(over(chips.into_any_element(), false)),
             )
-            // Terminal sessions live in the room below and never push the
-            // composer up: as many whole rows as fit, the rest left out.
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .child(probe(&self.probes, "pickup-room"))
-                    .child(
-                        div()
-                            .w_full()
-                            .max_w(px(size::COLUMN + space::S8 * 2.))
-                            .mx_auto()
-                            .px(px(space::S8))
-                            .flex()
-                            .flex_col()
-                            .children(self.terminal_sessions(cx).map(|e| over(e, false))),
-                    ),
-            )
+            .child(div().flex_1())
+            // As much room below as above the header.
+            .child(div().h(px(size::HEADER)).flex_none())
             .into_any_element()
-    }
-
-    /// Sessions started in a terminal, to carry on here with their history.
-    fn terminal_sessions(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.recent.is_empty() {
-            return None;
-        }
-        let t = self.t;
-        // Whole rows only, as many as the room below the composer holds,
-        // measured last frame; the header and its gap come off the top.
-        let fit = {
-            let probes = self.probes.borrow();
-            let row = probes
-                .get("adopt-0")
-                .map_or(44., |b| b.size.height.as_f32());
-            probes.get("pickup-room").map_or(3, |b| {
-                let room = b.size.height.as_f32() - space::S6 - 28. - space::S4;
-                (room / (row + space::S1)).floor().max(0.) as usize
-            })
-        };
-        let fit = fit.min(6);
-        if fit == 0 {
-            return None;
-        }
-        let rows: Vec<AnyElement> = self
-            .recent
-            .iter()
-            .take(fit)
-            .enumerate()
-            .map(|(i, r)| {
-                let id = r.agent_session.clone();
-                let open = r.open;
-                let opening = self.adopting.as_deref() == Some(r.agent_session.as_str());
-                let detail = if opening {
-                    format!("{} · Opening…", Self::project_name(&r.cwd))
-                } else if open {
-                    // Picking it up now would run it twice.
-                    format!(
-                        "{} · Close it in the terminal to pick it up here",
-                        Self::project_name(&r.cwd)
-                    )
-                } else if r.last.is_empty() || r.last == r.title {
-                    Self::project_name(&r.cwd)
-                } else {
-                    format!("{} · Last: “{}”", Self::project_name(&r.cwd), r.last)
-                };
-                div()
-                    .id(SharedString::from(format!("adopt-{i}")))
-                    .relative()
-                    .px(px(space::S3))
-                    .py(px(space::S2))
-                    .rounded(px(radius::MD))
-                    .when(!open && !opening, |d| {
-                        d.cursor_pointer()
-                            .hover(|d| d.bg(t.hover()))
-                            .active(|d| d.bg(t.press()))
-                            .on_press(cx.listener(move |this, _, _, cx| this.adopt(&id, cx)))
-                    })
-                    // Running in a terminal: shown, so you know where it
-                    // went, but it can't be picked up until it's closed there.
-                    .when(open, |d| {
-                        d.cursor_not_allowed().with_tip(tip(
-                            "Running in a terminal. Close it there to pick it up here.",
-                            None,
-                            t,
-                        ))
-                    })
-                    .flex()
-                    .items_center()
-                    .gap(px(space::S3))
-                    .child(icon(
-                        "square-terminal",
-                        14.,
-                        if open { t.faint } else { t.quiet },
-                    ))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .truncate()
-                                    .ty(UI)
-                                    .text_color(if open { t.quiet } else { t.ink })
-                                    .child(r.title.clone()),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .ty(UI)
-                                    .text_color(if open { t.faint } else { t.quiet })
-                                    .child(detail),
-                            ),
-                    )
-                    .child(if open {
-                        // A status square and its word, as status shows everywhere.
-                        div()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap(px(space::S1H))
-                            .child(div().size(px(8.)).bg(t.working.0))
-                            .child(div().ty(LABEL).text_color(t.quiet).child("In use"))
-                    } else {
-                        div()
-                            .flex_none()
-                            .ty(LABEL)
-                            .text_color(t.faint)
-                            .child(crate::data::ago(r.updated))
-                    })
-                    .child(probe(&self.probes, format!("adopt-{i}")))
-                    .into_any_element()
-            })
-            .collect();
-        Some(
-            div()
-                .pt(px(space::S6))
-                // Rows line up with the choices above; their hover reaches out.
-                .ml(px(-space::S3))
-                .flex()
-                .flex_col()
-                .gap(px(space::S1))
-                .child(
-                    div()
-                        .px(px(space::S3))
-                        .pb(px(space::S1))
-                        .ty(LABEL)
-                        .text_color(t.quiet)
-                        .child("PICK UP FROM THE TERMINAL"),
-                )
-                .children(rows)
-                .into_any_element(),
-        )
     }
 
     /// One remembered choice; a click opens its menu.
@@ -3486,6 +3350,7 @@ impl Dent {
                                 ),
                                 Menu::Model | Menu::SessionModel => "Model".into(),
                                 Menu::Project => "Project".into(),
+                                Menu::Pickup => "Pick up from terminal".into(),
                             },
                             t,
                         ))
@@ -3504,6 +3369,10 @@ impl Dent {
                 });
                 let up = if which.upward() {
                     !(above < 320. && below > above)
+                } else if which == Menu::Pickup {
+                    // Opening upward would cover the composer; a shorter
+                    // list that scrolls is better, unless there's no room.
+                    below < 200. && above > below
                 } else {
                     below < 320. && above > below
                 };
@@ -3517,7 +3386,11 @@ impl Dent {
                 let list = self.menu_list(which, fit, cx);
                 let placed = if up {
                     anchored()
-                        .anchor(Anchor::BottomLeft)
+                        .anchor(if which.from_end() {
+                            Anchor::BottomRight
+                        } else {
+                            Anchor::BottomLeft
+                        })
                         .snap_to_window_with_margin(px(8.))
                         .child(div().mb(px(6.)).child(list).arrive(
                             ElementId::Name(format!("{name}-arrive").into()),
@@ -3525,21 +3398,28 @@ impl Dent {
                             motion::FAST,
                         ))
                 } else {
-                    anchored().snap_to_window_with_margin(px(8.)).child(
-                        div().mt(px(size::CONTROL_SM + 2. + 6.)).child(list).arrive(
+                    anchored()
+                        .when(which.from_end(), |a| a.anchor(Anchor::TopRight))
+                        .snap_to_window_with_margin(px(8.))
+                        .child(div().mt(px(size::CONTROL_SM + 2. + 6.)).child(list).arrive(
                             ElementId::Name(format!("{name}-arrive").into()),
                             From::Above,
                             motion::FAST,
-                        ),
-                    )
+                        ))
                 };
-                // Placed from the chip's top-left corner, not from below
-                // it, where the flow would put it.
+                // Placed from the chip's top corner, not from below it,
+                // where the flow would put it.
                 d.child(
                     div()
                         .absolute()
                         .top_0()
-                        .left_0()
+                        .map(|d| {
+                            if which.from_end() {
+                                d.right_0()
+                            } else {
+                                d.left_0()
+                            }
+                        })
                         .child(deferred(placed).with_priority(1)),
                 )
             })
@@ -3553,6 +3433,7 @@ impl Dent {
         let act = |f: Box<ActFn>| -> Option<Act> { Some(Rc::from(f)) };
         match which {
             Menu::Project => self.project_entries(cx),
+            Menu::Pickup => self.pickup_entries(),
             Menu::Model | Menu::SessionModel => {
                 let current = self.menu_model(which, cx);
                 let all = self.models_or_default();
@@ -3719,6 +3600,8 @@ impl Dent {
     ) -> impl IntoElement + use<> {
         let t = self.t;
         let entries = self.menu_entries(which, cx);
+        // A menu where nothing is ticked keeps no room for the tick.
+        let ticks = entries.iter().any(|e| e.on);
         let hi = self.menu_ix;
         let rows: Vec<AnyElement> =
             entries
@@ -3772,9 +3655,14 @@ impl Dent {
                             &e.name,
                             e.note.clone(),
                             e.on,
+                            ticks,
+                            e.off.is_some(),
                             &t,
                         )
-                        .when(lit, |d| d.bg(t.hover()))
+                        .when(lit && e.off.is_none(), |d| d.bg(t.hover()))
+                        // Shown, so you know where it went, but not to be
+                        // chosen, with why.
+                        .when_some(e.off, |d, why| d.with_tip(tip(why, None, t)))
                         // Its shortcut as plain text, as a Mac menu shows one,
                         // then a slot that holds the remove button on the lit
                         // row: the same width on every row, so nothing shifts.
@@ -3862,7 +3750,11 @@ impl Dent {
         });
         floating(&t)
             .relative()
-            .w(px(if which.searches() { 360. } else { 280. }))
+            .w(px(match which {
+                Menu::Pickup => 320.,
+                w if w.wide() => 360.,
+                _ => 280.,
+            }))
             .overflow_hidden()
             .occlude()
             .children(field)
@@ -3880,6 +3772,48 @@ impl Dent {
             )
             .when(y < -1., |d| d.child(fade(true)))
             .when(max_y > 1. && y > -max_y + 1., |d| d.child(fade(false)))
+    }
+
+    /// Sessions started in a terminal, newest first. One still running
+    /// there is listed, so you know where it went, but picking it up now
+    /// would run it twice.
+    fn pickup_entries(&self) -> Vec<Entry> {
+        let row = |i: usize, r: &dent_protocol::RecentSession| {
+            let id = r.agent_session.clone();
+            let project = Self::project_name(&r.cwd);
+            let note = if r.open {
+                format!("{project} · In use in a terminal")
+            } else {
+                format!("{project} · {}", crate::data::ago(r.updated))
+            };
+            let act: Option<Act> = (!r.open).then(|| {
+                Rc::new(
+                    move |this: &mut Dent, _: &mut Window, cx: &mut Context<Dent>| {
+                        this.adopt(&id, cx)
+                    },
+                ) as Act
+            });
+            Entry {
+                off: r
+                    .open
+                    .then_some("Running in a terminal. Close it there to pick it up here."),
+                ..Entry::row(format!("adopt-{i}"), &r.title, Some(note), false, act)
+            }
+        };
+        // The ones you can pick up come first; those still running in a
+        // terminal wait below a line.
+        let all = self.recent.iter().enumerate();
+        let free: Vec<Entry> = all
+            .clone()
+            .filter(|(_, r)| !r.open)
+            .map(|(i, r)| row(i, r))
+            .collect();
+        let busy: Vec<Entry> = all
+            .filter(|(_, r)| r.open)
+            .map(|(i, r)| row(i, r))
+            .collect();
+        let line = (!free.is_empty() && !busy.is_empty()).then(Entry::separator);
+        free.into_iter().chain(line).chain(busy).collect()
     }
 
     /// The model a model menu is choosing for: the new session's, or the
@@ -3916,6 +3850,8 @@ pub struct Entry {
     pub remove: Option<(&'static str, Act)>,
     /// Choosing it leaves the menu open (it changes what the menu shows).
     pub keep: bool,
+    /// Listed but not to be chosen now, and why.
+    pub off: Option<&'static str>,
 }
 
 #[derive(Clone)]
@@ -3941,6 +3877,7 @@ impl Entry {
             keycap: None,
             remove: None,
             keep: false,
+            off: None,
         }
     }
     pub fn row(key: String, name: &str, note: Option<String>, on: bool, act: Option<Act>) -> Self {

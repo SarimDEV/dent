@@ -358,12 +358,24 @@ pub enum Menu {
     SessionModel,
     SessionPermission,
     SessionEffort,
+    /// Sessions started in a terminal, to carry on here.
+    Pickup,
 }
 
 impl Menu {
     /// Menus with a field to type in: the project picker.
     pub fn searches(self) -> bool {
         self == Menu::Project
+    }
+
+    /// Menus with longer rows: paths, session titles.
+    pub fn wide(self) -> bool {
+        matches!(self, Menu::Project | Menu::Pickup)
+    }
+
+    /// Menus from a chip at the row's end line up with its right edge.
+    pub fn from_end(self) -> bool {
+        self == Menu::Pickup
     }
 
     /// Menus under the composer open upward.
