@@ -2445,12 +2445,13 @@ impl Dent {
                 .child(probe(&self.probes, "send"))
                 .into_any_element()
         } else {
-            let ready = if settling {
-                Ready::No("Sending…")
-            } else if empty {
-                Ready::No("Type a message first")
-            } else {
+            // New words typed since sending can go at once.
+            let ready = if !empty {
                 Ready::Yes
+            } else if settling {
+                Ready::No("Sending…")
+            } else {
+                Ready::No("Type a message first")
             };
             action(
                 div()

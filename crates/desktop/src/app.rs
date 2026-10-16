@@ -5877,8 +5877,14 @@ fn message_parts(text: &str, cwd: &str, notes: bool) -> (String, Vec<String>) {
     (words.join("\n"), files)
 }
 
+/// A message with its attachment lines after its words, so one starting
+/// with `/` still reaches the agent as a command.
 fn with_attachments(text: &str, atts: &[Attachment]) -> String {
-    let mut lines: Vec<String> = atts
+    let mut lines: Vec<String> = Vec::new();
+    if !text.is_empty() {
+        lines.push(text.to_string());
+    }
+    lines.extend(atts
         .iter()
         .map(|a| match a {
             Attachment::Element {
@@ -5890,11 +5896,7 @@ fn with_attachments(text: &str, atts: &[Attachment]) -> String {
             Attachment::Error { file, message } => format!("› {file} · {message}"),
             Attachment::Comment { file, line, text } => format!("› {file}:{line} · {text}"),
             Attachment::File { path } => format!("› Attached · {path}"),
-        })
-        .collect();
-    if !text.is_empty() {
-        lines.push(text.to_string());
-    }
+        }));
     lines.join("\n")
 }
 
@@ -5928,4 +5930,36 @@ pub enum ChatScroll {
     Down,
     Top,
     Bottom,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Attachment, joined, message_parts, with_attachments};
+
+    #[test]
+    fn attachment_lines_follow_the_words() {
+        let atts = [Attachment::Comment {
+            file: "a.rs".into(),
+            line: 3,
+            text: "why?".into(),
+        }];
+        // A command stays first, so it still runs as one.
+        assert_eq!(
+            with_attachments("/review now", &atts),
+            "/review now\n› a.rs:3 · why?"
+        );
+        assert_eq!(with_attachments("", &atts), "› a.rs:3 · why?");
+        // Brought back to edit, the note lines stay behind.
+        assert_eq!(
+            message_parts(&with_attachments("/review now", &atts), "/", false).0,
+            "/review now"
+        );
+    }
+
+    #[test]
+    fn restored_words_go_after_a_draft() {
+        assert_eq!(joined("", "back"), "back");
+        assert_eq!(joined("mine", ""), "mine");
+        assert_eq!(joined("mine", "back"), "mine\n\nback");
+    }
 }
