@@ -4226,6 +4226,7 @@ fn continues(depths: &[usize], i: usize, k: usize) -> bool {
 impl Dent {
     /// A finished subagent's report under its steps: rendered, and folded
     /// to its first lines until opened.
+    #[allow(clippy::too_many_arguments)]
     fn report(
         &mut self,
         s: &Session,

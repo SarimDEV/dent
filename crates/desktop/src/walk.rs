@@ -4450,7 +4450,6 @@ thread_local! {
 }
 
 /// The composer's folded pastes, by their labels.
-
 fn chips(d: &Dent, cx: &App) -> Vec<String> {
     d.composer
         .read(cx)
