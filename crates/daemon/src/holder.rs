@@ -200,12 +200,24 @@ impl Holder {
         })?;
         line.push(b'\n');
         line.extend_from_slice(payload);
-        self.w.lock().await.write_all(&line).await?;
+        let forget = || {
+            if let Ok(mut p) = self.pending.lock() {
+                p.remove(&n);
+            }
+        };
+        if let Err(e) = self.w.lock().await.write_all(&line).await {
+            forget();
+            return Err(e.into());
+        }
         match tokio::time::timeout(Duration::from_secs(10), rx).await {
             Ok(Ok(Msg::Error { msg })) => bail!("{msg}"),
             Ok(Ok(m)) => Ok(m),
             Ok(Err(_)) => bail!("holder closed"),
-            Err(_) => bail!("holder timed out"),
+            Err(_) => {
+                // A late answer has nowhere to go.
+                forget();
+                bail!("holder timed out")
+            }
         }
     }
 
