@@ -821,6 +821,9 @@ pub struct Dent {
     pub act_errors: HashMap<(String, String, dent_protocol::Act), String>,
     /// The highlighted row of the slash menu.
     pub slash_ix: usize,
+    /// The permission mode last asked for, by session, and when: until the
+    /// daemon says it's in effect, ⇧Tab steps on from it.
+    pub asked_permission: Option<(String, Permission, Instant)>,
     /// The arrows have moved through the prompt's menu since it last
     /// changed: Return picks the lit row then.
     pub slash_moved: bool,
@@ -1354,6 +1357,7 @@ impl Dent {
             recent: Vec::new(),
             slash_ix: 0,
             slash_moved: false,
+            asked_permission: None,
             expanded: HashSet::new(),
             acting: Vec::new(),
             signing: HashMap::new(),
@@ -2567,8 +2571,14 @@ impl Dent {
             && !k.modifiers.alt
             && let Some(f @ (Field::Composer | Field::Starter)) = self.field_focused(window, cx)
         {
+            // From the mode last asked for, if the daemon hasn't said yet:
+            // two quick presses step twice.
             let now = match (f, self.current()) {
-                (Field::Composer, Some(s)) => s.permission,
+                (Field::Composer, Some(s)) => self
+                    .asked_permission
+                    .as_ref()
+                    .filter(|(id, _, at)| *id == s.id && at.elapsed() < Duration::from_secs(3))
+                    .map_or(s.permission, |(_, p, _)| *p),
                 _ => self.defaults.permission,
             };
             let next = match now {
@@ -2737,12 +2747,26 @@ impl Dent {
                 return true;
             }
         }
-        // An open menu: arrows move, Return chooses, and Space too unless
-        // the menu has a field to type it in.
+        // A chip's menu over a prompt: typing there puts the menu away and
+        // types, Space included; the menu keeps only its own keys.
+        if let Some(which) = self.menu
+            && !which.searches()
+            && matches!(field, Some(Field::Composer | Field::Starter))
+            && !k.modifiers.platform
+            && !k.modifiers.control
+            && k.key_char.as_deref().is_some_and(|c| !c.is_empty() && !c.chars().any(char::is_control))
+        {
+            self.menu = None;
+            self.menu_ix = None;
+            cx.notify();
+            return false;
+        }
+        // An open menu: arrows move, Return chooses, and Space too while no
+        // text field has the keyboard to type it in.
         if let Some(which) = self.menu
             && plain
             && matches!(k.key.as_str(), "up" | "down" | "enter" | "space")
-            && !(k.key == "space" && which.searches())
+            && !(k.key == "space" && (which.searches() || field.is_some()))
         {
             let entries = self.menu_entries(which, cx);
             let ok: Vec<usize> = (0..entries.len())
@@ -4730,6 +4754,7 @@ impl Dent {
 
     pub fn set_permission(&mut self, p: Permission, cx: &mut Context<Self>) {
         if let Some(id) = self.selected.clone() {
+            self.asked_permission = Some((id.clone(), p, Instant::now()));
             self.live.send(Request::SetPermission {
                 session: id,
                 permission: p,
