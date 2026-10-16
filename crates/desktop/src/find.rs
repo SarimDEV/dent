@@ -32,12 +32,19 @@ pub enum Scope {
     Page(&'static str),
 }
 
-/// The tint on every match, and the stronger one on the current match.
+/// The tint on every match, and the stronger one on the current match. On
+/// Carbon the current one stays light enough for the ink on it to read
+/// (about 5.5:1, where 70% was 2.8:1); its edge (`edge`) marks it too.
 pub fn tints(t: &crate::theme::Theme) -> (Hsla, Hsla) {
     (
-        t.waiting.0.opacity(if t.dark { 0.28 } else { 0.30 }),
-        t.waiting.0.opacity(if t.dark { 0.70 } else { 0.62 }),
+        t.waiting.0.opacity(if t.dark { 0.22 } else { 0.30 }),
+        t.waiting.0.opacity(if t.dark { 0.42 } else { 0.62 }),
     )
+}
+
+/// The current match's 1 px edge, in the full signal.
+pub fn edge(t: &crate::theme::Theme) -> Hsla {
+    t.waiting.0
 }
 
 /// Frames to look for a match to bring into view before giving up.
@@ -560,6 +567,7 @@ impl Dent {
             current: f.hits.get(f.at).map(|&(ix, k)| (ix as u32, k)),
             tint,
             strong,
+            edge: edge(&t),
             limits: (f.scope == Scope::Chat).then(|| f.chat.clone()),
         }));
     }

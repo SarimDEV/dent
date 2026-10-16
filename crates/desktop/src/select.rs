@@ -198,6 +198,8 @@ pub struct Find {
     pub current: Option<(u32, usize)>,
     pub tint: Hsla,
     pub strong: Hsla,
+    /// The current match's 1 px edge, so it stands out by shape too.
+    pub edge: Hsla,
     /// How many matches each item may tint, by item, when they were counted
     /// from what the item draws rather than from what was laid out (a long
     /// chat): what isn't counted isn't tinted.
@@ -1331,19 +1333,23 @@ impl Element for Text {
                 .as_ref()
                 .map_or(usize::MAX, |l| l.get(item as usize).copied().unwrap_or(0));
             let seen = s.found.entry(item).or_default();
-            let marks: Vec<(Range<usize>, Hsla)> = matches(&self.text, &f.needle)
+            let marks: Vec<(Range<usize>, Hsla, Option<Hsla>)> = matches(&self.text, &f.needle)
                 .into_iter()
                 .take(limit.saturating_sub(*seen))
                 .map(|r| {
                     let on = f.current == Some((item, *seen));
                     *seen += 1;
-                    (r, if on { f.strong } else { f.tint })
+                    if on {
+                        (r, f.strong, Some(f.edge))
+                    } else {
+                        (r, f.tint, None)
+                    }
                 })
                 .collect();
             Some(marks)
         });
-        for (r, color) in marks.into_iter().flatten() {
-            paint_range(&layout, r, color, window);
+        for (r, color, edge) in marks.into_iter().flatten() {
+            paint_range(&layout, r, color, edge, window);
         }
         let range = with(|s| {
             s.sel
@@ -1351,7 +1357,7 @@ impl Element for Text {
                 .and_then(|sel| sel.range_in(&self.key, self.text.len()))
         });
         if let Some(range) = range {
-            paint_range(&layout, range, self.color, window);
+            paint_range(&layout, range, self.color, None, window);
         }
         self.styled
             .paint(id, inspector, bounds, &mut (), &mut (), window, cx);
@@ -1417,7 +1423,13 @@ pub fn take_open() -> Option<(String, Option<u32>)> {
 }
 
 /// The highlight behind `range`: one band per line it covers.
-fn paint_range(layout: &TextLayout, range: Range<usize>, color: Hsla, window: &mut Window) {
+fn paint_range(
+    layout: &TextLayout,
+    range: Range<usize>,
+    color: Hsla,
+    edge: Option<Hsla>,
+    window: &mut Window,
+) {
     let (Some(start), Some(end)) = (
         layout.position_for_index(range.start),
         layout.position_for_index(range.end),
@@ -1442,7 +1454,11 @@ fn paint_range(layout: &TextLayout, range: Range<usize>, color: Hsla, window: &m
         ));
     }
     for band in bands {
-        window.paint_quad(fill(band, color));
+        let q = fill(band, color);
+        window.paint_quad(match edge {
+            Some(e) => q.border_widths(px(1.)).border_color(e).corner_radii(px(2.)),
+            None => q,
+        });
     }
 }
 
