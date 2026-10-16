@@ -83,11 +83,36 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 - Fix: rule: describe behaviour only after reading the code or running it, and say "unverified" when neither was done.
 - Check: corrections from the owner per week.
 
-### Walkthroughs pass when stills fail
-- Seen: 2026-10-15, new Mac. `scripts/walk.sh attach` printed "could not create image from window" for every shot, saved nothing, and still reported "13 checks, 0 failed". The cause was missing Screen Recording permission on a fresh machine.
-- Cost: a UI change can look verified with no picture taken, and nobody notices until someone asks for the screenshot.
-- Fix: a failed still fails the run (or the scene checks capture once at startup and stops with the fix to apply). Add the permission to the bootstrap checklist.
-- Check: run a scene without the permission; it must fail.
+### Checks that test a stand-in, not the thing
+- Seen: 2026-10-15. The attach scene's "dragging files over the window says where they'd go" only checked that a drag was active and the reply box was drawn, never that a hint was. It passed while both hints showed at once, and while the narrow still showed none.
+- Cost: bugs ship behind a green suite; the owner finds them in the stills, or in use.
+- Fix: audit `Until` checks in `walk.rs` for ones that test a proxy; draw a probe on the thing itself (as `drop-message` / `drop-shell` now do) and check that.
+- Check: count of checks that name a probe of the feature they describe.
+
+### The idle frame-rate check is flaky
+- Seen: 2026-10-15. "idle, the window draws no more than a caret blink (2.5 a second)" failed at 2.7 frames a second, then passed at 2.3 on an unchanged re-run. It sits right after the daemon-restart scene.
+- Cost: a 3 m 15 s re-run of the full suite to tell a flake from a regression.
+- Fix: let the window settle (wait for no reconnect or streaming activity) before measuring, and measure over a longer window so one stray frame can't tip it.
+- Check: the check's spread over 5 runs stays under the limit.
+
+### Scripted multi-file edits misfire
+- Seen: 2026-10-15. Edits applied with Python string replacement in a script failed twice: once an anchor wasn't unique, and once a 4-space-indented anchor matched inside a 16-space-indented line in another scene, adding the new scene to the wrong place.
+- Cost: about 5 minutes each to notice and repair; a silent wrong edit could ship.
+- Fix: use the editor tool (it refuses non-unique anchors) for anything but mechanical renames; when scripting, anchor on whole lines and assert the line number.
+- Check: misfired edits per batch.
+
+### Walkthroughs need an unlocked screen, and no one is there to unlock it
+- Seen: 2026-10-15, about 13:45. The screen locked while the owner was away. Locked, macOS draws no windows, so walkthroughs (mine and another session's in `dent-chat-polish`) stopped dead with no message. Two runs hung for 10+ minutes before I found why; a third went to a wrong theory (windows covering each other).
+- Cost: about 30 minutes, and every UI check stops until the owner is back.
+- Fixed in part: `walk.sh` now refuses to start on a locked screen and says so, keeps the display awake while it runs (`caffeinate -d`), and a still that doesn't come back in 15 s fails instead of waiting forever.
+- Still open: the display sleeping and locking whenever the owner steps away. Options: keep-awake for the length of a work session, or a setting that doesn't lock on display sleep; both the owner's call.
+- Check: walk runs lost to a locked screen per week.
+
+### Two sessions on the same repo at once
+- Seen: 2026-10-15. Another session works in `~/Documents/projects/active/dent-chat-polish` on branch `chat-polish`, cut from `316f679`, while this one lands batch 2 on main; both edit `crates/desktop/src/chat.rs`.
+- Cost: merge conflicts later, and walkthroughs from both competing for the screen.
+- Fix: one writer per area at a time; the second session works from the first's latest main, or waits.
+- Check: conflicts per merge.
 
 ### `walk.rs` is one 3,939-line file
 - Seen: 2026-10-15. Every walkthrough scene lives in `crates/desktop/src/walk.rs`.
@@ -97,4 +122,12 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 
 ## Done
 
-Nothing yet.
+### A design review caught what the walkthroughs passed
+- Seen: 2026-10-15, batch 2. Every new check passed, yet the reviewer found two blockers (showing the sidebar by hand squeezed the chat below its minimum; Send fell to its own row) and five should-fixes. And the full suite found a real bug no scene of its own showed: focus left on the terminal after the viewer switched away, so every shortcut went dead.
+- Fix: review stills before landing, not after; run the full suite before calling a batch done, since scenes leave state for the next one.
+- Result: all fixed in the same pass; full suite 308 checks, 0 failed, 3 m 28 s.
+
+### Walkthroughs passed when stills failed, and stills could catch the wrong moment
+- Seen: 2026-10-15, new Mac. Without Screen Recording permission every shot printed "could not create image from window" and the run still said "13 checks, 0 failed". Stills were also taken on a background thread while the scene moved on, so the narrow `drop-hint` still showed the state after the drop.
+- Fix: a `Shot` step now waits until its picture is saved, and an unsaved still is a failed check ("the still was saved").
+- Result: with no capture tool the attach scene now reports 3 failures instead of 0; the narrow `drop-hint` still shows the hint. Each scene run costs about 1 s more (attach: 14 s → 15 s).

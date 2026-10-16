@@ -719,6 +719,10 @@ pub enum Request {
     /// Stop the current turn. The session stays and takes the next message.
     Interrupt {
         session: SessionId,
+        /// What asked: "the Stop button", "⌘.". The daemon logs it, so a
+        /// stop no one remembers can be traced.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<String>,
     },
     Answer {
         session: SessionId,
@@ -1039,6 +1043,13 @@ pub fn encode<T: Serialize>(req: u64, body: &T) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stop_from_an_older_client_still_parses() {
+        let old: Request = serde_json::from_str(r#"{"op":"interrupt","session":"s1"}"#)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(matches!(old, Request::Interrupt { by: None, .. }));
+    }
 
     #[test]
     fn events_round_trip_and_tolerate_new_fields() {

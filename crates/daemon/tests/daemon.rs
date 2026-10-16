@@ -726,7 +726,11 @@ fn stop_stops_within_two_seconds_and_returns_held_messages() {
     c.wait(&s, "the turn to start", |b| matches!(b, Body::TurnStarted));
     c.say(&s, "held", "after that", false);
     let t = Instant::now();
-    c.call(Request::Interrupt { session: s.clone() }).unwrap();
+    c.call(Request::Interrupt {
+        session: s.clone(),
+        by: None,
+    })
+    .unwrap();
     c.wait(&s, "the interruption", |b| {
         matches!(
             b,
@@ -1042,7 +1046,11 @@ fn rewinding_restores_files_and_picks_the_conversation_up_there() {
         })
         .is_err()
     );
-    c.call(Request::Interrupt { session: s.clone() }).unwrap();
+    c.call(Request::Interrupt {
+        session: s.clone(),
+        by: None,
+    })
+    .unwrap();
     c.wait(&s, "stopped", |b| {
         matches!(
             b,

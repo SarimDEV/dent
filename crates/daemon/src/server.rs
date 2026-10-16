@@ -189,7 +189,11 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             d.command(&session, Op::Requeue { id, before }).await?;
             Reply::Ok
         }
-        Request::Interrupt { session } => {
+        Request::Interrupt { session, by } => {
+            eprintln!(
+                "dent-daemon: stop asked for {session} by {}",
+                by.as_deref().unwrap_or("a client that didn't say")
+            );
             d.command(&session, Op::Interrupt).await?;
             Reply::Ok
         }

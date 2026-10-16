@@ -52,9 +52,10 @@ use gpui_kit::*;
 use crate::ui::Press;
 
 use app::{
-    AttachFiles, CloseSession, Dent, Escape, InboxClose, InboxDown, InboxOpen, InboxUp, NewSession,
-    NextNeedsYou, Search, SelectNext, SelectPrev, ShowChanges, ShowFirst, ShowTerminal, SideChat,
-    SteerSend, StopSession, Tab, ToastAction, TogglePanel, UndoClose,
+    AttachFiles, ChatBottom, ChatPageDown, ChatPageUp, ChatTop, CloseSession, Dent, Escape,
+    InboxClose, InboxDown, InboxOpen, InboxUp, NewSession, NextNeedsYou, Search, SelectNext,
+    SelectPrev, ShowChanges, ShowFirst, ShowTerminal, SideChat, SteerSend, StopSession, Tab,
+    ToastAction, TogglePanel, ToggleSidebar, UndoClose,
 };
 use ds::{Typed, UI, radius, size, space};
 use theme::Theme;
@@ -153,8 +154,8 @@ impl Render for Dent {
         ui::FRAME.store(self.frames, std::sync::atomic::Ordering::Relaxed);
         self.drain_page(window, cx);
         // A link asked to show a file.
-        if let Some(path) = select::take_open() {
-            self.open_file(&path, cx);
+        if let Some((path, line)) = select::take_open() {
+            self.open_file_at(&path, line, cx);
         }
         // A file you opened in the viewer follows its changes on disk.
         if let Some(Tab::Art(a)) = self.current().map(|s| self.tab(s))
@@ -256,9 +257,17 @@ impl Render for Dent {
             self.sidebar_forced = false;
         }
         let room = w - self.sidebar_w - viewer::CHAT_MIN;
-        self.sidebar_hidden = wants_panel && room < viewer::MIN_WIDTH && !self.sidebar_forced;
-        // Folding away takes keyboard focus with it, to the window.
-        if self.sidebar_hidden && self.inbox_focus.is_focused(window) {
+        self.sidebar_hidden = (self.sidebar_off && !self.sidebar_forced)
+            || wants_panel && room < viewer::MIN_WIDTH && !self.sidebar_forced;
+        // Folding away takes keyboard focus with it, to the window. So does
+        // your terminal going out of sight (the viewer showing a file
+        // instead): focus left on what isn't drawn reaches no shortcut.
+        let shell_gone = self.term_focus.is_focused(window)
+            && !(self.panel_open && self.current().is_some_and(|s| self.tab(s) == Tab::Terminal));
+        if self.sidebar_hidden && self.inbox_focus.is_focused(window)
+            || shell_gone
+            || window.focused(cx).is_none()
+        {
             window.focus(&self.focus, cx);
         }
         let side = if self.sidebar_hidden {
@@ -305,13 +314,14 @@ impl Render for Dent {
                 };
                 div()
                     .absolute()
-                    .bottom(px(size::STATUS + space::S2))
                     .w(px(self.sidebar_w - space::S4))
+                    // Over the sidebar; with it folded, under the header,
+                    // clear of the reply box and its send button.
                     .map(|d| {
                         if self.sidebar_hidden {
-                            d.left(px(space::S4))
+                            d.left(px(space::S4)).top(px(size::HEADER + space::S2))
                         } else {
-                            d.left(px(space::S2))
+                            d.left(px(space::S2)).bottom(px(size::STATUS + space::S2))
                         }
                     })
                     .child(
@@ -427,6 +437,21 @@ impl Render for Dent {
             .on_action(
                 cx.listener(|this, _: &NextNeedsYou, window, cx| this.next_needs_you(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(
+                cx.listener(|this, _: &ChatPageUp, _, cx| {
+                    this.scroll_chat(app::ChatScroll::Up, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &ChatPageDown, _, cx| {
+                this.scroll_chat(app::ChatScroll::Down, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &ChatTop, _, cx| this.scroll_chat(app::ChatScroll::Top, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ChatBottom, _, cx| {
+                this.scroll_chat(app::ChatScroll::Bottom, cx)
+            }))
             .on_action(cx.listener(|this, _: &TogglePanel, _, cx| {
                 this.panel_open = !this.panel_open;
                 this.end_pick();
@@ -457,7 +482,7 @@ impl Render for Dent {
             )
             .on_action(cx.listener(|this, _: &StopSession, window, cx| {
                 if let Some(id) = this.selected.clone() {
-                    this.stop(&id, window, cx);
+                    this.stop(&id, "⌘.", window, cx);
                 }
             }))
             // Esc reaches the app before a text field swallows it.
@@ -492,6 +517,10 @@ impl Render for Dent {
             .on_drag_move(
                 cx.listener(|this, e: &DragMoveEvent<ExternalPaths>, _, cx| {
                     this.dragging_files = Some(e.drag(cx).paths().to_vec());
+                    if this.drag_at != Some(e.event.position) {
+                        this.drag_at = Some(e.event.position);
+                        cx.notify();
+                    }
                 }),
             )
             .child({
@@ -591,6 +620,14 @@ impl Render for Dent {
                 cx.listener(|this, _: &app::FindPrev, window, cx| this.step_find(true, window, cx)),
             )
             .on_action(|_: &app::Minimize, window, _| window.minimize_window())
+            .on_action(|_: &app::FullScreen, window, _| window.toggle_fullscreen())
+            .on_action(cx.listener(|this, _: &app::NotifySound, _, cx| {
+                use std::sync::atomic::Ordering::Relaxed;
+                let on = notify::SOUND.load(Relaxed);
+                notify::SOUND.store(!on, Relaxed);
+                this.save_prefs();
+                app::refresh_menus(cx);
+            }))
             .on_action(|_: &app::Zoom, window, _| window.zoom_window())
             .on_action(cx.listener(|this, _: &SelectPrev, window, cx| {
                 this.step_selection(-1, false, window, cx)

@@ -43,6 +43,8 @@ pub const SHEET: &[(&str, &[(&str, &str)])] = &[
             ("Find in the session", "⌘ F"),
             ("Next or previous match", "⌘ G  ⇧ ⌘ G"),
             ("Your earlier messages", "⌥ ↑ ↓"),
+            ("A page up or down", "PgUp  PgDn"),
+            ("The start or end of the chat", "Home  End"),
             ("Bigger or smaller text", "⌘ +  ⌘ −"),
             ("Text as designed", "⌘ 0"),
         ],
@@ -50,9 +52,11 @@ pub const SHEET: &[(&str, &[(&str, &str)])] = &[
     (
         "Panels",
         &[
+            ("Show or hide the sidebar", "⌃ ⌘ S"),
             ("Show or hide the viewer", "⌘ \\"),
             ("Changes", "⌘ 2"),
             ("Your terminal", "⌘ 3"),
+            ("Clear your terminal (in it)", "⌘ K"),
             ("Ask on the side", "⌘ ;"),
             ("This sheet", "⌘ /"),
         ],

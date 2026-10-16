@@ -34,6 +34,8 @@ pub enum Field {
 pub enum Act {
     Wait,
     Click(&'static str),
+    /// Right-click it: a press and release of the other button.
+    RightClick(&'static str),
     /// Click it if it's on screen; some controls exist only on some platforms.
     ClickIfShown(&'static str),
     Key(&'static str),
@@ -146,6 +148,14 @@ impl Walk {
                     Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
                 )];
                 v.extend(find());
+                v
+            }
+            "links" => {
+                let mut v = vec![(
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                )];
+                v.extend(file_links());
                 v
             }
             "attach" => {
@@ -345,6 +355,43 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
                 );
             }
         }
+        RightClick(name) => match center(&me, name, cx) {
+            Some(at) => {
+                window.dispatch_event(
+                    PlatformInput::MouseMove(MouseMoveEvent {
+                        position: at,
+                        pressed_button: None,
+                        modifiers: Modifiers::default(),
+                    }),
+                    cx,
+                );
+                for down in [true, false] {
+                    let ev = if down {
+                        PlatformInput::MouseDown(MouseDownEvent {
+                            button: MouseButton::Right,
+                            position: at,
+                            modifiers: Modifiers::default(),
+                            click_count: 1,
+                            first_mouse: false,
+                        })
+                    } else {
+                        PlatformInput::MouseUp(MouseUpEvent {
+                            button: MouseButton::Right,
+                            position: at,
+                            modifiers: Modifiers::default(),
+                            click_count: 1,
+                        })
+                    };
+                    window.dispatch_event(ev, cx);
+                }
+            }
+            None => note(
+                &me,
+                cx,
+                leak(format!("right-click target “{name}” on screen")),
+                false,
+            ),
+        },
         Wheel(name, dy) => match center(&me, name, cx) {
             Some(at) => {
                 window.dispatch_event(
@@ -568,11 +615,39 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
                 false,
             ),
         },
+        // The scene waits for the picture, so it shows this moment and not a
+        // later one, and a still that couldn't be taken fails the walk.
         Shot(name) => {
+            use std::sync::atomic::Ordering::SeqCst;
             let dir = me.read(cx).walk.as_ref().and_then(|d| d.shots.clone());
             if let Some(dir) = dir {
-                let _ = std::fs::create_dir_all(&dir);
-                still(dir.join(format!("{name}.png")));
+                let path = dir.join(format!("{name}.png"));
+                let asked = SHOT_ASKED.with(|a| a.get());
+                let stuck = SHOT_SINCE
+                    .with(|t| t.get())
+                    .is_some_and(|t| t.elapsed() > Duration::from_secs(15));
+                match SHOT.load(SeqCst) {
+                    // A capture that never comes back fails, not the walk.
+                    TAKING if asked && stuck => {
+                        SHOT_ASKED.with(|a| a.set(false));
+                        note(&me, cx, "the still was saved", false);
+                    }
+                    TAKING => advance = false,
+                    TAKEN if asked => {
+                        SHOT_ASKED.with(|a| a.set(false));
+                        if std::fs::metadata(&path).map_or(true, |m| m.len() == 0) {
+                            note(&me, cx, "the still was saved", false);
+                        }
+                    }
+                    _ => {
+                        let _ = std::fs::create_dir_all(&dir);
+                        let _ = std::fs::remove_file(&path);
+                        SHOT_ASKED.with(|a| a.set(true));
+                        SHOT_SINCE.with(|t| t.set(Some(Instant::now())));
+                        still(path);
+                        advance = false;
+                    }
+                }
             }
         }
     }
@@ -890,6 +965,18 @@ fn kill_daemon(_: &mut Dent, _: &mut Window, _: &mut Context<Dent>) {
 fn outside_page() -> &'static str {
     let dir = std::env::var("DENT_WALK_OUTSIDE").unwrap_or_else(|_| "/nonexistent".into());
     leak(format!("write {dir}/page.html with assets"))
+}
+
+thread_local! {
+    /// Whether the sidebar showed before a scene toggled it.
+    static SIDEBAR_WAS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the open right-click menu has a row saying `label`.
+fn menu_has(d: &Dent, label: &str) -> bool {
+    d.context
+        .as_ref()
+        .is_some_and(|m| m.items.iter().any(|(l, _)| l.as_ref() == label))
 }
 
 fn new_session(text: &'static str) -> Vec<(f32, Act)> {
@@ -1832,6 +1919,7 @@ fn checks() -> Vec<(f32, Act)> {
     ]);
     // Daily use, after the scenes that lean on files written at the start
     // still being fresh.
+    v.extend(file_links());
     v.extend(recall());
     v.extend(find());
     v.extend(find_viewer());
@@ -3616,6 +3704,257 @@ fn files_attached(d: &Dent) -> Vec<String> {
 /// Attaching: a session keeps what you attached while you look elsewhere,
 /// the paperclip is there, a drag says where it lands, a drop on the
 /// terminal types the paths, and clipped tool output opens in full.
+/// A file and line named in a reply opens in the viewer at that line; one
+/// that isn't there says so.
+fn file_links() -> Vec<(f32, Act)> {
+    let mut v = new_session("Narrate as you go from src/lib.rs:60 (see https://example.com/notes)");
+    v.extend([
+        (
+            0.1,
+            Until("it finishes", |d, _| done_saying(d, "All done"), 20.),
+        ),
+        (
+            0.,
+            Until(
+                "the file and address in your own message are links",
+                |_, _| {
+                    let links = crate::select::drawn_links();
+                    links.iter().any(|l| l.ends_with("/src/lib.rs:60"))
+                        && links.iter().any(|l| l == "https://example.com/notes")
+                },
+                3.,
+            ),
+        ),
+        (0.2, Shot("own-links")),
+        (
+            0.,
+            Until(
+                "the session knows the agent's own id, to resume in a terminal",
+                |d, _| {
+                    current(d)
+                        .and_then(|s| s.resume_command())
+                        .is_some_and(|c| c.contains("claude --resume "))
+                },
+                3.,
+            ),
+        ),
+        (
+            0.,
+            Call(|_, _, _| {
+                // The file the tool row read, so its menu is whole.
+                let f = in_project("src/handler.rs");
+                let _ = std::fs::create_dir_all(f.parent().unwrap_or(&f));
+                let _ = std::fs::write(f, "fn handle() {}\n");
+            }),
+        ),
+        (0.2, RightClick("tool-row")),
+        (
+            0.1,
+            Until(
+                "right-clicking a file's tool row opens it, shows it in Finder or copies its path",
+                |d, _| {
+                    menu_has(d, "Open") && menu_has(d, "Show in Finder") && menu_has(d, "Copy Path")
+                },
+                3.,
+            ),
+        ),
+        (0.3, Shot("menu-tool")),
+        (0.1, Key("escape")),
+        (
+            0.1,
+            Call(|d, w, _| {
+                if let Some(s) = current(d) {
+                    let area = crate::select::area(&format!("chat/{}", s.id));
+                    crate::select::select_all(area, w);
+                }
+            }),
+        ),
+        (0.2, RightClick("transcript")),
+        (
+            0.1,
+            Until(
+                "with words selected, the chat's menu copies them",
+                |d, _| menu_has(d, "Copy"),
+                3.,
+            ),
+        ),
+        (0.3, Shot("menu-chat")),
+        (
+            0.1,
+            Call(|d, w, cx| {
+                let quote = d.context.as_ref().and_then(|m| {
+                    m.items
+                        .iter()
+                        .find(|(l, _)| l.as_ref() == "Quote in Reply")
+                        .map(|(_, what)| what.clone())
+                });
+                if let Some(what) = quote {
+                    d.run_context(what, w, cx);
+                }
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "Quote in Reply puts the words in the reply box as a quote",
+                |d, cx| {
+                    let v = d.composer.read(cx).value().to_string();
+                    v.starts_with("> Narrate as you go") && v.ends_with("\n\n")
+                },
+                3.,
+            ),
+        ),
+        (0.3, Shot("quoted")),
+        (
+            0.,
+            Call(|d, w, cx| d.composer.update(cx, |c, cx| c.set_value("", w, cx))),
+        ),
+        (0.2, Key("cmd-k")),
+        (0.3, Keys("requests arrive")),
+        (
+            0.1,
+            Until(
+                "search finds words said inside the session",
+                |d, cx| {
+                    let here = d.selected.clone();
+                    d.palette_results(cx).first() == here.as_ref()
+                },
+                3.,
+            ),
+        ),
+        (0.2, Key("enter")),
+        (
+            0.1,
+            Until(
+                "opening it goes to where they were said, with ⌘F holding them",
+                |d, cx| {
+                    d.find.as_ref().is_some_and(|f| !f.hits.is_empty())
+                        && d.find_input.read(cx).value() == "requests arrive"
+                },
+                3.,
+            ),
+        ),
+        (0.3, Shot("search-match")),
+        (0.1, Key("escape")),
+        (0.2, Key("escape")),
+        (0.2, Key("cmd-k")),
+        (0.3, Keys("readme")),
+        (
+            0.1,
+            Until(
+                "⌘K lists the project's files that match",
+                |d, cx| d.palette_files(cx) == ["README.md"],
+                5.,
+            ),
+        ),
+        (
+            0.,
+            Call(|d, cx_w, cx| {
+                let _ = cx_w;
+                d.palette = Some(d.palette_results(cx).len());
+            }),
+        ),
+        (0.3, Shot("quick-open")),
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until(
+                "and ↩ opens the file in the viewer",
+                |d, _| {
+                    current(d).is_some_and(|s| {
+                        matches!(d.tab(s), crate::app::Tab::Art(a)
+                            if d.art(a).is_some_and(|x| x.path.ends_with("/README.md")))
+                    })
+                },
+                3.,
+            ),
+        ),
+        (
+            0.1,
+            Call(|d, w, cx| {
+                crate::select::clear(w);
+                d.run_context(
+                    crate::context::Do::RunInTerminal("echo from-dent".into()),
+                    w,
+                    cx,
+                )
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "Run in My Terminal types the command there, not run",
+                |d, _| {
+                    current(d)
+                        .and_then(|s| d.shells.get(&s.id))
+                        .is_some_and(|sh| sh.text().contains("echo from-dent"))
+                },
+                5.,
+            ),
+        ),
+        (
+            0.,
+            Call(|_, w, cx| {
+                let src = in_project("src/lib.rs");
+                let _ = std::fs::create_dir_all(src.parent().unwrap_or(&src));
+                // Line n reads "// line n", so the still checks itself.
+                let body: String = (2..=81).map(|n| format!("// line {n}\n")).collect();
+                let _ = std::fs::write(&src, format!("fn handler() {{}}\n{body}"));
+                crate::select::open_link(&format!("{}:60", src.display()), w, cx);
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "src/lib.rs:60 opens the file in the viewer",
+                |d, _| drawn(d, "text-view").is_some(),
+                3.,
+            ),
+        ),
+        (
+            0.,
+            Until(
+                "at line 60, marked",
+                |d, _| {
+                    d.marked_line.values().any(|&l| l == 60)
+                        && d.text_list.logical_scroll_top().item_ix > 40
+                },
+                3.,
+            ),
+        ),
+        (0.3, Shot("file-at-line")),
+        (
+            0.,
+            Call(|_, w, cx| {
+                let gone = in_project("src/gone.rs");
+                crate::select::open_link(&format!("{}:9", gone.display()), w, cx);
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "a file that isn't there says so",
+                |d, _| {
+                    d.toast
+                        .as_ref()
+                        .is_some_and(|t| t.text.starts_with("Can't find"))
+                },
+                3.,
+            ),
+        ),
+        (0.3, Shot("file-missing")),
+        // Leave nothing over the next scene.
+        (
+            0.,
+            Call(|d, _, cx| {
+                d.toast = None;
+                cx.notify();
+            }),
+        ),
+    ]);
+    v
+}
+
 fn attaching() -> Vec<(f32, Act)> {
     let mut v = new_session("Narrate as you go");
     v.extend([
@@ -3673,7 +4012,11 @@ fn attaching() -> Vec<(f32, Act)> {
             0.1,
             Until(
                 "dragging files over the window says where they'd go",
-                |d, cx| cx.has_active_drag() && drawn(d, "composer").is_some(),
+                |d, cx| {
+                    cx.has_active_drag()
+                        && drawn(d, "drop-message").is_some()
+                        && drawn(d, "drop-shell").is_none()
+                },
                 3.,
             ),
         ),
@@ -3700,6 +4043,14 @@ fn attaching() -> Vec<(f32, Act)> {
             ),
         ),
         (1.0, DragFiles("shell", 0.5, 0.5)),
+        (
+            0.1,
+            Until(
+                "over the terminal, only the terminal says so",
+                |d, _| drawn(d, "drop-shell").is_some() && drawn(d, "drop-message").is_none(),
+                3.,
+            ),
+        ),
         (0.3, Shot("drop-terminal")),
         (0.2, DropFiles),
         (
@@ -3711,6 +4062,22 @@ fn attaching() -> Vec<(f32, Act)> {
                         .and_then(|s| d.shells.get(&s.id))
                         .is_some_and(|sh| sh.text().replace('\n', "").contains("my notes.txt' "))
                         && files_attached(d).len() == 2
+                },
+                5.,
+            ),
+        ),
+        // The terminal has the keyboard after the drop: ⌘K clears it there.
+        (0.3, Key("cmd-k")),
+        (
+            0.1,
+            Until(
+                "⌘K in your terminal clears what came before, and search stays shut",
+                // What's typed and not yet run stays, as in Terminal.
+                |d, _| {
+                    d.palette.is_none()
+                        && current(d)
+                            .and_then(|s| d.shells.get(&s.id))
+                            .is_some_and(|sh| !sh.text().contains("Last login"))
                 },
                 5.,
             ),
@@ -3743,8 +4110,98 @@ fn attaching() -> Vec<(f32, Act)> {
                 3.,
             ),
         ),
+        (0.2, Shot("output-folded")),
         (0.1, Click("call-out-all")),
         (0.5, Shot("output-all")),
+        (
+            0.2,
+            Call(|d, w, cx| d.composer.update(cx, |c, cx| c.focus(w, cx))),
+        ),
+        (0.2, Key("home")),
+        (
+            0.1,
+            Until(
+                "Home goes to the start of the chat",
+                |d, _| {
+                    let top = d.transcript.logical_scroll_top();
+                    top.item_ix == 0 && top.offset_in_item == px(0.)
+                },
+                3.,
+            ),
+        ),
+        (0.2, Key("pagedown")),
+        (
+            0.1,
+            Until(
+                "Page Down moves down a page",
+                |d, _| {
+                    let top = d.transcript.logical_scroll_top();
+                    top.item_ix > 0 || top.offset_in_item > px(200.)
+                },
+                3.,
+            ),
+        ),
+        (0.2, Key("end")),
+        (
+            0.1,
+            Until(
+                "End goes back to the newest",
+                |d, _| {
+                    let n = current(d).map_or(0, |s| s.items.len());
+                    n > 0 && d.transcript.bounds_for_item(n - 1).is_some()
+                },
+                3.,
+            ),
+        ),
+        (
+            0.2,
+            Call(|d, _, _| SIDEBAR_WAS.with(|w| w.set(d.sidebar_hidden))),
+        ),
+        (0.2, Key("ctrl-cmd-s")),
+        (
+            0.1,
+            Until(
+                "⌃⌘S shows or hides the sidebar",
+                |d, _| d.sidebar_hidden != SIDEBAR_WAS.with(|w| w.get()),
+                3.,
+            ),
+        ),
+        (0.3, Shot("sidebar-toggled")),
+        (0.2, Key("ctrl-cmd-s")),
+        (
+            0.1,
+            Until(
+                "and again puts it back",
+                |d, _| d.sidebar_hidden == SIDEBAR_WAS.with(|w| w.get()),
+                3.,
+            ),
+        ),
+        (0.2, Click("pic-chip")),
+        (
+            0.1,
+            Until(
+                "a picture opened large offers Copy and Open in Preview",
+                |d, _| d.lightbox.is_some() && drawn(d, "lightbox-copy").is_some(),
+                3.,
+            ),
+        ),
+        (0.4, Shot("picture-large")),
+        (0.1, Click("lightbox-copy")),
+        (
+            0.1,
+            Until(
+                "Copy puts the picture on the clipboard",
+                |_, cx| {
+                    cx.read_from_clipboard().is_some_and(|c| {
+                        c.entries()
+                            .iter()
+                            .any(|e| matches!(e, ClipboardEntry::Image(_)))
+                    })
+                },
+                3.,
+            ),
+        ),
+        (0.2, Key("escape")),
         (
             0.2,
             Until(
@@ -4203,9 +4660,25 @@ fn stills() -> Vec<(f32, Act)> {
     v
 }
 
+/// Where the latest still is: not asked for, being taken, or done (saved or not).
+static SHOT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(IDLE);
+const IDLE: u8 = 0;
+const TAKING: u8 = 1;
+const TAKEN: u8 = 2;
+thread_local! {
+    /// A `Shot` step asked for the still in flight (a sweep's own don't count).
+    static SHOT_ASKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// When it asked.
+    static SHOT_SINCE: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
 /// The window only, never what's around it: by window number when the
 /// `WINID` helper (tools/winid.swift) is given, else the window's rectangle.
+/// `SHOT` says when it's done.
 pub fn still(path: PathBuf) {
+    use std::sync::atomic::Ordering::SeqCst;
+    SHOT.store(TAKING, SeqCst);
+
     // On Linux: dent's own window, found by process, never the whole screen.
     #[cfg(target_os = "linux")]
     {
@@ -4224,12 +4697,14 @@ pub fn still(path: PathBuf) {
                 .and_then(|s| s.lines().last().map(str::to_string));
             let Some(id) = id else {
                 eprintln!("still: no window to capture for {}", path.display());
+                SHOT.store(TAKEN, SeqCst);
                 return;
             };
             let _ = std::process::Command::new("import")
                 .args(["-window", &id])
                 .arg(&path)
                 .status();
+            SHOT.store(TAKEN, SeqCst);
         });
         return;
     }
@@ -4246,11 +4721,13 @@ pub fn still(path: PathBuf) {
         // Only ever the window itself: without its number, no still.
         let Some(id) = id else {
             eprintln!("still: set WINID to capture {}", path.display());
+            SHOT.store(TAKEN, SeqCst);
             return;
         };
         let _ = std::process::Command::new("screencapture")
             .args(["-x", "-o", &format!("-l{id}")])
             .arg(&path)
             .status();
+        SHOT.store(TAKEN, SeqCst);
     });
 }

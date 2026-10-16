@@ -162,9 +162,15 @@ impl Dent {
                     icon_button("show-sidebar", "panel-left-open", &t)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_press(cx.listener(|this, _, _, cx| {
-                            this.sidebar_forced = true;
-                            this.panel_open = false;
-                            cx.notify();
+                            // Hidden by hand, it comes back as it was;
+                            // folded for room, it shows over the viewer.
+                            if this.sidebar_off {
+                                this.toggle_sidebar(cx);
+                            } else {
+                                this.sidebar_forced = true;
+                                this.panel_open = false;
+                                cx.notify();
+                            }
                         }))
                         .with_tip(tip("Show sessions", None, t)),
                 )
@@ -311,19 +317,16 @@ impl Dent {
                 } else {
                     format!("Show {more} more lines")
                 };
-                div()
-                    .id(SharedString::from(fold.clone()))
+                crate::ui::ghost(SharedString::from(fold.clone()), label, &t)
+                    .self_start()
                     .relative()
-                    .text_color(t.faint)
-                    .cursor_pointer()
-                    .hover(|d| d.text_color(t.ink))
+                    .ml(px(-space::S2))
                     .on_press(cx.listener(move |this, _, _, cx| {
                         if !this.expanded.remove(&fold) {
                             this.expanded.insert(fold.clone());
                         }
                         cx.notify();
                     }))
-                    .child(label)
                     .child(probe(&self.probes, format!("call-{which}-all")))
                     .into_any_element()
             })
@@ -840,7 +843,14 @@ impl Dent {
             .relative()
             .flex_1()
             .min_h_0()
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                    this.chat_context(e.position, window, cx)
+                }),
+            )
             .child(transcript)
+            .child(probe(&self.probes, "transcript"))
             .children(find)
             // A drag past the top or bottom scrolls the chat under it.
             .child(crate::select::region(
@@ -942,6 +952,7 @@ impl Dent {
                 .into_any_element()
         };
         div()
+            .key_context("Chat")
             .flex_1()
             .min_w_0()
             .h_full()
@@ -1155,11 +1166,21 @@ impl Dent {
                                     div()
                                         .ty(if command { CODE } else { READING })
                                         .text_color(t.ink)
-                                        .child(crate::select::text(
-                                            SharedString::from(format!("user-text-{ix}")),
-                                            shown,
-                                            &t,
-                                        )),
+                                        .child({
+                                            // Addresses and files you named open
+                                            // as they do in a reply.
+                                            let links = crate::markdown::plain_links(
+                                                &shown,
+                                                Some(std::path::Path::new(&s.cwd)),
+                                            );
+                                            crate::select::text(
+                                                SharedString::from(format!("user-text-{ix}")),
+                                                shown,
+                                                &t,
+                                            )
+                                            .links(links)
+                                            .underline_links(&t)
+                                        }),
                                 )
                                 .when(long, |d| {
                                     d.child(
@@ -1400,6 +1421,18 @@ impl Dent {
                             .gap(px(space::S1H))
                             .ty(UI)
                             .text_color(t.quiet)
+                            .relative()
+                            .child(probe(&self.probes, "tool-row"))
+                            .when(lone, |d| {
+                                let line = lines[0].clone();
+                                d.on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        this.tool_context(e.position, &line, cx)
+                                    }),
+                                )
+                            })
                             .when(more, |d| {
                                 d.cursor_pointer()
                                     .on_press(cx.listener(move |this, _, _, cx| {
@@ -1553,6 +1586,15 @@ impl Dent {
                                             .id(SharedString::from(format!("tool-line-{ix}-{n}")))
                                             .group(gname.clone())
                                             .flex()
+                                            .on_mouse_down(MouseButton::Right, {
+                                                let line = l.clone();
+                                                cx.listener(
+                                                    move |this, e: &MouseDownEvent, _, cx| {
+                                                        cx.stop_propagation();
+                                                        this.tool_context(e.position, &line, cx)
+                                                    },
+                                                )
+                                            })
                                             .min_w_0()
                                             .child(tool_text(
                                                 &l.text,
@@ -2328,9 +2370,11 @@ impl Dent {
         let text = self.composer.read(cx).value();
         let empty = text.trim().is_empty() && self.attachments.is_empty();
         let working = s.running();
+        // Long enough for a second press meant for Send (one at 11:24 on
+        // 15 Oct came 2 s after a send); ⌘. still stops at once.
         let settling = self
             .just_sent
-            .is_some_and(|at| at.elapsed().as_secs_f32() < 1.);
+            .is_some_and(|at| at.elapsed().as_secs_f32() < 2.5);
         let id = s.id.clone();
         // While it works and nothing is typed, the button stops it. Right after
         // sending it stays inert, so a double press never lands on Stop.
@@ -2357,7 +2401,9 @@ impl Dent {
                         .active(|d| d.bg(t.press()))
                 })
                 .cursor_pointer()
-                .on_press(cx.listener(move |this, _, window, cx| this.stop(&id, window, cx)))
+                .on_press(cx.listener(move |this, _, window, cx| {
+                    this.stop(&id, "the Stop button", window, cx)
+                }))
                 .with_tip(tip("Stop", Some("⌘ ."), t))
                 .child(
                     div()
@@ -2481,17 +2527,22 @@ impl Dent {
                             // order: the default's "Default ·", then effort's
                             // label, then permission's; each keeps its icon
                             // and says what it is on hover. The model's name
-                            // always shows.
+                            // always shows: with no room even for that, the
+                            // row wraps instead of squeezing.
+                            .when(!fit.fits, |d| d.flex_wrap())
                             .child(self.attach_button(cx))
-                            .child(self.chip(Menu::SessionModel, "claude", &labels[0], false, cx))
-                            .child(self.chip(
-                                Menu::SessionPermission,
-                                "shield",
-                                &labels[1],
-                                false,
-                                cx,
+                            .child(keep(
+                                !fit.fits,
+                                self.chip(Menu::SessionModel, "claude", &labels[0], false, cx),
                             ))
-                            .child(self.chip(Menu::SessionEffort, "gauge", &labels[2], false, cx))
+                            .child(keep(
+                                !fit.fits,
+                                self.chip(Menu::SessionPermission, "shield", &labels[1], false, cx),
+                            ))
+                            .child(keep(
+                                !fit.fits,
+                                self.chip(Menu::SessionEffort, "gauge", &labels[2], false, cx),
+                            ))
                             .child(div().flex_1())
                             .when_some(s.context.filter(|_| fit.context), |d, (used, max)| {
                                 d.child(self.context_meter(s, used, max, cx))
@@ -2501,13 +2552,23 @@ impl Dent {
                                 d.child(div().ty(LABEL).text_color(t.faint).child("·"))
                             })
                             .when(fit.hint, |d| d.child(hint(hint_text, &t)))
-                            .child(action),
+                            // At the right even when the row wraps.
+                            .child(div().ml_auto().child(action)),
                     )
                     .child(probe(&self.probes, "composer"))
                     .children(self.slash_menu(false, cx))
                     .children(
-                        cx.has_active_drag()
-                            .then(|| crate::ui::drop_hint("Drop to attach to your message", &t)),
+                        (self.drop_target(cx) == Some(crate::app::DropTarget::Message)).then(
+                            || {
+                                crate::ui::drop_hint(
+                                    "Drop to attach to your message",
+                                    &self.probes,
+                                    "drop-message",
+                                    0.,
+                                    &t,
+                                )
+                            },
+                        ),
                     ),
             )
     }
@@ -2702,7 +2763,11 @@ impl Dent {
                             .into_any_element(),
                         _ => icon(a.icon(), 12., t.quiet).into_any_element(),
                     })
-                    .child(div().truncate().ty(UI).text_color(t.ink).child(a.label()));
+                    .child(div().truncate().ty(UI).text_color(t.ink).child(a.label()))
+                    .relative()
+                    .when(shown.is_some(), |d| {
+                        d.child(probe(&self.probes, "pic-chip"))
+                    });
                 div()
                     .id(SharedString::from(format!("att-{id}")))
                     .flex()
@@ -3151,9 +3216,18 @@ impl Dent {
                             )
                             .child(probe(&self.probes, "starter"))
                             .children(self.slash_menu(true, cx))
-                            .children(cx.has_active_drag().then(|| {
-                                crate::ui::drop_hint("Drop to attach to your message", &t)
-                            })),
+                            .children(
+                                (self.drop_target(cx) == Some(crate::app::DropTarget::Message))
+                                    .then(|| {
+                                        crate::ui::drop_hint(
+                                            "Drop to attach to your message",
+                                            &self.probes,
+                                            "drop-message",
+                                            0.,
+                                            &t,
+                                        )
+                                    }),
+                            ),
                     )
                     .child(chips)
                     .children(self.terminal_sessions(cx)),
@@ -4182,6 +4256,9 @@ pub struct Fit {
     pub labels: [String; 3],
     pub context: bool,
     pub hint: bool,
+    /// False when even the tightest layout is too wide: the row wraps
+    /// rather than letting chips run under the send button.
+    pub fits: bool,
 }
 
 /// Fit chips (each with its full and short label; an empty short label is
@@ -4230,6 +4307,7 @@ pub fn fit_footer(room: f32, chips: [(String, String); 3], context: bool, hint: 
                 labels,
                 context: *ctx && context,
                 hint: *h,
+                fits: true,
             };
         }
     }
@@ -4246,6 +4324,7 @@ pub fn fit_footer(room: f32, chips: [(String, String); 3], context: bool, hint: 
         }),
         context: false,
         hint: false,
+        fits: false,
     }
 }
 
@@ -4347,6 +4426,16 @@ fn tool_text(text: &str, hover: Option<SharedString>, t: &theme::Theme) -> Div {
         .when(!rest.trim().is_empty(), |d| {
             d.child(part(div().min_w_0().truncate(), t.secondary()).child(rest.to_string()))
         })
+}
+
+/// A chip held at its natural width when `whole`, so a wrapping row moves
+/// it to the next line rather than cutting its label short.
+fn keep(whole: bool, chip: AnyElement) -> AnyElement {
+    if whole {
+        div().flex_none().child(chip).into_any_element()
+    } else {
+        chip
+    }
 }
 
 #[cfg(test)]

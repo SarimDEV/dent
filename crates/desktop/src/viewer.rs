@@ -388,6 +388,7 @@ impl Dent {
                 Some(Kind::Html | Kind::Server) => self.page(id, window, cx),
                 Some(Kind::Doc) => self.doc(id, window, cx),
                 Some(Kind::Image) => self.image(id, window, cx),
+                Some(Kind::Text) => self.text(id, window, cx),
                 None => div().into_any_element(),
             },
             Tab::Changes => self.changes(s, window, cx),
@@ -1800,6 +1801,177 @@ impl Dent {
                     ),
             )
             .children(review)
+            .into_any_element()
+    }
+
+    /// A text file opened from a link: read-only, numbered and highlighted
+    /// like the diff, at the line the link named, which stays marked.
+    fn text(
+        &mut self,
+        id: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.t;
+        let Some(a) = self.art(id).cloned() else {
+            return div().into_any_element();
+        };
+        let v = self.version(&a);
+        let src: Rc<str> = String::from_utf8_lossy(&a.versions[v - 1]).into();
+        let lines: Rc<Vec<(usize, usize)>> = Rc::new({
+            let mut at = 0;
+            src.split('\n')
+                .map(|l| {
+                    let r = (at, at + l.trim_end_matches('\r').len());
+                    at += l.len() + 1;
+                    r
+                })
+                .collect()
+        });
+        let marked = self.marked_line.get(id).copied();
+        if self.text_key != Some((id, v)) {
+            self.text_key = Some((id, v));
+            self.text_list.reset(lines.len());
+            // A few lines above the marked one, so it reads in context.
+            if let Some(l) = marked {
+                self.text_list.scroll_to(ListOffset {
+                    item_ix: (l as usize)
+                        .saturating_sub(4)
+                        .min(lines.len().saturating_sub(1)),
+                    offset_in_item: px(0.),
+                });
+            }
+        }
+        let lang: SharedString = a
+            .path
+            .rsplit('.')
+            .next()
+            .unwrap_or_default()
+            .to_string()
+            .into();
+        let longest = lines
+            .iter()
+            .map(|(s, e)| src[*s..*e].chars().count())
+            .max()
+            .unwrap_or(0);
+        let wide = 64. + longest as f32 * self.code_advance(window) + space::S4 * 2.;
+        let area = crate::select::area(&format!("text/{id}"));
+        let body = {
+            let (src, lines, lang) = (src.clone(), lines.clone(), lang.clone());
+            list(
+                self.text_list.clone(),
+                cx.processor(move |_, ix: usize, _, _| {
+                    let _place = crate::select::item(area, ix);
+                    let (s, e) = lines[ix];
+                    let text: SharedString = src[s..e].to_string().into();
+                    let n = ix as u32 + 1;
+                    let here = marked == Some(n);
+                    div()
+                        .flex()
+                        .w_full()
+                        .h(px(size::LINE))
+                        .border_l_2()
+                        .border_color(if here { t.ink } else { transparent_black() })
+                        .when(here, |d| d.bg(t.selected()))
+                        .child(
+                            div()
+                                .w(px(64.))
+                                .flex_none()
+                                .flex()
+                                .justify_end()
+                                .pr(px(space::S4))
+                                .ty(CODE)
+                                .text_color(if here { t.ink } else { t.faint })
+                                .child(n.to_string()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .pr(px(space::S4))
+                                .whitespace_nowrap()
+                                .ty(CODE)
+                                .text_color(t.ink)
+                                .child(if text.is_empty() {
+                                    text.into_any_element()
+                                } else {
+                                    let spans = crate::highlight::spans(&lang, &text);
+                                    crate::select::styled(
+                                        SharedString::from(format!("text-{ix}")),
+                                        text.clone(),
+                                        crate::highlight::runs(&spans, &text, &t),
+                                        &t,
+                                    )
+                                    .into_any_element()
+                                }),
+                        )
+                        .into_any_element()
+                }),
+            )
+            .size_full()
+        };
+        let scroll = self.text_list.clone();
+        let bytes = a.versions[v - 1].clone();
+        let copied = self
+            .copied_at
+            .is_some_and(|at| at.elapsed().as_secs_f32() < 1.5);
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                self.toolbar()
+                    .pl(px(space::S3))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .ty(LABEL)
+                            .text_color(t.quiet)
+                            .child(match marked {
+                                Some(l) => format!("{} · line {l}", self.shown(&a)),
+                                None => self.shown(&a).to_string(),
+                            }),
+                    )
+                    .child(
+                        ghost("copy-text", if copied { "Copied" } else { "Copy text" }, &t)
+                            .with_tip(tip("Copy the file's text", None, t))
+                            .on_press(cx.listener(move |this, _, _, cx| {
+                                let src = String::from_utf8_lossy(&bytes).into_owned();
+                                cx.write_to_clipboard(ClipboardItem::new_string(src));
+                                this.copied_at = Some(std::time::Instant::now());
+                                cx.notify();
+                            })),
+                    )
+                    .when_some(art_file(&a), |d, full| {
+                        d.child(self.open_button("open-text", full, cx))
+                    }),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("text-{id}")))
+                            .size_full()
+                            .overflow_x_scroll()
+                            .child(
+                                div()
+                                    .h_full()
+                                    .min_w_full()
+                                    .w(px(wide))
+                                    .py(px(space::S1))
+                                    .child(body),
+                            ),
+                    )
+                    .child(crate::select::region(area, move |dy| {
+                        scroll.scroll_by(px(dy))
+                    }))
+                    .child(probe(&self.probes, "text-view")),
+            )
             .into_any_element()
     }
 

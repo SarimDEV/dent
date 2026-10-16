@@ -55,6 +55,9 @@ pub struct SessionView {
     pub checkpoints: std::collections::HashSet<String>,
     /// Side questions, oldest first, kept apart from the conversation.
     pub asides: Vec<Aside>,
+    /// The agent's own id for the conversation, as it last said: what
+    /// `claude --resume` takes to carry on in a terminal.
+    pub agent_session: Option<String>,
     /// Where the current turn's entries begin.
     turn_from: usize,
     /// The first entry that changed since [`SessionView::take_changes`].
@@ -909,6 +912,10 @@ impl SessionView {
                     a.answer = Some((text.clone(), *error, agent_session.clone()));
                 }
             }
+            Body::Agent {
+                agent_session: Some(a),
+                ..
+            } => self.agent_session = Some(a.clone()),
             Body::Limits { .. } | Body::Agent { .. } | Body::Forked { .. } => {}
         }
     }
@@ -1087,6 +1094,21 @@ mod tests {
             output: "ok".into(),
             parent: None,
         }
+    }
+
+    #[test]
+    fn the_agents_own_id_is_kept_for_resuming() {
+        let s = feed(vec![
+            Body::Agent {
+                agent_session: Some("abc-1".into()),
+                version: None,
+            },
+            Body::Agent {
+                agent_session: None,
+                version: Some("2.1".into()),
+            },
+        ]);
+        assert_eq!(s.list["s"].agent_session.as_deref(), Some("abc-1"));
     }
 
     fn feed(bodies: Vec<Body>) -> Sessions {

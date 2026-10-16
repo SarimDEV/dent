@@ -35,6 +35,16 @@ pub enum Do {
     Pin(String),
     /// Open a file with this app from now on (`None`: the Mac's default).
     OpenWith(String, Option<String>),
+    /// Put text on the clipboard: a link, a command, what's selected.
+    Copy(String),
+    /// Follow a link as a click would.
+    OpenLink(String),
+    /// Open a file in its app (your pick for its kind, else the Mac's).
+    OpenInApp(String),
+    /// Type a command into your terminal, for you to run.
+    RunInTerminal(String),
+    /// Put words into the reply box as a quote, under what's there.
+    Quote(String),
 }
 
 const WIDTH: f32 = 200.;
@@ -52,7 +62,7 @@ impl Dent {
         cx.notify();
     }
 
-    fn run_context(&mut self, what: Do, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn run_context(&mut self, what: Do, window: &mut Window, cx: &mut Context<Self>) {
         self.context = None;
         match what {
             Do::Separator => {}
@@ -80,8 +90,102 @@ impl Dent {
                 crate::open::open_with(&path, app, cx);
                 self.save_prefs();
             }
+            Do::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            Do::OpenLink(url) => crate::select::open_link(&url, window, cx),
+            Do::OpenInApp(path) => crate::open::open(&path, cx),
+            Do::Quote(words) => self.quote(&words, window, cx),
+            Do::RunInTerminal(command) => {
+                self.open_shell(window, cx);
+                if let Some(sh) = self.current().and_then(|s| self.shells.get(&s.id)) {
+                    sh.paste(&command);
+                }
+            }
         }
         cx.notify();
+    }
+
+    /// Words from the chat into your reply as a Markdown quote, after
+    /// anything you've written, with the caret on a fresh line below it.
+    pub fn quote(&mut self, words: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let quoted = quote_block(words);
+        if quoted.is_empty() {
+            return;
+        }
+        let draft = self.composer.read(cx).value().to_string();
+        let text = if draft.trim().is_empty() {
+            format!("{quoted}\n\n")
+        } else {
+            format!("{}\n\n{quoted}\n\n", draft.trim_end())
+        };
+        let caret = text.len();
+        self.composer.update(cx, |c, cx| {
+            crate::app::put_at(c, text, caret, window, cx);
+            c.focus(window, cx);
+        });
+        crate::select::clear(window);
+    }
+
+    /// Right-click in the chat: what's under the pointer decides. A link
+    /// offers to open or copy it (a file: also Finder and its app); a
+    /// selection offers Copy. Elsewhere, nothing.
+    pub fn chat_context(&mut self, at: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
+        let mut items: Vec<(&str, Do)> = Vec::new();
+        if let Some(url) = crate::select::link_at(at, window) {
+            if url.starts_with('/') {
+                let (path, _) = crate::select::at_line(&url);
+                items.push(("Open", Do::OpenLink(url.clone())));
+                items.push(("Open in App", Do::OpenInApp(path.clone())));
+                items.push(("Show in Finder", Do::Reveal(path.clone())));
+                items.push(("Copy Path", Do::CopyPath(path)));
+            } else {
+                items.push(("Open Link", Do::OpenLink(url.clone())));
+                items.push(("Copy Link", Do::Copy(url)));
+            }
+        }
+        if crate::select::has_selection() {
+            if !items.is_empty() {
+                items.push(("", Do::Separator));
+            }
+            let words = crate::select::copied();
+            items.push(("Copy", Do::Copy(words.clone())));
+            if self.current().is_some() {
+                items.push(("Quote in Reply", Do::Quote(words)));
+            }
+        }
+        if !items.is_empty() {
+            self.open_context(at, items, cx);
+        }
+    }
+
+    /// Right-click on a tool row: a command copies or goes to your
+    /// terminal; a file opens, shows in Finder or copies its path.
+    pub fn tool_context(
+        &mut self,
+        at: Point<Pixels>,
+        line: &crate::data::ToolLine,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(detail) = line.detail.as_ref() else {
+            return;
+        };
+        let mut items: Vec<(&str, Do)> = Vec::new();
+        if line.text.starts_with("$ ") {
+            items.push(("Copy Command", Do::Copy(detail.input.clone())));
+            items.push((
+                "Run in My Terminal",
+                Do::RunInTerminal(detail.input.clone()),
+            ));
+        }
+        if let Some(path) = &detail.path {
+            if std::path::Path::new(path).exists() {
+                items.push(("Open", Do::OpenLink(path.clone())));
+                items.push(("Show in Finder", Do::Reveal(path.clone())));
+            }
+            items.push(("Copy Path", Do::CopyPath(path.clone())));
+        }
+        if !items.is_empty() {
+            self.open_context(at, items, cx);
+        }
     }
 
     /// The open menu, over everything, kept inside the window.
@@ -255,5 +359,31 @@ impl Dent {
                     }),
                 ),
             )
+    }
+}
+
+/// `words` as a Markdown quote: each line behind "> ", paragraphs apart as
+/// they were.
+pub fn quote_block(words: &str) -> String {
+    words
+        .trim()
+        .lines()
+        .map(|l| {
+            if l.trim().is_empty() {
+                String::new()
+            } else {
+                format!("> {l}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn quotes_keep_their_lines() {
+        assert_eq!(super::quote_block(" a\n\nb \n"), "> a\n\n> b");
+        assert_eq!(super::quote_block("  "), "");
     }
 }

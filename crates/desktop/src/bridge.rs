@@ -470,6 +470,7 @@ pub fn session(
         servers: built.servers.iter().map(|(_, u)| u.clone()).collect(),
         made_sig: v.made.iter().map(|m| m.versions.len()).sum::<usize>() + v.made.len() * 1000,
         todos: todos(v),
+        agent_session: v.agent_session.clone(),
     }
 }
 

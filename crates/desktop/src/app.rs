@@ -64,20 +64,40 @@ actions!(
         ShowAll,
         Minimize,
         Zoom,
+        ToggleSidebar,
+        ClearTerminal,
+        ChatPageUp,
+        ChatPageDown,
+        ChatTop,
+        ChatBottom,
+        NotifySound,
+        FullScreen,
+        About,
     ]
 );
 
 /// The menu bar: the app menu, Edit for text fields, and Window.
 pub fn set_menus(cx: &mut App) {
-    use gpui_kit::base::input;
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+    cx.on_action(|_: &About, _| crate::notify::about());
+    refresh_menus(cx);
+}
+
+/// The menus as things stand: the sound's tick follows your choice.
+pub fn refresh_menus(cx: &mut App) {
+    use gpui_kit::base::input;
+    let sound = crate::notify::SOUND.load(std::sync::atomic::Ordering::Relaxed);
     cx.set_menus([
         gpui_kit::Menu {
             name: "dent".into(),
             items: vec![
+                MenuItem::action("About dent", About),
+                MenuItem::separator(),
+                MenuItem::action("Notification Sound", NotifySound).checked(sound),
+                MenuItem::separator(),
                 MenuItem::action("Hide dent", Hide),
                 MenuItem::action("Hide Others", HideOthers),
                 MenuItem::action("Show All", ShowAll),
@@ -119,6 +139,7 @@ pub fn set_menus(cx: &mut App) {
         gpui_kit::Menu {
             name: "View".into(),
             items: vec![
+                MenuItem::action("Show or Hide Sidebar", ToggleSidebar),
                 MenuItem::action("Show or Hide Viewer", TogglePanel),
                 MenuItem::action("Changes", ShowChanges),
                 MenuItem::action("Terminal", ShowTerminal),
@@ -139,6 +160,8 @@ pub fn set_menus(cx: &mut App) {
             items: vec![
                 MenuItem::action("Minimize", Minimize),
                 MenuItem::action("Zoom", Zoom),
+                MenuItem::separator(),
+                MenuItem::action("Enter Full Screen", FullScreen),
             ],
             disabled: false,
         },
@@ -157,12 +180,26 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-h", Hide, None),
         KeyBinding::new("alt-cmd-h", HideOthers, None),
         KeyBinding::new("cmd-m", Minimize, None),
+        KeyBinding::new("ctrl-cmd-f", FullScreen, None),
         KeyBinding::new("cmd-n", NewSession, None),
         KeyBinding::new("shift-cmd-a", AttachFiles, None),
         KeyBinding::new("cmd-w", CloseSession, None),
         KeyBinding::new("cmd-z", UndoClose, Some("Dent")),
         KeyBinding::new("cmd-j", NextNeedsYou, None),
         KeyBinding::new("cmd-\\", TogglePanel, None),
+        KeyBinding::new("ctrl-cmd-s", ToggleSidebar, None),
+        // The chat scrolls by page and to its ends from the reply box, as a
+        // Mac document does (the field's own binding for these moves the
+        // caret, which a short box doesn't need); your terminal and the
+        // viewer keep these keys.
+        KeyBinding::new("pageup", ChatPageUp, Some("Chat")),
+        KeyBinding::new("pagedown", ChatPageDown, Some("Chat")),
+        KeyBinding::new("home", ChatTop, Some("Chat")),
+        KeyBinding::new("end", ChatBottom, Some("Chat")),
+        KeyBinding::new("pageup", ChatPageUp, Some("Chat > Input")),
+        KeyBinding::new("pagedown", ChatPageDown, Some("Chat > Input")),
+        KeyBinding::new("home", ChatTop, Some("Chat > Input")),
+        KeyBinding::new("end", ChatBottom, Some("Chat > Input")),
         KeyBinding::new("cmd-1", ShowFirst, None),
         KeyBinding::new("cmd-2", ShowChanges, None),
         KeyBinding::new("cmd-3", ShowTerminal, None),
@@ -171,6 +208,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-.", StopSession, None),
         KeyBinding::new("cmd-enter", SteerSend, None),
         KeyBinding::new("cmd-k", Search, None),
+        // In your terminal ⌘K clears it, as in Terminal.
+        KeyBinding::new("cmd-k", ClearTerminal, Some("Terminal")),
         KeyBinding::new("cmd-f", FindInSession, None),
         KeyBinding::new("cmd-g", FindNext, None),
         KeyBinding::new("shift-cmd-g", FindPrev, None),
@@ -559,6 +598,8 @@ pub struct Dent {
     pub attached: HashMap<Option<String>, Vec<Attachment>>,
     /// Files being dragged in from another app, until they're let go.
     pub dragging_files: Option<Vec<std::path::PathBuf>>,
+    /// Where those files are over the window, last we heard.
+    pub drag_at: Option<Point<Pixels>>,
     /// The appearance you chose, and one a flag forces for this run.
     pub appearance: crate::prefs::Appearance,
     /// Sessions pinned to the top of the sidebar.
@@ -689,6 +730,8 @@ pub struct Dent {
     /// This frame's chat column width.
     pub chat_w: f32,
     pub sidebar_hidden: bool,
+    /// You hid it by hand; it stays hidden whatever the width.
+    pub sidebar_off: bool,
     /// The person opened the sidebar over a narrow window.
     pub sidebar_forced: bool,
     pub dragging: bool,
@@ -764,6 +807,11 @@ pub struct Dent {
     pub row_born: HashMap<usize, (Instant, f32)>,
     /// The diff draws only the lines on screen.
     pub diff_list: ListState,
+    /// A text file's lines, and which file and version they're for.
+    pub text_list: ListState,
+    pub text_key: Option<(&'static str, usize)>,
+    /// The line a link pointed at in each text file.
+    pub marked_line: HashMap<&'static str, u32>,
     /// Side chat's place.
     pub aside_scroll: ScrollHandle,
     /// Each document's scroll, so each keeps its own place.
@@ -1197,6 +1245,10 @@ impl Dent {
             panel_w: 600.,
             chat_w: 800.,
             sidebar_hidden: false,
+            sidebar_off: {
+                crate::notify::SOUND.store(!prefs.quiet, std::sync::atomic::Ordering::Relaxed);
+                prefs.sidebar_off
+            },
             sidebar_forced: false,
             dragging: false,
             tabs: HashMap::new(),
@@ -1211,6 +1263,7 @@ impl Dent {
             attachments: Vec::new(),
             attached: HashMap::new(),
             dragging_files: None,
+            drag_at: None,
             diff_file: HashMap::new(),
             commenting: None,
             review: Vec::new(),
@@ -1220,6 +1273,9 @@ impl Dent {
             transcript_sigs: (None, Vec::new()),
             row_born: HashMap::new(),
             diff_list: ListState::new(0, ListAlignment::Top, px(400.)),
+            text_list: ListState::new(0, ListAlignment::Top, px(400.)),
+            text_key: None,
+            marked_line: HashMap::new(),
             aside_scroll: ScrollHandle::new(),
             doc_scrolls: HashMap::new(),
             diff_key: 0,
@@ -1429,6 +1485,28 @@ impl Dent {
     /// other document, page or picture opens as a tab of its own that
     /// follows the file on disk. With no session open, it opens in its app.
     pub fn open_file(&mut self, path: &str, cx: &mut Context<Self>) {
+        self.open_file_at(path, None, cx);
+    }
+
+    /// Show a file from a link, at `line` when it names one. A path that
+    /// isn't there says so; a folder opens in Finder.
+    pub fn open_file_at(&mut self, path: &str, line: Option<u32>, cx: &mut Context<Self>) {
+        let target = std::path::Path::new(path);
+        if !target.exists() {
+            // Named as the reply named it: from the session's folder.
+            let shown = self
+                .current()
+                .and_then(|s| target.strip_prefix(&s.cwd).ok())
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| crate::picker::tilde(path));
+            self.toast(ToastAction::Info, format!("Can't find {shown}"));
+            cx.notify();
+            return;
+        }
+        if target.is_dir() {
+            crate::open::open(path, cx);
+            return;
+        }
         let Some(s) = self.current().cloned() else {
             crate::open::open(path, cx);
             return;
@@ -1445,16 +1523,21 @@ impl Dent {
                     .is_some_and(|f| f == target)
             });
         if let Some(a) = known {
+            self.mark_line(a, line);
             self.open_art(a, None, cx);
             return;
         }
-        if crate::data::Kind::of(path).is_none() {
+        let shown = std::fs::read(path)
+            .ok()
+            .and_then(|b| crate::data::Kind::opened(path, &b));
+        if shown.is_none() {
             crate::open::open(path, cx);
             return;
         }
         match self.load_opened(&s.id, path) {
             Some(id) => {
                 self.save_prefs();
+                self.mark_line(id, line);
                 self.open_art(id, None, cx);
             }
             None => {
@@ -1466,8 +1549,8 @@ impl Dent {
 
     /// Read a file into a viewer tab of `session`'s; its id, if it could.
     fn load_opened(&mut self, session: &str, path: &str) -> Option<&'static str> {
-        let kind = crate::data::Kind::of(path)?;
         let bytes = std::fs::read(path).ok()?;
+        let kind = crate::data::Kind::opened(path, &bytes)?;
         let id = crate::data::intern(&format!("{session}/open/{path}"));
         let name = std::path::Path::new(path)
             .file_name()
@@ -1490,6 +1573,20 @@ impl Dent {
             list.push(id);
         }
         Some(id)
+    }
+
+    /// The line a link named in a text file: scrolled to and marked when
+    /// the file next shows. Other kinds ignore it.
+    fn mark_line(&mut self, art: &'static str, line: Option<u32>) {
+        match line {
+            Some(l) => {
+                self.marked_line.insert(art, l);
+                self.text_key = None;
+            }
+            None => {
+                self.marked_line.remove(art);
+            }
+        }
     }
 
     /// Whether the opened file showing in the viewer changed on disk.
@@ -1601,6 +1698,10 @@ impl Dent {
     // ---- Selecting and closing ----
 
     pub fn select(&mut self, id: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        // Looking at a session deals with what it notified you about.
+        if let Some(id) = &id {
+            crate::notify::clear(id);
+        }
         // Choosing the session already open only puts you in its reply box:
         // attachments, draft and place stay as they are.
         if id.is_some() && id == self.selected {
@@ -2677,7 +2778,25 @@ impl Dent {
     /// something is typed.
     pub fn palette_len(&self, cx: &App) -> usize {
         let typed = !self.search.read(cx).value().trim().is_empty();
-        self.palette_results(cx).len() + usize::from(typed)
+        self.palette_results(cx).len() + self.palette_files(cx).len() + usize::from(typed)
+    }
+
+    /// Files in the open session's project matching what's typed in ⌘K,
+    /// listed under the sessions; one opens in the viewer.
+    pub fn palette_files(&self, cx: &App) -> Vec<String> {
+        let q = self.search.read(cx).value().trim().to_string();
+        if q.is_empty() || q.contains(char::is_whitespace) {
+            return Vec::new();
+        }
+        let Some(list) = self.current().and_then(|s| self.files.get(&s.id)) else {
+            return Vec::new();
+        };
+        complete::files(list, &q)
+            .into_iter()
+            .map(|c| c.name)
+            .filter(|p| !p.ends_with('/'))
+            .take(6)
+            .collect()
     }
 
     /// Scroll to your previous or next message. Returns whether there was one.
@@ -3250,6 +3369,8 @@ impl Dent {
             effort: self.defaults.effort.clone(),
             panel_width: Some(self.panel_width),
             sidebar_width: Some(self.sidebar_w),
+            sidebar_off: self.sidebar_off,
+            quiet: !crate::notify::SOUND.load(std::sync::atomic::Ordering::Relaxed),
             appearance: self.appearance,
             pinned: self.pinned.clone(),
             open_with: crate::open::chosen(),
@@ -3431,7 +3552,7 @@ impl Dent {
         cx.notify();
     }
 
-    pub fn stop(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn stop(&mut self, id: &str, by: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(s) = self.session(id) else { return };
         if !s.running() {
             return;
@@ -3464,6 +3585,7 @@ impl Dent {
         // The header offers Resume once it has stopped.
         self.live.send(Request::Interrupt {
             session: id.to_string(),
+            by: Some(by.to_string()),
         });
         cx.notify();
     }
@@ -4033,26 +4155,40 @@ impl Dent {
         cx.notify();
     }
 
-    /// Dragged files let go: on your terminal they're typed as paths, as
-    /// in any terminal; anywhere else they ride along with the message.
-    pub fn drop_files(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(paths) = self.dragging_files.take() else {
-            return;
-        };
+    /// Whether `at` is over the terminal drawn this frame.
+    fn over_shell(&self, at: Point<Pixels>) -> bool {
         let frame = crate::ui::FRAME.load(std::sync::atomic::Ordering::Relaxed);
-        let on_shell = crate::ui::PROBE_FRAME
+        crate::ui::PROBE_FRAME
             .with(|f| f.borrow().get("shell").copied())
             .is_some_and(|f| f + 1 >= frame)
             && self
                 .probes
                 .borrow()
                 .get("shell")
-                .is_some_and(|b| b.contains(&at));
+                .is_some_and(|b| b.contains(&at))
+    }
+
+    /// Where files being dragged would go if let go now: the terminal under
+    /// the pointer, else the message. Only that one says so.
+    pub fn drop_target(&self, cx: &App) -> Option<DropTarget> {
+        cx.has_active_drag().then(|| match self.drag_at {
+            Some(at) if self.over_shell(at) => DropTarget::Shell,
+            _ => DropTarget::Message,
+        })
+    }
+
+    /// Dragged files let go: on your terminal they're typed as paths, as
+    /// in any terminal; anywhere else they ride along with the message.
+    pub fn drop_files(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        self.drag_at = None;
+        let Some(paths) = self.dragging_files.take() else {
+            return;
+        };
         let shell = self
             .selected
             .as_ref()
             .and_then(|id| self.shells.get(id))
-            .filter(|_| on_shell);
+            .filter(|_| self.over_shell(at));
         match shell {
             Some(sh) => {
                 let typed: Vec<String> = paths
@@ -4906,9 +5042,32 @@ impl Dent {
     /// Open session `id` from the palette: the one clicked, wherever the
     /// results have moved since.
     pub fn palette_open(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.search.read(cx).value().trim().to_string();
         self.palette = None;
-        self.select(Some(id), window, cx);
+        self.open_at_match(id, &query, window, cx);
         cx.notify();
+    }
+
+    /// Open a session from search. Found inside the conversation rather than
+    /// its title, it opens at the first place it was said, with ⌘F holding
+    /// the words so the next match is a ↩ away.
+    fn open_at_match(
+        &mut self,
+        id: String,
+        query: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let inside = !query.is_empty()
+            && self
+                .session(&id)
+                .is_some_and(|s| self.search_snippet(s, cx).is_some());
+        self.select(Some(id), window, cx);
+        if inside {
+            let q = query.to_string();
+            self.find_input.update(cx, |f, cx| put(f, q, window, cx));
+            self.open_find(window, cx);
+        }
     }
 
     pub fn palette_open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4916,14 +5075,26 @@ impl Dent {
             return;
         }
         let results = self.palette_results(cx);
+        let files = self.palette_files(cx);
         let at = self.palette.unwrap_or(0);
         let query = self.search.read(cx).value().trim().to_string();
         self.palette = None;
-        if let Some(id) = results.get(at).cloned() {
+        if let Some(file) = at.checked_sub(results.len()).and_then(|j| files.get(j)) {
+            let full = self.current().map(|s| {
+                std::path::Path::new(&s.cwd)
+                    .join(file)
+                    .display()
+                    .to_string()
+            });
+            self.close_palette(window, cx);
+            if let Some(full) = full {
+                self.open_file(&full, cx);
+            }
+        } else if let Some(id) = results.get(at).cloned() {
             // A closed session opens to read, as from the sidebar; Reopen
             // is in its footer.
-            self.select(Some(id), window, cx);
-        } else if !query.is_empty() {
+            self.open_at_match(id, &query, window, cx);
+        } else if !query.is_empty() && at >= results.len() + files.len() {
             // The last row: start a session with what was typed.
             self.select(None, window, cx);
             self.starter.update(cx, |s, cx| {
@@ -4932,6 +5103,41 @@ impl Dent {
             });
         } else {
             self.close_palette(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Hide the sidebar, or bring it back: hidden by hand it stays hidden;
+    /// brought back, the viewer closes to make room, as the header's
+    /// sidebar button does.
+    pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar_hidden {
+            self.sidebar_off = false;
+            self.sidebar_forced = true;
+            // Short of room, the viewer gives way, so the chat keeps its width.
+            self.panel_open = false;
+        } else {
+            self.sidebar_off = true;
+            self.sidebar_forced = false;
+        }
+        self.save_prefs();
+        cx.notify();
+    }
+
+    /// Page Up, Page Down, Home and End in the chat.
+    pub fn scroll_chat(&mut self, by: ChatScroll, cx: &mut Context<Self>) {
+        let page = (self.window_h - crate::ds::size::HEADER - 160.).max(120.) * 0.9;
+        match by {
+            ChatScroll::Up => {
+                self.transcript.set_follow_mode(FollowMode::Normal);
+                self.transcript.scroll_by(px(-page));
+            }
+            ChatScroll::Down => self.transcript.scroll_by(px(page)),
+            ChatScroll::Top => {
+                self.transcript.set_follow_mode(FollowMode::Normal);
+                self.transcript.scroll_to(ListOffset::default());
+            }
+            ChatScroll::Bottom => self.follow(),
         }
         cx.notify();
     }
@@ -5151,4 +5357,20 @@ pub struct LiveWords {
     next: Option<(String, Instant)>,
     /// The words shown are the plan's current step.
     step: bool,
+}
+
+/// Where dragged files would land.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DropTarget {
+    Message,
+    Shell,
+}
+
+/// Where the chat scrolls to by key.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChatScroll {
+    Up,
+    Down,
+    Top,
+    Bottom,
 }

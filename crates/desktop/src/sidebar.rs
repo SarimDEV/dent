@@ -456,6 +456,7 @@ impl Dent {
             )
             .on_mouse_down(MouseButton::Right, {
                 let (sid, cwd, closed) = (s.id.clone(), s.cwd.clone(), s.closed);
+                let resume = s.resume_command();
                 cx.listener(move |this, e: &MouseDownEvent, _, cx| {
                     use crate::context::Do;
                     let mut items = vec![
@@ -478,6 +479,10 @@ impl Dent {
                         items.push(("", Do::Separator));
                         items.push(("Copy folder path", Do::CopyPath(cwd.clone())));
                         items.push(("Show folder in Finder", Do::Reveal(cwd.clone())));
+                    }
+                    // Carry it on in a terminal of your own.
+                    if let Some(cmd) = &resume {
+                        items.push(("Copy Resume Command", Do::Copy(cmd.clone())));
                     }
                     this.open_context(e.position, items, cx);
                 })
