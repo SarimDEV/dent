@@ -27,6 +27,10 @@ pub enum Live {
         session: String,
         text: String,
         reset: bool,
+        /// Counts every change to the replies in progress, so a client
+        /// that took a snapshot ([`Daemon::partials`]) skips the deltas
+        /// already in it.
+        n: u64,
     },
     Activity {
         session: String,
@@ -53,7 +57,7 @@ pub struct Daemon {
     sessions: Mutex<HashMap<String, mpsc::UnboundedSender<Cmd>>>,
     holder: tokio::sync::Mutex<Option<Arc<Holder>>>,
     /// Each session's reply so far, for clients that subscribe mid-stream.
-    partials: Mutex<HashMap<String, String>>,
+    partials: Mutex<Partials>,
     models: Mutex<Vec<Model>>,
     /// The last usage reading and when it was taken.
     usage: tokio::sync::Mutex<Option<(Vec<dent_protocol::Window>, u64)>>,
@@ -64,6 +68,13 @@ pub struct Daemon {
     catalogs: Mutex<HashMap<String, crate::claude::commands::Catalog>>,
     /// What each session's agent is doing besides talking.
     activities: Mutex<HashMap<String, dent_protocol::Activity>>,
+}
+
+/// The replies streaming now, and how many changes they've had.
+#[derive(Default)]
+struct Partials {
+    text: HashMap<String, String>,
+    n: u64,
 }
 
 pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -98,7 +109,7 @@ impl Daemon {
             live,
             sessions: Mutex::new(HashMap::new()),
             holder: tokio::sync::Mutex::new(None),
-            partials: Mutex::new(HashMap::new()),
+            partials: Mutex::new(Partials::default()),
             models: Mutex::new(models),
             commands: Mutex::new(HashMap::new()),
             catalogs: Mutex::new(HashMap::new()),
@@ -111,40 +122,55 @@ impl Daemon {
         lock(&self.store)
     }
 
-    /// Write an event and tell every client.
+    /// Write an event and tell every client. The log stays locked until
+    /// the event is on the live feed, so the feed carries events in `seq`
+    /// order: a subscriber skips anything at or below the last seq it
+    /// sent, and an event overtaken by a later one would be lost to it.
     pub fn append(&self, session: &str, body: Body, src: Option<Source<'_>>) -> Result<Event> {
-        let ev = self.store().append(session, now_ms(), &body, src)?;
+        let mut store = self.store();
+        let ev = store.append(session, now_ms(), &body, src)?;
         if matches!(ev.body, Body::Assistant { parent: None, .. }) {
-            lock(&self.partials).remove(session);
+            let mut p = lock(&self.partials);
+            if p.text.remove(session).is_some() {
+                p.n += 1;
+            }
         }
         let _ = self.live.send(Arc::new(Live::Event(ev.clone())));
+        drop(store);
         Ok(ev)
     }
 
     pub fn delta(&self, session: &str, text: &str, reset: bool) {
-        {
-            let mut p = lock(&self.partials);
-            let s = p.entry(session.into()).or_default();
-            if reset {
-                s.clear();
-            }
-            s.push_str(text);
+        // Changed and sent under one lock, so a snapshot's count says
+        // exactly which deltas it holds.
+        let mut p = lock(&self.partials);
+        p.n += 1;
+        let n = p.n;
+        let s = p.text.entry(session.into()).or_default();
+        if reset {
+            s.clear();
         }
+        s.push_str(text);
         let _ = self.live.send(Arc::new(Live::Delta {
             session: session.into(),
             text: text.into(),
             reset,
+            n,
         }));
     }
 
     /// A reply was replaced by its final message, or cut off: clients drop
     /// what streamed so far.
     pub fn clear_partial(&self, session: &str) {
-        if lock(&self.partials).remove(session).is_some() {
+        let mut p = lock(&self.partials);
+        if p.text.remove(session).is_some() {
+            p.n += 1;
+            let n = p.n;
             let _ = self.live.send(Arc::new(Live::Delta {
                 session: session.into(),
                 text: String::new(),
                 reset: true,
+                n,
             }));
         }
     }
@@ -152,17 +178,23 @@ impl Daemon {
     /// What has streamed of the reply in progress.
     pub fn partial(&self, session: &str) -> Option<String> {
         lock(&self.partials)
+            .text
             .get(session)
             .filter(|t| !t.trim().is_empty())
             .cloned()
     }
 
-    pub fn partials(&self) -> Vec<(String, String)> {
-        lock(&self.partials)
+    /// Every reply in progress, and the count of the last delta they
+    /// hold: deltas numbered up to it are already in the snapshot.
+    pub fn partials(&self) -> (Vec<(String, String)>, u64) {
+        let p = lock(&self.partials);
+        let text = p
+            .text
             .iter()
             .filter(|(_, t)| !t.is_empty())
             .map(|(s, t)| (s.clone(), t.clone()))
-            .collect()
+            .collect();
+        (text, p.n)
     }
 
     pub fn models(&self) -> Vec<Model> {

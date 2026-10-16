@@ -475,6 +475,10 @@ async fn subscribe(
     mut rx: broadcast::Receiver<Arc<Live>>,
     tx: mpsc::UnboundedSender<Vec<u8>>,
 ) {
+    // Sessions this client holds a streaming reply for, and the count of
+    // the last delta its snapshot held.
+    let mut streaming = std::collections::HashSet::new();
+    let mut snapshot: u64;
     loop {
         loop {
             let batch = match d.store().after(after, BATCH_BYTES) {
@@ -498,7 +502,26 @@ async fn subscribe(
         if tx.send(encode(0, &Out::CaughtUp { seq: after })).is_err() {
             return;
         }
-        for (session, text) in d.partials() {
+        // The replies streaming now, whole. Deltas already queued for this
+        // client are in the snapshot, so they're skipped by number; after
+        // a lag, a reply that ended while this client wasn't listening is
+        // dropped.
+        let (now, n) = d.partials();
+        for session in std::mem::take(&mut streaming) {
+            if !now.iter().any(|(s, _)| *s == session) {
+                let _ = tx.send(encode(
+                    0,
+                    &Out::Delta {
+                        session,
+                        text: String::new(),
+                        reset: true,
+                    },
+                ));
+            }
+        }
+        snapshot = n;
+        for (session, text) in now {
+            streaming.insert(session.clone());
             let _ = tx.send(encode(
                 0,
                 &Out::Delta {
@@ -531,15 +554,24 @@ async fn subscribe(
                         Live::Models(models) => Out::Models {
                             models: models.clone(),
                         },
+                        Live::Delta { n, .. } if *n <= snapshot => continue,
                         Live::Delta {
                             session,
                             text,
                             reset,
-                        } => Out::Delta {
-                            session: session.clone(),
-                            text: text.clone(),
-                            reset: *reset,
-                        },
+                            ..
+                        } => {
+                            if *reset && text.is_empty() {
+                                streaming.remove(session);
+                            } else {
+                                streaming.insert(session.clone());
+                            }
+                            Out::Delta {
+                                session: session.clone(),
+                                text: text.clone(),
+                                reset: *reset,
+                            }
+                        }
                         Live::Activity { session, activity } => Out::Activity {
                             session: session.clone(),
                             activity: activity.clone(),

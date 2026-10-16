@@ -1473,3 +1473,37 @@ fn commands_compaction_retries_and_dialogs_arrive_by_kind() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn clients_joining_mid_reply_see_it_once_and_events_never_skip() {
+    let w = World::new(&[]);
+    let mut c = w.client();
+    c.subscribe(0);
+    // Two sessions writing at once: the feed still carries every seq, in
+    // order.
+    let a = c.create(&w.cwd(), Permission::Ask, "a long answer please");
+    let b = c.create(&w.cwd(), Permission::Ask, "another long answer please");
+    c.wait(&a, "the turn to start", |x| matches!(x, Body::TurnStarted));
+    // Clients joining while the reply streams get what streamed so far
+    // once, then the rest.
+    let mut late: Vec<Client> = (0..6)
+        .map(|_| {
+            std::thread::sleep(Duration::from_millis(15));
+            let mut l = w.client();
+            l.subscribe(0);
+            l
+        })
+        .collect();
+    c.wait_turns(&a, 1);
+    c.wait_turns(&b, 1);
+    let want = c.text(&a);
+    for l in &mut late {
+        l.wait_turns(&a, 1);
+        assert_eq!(l.partial.get(&a).cloned().unwrap_or_default(), want);
+    }
+    let seqs: Vec<u64> = c.events.lock().unwrap().iter().map(|e| e.seq).collect();
+    assert!(
+        seqs.windows(2).all(|p| p[1] == p[0] + 1),
+        "gaps in {seqs:?}"
+    );
+}
