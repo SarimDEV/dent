@@ -950,13 +950,13 @@ fn main() {
         })
         .expect("open window");
         // Look in eight times a second, but only draw when something on
-        // screen changes: a working square's step, a timer's second, a
-        // page's message.
+        // screen changes: a timer's second, a page's message. (A working
+        // square asks for every frame itself, through `animating`.)
         let weak = view.downgrade();
         cx.spawn(async move |cx| {
             loop {
                 cx.background_executor()
-                    .timer(Duration::from_secs_f32(1. / ds::motion::PIXEL_FPS))
+                    .timer(Duration::from_secs_f32(1. / ds::motion::LOOK_FPS))
                     .await;
                 let Ok(due) = weak.update(cx, |this, _| this.tick_due()) else {
                     break;

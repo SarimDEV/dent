@@ -22,6 +22,10 @@ Status: accepted (2026-10-15) · Spec: [desktop.md](../desktop.md), [chat-render
 
 Set beside another agent app on the same turn, dent read as busy while it was the calmer design: shell incantations in grey on every other row, every paragraph of narration at the answer's weight, lines of about 100 characters, and an even 8 pt rhythm that never grouped anything. The words were the same; the presentation made them louder. These changes make the work recede and keep dent's own voice (serif reading column, pixel squares, Field Notes inks) for the answer.
 
+## Later notes
+
+- 16 Oct 2026: the working square no longer steps a checker at 8 fps; it is a small rounded square that breathes smoothly, every frame while it shows, and it sits inside the reply column instead of hanging in the gutter, so the working line shares the reply's left edge. The owner found the stepped, hung square out of place.
+
 ## Consequences
 
 - Tool lines depend on the agent describing its commands; the session prompt asks for it, and the fallback is a plain "Ran a command".

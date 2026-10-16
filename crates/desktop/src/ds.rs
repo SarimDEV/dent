@@ -56,8 +56,12 @@ pub mod motion {
     pub const THEME: f32 = 200.;
     pub const STAGGER: f32 = 30.;
     pub const STAGGER_CAP: f32 = 150.;
-    /// The working square is deliberately stepped, like pixel animation.
-    pub const PIXEL_FPS: f32 = 8.;
+    /// How often (per second) the window looks for something to draw:
+    /// a timer's second, a toast ending.
+    pub const LOOK_FPS: f32 = 8.;
+    /// One breath of the working square (ms), eased in and out, drawn
+    /// every frame while a working session shows.
+    pub const WORKING: f32 = 1600.;
     /// Arrive rises this far (px); chrome moves half as far.
     pub const RISE: f32 = 6.;
     pub const NUDGE: f32 = 4.;

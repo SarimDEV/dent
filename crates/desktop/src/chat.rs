@@ -756,8 +756,20 @@ impl Dent {
                 // drawn or not.
                 let _place =
                     crate::select::item(crate::select::area(&format!("chat/{}", s.id)), ix);
+                // The working line sits under the reply being written, above
+                // any messages queued after it, so they never read as the
+                // thing being written.
+                let host = working_host(&s);
                 let body = match s.items.get(ix) {
+                    Some(item) if host == Some(ix) => div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(space::S4))
+                        .child(this.working_line(&s))
+                        .child(this.item(&s, ix, item, window, cx))
+                        .into_any_element(),
                     Some(item) => this.item(&s, ix, item, window, cx),
+                    None if host.is_some() => div().into_any_element(),
                     None => this.working_line(&s),
                 };
                 // While "Edit from here" asks, what would go fades.
@@ -802,7 +814,9 @@ impl Dent {
                             .when_some(arrive, |d, k| {
                                 d.relative().top(px((1. - k) * motion::RISE)).opacity(k)
                             })
-                            .pb(px(if ix + 1 == count {
+                            .pb(px(if ix + 1 == count && host.is_some() {
+                                0.
+                            } else if ix + 1 == count || (host.is_some() && ix + 2 == count) {
                                 space::S8
                             } else if marker || folded_change(&s.items, ix) {
                                 0.
@@ -834,6 +848,8 @@ impl Dent {
                                     .unwrap_or_default()
                                     .iter()
                                     .find(|i| !matches!(i, Item::TurnEnd { .. }));
+                                // The working line leads the queued run.
+                                let next = if host == Some(ix + 1) { None } else { next };
                                 match (work(s.items.get(ix)), work(next)) {
                                     (true, true) => space::HALF,
                                     (false, true) => space::S3,
@@ -999,8 +1015,9 @@ impl Dent {
     }
 
     /// The last line while the agent works: what it's doing, and for how
-    /// long. The square hangs in the gutter so the words line up with the
-    /// reply; the words breathe once it's been a while, and each change of
+    /// long. The square sits inside the column, on the reply's left edge
+    /// like everything else in the chat; the words breathe once it's been
+    /// a while, and each change of
     /// words hands over in place: the old rise out, the new rise in.
     fn working_line(&self, s: &Session) -> AnyElement {
         let t = self.t;
@@ -1062,8 +1079,8 @@ impl Dent {
         div()
             .flex()
             .items_center()
+            // Its words start where a note's do.
             .gap(px(space::S2))
-            .ml(px(-(size::SQUARE + space::S2)))
             .ty(UI)
             .text_color(t.quiet)
             .child(status_square(
@@ -4341,6 +4358,21 @@ fn sent_attachment(
                 .child(div().ty(LABEL).text_color(t.quiet).child(place.to_string()))
                 .child(div().text_color(t.ink).child(what.to_string())),
         )
+}
+
+/// The queued message the working line sits above, while a session works
+/// with messages waiting: the first of the queued run at the end.
+pub fn working_host(s: &Session) -> Option<usize> {
+    if s.status != Status::Working {
+        return None;
+    }
+    let tail = s
+        .items
+        .iter()
+        .rev()
+        .take_while(|i| matches!(i, Item::Queued { .. }))
+        .count();
+    (tail > 0).then(|| s.items.len() - tail)
 }
 
 /// What keeps a plan card opened in full.

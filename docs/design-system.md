@@ -141,7 +141,7 @@ Shadows are drawn once per floating layer, never animated, never stacked on scro
 | `spring.snappy` | 0.25 s, no bounce | Interruptible values: title compaction, selection |
 | `spring.pop` | 0.3 s, bounce 0.2 | A completion mark, once |
 | `stagger` | 30 ms per item, 150 ms cap | Several things arriving together |
-| `steps.pixel` | 8 fps | Pixel animation (the working square) is deliberately stepped |
+| `dur.working` | 1.6 s | One breath of the working square, eased in and out, drawn every frame |
 
 - Exits are quicker than enters. Never ease-in.
 - Distances are small: 4 px for chrome, 6 px for a message. Presses read as 0.97, never smaller.
@@ -166,7 +166,7 @@ Each motion has one name and one job.
 | **Progress** | A hairline fill under a running tool line moves linearly towards 90% of its expected time and holds; a timer counts up | Running tools |
 | **Lift** | A picture zooms from where it sits to the middle of the window (`dur.slow` + 40 ms, `ease.out`) as the backdrop fades dark a little ahead of it; it zooms back in `dur.base`, the backdrop clearing first | Opening a picture large |
 | **Compact** | The serif title eases from 28 to 20 on `spring.snappy`; the live pill arrives with a 4 px slide | Reading history |
-| **Drift** | The working square's checker shifts one cell, stepped at `steps.pixel` | Working status |
+| **Drift** | The working square, a small rounded square, breathes from its paler partner to the full signal and back over `dur.working` (and grows a touch), smoothly at the display's frame rate; every working square shares one clock | Working status |
 | **Hand-over** | The working line's words stay up at least 650 ms (2 s for a step) and change only once the new words have held 250 ms; the old rise 3 px out, the new rise 3 px in, `dur.base` in all | Working line |
 | **Breathe** | After 3 s of work the working line's words ease between full and 60% opacity over 2 s | Working line |
 | **Press** | See States | Buttons, rows |
@@ -185,7 +185,7 @@ With the system's reduce-motion setting on (read at launch and whenever the wind
 
 - Allowed per frame: opacity, offsets, colours, flat quads, and remeasuring at most the one row that is changing.
 - The dither is a grid of flat quads, so it is for small surfaces only. Across a whole window it measured far over budget, which is why the theme switch is a colour tween.
-- Only the working line repaints a quiet window (its square's drift, its words' breath and hand-over), and only while a session is working and visible. The one exception is an ambient background you chose for the new-session page, which redraws every frame while that page is visible ([0049](decisions/0049-ambient-backgrounds.md)).
+- Only the working line repaints a quiet window (its square's drift, its words' breath and hand-over; the working squares in the sidebar and plan card too), and only while a session is working and visible. The one exception is an ambient background you chose for the new-session page, which redraws every frame while that page is visible ([0049](decisions/0049-ambient-backgrounds.md)).
 - Every new motion is measured with the frame-timing bench before it lands (Reliability requirements).
 
 ## Lists of things you act on

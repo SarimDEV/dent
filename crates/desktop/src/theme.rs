@@ -288,6 +288,11 @@ pub fn serif() -> &'static str {
 
 /// A 12px status square, drawn as a 4×4 pixel pattern so status never relies
 /// on colour alone (the same patterns as the phone): needs you = solid,
+/// done = a corner step, waiting = dots, idle = an outline. Working is the
+/// one that moves: a small rounded square that breathes smoothly between
+/// its paler partner and the signal, every frame while it shows.
+/// A 12px status square, drawn as a 4×4 pixel pattern so status never relies
+/// on colour alone (the same patterns as the phone): needs you = solid,
 /// done = a corner step, working = a checker that drifts at 8 fps, waiting =
 /// dots, idle = an outline.
 pub fn status_square(status: Status, t: &Theme) -> Div {
@@ -299,14 +304,37 @@ pub fn status_square(status: Status, t: &Theme) -> Div {
 pub fn status_square_at(status: Status, t: &Theme, scale: f32) -> Div {
     let (signal, partner) = t.signal(status);
     let s = crate::ds::size::SQUARE * scale;
-    let phase = if status == Status::Working && !crate::reduce_motion() {
-        crate::PROCESS_START
-            .get()
-            .map(|p| (p.elapsed().as_secs_f32() * crate::ds::motion::PIXEL_FPS) as usize)
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    if status == Status::Working {
+        // One shared clock, so every working square breathes together.
+        let k = if crate::reduce_motion() {
+            1.
+        } else {
+            let secs = crate::PROCESS_START
+                .get()
+                .map(|p| p.elapsed().as_secs_f32())
+                .unwrap_or(0.);
+            breath(secs)
+        };
+        let inner = s * 0.84 * (0.9 + 0.1 * k);
+        return div()
+            .size(px(crate::ds::size::SQUARE))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .size(px(inner))
+                    .rounded(px(inner * 0.28))
+                    .bg(partner)
+                    .child(
+                        div()
+                            .size_full()
+                            .rounded(px(inner * 0.28))
+                            .bg(signal.opacity(0.3 + 0.7 * k)),
+                    ),
+            );
+    }
     let mark = div()
         .size(px(s))
         .flex()
@@ -316,19 +344,12 @@ pub fn status_square_at(status: Status, t: &Theme, scale: f32) -> Div {
                 let on = match status {
                     Status::Needs => true,
                     Status::Done => x <= y,
-                    Status::Working => (x + y + phase).is_multiple_of(2),
+                    Status::Working => true,
                     Status::Waiting => x.is_multiple_of(2) && y.is_multiple_of(2),
                     Status::Idle => x == 0 || y == 0 || x == 3 || y == 3,
                 };
                 let cell = div().size(px(s / 4.));
-                if on {
-                    cell.bg(signal)
-                } else if status == Status::Working {
-                    // The working checker dithers against its paler partner.
-                    cell.bg(partner)
-                } else {
-                    cell
-                }
+                if on { cell.bg(signal) } else { cell }
             }))
         }));
     div()
@@ -338,4 +359,11 @@ pub fn status_square_at(status: Status, t: &Theme, scale: f32) -> Div {
         .items_center()
         .justify_center()
         .child(mark)
+}
+
+/// The working square's breath at `secs`: 0 (its paler partner) to 1 (the
+/// full signal) and back over `motion::WORKING`, eased in and out.
+pub fn breath(secs: f32) -> f32 {
+    let p = secs * 1000. / crate::ds::motion::WORKING;
+    0.5 - 0.5 * (p * std::f32::consts::TAU).cos()
 }

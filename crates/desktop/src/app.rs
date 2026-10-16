@@ -5214,6 +5214,12 @@ impl Dent {
             })
             .chain((s.status == Status::Working).then_some(u64::MAX))
             .collect();
+        // The first queued message carries the working line above it, so
+        // its height changes with the working state.
+        let mut sigs = sigs;
+        if let Some(q) = crate::chat::working_host(s) {
+            sigs[q] ^= 0x9e37_79b9_7f4a_7c15;
+        }
         let (id, old) = &self.transcript_sigs;
         if id.as_deref() != Some(s.id.as_str()) {
             // Leaving a session remembers where you were reading it.
@@ -5812,20 +5818,15 @@ impl Dent {
         let copied = self
             .copied_at
             .is_some_and(|at| (1.5..1.7).contains(&at.elapsed().as_secs_f32()));
-        let working_shown = self.sessions.iter().any(|s| {
-            !s.closed
-                && s.status == Status::Working
-                && (!self.sidebar_hidden || self.selected.as_deref() == Some(s.id.as_str()))
-        });
-        // Squares step at 8 fps; with Reduce Motion they hold still and only
-        // the timers move, once a second.
+        let working_shown = self.working_shown();
+        // Working squares draw every frame through `animating`; with Reduce
+        // Motion they hold still and only the timers move, once a second.
         let second = crate::PROCESS_START
             .get()
             .map(|p| p.elapsed().as_secs())
             .unwrap_or(0);
         let new_second = second != self.last_second;
         self.last_second = second;
-        let squares = working_shown && !crate::reduce_motion();
         // A walkthrough wakes when an idle stretch it's measuring ends.
         let rest_over = self
             .walk
@@ -5839,18 +5840,28 @@ impl Dent {
         let due = page
             || toast_expired
             || copied
-            || squares
             || (working_shown && new_second)
             || new_minute
             || disk
             || rest_over;
         if due && self.walk.as_ref().is_some_and(|w| w.resting.is_some()) {
             eprintln!(
-                "      tick: page={page} toast={toast_expired} copied={copied} squares={squares} second={}",
+                "      tick: page={page} toast={toast_expired} copied={copied} second={}",
                 working_shown && new_second
             );
         }
         due
+    }
+
+    /// Whether a working session's square is on screen: in the sidebar,
+    /// or the open session (its working line and plan) when the sidebar is
+    /// hidden.
+    fn working_shown(&self) -> bool {
+        self.sessions.iter().any(|s| {
+            !s.closed
+                && s.status == Status::Working
+                && (!self.sidebar_hidden || self.selected.as_deref() == Some(s.id.as_str()))
+        })
     }
 
     pub fn animating(&self) -> bool {
@@ -5864,7 +5875,11 @@ impl Dent {
                 at.elapsed() < Duration::from_millis(crate::ds::motion::BASE as u64 + 40)
             })
         });
+        // A working square breathes every frame, smoothly, but only while
+        // one shows: an idle window still draws nothing.
+        let breathing = !crate::reduce_motion() && self.working_shown();
         streaming
+            || breathing
             || !self.row_born.is_empty()
             || fresh(&self.finished_at)
             || fresh(&self.arrived_at)
