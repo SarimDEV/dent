@@ -1804,7 +1804,14 @@ impl Dent {
                                 .px(px(space::S3))
                                 .py(px(space::S2))
                                 .rounded(px(radius::SM))
-                                .bg(t.raised)
+                                // Raised off the card in both themes: on
+                                // Carbon the magenta wash is about as light
+                                // as a raised fill, so it lifts a step more.
+                                .bg(if t.dark {
+                                    theme::mix_pub(t.raised, t.ink, 0.08)
+                                } else {
+                                    t.raised
+                                })
                                 .border_1()
                                 .border_color(t.hairline)
                                 .ty(CODE)
