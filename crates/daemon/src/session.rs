@@ -844,6 +844,20 @@ impl Session {
         else {
             bail!("no such message");
         };
+        // Already back there, with nothing said since (a resend after a
+        // reconnect or a restart): going again would only put back files
+        // changed by hand since.
+        let last = events.iter().rev().find_map(|e| match &e.body {
+            Body::Rewound { to, files } => Some(Some((to, *files))),
+            Body::User { .. } => Some(None),
+            _ => None,
+        });
+        if let Some(Some((was, had))) = last
+            && *was == to
+            && (had || !files)
+        {
+            return Ok(());
+        }
         if files {
             let commit = events.iter().find_map(|e| match &e.body {
                 Body::Checkpoint { id, commit } if *id == to => Some(commit.clone()),

@@ -1156,6 +1156,7 @@ fn a_fork_copies_the_conversation_and_resumes_it_as_a_new_agent_session() {
 
     // Everything so far.
     let f = match c.call(Request::Fork {
+        id: None,
         session: s.clone(),
         before: None,
     }) {
@@ -1180,6 +1181,7 @@ fn a_fork_copies_the_conversation_and_resumes_it_as_a_new_agent_session() {
 
     // Up to just before the second message.
     let g = match c.call(Request::Fork {
+        id: None,
         session: s.clone(),
         before: Some("two".into()),
     }) {
@@ -1569,14 +1571,21 @@ fn always_allow_for_the_project_survives_a_daemon_restart() {
 
 #[test]
 fn background_work_outlives_a_setting_change_and_ends_with_its_agent() {
-    let w = World::new(&[]);
+    // Slow enough (1.5 s of background work) to act while it runs.
+    let w = World::new(&[("FAKE_CLAUDE_SPEED", "1")]);
     let mut c = w.client();
     c.subscribe(0);
+    let background = |b: &Body| {
+        matches!(
+            b,
+            Body::Status {
+                status: Status::Background
+            }
+        )
+    };
     // Changing effort waits for the background work instead of stopping it.
     let s = c.create(&w.cwd(), Permission::Full, "start the background job");
-    c.wait_turns(&s, 1);
-    c.pump(Duration::from_millis(30));
-    assert_eq!(c.status(&s), Some(Status::Background));
+    c.wait(&s, "the background work", background);
     c.call(Request::SetEffort {
         session: s.clone(),
         effort: "max".into(),
@@ -1587,18 +1596,20 @@ fn background_work_outlives_a_setting_change_and_ends_with_its_agent() {
     c.pump(Duration::from_millis(100));
     assert_eq!(c.status(&s), Some(Status::Done));
 
-    // When the agent goes, so does its background work.
-    let t = c.create(&w.cwd(), Permission::Full, "start the background job");
-    c.wait_turns(&t, 1);
-    c.pump(Duration::from_millis(30));
-    assert_eq!(c.status(&t), Some(Status::Background));
-    let pid = w.holder_pid().expect("holder running");
-    // SAFETY: kill has no memory preconditions.
-    unsafe { libc::kill(pid, libc::SIGKILL) };
+    // When the agent goes (here for a rewind), so does its background work.
+    // (Its own first message: the same id would be the same session.)
+    let t = c.create(&w.cwd(), Permission::Full, "start another background job");
+    c.wait(&t, "the background work", background);
+    c.call(Request::Rewind {
+        session: t.clone(),
+        to: "m-start another background job".into(),
+        files: false,
+    })
+    .unwrap();
     c.wait(
         &t,
         "the work to be let go",
-        |b| matches!(b, Body::Background { tasks } if tasks.is_empty()),
+        |b| matches!(b, Body::Notice { text } if text.starts_with("Background work stopped")),
     );
     let until = Instant::now() + Duration::from_secs(10);
     while c.status(&t) == Some(Status::Background) && Instant::now() < until {
@@ -1715,4 +1726,75 @@ fn a_stop_or_a_stuck_start_is_seen_through_across_a_daemon_restart() {
         matches!(b, Body::TurnEnded { outcome: Outcome::Error { message } }
             if message.starts_with("Claude Code didn't start"))
     });
+}
+
+#[test]
+fn resent_creates_forks_and_rewinds_happen_once() {
+    let mut w = World::new(&[]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let create = Request::Create {
+        cwd: w.cwd(),
+        model: None,
+        permission: Permission::Edits,
+        effort: None,
+        id: "first".into(),
+        text: "hi".into(),
+        attachments: Vec::new(),
+    };
+    let made = |o: Result<Out, String>| match o {
+        Ok(Out::Reply {
+            reply: dent_protocol::Reply::Created { session },
+        }) => session,
+        other => panic!("{other:?}"),
+    };
+    let s = made(c.call(create.clone()));
+    c.wait_turns(&s, 1);
+    c.say(&s, "second", "write notes.md please", false);
+    c.wait_turns(&s, 2);
+    let fork = Request::Fork {
+        session: s.clone(),
+        before: None,
+        id: Some("f1".into()),
+    };
+    let f = made(c.call(fork.clone()));
+    // A restart in between: the same requests again.
+    drop(c);
+    w.kill();
+    w.start();
+    let mut c = w.client();
+    c.subscribe(0);
+    assert_eq!(made(c.call(create)), s);
+    assert_eq!(made(c.call(fork)), f);
+    c.pump(Duration::from_millis(300));
+    assert_eq!(c.count(&s, |b| matches!(b, Body::Created { .. })), 1);
+    assert_eq!(
+        c.count(&s, |b| matches!(b, Body::User { id, .. } if id == "first")),
+        1
+    );
+    let sessions = c
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e.body, Body::Created { .. }))
+        .count();
+    assert_eq!(sessions, 2);
+
+    // Rewound once, files and all; a file changed by hand since stays.
+    let rewind = Request::Rewind {
+        session: s.clone(),
+        to: "second".into(),
+        files: true,
+    };
+    c.call(rewind.clone()).unwrap();
+    assert!(!w.project.join("notes.md").exists());
+    std::fs::write(w.project.join("README.md"), "mine\n").unwrap();
+    c.call(rewind).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(w.project.join("README.md")).unwrap(),
+        "mine\n"
+    );
+    c.pump(Duration::from_millis(100));
+    assert_eq!(c.count(&s, |b| matches!(b, Body::Rewound { .. })), 1);
 }
