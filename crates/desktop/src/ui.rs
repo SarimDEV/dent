@@ -419,6 +419,7 @@ pub fn floating(t: &Theme) -> Div {
 }
 
 /// One row of a menu: a check for the current choice, a name, a quiet note.
+#[allow(clippy::too_many_arguments)]
 pub fn menu_row(
     probes: &Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
     id: impl Into<SharedString>,

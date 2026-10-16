@@ -374,6 +374,7 @@ impl Menu {
     }
 
     /// Menus from a chip at the row's end line up with its right edge.
+    #[allow(clippy::wrong_self_convention)] // reads as "opens from the end"
     pub fn from_end(self) -> bool {
         self == Menu::Pickup
     }

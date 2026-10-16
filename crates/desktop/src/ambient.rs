@@ -68,9 +68,23 @@ pub struct State {
     runner: Option<Runner>,
     last: Option<Instant>,
     feed: Feed,
+    cost: Cost,
+}
+
+/// What the background has cost the main thread since it was last read:
+/// frames painted, and time spent ticking, building and painting them.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct Cost {
+    pub frames: u32,
+    pub busy: Duration,
 }
 
 impl State {
+    /// The cost so far, and start counting afresh.
+    pub fn take_cost(&mut self) -> Cost {
+        std::mem::take(&mut self.cost)
+    }
+
     /// A key was typed in the new-session box.
     pub fn key(&mut self) {
         if let Some(r) = &mut self.runner {
@@ -113,13 +127,26 @@ pub fn wants_frames(d: &Dent) -> bool {
             .is_some_and(|r| r.failed())
 }
 
+/// `DENT_AMBIENT_DEMO=1` feeds the stand-in (a busy afternoon) instead of
+/// live state, for demos and recordings.
+fn demo() -> bool {
+    static DEMO: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DEMO.get_or_init(|| std::env::var_os("DENT_AMBIENT_DEMO").is_some())
+}
+
 /// The background as a layer behind the new-session page, or nothing.
 pub fn layer(d: &Dent) -> Option<AnyElement> {
     chosen()?;
-    let signals = d.ambient.borrow_mut().feed.collect(d);
+    let signals = if demo() {
+        Signals::default()
+    } else {
+        d.ambient.borrow_mut().feed.collect(d)
+    };
     let state = d.ambient.clone();
     let painter = d.ambient.clone();
     let probes = d.probes.clone();
+    let veils = d.probes.clone();
+    let surface = d.t.surface;
     let pal = palette(&d.t);
     let still = crate::reduce_motion();
     Some(
@@ -127,6 +154,7 @@ pub fn layer(d: &Dent) -> Option<AnyElement> {
             move |bounds, window, _| {
                 let mut s = state.borrow_mut();
                 let now = Instant::now();
+                let start = now;
                 // Back after a while away: start afresh rather than resume,
                 // which also keeps the background's clock small and precise.
                 if s.last.is_some_and(|last| now - last > AWAY) {
@@ -157,14 +185,28 @@ pub fn layer(d: &Dent) -> Option<AnyElement> {
                     h: f32::from(bounds.size.height),
                 };
                 r.tick(dt, size, signals);
+                s.cost.busy += start.elapsed();
             },
             move |bounds, (), window, cx| {
+                let start = Instant::now();
                 let mut s = painter.borrow_mut();
                 let Some(r) = s.runner.as_mut() else { return };
                 let scene = r.draw(&pal);
                 window.with_content_mask(Some(ContentMask { bounds }), |window| {
                     paint(&scene.prims, bounds.origin, window, cx);
+                    let veiled: Vec<Bounds<Pixels>> = {
+                        let probes = veils.borrow();
+                        VEILED
+                            .iter()
+                            .filter_map(|n| probes.get(*n).copied())
+                            .collect()
+                    };
+                    for text in veiled {
+                        veil(window, text, surface);
+                    }
                 });
+                s.cost.busy += start.elapsed();
+                s.cost.frames += 1;
             },
         )
         .absolute()
@@ -175,32 +217,34 @@ pub fn layer(d: &Dent) -> Option<AnyElement> {
     )
 }
 
-/// A soft glow of the page colour behind text over the background, so it
-/// stays readable without a hard-edged box. `hug` sizes it to its content
-/// (a title); otherwise it keeps the width it would have had (rows you click).
-pub fn glow(t: &Theme, child: impl IntoElement, hug: bool) -> Div {
-    let pad = px(-18.);
-    div()
-        .relative()
-        .when(hug, |d| d.self_start())
-        .child(
-            div()
-                .absolute()
-                .top(pad)
-                .bottom(pad)
-                .left(pad)
-                .right(pad)
-                .rounded(px(28.))
-                .bg(t.surface.opacity(0.5))
-                .shadow(vec![BoxShadow {
-                    color: t.surface.opacity(0.75),
-                    offset: point(px(0.), px(0.)),
-                    blur_radius: px(36.),
-                    spread_radius: px(0.),
-                    inset: false,
-                }]),
-        )
-        .child(div().relative().child(child))
+/// The page's own text that floats over the background, by probe name. A
+/// veil is painted under each so the words stay readable.
+const VEILED: [&str; 2] = ["ambient-title", "ambient-chips"];
+
+/// A soft veil of the page colour under text: a blurred shadow cast from a
+/// zero-height line through the middle of the text. A drop shadow leaves its
+/// element's own area hollow, and a line has no area, so the veil is solid
+/// in the middle and fades out with no edge anywhere.
+fn veil(window: &mut Window, text: Bounds<Pixels>, surface: Hsla) {
+    let half = text.size.height / 2.;
+    let line = Bounds {
+        origin: point(text.origin.x, text.origin.y + half),
+        size: size(text.size.width, px(0.)),
+    };
+    // A blur narrower than the shape keeps the middle solid; the fade is
+    // about twice the blur wide, so it still has no visible edge.
+    let reach = half + px(20.);
+    window.paint_drop_shadows(
+        line,
+        Corners::all(reach),
+        &[BoxShadow {
+            color: surface.opacity(0.94),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(14.),
+            spread_radius: reach,
+            inset: false,
+        }],
+    );
 }
 
 /// The theme's tokens as the background's palette.
@@ -286,38 +330,25 @@ fn bbox(pts: &[[f32; 2]]) -> ([f32; 2], [f32; 2]) {
 /// (just past a `ClipEnd`, or the end).
 fn paint(prims: &[Prim], o: Point<Pixels>, window: &mut Window, cx: &mut App) -> usize {
     let at = |x: f32, y: f32| point(o.x + px(x), o.y + px(y));
+    let is_quads = |p: &Prim| matches!(p, Prim::Rect { .. } | Prim::Dots { .. });
     let mut i = 0;
     while i < prims.len() {
-        match &prims[i] {
-            Prim::Rect {
-                x,
-                y,
-                w,
-                h,
-                paint: p,
-            } => {
-                let b = Bounds {
-                    origin: at(*x, *y),
-                    size: size(px(*w), px(*h)),
-                };
-                window.paint_quad(fill(b, background(p, [*x, *y], [x + w, y + h])));
-            }
-            Prim::Dots {
-                size: s,
-                color,
-                pts,
-            } => {
-                let c = hsla(*color);
-                for p in pts {
-                    window.paint_quad(fill(
-                        Bounds {
-                            origin: at(p[0], p[1]),
-                            size: size(px(*s), px(*s)),
-                        },
-                        c,
-                    ));
+        // A run of rects and dots (stipple can be tens of thousands) goes in
+        // one layer: GPUI then skips ordering each quad against everything
+        // else, and quads keep their order among themselves.
+        if is_quads(&prims[i]) {
+            let end = i + prims[i..].iter().take_while(|p| is_quads(p)).count();
+            let area = window.content_mask().bounds;
+            window.paint_layer(area, |window| {
+                for p in &prims[i..end] {
+                    quads(p, o, window);
                 }
-            }
+            });
+            i = end;
+            continue;
+        }
+        match &prims[i] {
+            Prim::Rect { .. } | Prim::Dots { .. } => quads(&prims[i], o, window),
             Prim::Stroke {
                 pts,
                 closed,
@@ -412,6 +443,43 @@ fn paint(prims: &[Prim], o: Point<Pixels>, window: &mut Window, cx: &mut App) ->
         i += 1;
     }
     i
+}
+
+/// Paint one rect or dots primitive.
+fn quads(p: &Prim, o: Point<Pixels>, window: &mut Window) {
+    let at = |x: f32, y: f32| point(o.x + px(x), o.y + px(y));
+    match p {
+        Prim::Rect {
+            x,
+            y,
+            w,
+            h,
+            paint: p,
+        } => {
+            let b = Bounds {
+                origin: at(*x, *y),
+                size: size(px(*w), px(*h)),
+            };
+            window.paint_quad(fill(b, background(p, [*x, *y], [x + w, y + h])));
+        }
+        Prim::Dots {
+            size: s,
+            color,
+            pts,
+        } => {
+            let c = hsla(*color);
+            for p in pts {
+                window.paint_quad(fill(
+                    Bounds {
+                        origin: at(p[0], p[1]),
+                        size: size(px(*s), px(*s)),
+                    },
+                    c,
+                ));
+            }
+        }
+        _ => {}
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

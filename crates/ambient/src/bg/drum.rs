@@ -39,6 +39,8 @@ const FREQ: f32 = 0.38;
 const KSTEP: f32 = 0.25;
 /// Trace sample spacing (pt).
 const SAMPLE: f32 = 2.;
+/// Along quiet paper, only every this-many samples is drawn.
+const QUIET_EVERY: usize = 4;
 /// Tremors are pruned once this far behind the left edge (pt).
 const PRUNE: f32 = 300.;
 /// Tremors kept per row at most.
@@ -281,18 +283,24 @@ impl Ambient for Drum {
                 }
             }
             let by = Self::base_y(i);
+            let n = self.off.len().min(row.noise.len());
             row.trace.clear();
-            row.trace
-                .extend(
-                    self.off
-                        .iter()
-                        .zip(&row.noise)
-                        .enumerate()
-                        .map(|(s, (&off, &jitter))| {
-                            let x = (k_lo + s as i64) as f32 * SAMPLE - u0;
-                            [x, by + jitter + TRAVEL * (off / TRAVEL).tanh()]
-                        }),
-                );
+            row.trace.extend(
+                self.off
+                    .iter()
+                    .zip(&row.noise)
+                    .enumerate()
+                    // Where no tremor moves the pen it only drifts a little,
+                    // so a quarter of the points draw it as well and cost a
+                    // quarter as much to stroke.
+                    .filter(|&(s, (&off, _))| {
+                        s % QUIET_EVERY == 0 || s + 1 == n || off.abs() > 0.05
+                    })
+                    .map(|(s, (&off, &jitter))| {
+                        let x = (k_lo + s as i64) as f32 * SAMPLE - u0;
+                        [x, by + jitter + TRAVEL * (off / TRAVEL).tanh()]
+                    }),
+            );
         }
     }
 

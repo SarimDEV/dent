@@ -894,6 +894,13 @@ fn main() {
             window_min_size: Some(size(px(720.), px(480.))),
             // Walkthroughs drive the window directly; they never need focus.
             focus: !background,
+            // A demo recording animates at full rate though it never has
+            // focus (GPUI otherwise holds such a window to about 30 fps).
+            inactive_frame_interval: if std::env::var_os("DENT_AMBIENT_DEMO").is_some() {
+                None
+            } else {
+                WindowOptions::default().inactive_frame_interval
+            },
             ..Default::default()
         };
         let dark = o.dark;

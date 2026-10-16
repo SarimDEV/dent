@@ -3171,16 +3171,8 @@ impl Dent {
             },
         );
         // The ambient background, when one is chosen, sits behind everything;
-        // text that floats over it gets a soft glow of the page colour.
+        // it veils itself under the title and the settings row (probed here).
         let ambient = crate::ambient::layer(self);
-        let lit = ambient.is_some();
-        let over = |e: AnyElement, hug: bool| {
-            if lit {
-                crate::ambient::glow(&t, e, hug).into_any_element()
-            } else {
-                e
-            }
-        };
         div()
             .relative()
             .flex_1()
@@ -3212,15 +3204,16 @@ impl Dent {
                     .gap(px(space::S3))
                     .child(probe(&self.probes, "ambient-ui"))
                     .relative()
-                    .child(over(
+                    .child(
                         div()
+                            .self_start()
+                            .relative()
                             .pb(px(space::S1))
                             .ty(DISPLAY)
                             .text_color(t.ink)
                             .child("New session")
-                            .into_any_element(),
-                        true,
-                    ))
+                            .child(probe(&self.probes, "ambient-title")),
+                    )
                     .child(
                         div()
                             .relative()
@@ -3260,7 +3253,13 @@ impl Dent {
                                     }),
                             ),
                     )
-                    .child(over(chips.into_any_element(), false)),
+                    .child(
+                        div()
+                            .self_start()
+                            .relative()
+                            .child(chips)
+                            .child(probe(&self.probes, "ambient-chips")),
+                    ),
             )
             .child(div().flex_1())
             // As much room below as above the header.

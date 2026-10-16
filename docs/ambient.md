@@ -54,4 +54,6 @@ Rules every background follows:
 | `just ambient-stress` | When something looks wrong | Release build; every background at 5 sizes and 3 frame rates, plus timings |
 | `just ambient-walk` | When something looks wrong | The real app: a still of each background (`--shots DIR`, `--dark`), checks that frames stop with none chosen and once a session starts |
 
+For recordings, `DENT_AMBIENT_DEMO=1 scripts/walk.sh demo-<id>` plays a short choreography on the stand-in's busy afternoon, at full frame rate, printing `demo: rolling` and `demo: cut` around the part worth filming (`crates/desktop/tools/record-window.swift` records the window).
+
 The prototype used to design them is the gallery at https://claude.ai/artifact/ESBBECQZDRDk57tzbvJQhG; new backgrounds are easiest to sketch there first.

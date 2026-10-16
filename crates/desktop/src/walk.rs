@@ -142,6 +142,16 @@ impl Walk {
             "sweep" => sweep(),
             "markdown" => markdown(),
             "motion" => motion(),
+            n if n.starts_with("demo-") => {
+                let id = leak(n["demo-".len()..].to_string());
+                *DEMO.lock().unwrap_or_else(|e| e.into_inner()) = id;
+                let mut v = vec![(
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                )];
+                v.extend(demo(id));
+                v
+            }
             "ambient" => {
                 let mut v = vec![(
                     0.,
@@ -4692,8 +4702,128 @@ fn compare() -> Vec<(f32, Act)> {
     v
 }
 
+/// The background a `demo-<id>` walk shows.
+static DEMO: std::sync::Mutex<&'static str> = std::sync::Mutex::new("prism");
+
+/// The pointer gliding from one offset (from the composer's centre) to
+/// another over `secs`, one step every 40 ms.
+fn glide(from: (f32, f32), to: (f32, f32), secs: f32) -> Vec<(f32, Act)> {
+    let steps = (secs / 0.04).max(1.) as usize;
+    (1..=steps)
+        .map(|i| {
+            let k = i as f32 / steps as f32;
+            let k = k * k * (3. - 2. * k);
+            (
+                0.04,
+                Hover(
+                    "starter",
+                    from.0 + (to.0 - from.0) * k,
+                    from.1 + (to.1 - from.1) * k,
+                ),
+            )
+        })
+        .collect()
+}
+
+/// A demo of one ambient background for a recording, with the stand-in's
+/// busy afternoon (`DENT_AMBIENT_DEMO=1`): `scripts/walk.sh demo-prism`.
+/// It prints `demo: rolling` and `demo: cut` around the part worth filming.
+fn demo(id: &'static str) -> Vec<(f32, Act)> {
+    let _ = id;
+    let mut v = vec![
+        (0.3, Key("ctrl-cmd-s")),
+        (0.3, Key("cmd-n")),
+        (
+            0.1,
+            Call(|_, _, cx| {
+                crate::ambient::choose(Some(*DEMO.lock().unwrap_or_else(|e| e.into_inner())));
+                cx.notify();
+            }),
+        ),
+        (0.1, Hover("starter", 0., 0.)),
+        (1.5, Call(|_, _, _| eprintln!("demo: rolling"))),
+    ];
+    let pulse = || (0., Call(|d, _, _| d.ambient.borrow_mut().submit()));
+    match *DEMO.lock().unwrap_or_else(|e| e.into_inner()) {
+        "prism" => {
+            v.push((2.0, Wait));
+            v.extend(glide((-60., 0.), (-720., 160.), 1.2));
+            v.extend(glide((-720., 160.), (-720., -200.), 3.0));
+            // Aimed low enough, violet and then blue stay inside the glass.
+            v.extend(glide((-720., -200.), (-640., -330.), 2.6));
+            v.push((1.6, Wait));
+            v.extend(glide((-640., -330.), (-740., -20.), 2.2));
+            v.extend(glide((-740., -20.), (0., 0.), 0.8));
+            v.push((1.2, Keys("Map every tool call this session made")));
+            v.push(pulse());
+            v.push((3.5, Wait));
+        }
+        "attention" => {
+            v.push((1.2, Wait));
+            v.extend(glide((0., 0.), (-650., -290.), 1.0));
+            v.extend(glide((-650., -290.), (640., -290.), 4.0));
+            v.push(pulse());
+            v.extend(glide((640., -290.), (640., 320.), 3.0));
+            v.extend(glide((640., 320.), (-640., 320.), 4.0));
+            v.extend(glide((-640., 320.), (0., 0.), 1.0));
+            v.push((1.0, Keys("Where did it spend its time?")));
+            v.push((3.0, Wait));
+        }
+        _ => {
+            // Stipple and the rest: a rise under the composer, then the
+            // pointer lifts the ground as it circles the page.
+            v.push((1.0, Wait));
+            v.push(pulse());
+            v.push((1.5, Wait));
+            let mut at = (0., 0.);
+            for k in 1..=48 {
+                let a = k as f32 / 48. * std::f32::consts::TAU;
+                let next = (650. * a.sin(), -320. * a.cos() + 0.);
+                v.extend(glide(at, next, 0.2));
+                at = next;
+            }
+            v.extend(glide(at, (0., 0.), 0.8));
+            v.push((1.0, Keys("Survey the whole codebase")));
+            v.push((3.0, Wait));
+        }
+    }
+    v.push((0., Call(|_, _, _| eprintln!("demo: cut"))));
+    v.push((1.0, Wait));
+    v
+}
+
 /// Which background the ambient walk shows next.
 static AMBIENT_AT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Each background's frame rate and main-thread cost per frame, as timed.
+/// Each entry also holds the frame rate it must reach: GPUI holds a window
+/// without focus (as a walk's always is) to about 30 fps, to save energy.
+static AMBIENT_COSTS: std::sync::Mutex<Vec<(&'static str, f32, f32, f32)>> =
+    std::sync::Mutex::new(Vec::new());
+static COST_FROM: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+fn start_cost(d: &mut Dent, _: &mut Window, _: &mut Context<Dent>) {
+    d.ambient.borrow_mut().take_cost();
+    *COST_FROM.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+}
+
+fn record_cost(d: &mut Dent, window: &mut Window, _: &mut Context<Dent>) {
+    let cost = d.ambient.borrow_mut().take_cost();
+    let secs = COST_FROM
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .map_or(1., |t| t.elapsed().as_secs_f32().max(0.001));
+    let id = crate::ambient::chosen().map_or("none", |s| s.id);
+    let fps = cost.frames as f32 / secs;
+    let ms = cost.busy.as_secs_f32() * 1000. / cost.frames.max(1) as f32;
+    let floor = if window.is_window_active() { 50. } else { 20. };
+    eprintln!("      {id:<10} {fps:>6.1} fps (at least {floor})  {ms:>5.2} ms a frame");
+    AMBIENT_COSTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((id, fps, ms, floor));
+}
 
 fn next_ambient(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
     let i = AMBIENT_AT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4709,7 +4839,13 @@ fn ambient() -> Vec<(f32, Act)> {
     let mut v = vec![
         (
             0.,
-            Call(|_, _, _| AMBIENT_AT.store(0, std::sync::atomic::Ordering::Relaxed)),
+            Call(|_, _, _| {
+                AMBIENT_AT.store(0, std::sync::atomic::Ordering::Relaxed);
+                AMBIENT_COSTS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clear();
+            }),
         ),
         (0.3, Key("cmd-n")),
     ];
@@ -4718,7 +4854,26 @@ fn ambient() -> Vec<(f32, Act)> {
         v.push((0.1, Call(next_ambient)));
         // Backgrounds prefill their history; the longest fade-in is 0.5 s.
         v.push((0.6, Shot(name)));
+        // Then a second of frames, timed: the real cost on the main thread.
+        v.push((0., Call(start_cost)));
+        v.push((1.0, Call(record_cost)));
     }
+    v.push((
+        0.,
+        Until(
+            "every background holds its frame rate at under 4 ms a frame",
+            |_, _| {
+                let costs = AMBIENT_COSTS.lock().unwrap_or_else(|e| e.into_inner());
+                // A debug build is too slow to judge: there it only reports.
+                costs.len() == dent_ambient::ALL.len()
+                    && (cfg!(debug_assertions)
+                        || costs
+                            .iter()
+                            .all(|(_, fps, ms, floor)| *fps >= *floor && *ms <= 4.))
+            },
+            0.5,
+        ),
+    ));
     v.extend([
         (
             0.1,

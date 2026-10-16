@@ -43,6 +43,11 @@ opt-level = 3
 [profile.dev.package.gpui-pre-platform]
 opt-level = 3
 
+# Ambient backgrounds simulate every frame; unoptimised they cost several
+# times more, which would make dev runs misleading.
+[profile.dev.package.dent-ambient]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 

@@ -56,8 +56,11 @@ if [[ "$(uname)" == Darwin ]]; then
   fi
   caffeinate -d -w $$ &
 fi
-cargo build -q -p dent-desktop -p dent-daemon -p dent-session-holder -p dent-fake-claude
-bin=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug
+# DENT_WALK_RELEASE=1 walks the optimised build, for timing what you'd really run.
+profile=debug; release=()
+if [[ -n "${DENT_WALK_RELEASE:-}" ]]; then profile=release; release=(--release); fi
+cargo build -q "${release[@]}" -p dent-desktop -p dent-daemon -p dent-session-holder -p dent-fake-claude
+bin=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/$profile
 if [[ "$name" == "real" || "$name" == "compare" ]]; then
   # The real agent on its smallest model, signed in as you: your own home.
   status=0

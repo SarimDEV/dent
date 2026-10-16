@@ -413,17 +413,11 @@ impl Ambient for Attention {
             .collect();
         out.dots(dot, p.pencil, pts);
 
+        // Bottom-left, opposite the totals: the top-left corner is where the
+        // window's own controls sit when the sidebar is hidden.
         out.text(
-            [OX, 28.],
-            "WHERE THE AGENT",
-            Font::Mono,
-            11.,
-            p.pencil,
-            Align::Left,
-        );
-        out.text(
-            [OX, 44.],
-            "IS LOOKING.",
+            [OX, h - 14.],
+            "WHERE THE AGENT IS LOOKING.",
             Font::Mono,
             11.,
             p.pencil,

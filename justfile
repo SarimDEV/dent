@@ -27,7 +27,9 @@ verify:
 ambient-stress:
     cargo test -q -p dent-ambient --release -- --ignored --nocapture stress
 
-# Ambient backgrounds in the real app: a still of each. Needs WINID; pass --shots DIR, --dark.
+# Ambient backgrounds in the real app: a still of each and its frame cost (held
+# to 50 fps and 4 ms a frame in release). Needs WINID; pass --shots DIR, --dark.
+# DENT_WALK_RELEASE=1 times the optimised build.
 ambient-walk *args:
     scripts/walk.sh ambient {{args}}
 
