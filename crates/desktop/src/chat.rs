@@ -1702,7 +1702,9 @@ impl Dent {
                                         .into_any_element()
                                     }
                                     Some(report) => row
-                                        .child(self.report(s, ix, &l.id, report, window, cx))
+                                        .child(
+                                            self.report(s, ix, &l.id, l.depth, report, window, cx),
+                                        )
                                         .into_any_element(),
                                 }
                             })
@@ -4214,11 +4216,46 @@ impl Dent {
         s: &Session,
         ix: usize,
         call: &str,
+        depth: usize,
         report: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = self.t;
+        // A report from inside a subagent's work is one of its steps: the
+        // card's own type, in the secondary ink. Only the final report reads
+        // at reading size.
+        if depth > 0 {
+            let plain: String = report
+                .lines()
+                .map(|l| l.trim_start_matches('#').trim_start())
+                .collect::<Vec<_>>()
+                .join("\n")
+                .replace("**", "")
+                .replace('`', "");
+            return div()
+                .flex_1()
+                .min_w_0()
+                .my(px(space::S1))
+                .flex()
+                .flex_col()
+                .gap(px(space::S1))
+                .child(div().ty(LABEL).text_color(t.quiet).child("REPORT"))
+                .child(
+                    div()
+                        .pl(px(space::S3))
+                        .border_l_2()
+                        .border_color(t.hairline)
+                        .ty(UI)
+                        .text_color(t.secondary())
+                        .child(crate::select::text(
+                            SharedString::from(format!("report-{ix}-{call}-text")),
+                            plain.trim().to_string(),
+                            &t,
+                        )),
+                )
+                .into_any_element();
+        }
         let key = format!("report-{call}");
         let open = self.expanded.contains(&key);
         // Folded, it shows its first two blocks whole, never half a table.
@@ -4262,6 +4299,8 @@ impl Dent {
                 d.child(
                     div()
                         .id(SharedString::from(format!("report-{ix}-{call}")))
+                        // Clear of the quote above it.
+                        .mt(px(space::S1))
                         .ty(UI)
                         .text_color(t.quiet)
                         .cursor_pointer()
