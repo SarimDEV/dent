@@ -12,7 +12,11 @@
 //! - `background`: starts background work, ends the turn, then follows up
 //! - `subagent`: a Task call whose steps nest under it
 //! - `dev server`: serves a page on a free port and prints its address
-//! - `long`: a long reply, for stopping halfway
+//! - `long`: a long reply, for stopping halfway (`slowly`: ten times slower)
+//! - `colour output`: a Bash call whose output is coloured, with a
+//!   progress line and one very long line
+//! - `half-typed`: a reply that stops for a while each time bold, a link,
+//!   a table and a list are half typed
 //! - `fail`: the turn errors
 //! - `hit the limit`: the 5-hour usage limit is used up and the turn fails
 //! - `crash`: the process exits mid-turn
@@ -55,6 +59,8 @@ struct Agent {
     steer: bool,
     /// MCP servers: name, status, scope.
     mcp: Vec<(String, String, String)>,
+    /// How long `say` waits between chunks, unscaled.
+    chunk_ms: u64,
 }
 
 /// Why a turn stopped early.
@@ -116,6 +122,7 @@ fn main() {
         next: 0,
         context: 18_000,
         steer: false,
+        chunk_ms: 40,
     };
     // One-off: `-p "prompt"` without stream-json input answers and exits.
     if !args.iter().any(|x| x == "--input-format")
@@ -541,7 +548,7 @@ impl Agent {
                 "delta": {"type": "text_delta", "text": chunk.concat()}}}),
                 parent,
             ));
-            self.pause(40)?;
+            self.pause(self.chunk_ms)?;
         }
         out(self.envelope(
             json!({"type": "assistant", "message": {"id": msg_id, "role": "assistant", "model": self.model,
@@ -625,6 +632,46 @@ impl Agent {
                 "usage": self.usage()}}),
             None,
         ));
+    }
+
+    /// Stream `parts` a few characters at a time, stopping for a while
+    /// after each but the last, then the whole message.
+    fn say_held(&mut self, parts: &[&str]) -> Result<String, Cut> {
+        let text = parts.concat();
+        let msg_id = format!("msg_fake_h{}", new_id());
+        let ev = |e: Value| json!({"type": "stream_event", "event": e});
+        out(self.envelope(
+            ev(json!({"type": "message_start", "message": {
+                "id": msg_id, "role": "assistant", "content": [], "usage": self.usage()}})),
+            None,
+        ));
+        out(self.envelope(
+            ev(json!({"type": "content_block_start", "index": 0,
+                "content_block": {"type": "text", "text": ""}})),
+            None,
+        ));
+        for (n, part) in parts.iter().enumerate() {
+            let chars: Vec<char> = part.chars().collect();
+            for chunk in chars.chunks(4) {
+                out(self.envelope(
+                    ev(json!({"type": "content_block_delta", "index": 0,
+                        "delta": {"type": "text_delta", "text": chunk.iter().collect::<String>()}})),
+                    None,
+                ));
+                self.pause(60)?;
+            }
+            if n + 1 < parts.len() {
+                self.pause(12_000)?;
+            }
+        }
+        out(self.envelope(
+            json!({"type": "assistant", "message": {"id": msg_id, "role": "assistant", "model": self.model,
+                "content": [{"type": "text", "text": text}], "usage": self.usage()}}),
+            None,
+        ));
+        out(self.envelope(ev(json!({"type": "content_block_stop", "index": 0})), None));
+        out(self.envelope(ev(json!({"type": "message_stop"})), None));
+        Ok(text)
     }
 
     fn tool(&mut self, name: &str, input: Value, parent: Option<&str>) -> String {
@@ -861,6 +908,29 @@ impl Agent {
             };
             self.say(said, None)?;
             self.end(said, false);
+            return Ok(());
+        }
+        if lower.contains("colour output") {
+            let id = self.tool(
+                "Bash",
+                json!({"command": "cargo test --color=always", "description": "Run the tests"}),
+                None,
+            );
+            self.pause(300)?;
+            self.result(&id, &coloured_output(), false, None);
+            self.say("Tests ran: five passed and one failed.", None)?;
+            self.end("done", false);
+            return Ok(());
+        }
+        if lower.contains("half-typed") {
+            let text = self.say_held(&[
+                "Streaming check: this word is **bo",
+                "ld text** and here is [the docs](https://exa",
+                "mple.com) for more.\n\n| Name | Size |\n| --",
+                "- | ---: |\n| alpha | 12 KB |\n| beta | 3 KB |\n\n1. Parse the `tail` again\n2",
+                ". Draw it\n3. Commit the block\n\nThat's the lot.",
+            ])?;
+            self.end(&text, false);
             return Ok(());
         }
         if lower.contains("crash") {
@@ -1175,6 +1245,9 @@ impl Agent {
         if lower.contains("think") {
             self.think("The user wants this considered first. The parser keeps a stack of open containers, so a list item can hold code. I should check the tests before answering.");
         }
+        if lower.contains("slowly") {
+            self.chunk_ms = 400;
+        }
         let reply = if lower.contains("long") {
             LONG.to_string()
         } else if lower.contains("math") || lower.contains("diagram") || lower.contains("big table")
@@ -1191,10 +1264,42 @@ impl Agent {
                     .collect::<String>()
             )
         };
-        self.say(&reply, None)?;
+        let said = self.say(&reply, None);
+        self.chunk_ms = 40;
+        said?;
         self.end(&reply, false);
         Ok(())
     }
+}
+
+/// What `cargo test --color=always` might print: colours, bold, dim, a
+/// progress line redrawn with carriage returns, and one very long line.
+fn coloured_output() -> String {
+    let mut s = String::from("\x1b[1m\x1b[32m   Compiling\x1b[0m dent v0.1.0\n");
+    s.push_str("Building [=====>              ] 30%\rBuilding [===========>        ] 60%\rBuilding [====================] 100%\n");
+    s.push_str("\x1b[1mrunning 6 tests\x1b[0m\n");
+    for t in [
+        "parse::empty",
+        "parse::nested",
+        "log::append",
+        "log::replay",
+        "sync::resume",
+    ] {
+        s.push_str(&format!("test {t} ... \x1b[32mok\x1b[0m\n"));
+    }
+    s.push_str("test sync::conflict ... \x1b[31mFAILED\x1b[0m\n\n");
+    s.push_str("\x1b[33mwarning\x1b[0m: unused variable: `seq` \x1b[2m(src/sync.rs:41)\x1b[0m\n");
+    s.push_str(
+        "\x1b[32m✓ passed\x1b[0m 5   \x1b[31m✗ failed\x1b[0m 1   \x1b[90m0 ignored\x1b[0m\n",
+    );
+    s.push_str("\x1b[36mcyan\x1b[0m \x1b[35mmagenta\x1b[0m \x1b[34mblue\x1b[0m \x1b[38;5;208m256-orange\x1b[0m \x1b[38;2;120;200;80mtrue colour\x1b[0m \x1b[3mitalic\x1b[0m\n");
+    s.push_str("thread 'sync::conflict' panicked: ");
+    for n in 0..80 {
+        s.push_str(&format!("left=seq{n} "));
+    }
+    s.push('\n');
+    s.push_str("\x1b[1m\x1b[31merror\x1b[0m: test failed, to rerun pass `--lib`\n");
+    s
 }
 
 /// Maths, inline and display, a diagram and a table too tall for the chat.
