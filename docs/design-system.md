@@ -167,7 +167,7 @@ Each motion has one name and one job.
 | **Lift** | A picture zooms from where it sits to the middle of the window (`dur.slow` + 40 ms, `ease.out`) as the backdrop fades dark a little ahead of it; it zooms back in `dur.base`, the backdrop clearing first | Opening a picture large |
 | **Compact** | The serif title eases from 28 to 20 on `spring.snappy`; the live pill arrives with a 4 px slide | Reading history |
 | **Drift** | The working square, a small rounded square, breathes from its paler partner to the full signal and back over `dur.working` (and grows a touch), smoothly at the display's frame rate; every working square shares one clock | Working status |
-| **Hand-over** | The working line's words stay up at least 650 ms (2 s for a step) and change only once the new words have held 250 ms; the old rise 3 px out, the new rise 3 px in, `dur.base` in all | Working line |
+| **Hand-over** | The working line's words stay up at least 650 ms (a plan step 2 s, unless the plan's next step replaces it) and change only once the new words have held 250 ms; the old rise 3 px out, the new rise 3 px in, `dur.base` in all | Working line |
 | **Breathe** | After 3 s of work the working line's words ease between full and 60% opacity over 2 s | Working line |
 | **Press** | See States | Buttons, rows |
 

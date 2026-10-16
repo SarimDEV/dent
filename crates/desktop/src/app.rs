@@ -5983,7 +5983,6 @@ impl Dent {
     /// have been up long enough to read and have themselves held still a
     /// moment, so a run of quick calls never flickers.
     pub fn live_words(&self, session: &str, kind: &str, words: &str, step: bool) -> LiveWords {
-        use crate::ds::motion::{DWELL, DWELL_STEP, SETTLE};
         let key = format!("{kind}\u{1f}{words}");
         let now = Instant::now();
         let mut all = self.live_words.borrow_mut();
@@ -6003,15 +6002,12 @@ impl Dent {
                 Some((k, _)) if *k == key => {}
                 _ => w.next = Some((key.clone(), now)),
             }
-            // A plan step is up for a while, so it reads; a call's words
-            // only long enough not to flicker.
-            let held = if w.step { DWELL_STEP } else { DWELL };
             let up = w.at.elapsed().as_millis() as f32;
             let still = w
                 .next
                 .as_ref()
                 .map_or(0., |(_, t)| t.elapsed().as_millis() as f32);
-            if up >= held && still >= SETTLE {
+            if swap_due(w.step, step, up, still) {
                 w.was = std::mem::replace(&mut w.words, words.to_string());
                 w.key = key;
                 w.at = now;
@@ -6041,6 +6037,18 @@ impl Dent {
         });
         cx.notify();
     }
+}
+
+/// Whether the working line's words give way to new ones, `up` ms after
+/// they came and with the new ones still for `still` ms. A plan step
+/// (`was_step`) is up for a while, so it reads before a call's words
+/// replace it; a call's words only long enough not to flicker. The plan's
+/// next step (`step`) never waits on the last one: the line keeps up with
+/// the plan above it.
+fn swap_due(was_step: bool, step: bool, up: f32, still: f32) -> bool {
+    use crate::ds::motion::{DWELL, DWELL_STEP, SETTLE};
+    let held = if was_step && !step { DWELL_STEP } else { DWELL };
+    up >= held && still >= SETTLE
 }
 
 /// A message as sent, split back into its words and the files attached to
@@ -6144,6 +6152,17 @@ mod tests {
             message_parts(&with_attachments("/review now", &atts), "/", false).0,
             "/review now"
         );
+    }
+
+    #[test]
+    fn the_working_line_keeps_up_with_the_plan() {
+        // A step gives way to the plan's next step at the usual pace...
+        assert!(super::swap_due(true, true, 700., 300.));
+        // ...but holds against a call's words for its full while.
+        assert!(!super::swap_due(true, false, 700., 300.));
+        assert!(super::swap_due(true, false, 2000., 300.));
+        // New words always settle first.
+        assert!(!super::swap_due(false, true, 5000., 100.));
     }
 
     #[test]
