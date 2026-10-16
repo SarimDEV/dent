@@ -279,18 +279,12 @@ impl Dent {
         cx: &mut Context<Self>,
     ) -> Div {
         let t = self.t;
-        const MAX: usize = 60;
-        // Long text shows its start, and a line that opens the rest.
-        let clip = |text: &str, all: bool| -> (String, usize) {
-            let n = text.lines().count();
-            if n <= MAX || all {
-                (text.trim_end().to_string(), 0)
-            } else {
-                (
-                    text.lines().take(MAX).collect::<Vec<_>>().join("\n"),
-                    n - MAX,
-                )
-            }
+        // Long text shows its start, and a line that opens the rest: held
+        // to so many lines, and so many characters, so one enormous line
+        // can't stall the chat.
+        let clip = |text: &str, all: bool| -> String {
+            let (kept, ..) = crate::ansi::clip(text, all);
+            clipped(text, &kept)
         };
         let block = |id: String, text: String, ink: Hsla| code_lines(id, text, d.edits, ink, &t);
         let mut col = div()
@@ -308,14 +302,16 @@ impl Dent {
         let rest = |which: &str, text: &str, cx: &mut Context<Self>| -> Option<AnyElement> {
             let fold = format!("call-{which}-all-{key}");
             let all = self.expanded.contains(&fold);
-            let more = text.lines().count().saturating_sub(MAX);
-            (more > 0).then(|| {
+            let (_, lines, chars) = crate::ansi::clip(text, false);
+            (lines + chars > 0).then(|| {
                 let label = if all {
                     "Show less".to_string()
-                } else if more == 1 {
+                } else if lines == 1 {
                     "Show 1 more line".to_string()
+                } else if lines > 1 {
+                    format!("Show {lines} more lines")
                 } else {
-                    format!("Show {more} more lines")
+                    "Show all".to_string()
                 };
                 crate::ui::ghost(SharedString::from(fold.clone()), label, &t)
                     .self_start()
@@ -333,7 +329,7 @@ impl Dent {
         };
         if !d.input.trim().is_empty() {
             let all = self.expanded.contains(&format!("call-in-all-{key}"));
-            let (text, _) = clip(&d.input, all);
+            let text = clip(&d.input, all);
             col = col
                 .child(block(format!("call-in-{key}"), text, t.ink))
                 .children(rest("in", &d.input, cx));
@@ -343,7 +339,10 @@ impl Dent {
             && !d.edits
         {
             let all = self.expanded.contains(&format!("call-out-all-{key}"));
-            let (text, _) = clip(out, all);
+            // Colour codes become colours; other escapes go.
+            let parsed = crate::ansi::parsed(out);
+            let (plain, spans) = (&parsed.0, &parsed.1);
+            let (kept, ..) = crate::ansi::clip(plain, all);
             col = col
                 .child(
                     div()
@@ -353,8 +352,15 @@ impl Dent {
                         .text_color(if *failed { t.ink } else { t.faint })
                         .child(if *failed { "Failed" } else { "Output" }),
                 )
-                .child(block(format!("call-out-{key}"), text, t.quiet))
-                .children(rest("out", out, cx));
+                .child(output_lines(
+                    format!("call-out-{key}"),
+                    plain,
+                    spans,
+                    &kept,
+                    t.quiet,
+                    &t,
+                ))
+                .children(rest("out", plain, cx));
         }
         // Its file: shown in dent when it can be, and its changes.
         let in_diff = d.path.as_ref().and_then(|p| {
@@ -364,7 +370,7 @@ impl Dent {
         let openable = d
             .path
             .as_ref()
-            .filter(|p| std::path::Path::new(p).is_file())
+            .filter(|p| crate::data::is_file(std::path::Path::new(p)))
             .cloned();
         if openable.is_some() || in_diff.is_some() {
             let sid = s.id.clone();
@@ -4116,7 +4122,7 @@ fn picture_path(shown: &str, cwd: &str) -> Option<std::path::PathBuf> {
     } else {
         std::path::Path::new(cwd).join(shown)
     };
-    path.exists().then_some(path)
+    crate::data::is_file(&path).then_some(path)
 }
 
 /// One attachment line of a sent message; a picture (`shot`, its place in
@@ -4194,6 +4200,105 @@ pub fn user_shown(body: &[&str], open: bool) -> (String, bool) {
     } else {
         (full, long)
     }
+}
+
+/// The parts of `text` that [`crate::ansi::clip`] kept, a line each, with
+/// `…` where a line was cut short.
+fn clipped(text: &str, kept: &[std::ops::Range<usize>]) -> String {
+    let mut out = String::new();
+    for (k, r) in kept.iter().enumerate() {
+        if k > 0 {
+            out.push('\n');
+        }
+        out.push_str(&text[r.clone()]);
+        if cut_short(text, r) {
+            out.push('…');
+        }
+    }
+    out
+}
+
+/// A kept stretch stops before its line ends.
+fn cut_short(text: &str, r: &std::ops::Range<usize>) -> bool {
+    !text[r.end..].is_empty() && !text[r.end..].starts_with('\n') && text[r.end..].trim_end() != ""
+}
+
+/// Terminal output as the program coloured it, through the theme's 16
+/// colours; what `kept` leaves out isn't drawn.
+fn output_lines(
+    id: String,
+    text: &str,
+    spans: &[(std::ops::Range<usize>, crate::ansi::Sgr)],
+    kept: &[std::ops::Range<usize>],
+    ink: Hsla,
+    t: &crate::theme::Theme,
+) -> Div {
+    let run = |len: usize, st: Option<&crate::ansi::Sgr>| {
+        let mut f = font(crate::theme::mono());
+        let mut color = ink;
+        if let Some(st) = st {
+            if st.bold {
+                f.weight = FontWeight::BOLD;
+            }
+            if st.italic {
+                f.style = FontStyle::Italic;
+            }
+            color = match st.fg {
+                Some(crate::ansi::Colour::Indexed(i)) => crate::shell::indexed(t, i),
+                Some(crate::ansi::Colour::Rgb(r, g, b)) => {
+                    gpui_kit::rgb((u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)).into()
+                }
+                None => ink,
+            };
+            if st.dim {
+                color = color.opacity(0.6);
+            }
+        }
+        TextRun {
+            len,
+            font: f,
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }
+    };
+    let mut out = String::new();
+    let mut runs = Vec::new();
+    // Spans are in order and don't overlap; walk them alongside.
+    let mut j = 0;
+    for (k, r) in kept.iter().enumerate() {
+        if k > 0 {
+            out.push('\n');
+            runs.push(run(1, None));
+        }
+        let mut at = r.start;
+        while j < spans.len() && spans[j].0.end <= r.start {
+            j += 1;
+        }
+        let mut i = j;
+        while i < spans.len() && spans[i].0.start < r.end {
+            let (s0, s1) = (spans[i].0.start.max(r.start), spans[i].0.end.min(r.end));
+            if s0 > at {
+                runs.push(run(s0 - at, None));
+            }
+            runs.push(run(s1 - s0, Some(&spans[i].1)));
+            at = s1;
+            i += 1;
+        }
+        if at < r.end {
+            runs.push(run(r.end - at, None));
+        }
+        out.push_str(&text[r.clone()]);
+        if cut_short(text, r) {
+            out.push('…');
+            runs.push(run('…'.len_utf8(), None));
+        }
+    }
+    div()
+        .min_w_0()
+        .whitespace_normal()
+        .child(crate::select::styled(id, out, runs, t))
 }
 
 /// Lines of code or output that select and copy; with `diff`, removed

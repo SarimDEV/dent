@@ -203,6 +203,31 @@ impl Item {
     }
 }
 
+/// Whether `path` is a file, asked of the disk at most every few seconds:
+/// drawing asks every frame, for every line that names one.
+pub fn is_file(path: &std::path::Path) -> bool {
+    use std::collections::HashMap;
+    const FRESH: std::time::Duration = std::time::Duration::from_secs(3);
+    thread_local! {
+        static SEEN: RefCell<HashMap<PathBuf, (bool, Instant)>> = RefCell::new(HashMap::new());
+    }
+    SEEN.with(|seen| {
+        let now = Instant::now();
+        if let Some(&(is, at)) = seen.borrow().get(path)
+            && now.duration_since(at) < FRESH
+        {
+            return is;
+        }
+        let is = path.is_file();
+        let mut seen = seen.borrow_mut();
+        if seen.len() > 4096 {
+            seen.retain(|_, (_, at)| now.duration_since(*at) < FRESH);
+        }
+        seen.insert(path.to_path_buf(), (is, now));
+        is
+    })
+}
+
 /// A message you sent, split into the lines that say what went with it
 /// (files, a picked element, a page error, a review comment, as the
 /// composer writes them: `› what · detail`) and its words. Those lines

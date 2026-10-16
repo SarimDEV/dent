@@ -365,7 +365,7 @@ pub fn key_bytes(k: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
 }
 
 /// The 16 colours, tuned to the page: readable on Paper and on Carbon.
-fn ansi(t: &Theme, i: usize) -> Hsla {
+pub fn ansi(t: &Theme, i: usize) -> Hsla {
     const PAPER: [u32; 16] = [
         0x171614, 0xB8402F, 0x3C7A34, 0x8F6A00, 0x2F5EA6, 0x94408A, 0x1F7682, 0x8C877D, 0x6E6A62,
         0xD24A35, 0x4A9440, 0xA97E00, 0x3A72C4, 0xAD4DA1, 0x268C9A, 0x171614,
@@ -377,12 +377,12 @@ fn ansi(t: &Theme, i: usize) -> Hsla {
     rgb(if t.dark { CARBON[i] } else { PAPER[i] }).into()
 }
 
-fn rgb_of(c: Rgb) -> Hsla {
+pub fn rgb_of(c: Rgb) -> Hsla {
     rgb((u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b)).into()
 }
 
 /// The 256-colour palette past the first 16: a 6×6×6 cube, then greys.
-fn indexed(t: &Theme, i: u8) -> Hsla {
+pub fn indexed(t: &Theme, i: u8) -> Hsla {
     match i {
         0..=15 => ansi(t, i as usize),
         16..=231 => {

@@ -6,6 +6,7 @@
 
 mod ambient;
 mod anim;
+mod ansi;
 mod app;
 mod assets;
 mod bridge;

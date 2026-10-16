@@ -1138,7 +1138,7 @@ pub fn resolve(href: &str, base: Option<&std::path::Path>) -> String {
 /// a web picture is a link to it.
 fn image_block(src: &str, alt: &str, t: &Theme, key: &str, r: &mut R) -> AnyElement {
     let at = resolve(src, r.base.as_deref());
-    if at.starts_with('/') && std::path::Path::new(&at).is_file() {
+    if at.starts_with('/') && crate::data::is_file(std::path::Path::new(&at)) {
         let path = std::path::PathBuf::from(&at);
         div()
             .id(SharedString::from(format!("{key}/img")))
