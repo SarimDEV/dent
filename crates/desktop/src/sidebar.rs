@@ -272,7 +272,7 @@ impl Dent {
         } else if fresh {
             ("No sessions yet", "Type a task to start one.".into())
         } else {
-            ("All caught up", "Everything is working or closed.".into())
+            ("All caught up", "Nothing needs you.".into())
         };
         div()
             .mx(px(space::S2))

@@ -42,7 +42,7 @@ Every message is parsed into a tree of typed blocks, and each block type has one
 
 ## Sizes and overflow
 
-The reading column is 720 pt wide at most and shrinks with the window down to 360 pt. Nothing is ever clipped without a way to see it ([spike 04, stress](spikes/04-markdown-math-mermaid.md#stress-every-block-at-its-limits)).
+The reading column is 720 pt wide at most and shrinks with the window down to 360 pt; running text (paragraphs and lists) stops at a 540 pt measure, about 78 characters, while tables, code and pictures may use the whole column. Inline code sits a step quieter than the words around it. Nothing is ever clipped without a way to see it ([spike 04, stress](spikes/04-markdown-math-mermaid.md#stress-every-block-at-its-limits)).
 
 - **Wide content scrolls sideways inside its block**, with a fade on whichever edge has more to see. This covers tables, display maths, code and diagrams. The page itself never scrolls sideways.
 - **Tables:**

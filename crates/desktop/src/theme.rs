@@ -148,6 +148,14 @@ impl Theme {
     pub fn secondary(&self) -> Hsla {
         mix(self.quiet, self.ink, 0.45)
     }
+    /// The theme for words said on the way to an answer: their ink steps
+    /// back to `secondary`, so the work recedes and the answer stands out.
+    pub fn narrating(&self) -> Self {
+        Self {
+            ink: self.secondary(),
+            ..*self
+        }
+    }
     /// Your messages' fill: a tint of ink, no edge, so a message reads as
     /// yours without becoming a card.
     pub fn tint(&self) -> Hsla {

@@ -29,6 +29,10 @@ pub mod size {
     pub const STATUS: f32 = 28.;
     pub const SQUARE: f32 = 12.;
     pub const COLUMN: f32 = 720.;
+    /// The longest line of running text, about 78 characters of the
+    /// reading face: a book's measure. Tables, code and pictures may use
+    /// the whole column.
+    pub const MEASURE: f32 = 540.;
 }
 
 pub mod radius {

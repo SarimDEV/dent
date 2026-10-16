@@ -704,8 +704,10 @@ impl Dent {
                                 space::S1
                             } else {
                                 // Work sits close: tool lines in a run
-                                // almost touch, and hang near the words
-                                // around them; paragraphs of reply breathe.
+                                // almost touch and hang under the words
+                                // that led to them; a wider break follows,
+                                // so each paragraph and its work read as
+                                // one step. Paragraphs of reply breathe.
                                 let work = |i: Option<&Item>| {
                                     matches!(
                                         i,
@@ -724,8 +726,8 @@ impl Dent {
                                     .find(|i| !matches!(i, Item::TurnEnd { .. }));
                                 match (work(s.items.get(ix)), work(next)) {
                                     (true, true) => space::HALF,
-                                    (true, false) | (false, true) => space::S2,
-                                    (false, false) => space::S4,
+                                    (false, true) => space::S3,
+                                    (true, false) | (false, false) => space::S4,
                                 }
                             }))
                             .child(body),
@@ -921,9 +923,11 @@ impl Dent {
             }
             _ => 1.,
         };
-        let elapsed = ran
-            .filter(|r| r.as_secs() >= 2)
-            .map(|r| duration(r.as_secs()));
+        // The clock runs from the start, so the first seconds look alive.
+        let elapsed = ran.map(|r| duration(r.as_secs()));
+        // What it's doing says it all; "Working…" only stands in when
+        // there are no words yet. Compacting and retrying keep their lead.
+        let lead = (kind != "working" || words.is_empty()).then_some(lead);
         div()
             .flex()
             .items_center()
@@ -947,19 +951,21 @@ impl Dent {
                     .items_center()
                     .gap(px(space::S1H))
                     .opacity(breath)
-                    .child(div().flex_none().child(lead))
+                    .when_some(lead, |d, lead| d.child(div().flex_none().child(lead)))
                     .when(!words.is_empty(), |d| {
-                        d.child(div().flex_none().text_color(t.faint).child("·"))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .relative()
-                                    .top(px(rise))
-                                    .opacity(fade)
-                                    .text_color(t.secondary())
-                                    .child(words),
-                            )
+                        d.when(kind != "working", |d| {
+                            d.child(div().flex_none().text_color(t.faint).child("·"))
+                        })
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .relative()
+                                .top(px(rise))
+                                .opacity(fade)
+                                .text_color(t.secondary())
+                                .child(words),
+                        )
                     })
                     .when_some(elapsed, |d, e| {
                         d.child(div().flex_none().text_color(t.faint).child("·"))
@@ -1217,6 +1223,13 @@ impl Dent {
                     .into_any_element()
             }
             Item::Text(src) => {
+                // What it says on the way sits a step back; the answer at
+                // the end of a turn reads in full ink.
+                let t = if is_answer(&s.items, ix, s.running()) {
+                    t
+                } else {
+                    t.narrating()
+                };
                 let births = self
                     .births
                     .get(&s.id)
@@ -1573,6 +1586,10 @@ impl Dent {
                     .id(SharedString::from(format!("ask-{ask}")))
                     .track_focus(&self.ask_focus)
                     .child(needs_title(title, &t))
+                    // Why it wants to, in its own words, before the command.
+                    .when(!why.is_empty(), |c| {
+                        c.child(div().ty(UI).text_color(t.ink).child(why.clone()))
+                    })
                     .when(!command.is_empty(), |c| {
                         c.child(
                             div()
@@ -1596,9 +1613,6 @@ impl Dent {
                                     &t,
                                 )),
                         )
-                    })
-                    .when(!why.is_empty(), |c| {
-                        c.child(div().ty(UI).text_color(t.quiet).child(why.clone()))
                     })
                     .child(
                         div()
@@ -2396,6 +2410,8 @@ impl Dent {
             .mx_auto()
             .px(px(space::S8))
             .pb(px(space::S4))
+            // The plan stands on its own over the composer, not inside it.
+            .children(self.plan_strip(s, cx))
             .child(
                 div()
                     .relative()
@@ -2409,7 +2425,6 @@ impl Dent {
                     .flex()
                     .flex_col()
                     .gap(px(space::S2))
-                    .children(self.plan_strip(s, cx))
                     .children(self.attachment_chips(cx))
                     .child(self.prompt_field(&self.composer.clone(), cx))
                     .child(
@@ -2466,7 +2481,10 @@ impl Dent {
             .into_any_element()
     }
 
-    /// The agent's plan, folded to one line above the composer.
+    /// The agent's plan above the composer: a checklist card while it's
+    /// open (the default), one line ("Step 5 of 12 · what's at hand") when
+    /// folded. Done steps step back, the current one wears the working
+    /// square, the rest wait in the secondary ink.
     fn plan_strip(&self, s: &Session, cx: &mut Context<Self>) -> Option<AnyElement> {
         if s.todos.is_empty()
             || s.todos.iter().all(|(st, ..)| st == "completed") && s.status != Status::Working
@@ -2474,84 +2492,79 @@ impl Dent {
             return None;
         }
         let t = self.t;
+        let total = s.todos.len();
         let done = s.todos.iter().filter(|(st, ..)| st == "completed").count();
-        let now = s
-            .todos
-            .iter()
-            .find(|(st, ..)| st == "in_progress")
-            .map(|(_, what, doing)| {
-                if doing.is_empty() {
-                    what.clone()
-                } else {
-                    doing.clone()
-                }
-            });
+        let at = s.todos.iter().position(|(st, ..)| st == "in_progress");
+        let now = at.map(|i| {
+            let (_, what, doing) = &s.todos[i];
+            if doing.is_empty() {
+                what.clone()
+            } else {
+                doing.clone()
+            }
+        });
         let open = self.plan_open;
+        let head = div()
+            .id("plan-strip")
+            .flex()
+            .items_center()
+            .gap(px(space::S2))
+            .cursor_pointer()
+            .on_press(cx.listener(|this, _, _, cx| {
+                this.plan_open = !this.plan_open;
+                cx.notify();
+            }))
+            .child(icon("list-checks", 13., t.quiet))
+            .child(div().ty(UI).text_color(t.quiet).child(match at {
+                Some(i) if !open => format!("Step {} of {total}", i + 1),
+                _ => format!("Plan · {done} of {total} done"),
+            }))
+            .when_some(now.filter(|_| !open), |d, now| {
+                d.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .ty(UI)
+                        .text_color(t.ink)
+                        .child(now),
+                )
+            })
+            .when(open, |d| d.child(div().flex_1()))
+            .child(icon(
+                if open { "chevron-down" } else { "chevron-up" },
+                11.,
+                t.faint,
+            ));
         Some(
             div()
+                .mb(px(space::S2))
+                .px(px(space::S4))
+                .when(open, |d| {
+                    d.py(px(space::S3))
+                        .rounded(px(radius::XL))
+                        .border_1()
+                        .border_color(t.hairline)
+                })
                 .flex()
                 .flex_col()
                 .gap(px(space::S1))
-                .pb(px(space::S1))
-                .border_b_1()
-                .border_color(t.hairline)
-                .child(
-                    div()
-                        .id("plan-strip")
-                        .flex()
-                        .items_center()
-                        .gap(px(space::S2))
-                        .cursor_pointer()
-                        .on_press(cx.listener(|this, _, _, cx| {
-                            this.plan_open = !this.plan_open;
-                            cx.notify();
-                        }))
-                        .child(icon("list-checks", 13., t.quiet))
-                        .child(div().ty(UI).text_color(t.quiet).child({
-                            let total = s.todos.len();
-                            match s.todos.iter().position(|(st, ..)| st == "in_progress") {
-                                Some(i) if !open => format!("Step {} of {total}", i + 1),
-                                _ => format!("Plan · {done} of {total} done"),
-                            }
-                        }))
-                        .when_some(now.filter(|_| !open), |d, now| {
-                            d.child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .ty(UI)
-                                    .text_color(t.ink)
-                                    .child(now),
-                            )
-                        })
-                        .child(icon(
-                            if open { "chevron-down" } else { "chevron-up" },
-                            11.,
-                            t.faint,
-                        )),
-                )
+                .child(head)
                 .when(open, |d| {
                     d.children(s.todos.iter().map(|(st, what, _)| {
                         let ink = match st.as_str() {
-                            "completed" => t.faint,
+                            "completed" => t.quiet,
                             "in_progress" => t.ink,
-                            _ => t.quiet,
+                            _ => t.secondary(),
                         };
-                        // Done is a check; the current step a filled dot; the
-                        // rest an outline.
                         let mark = match st.as_str() {
-                            "completed" => icon("check", 12., t.faint).into_any_element(),
-                            "in_progress" => div()
-                                .size(px(7.))
-                                .rounded_full()
-                                .bg(t.ink)
-                                .into_any_element(),
+                            "completed" => icon("check", 13., t.quiet).into_any_element(),
+                            "in_progress" => status_square(Status::Working, &t).into_any_element(),
                             _ => div()
-                                .size(px(7.))
+                                .size(px(9.))
                                 .rounded_full()
                                 .border_1()
-                                .border_color(t.quiet)
+                                .border_color(t.faint)
                                 .into_any_element(),
                         };
                         div()
@@ -4190,6 +4203,21 @@ fn ask_keys(keyed: bool, on: &'static str, off: &'static str, t: &theme::Theme) 
         .ty(LABEL)
         .text_color(if keyed { t.ink } else { t.quiet })
         .child(if keyed { on } else { off })
+}
+
+/// Whether the reply at `ix` is a turn's answer: nothing but notes follow it
+/// before your next message, and its turn has ended. Everything else said in
+/// a turn is narration of the work.
+pub fn is_answer(items: &[Item], ix: usize, running: bool) -> bool {
+    for i in items.iter().skip(ix + 1) {
+        match i {
+            Item::User { .. } | Item::Queued { .. } => return true,
+            Item::TurnEnd { .. } => return true,
+            Item::Text(_) | Item::Tools { .. } | Item::Thinking(_) => return false,
+            _ => {}
+        }
+    }
+    !running
 }
 
 /// For the last reply of a turn that has finished: when it finished, how

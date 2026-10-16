@@ -50,9 +50,26 @@ pub fn argv(
             // Lets the person switch to full access mid-session; it does
             // nothing unless they do.
             "--allow-dangerously-skip-permissions",
+            // dent shows the plan and each command's purpose rather than
+            // the commands themselves, so ask for both.
+            "--append-system-prompt",
+            PLAN_NUDGE,
         ]
         .map(String::from),
     );
+    // The plan tool, from this same binary, allowed up front: showing the
+    // plan never needs asking.
+    if let Some(exe) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.to_str().map(str::to_owned))
+    {
+        v.extend([
+            "--mcp-config".into(),
+            crate::plan_tool::config(&exe),
+            "--allowedTools".into(),
+            crate::plan_tool::TOOL.into(),
+        ]);
+    }
     if let Some(mode) = mode(permission) {
         v.extend(["--permission-mode".into(), mode.into()]);
     }
@@ -77,6 +94,9 @@ pub fn argv(
     }
     v
 }
+
+/// Added to every session's system prompt.
+const PLAN_NUDGE: &str = "Before you start any task with three or more steps, call the update_plan tool (from the dent server) with the whole plan, one short line per step. Call it again whenever a step starts or finishes, marking it in_progress or completed, so the plan always shows where you are. Give every Bash command a short description of what it is for, starting with a verb.";
 
 /// A one-off side question: the conversation `agent_session` so far, forked
 /// so the original never sees it, answered without changing anything.

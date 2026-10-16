@@ -6,6 +6,8 @@
 //! `dent-daemon login-item on|off` starts it at login, or stops doing so.
 //! `dent-daemon check-transcripts [DIR] [--into STATE]` checks the import of
 //! Claude Code transcripts (see [`check`]).
+//! `dent-daemon plan-tool` serves the agent's plan tool to a session (see
+//! [`plan_tool`]).
 
 mod check;
 mod claude;
@@ -15,6 +17,7 @@ mod git;
 mod holder;
 mod login;
 mod paths;
+mod plan_tool;
 mod projects;
 mod server;
 mod session;
@@ -47,6 +50,9 @@ fn main() -> Result<()> {
     }
     if args.first().map(String::as_str) == Some("check-transcripts") {
         return check::run(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("plan-tool") {
+        return plan_tool::run();
     }
     std::fs::create_dir_all(&paths.state)
         .with_context(|| format!("create {}", paths.state.display()))?;

@@ -268,6 +268,7 @@ pub fn session(
                             // plans have their own cards; the rest is the
                             // agent's housekeeping.
                             "TodoWrite"
+                                | PLAN_TOOL
                                 | "AskUserQuestion"
                                 | "ExitPlanMode"
                                 | "EnterPlanMode"
@@ -322,7 +323,14 @@ pub fn session(
                 let input: Value = serde_json::from_str(input).unwrap_or(Value::Null);
                 match answer {
                     None => items.push(ask(id, tool, &input, description.as_deref(), *keeps, cwd)),
-                    // The answer reads before what it let happen.
+                    // Allowed once, the work that follows shows it went
+                    // ahead: no line of its own. Anything that lasts or
+                    // stops it reads before what it let happen.
+                    Some(Answer::Allow {
+                        always: false,
+                        project: false,
+                        ..
+                    }) if !matches!(tool.as_str(), "ExitPlanMode" | "AskUserQuestion") => {}
                     Some(a) => {
                         let note = answered(tool, &input, a, cwd);
                         match items.last() {
@@ -511,15 +519,26 @@ fn servers_in(e: &Entry) -> Vec<String> {
     out
 }
 
-/// The agent's latest plan, from its last todo list.
+/// A call that sets the agent's plan: dent's own plan tool, or Claude
+/// Code's todo list where it still has one.
+fn plans(name: &str) -> bool {
+    name == "TodoWrite" || name == PLAN_TOOL
+}
+
+/// dent's plan tool as the agent calls it (the daemon serves it).
+const PLAN_TOOL: &str = "mcp__dent__update_plan";
+
+/// The agent's latest plan, from its last plan call.
 fn todos(v: &SessionView) -> Vec<(String, String, String)> {
     let last = v.entries.iter().rev().find_map(|e| match e {
-        Entry::Tools { calls } => calls.iter().rev().find(|c| c.name == "TodoWrite"),
+        Entry::Tools { calls } => calls.iter().rev().find(|c| plans(&c.name)),
         _ => None,
     });
     let Some(c) = last else { return Vec::new() };
-    c.input()["todos"]
+    let input = c.input();
+    input["todos"]
         .as_array()
+        .or(input["items"].as_array())
         .map(|a| {
             a.iter()
                 .map(|t| {
@@ -608,7 +627,7 @@ fn detail(v: &SessionView) -> String {
                 .map(|(_, what, doing)| if doing.is_empty() { what } else { doing });
             match v.entries.last() {
                 Some(Entry::Tools { calls }) => {
-                    let top = |c: &&Call| c.parent.is_none() && c.name != "TodoWrite";
+                    let top = |c: &&Call| c.parent.is_none() && !plans(&c.name);
                     let call = calls
                         .iter()
                         .rev()
@@ -859,9 +878,10 @@ fn line(c: &Call, cwd: &Path) -> String {
         let short = p.rsplit('/').next().unwrap_or(&p).to_string();
         l = l.replacen(&short, &rel, 1);
     }
+    // A failed command says so in its verb; why waits inside with the rest
+    // of its output.
     let mark = match &c.result {
         Some((true, out)) if c.name != "Bash" => format!(" · failed: {}", first_line(out)),
-        Some((true, out)) => format!(": {}", first_line(out)),
         _ => String::new(),
     };
     format!("{l}{mark}")
@@ -873,7 +893,11 @@ fn line(c: &Call, cwd: &Path) -> String {
 fn summary(calls: &[Call], cwd: &Path) -> String {
     let top: Vec<&Call> = calls.iter().filter(|c| c.parent.is_none()).collect();
     if top.len() == 1 {
-        return line(top[0], cwd).trim_start().to_string();
+        let l = line(top[0], cwd).trim_start().to_string();
+        return match diffstat(&top) {
+            Some(stat) => format!("{l}  {stat}"),
+            None => l,
+        };
     }
     // (tier, kind, count, first seen): writes, then reads, then the rest.
     let mut kinds: Vec<(u8, &str, usize, usize)> = Vec::new();
@@ -906,6 +930,19 @@ fn summary(calls: &[Call], cwd: &Path) -> String {
         }
     }
     kinds.sort_by_key(|k| (k.0, std::cmp::Reverse(k.2), k.3));
+    // One or two files changed are named; more are counted.
+    let files = |k: &str| -> Option<String> {
+        let names: Vec<String> = touched
+            .iter()
+            .filter(|(_, j)| *j == k)
+            .map(|(p, _)| p.rsplit('/').next().unwrap_or(p).to_string())
+            .collect();
+        match names.as_slice() {
+            [a] => Some(a.clone()),
+            [a, b] => Some(format!("{a} and {b}")),
+            _ => None,
+        }
+    };
     let phrase = |&(_, kind, n, _): &(u8, &str, usize, usize)| -> String {
         let count = |one: &str, many: &str| {
             if n == 1 {
@@ -915,11 +952,27 @@ fn summary(calls: &[Call], cwd: &Path) -> String {
             }
         };
         match kind {
-            "edited" => format!("edited {}", count("a file", "files")),
-            "created" => format!("created {}", count("a file", "files")),
+            "edited" => format!(
+                "edited {}",
+                files("edited").unwrap_or_else(|| count("a file", "files"))
+            ),
+            "created" => format!(
+                "created {}",
+                files("created").unwrap_or_else(|| count("a file", "files"))
+            ),
             "read" => format!("read {}", count("a file", "files")),
             "fetched" => format!("read {}", count("a page", "pages")),
             "ran" => format!("ran {}", count("a command", "commands")),
+            // One subagent is named by its task.
+            "agents" | "working" if n == 1 => {
+                let task = top
+                    .iter()
+                    .find(|c| matches!(c.name.as_str(), "Task" | "Agent"))
+                    .and_then(|c| c.input()["description"].as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "a task".into());
+                let doing = if kind == "working" { " (working)" } else { "" };
+                format!("subagent “{task}”{doing}")
+            }
             "agents" => format!("ran {}", count("an agent", "agents")),
             "working" => format!("{} working", count("an agent", "agents")),
             "used" => format!("used {}", count("a tool", "tools")),
@@ -947,6 +1000,9 @@ fn summary(calls: &[Call], cwd: &Path) -> String {
     if let Some(f) = out.get(..1) {
         out = f.to_uppercase() + &out[1..];
     }
+    if let Some(stat) = diffstat(&top) {
+        out.push_str(&format!("  {stat}"));
+    }
     let failed = top
         .iter()
         .filter(|c| matches!(c.result, Some((true, _))))
@@ -955,6 +1011,32 @@ fn summary(calls: &[Call], cwd: &Path) -> String {
         out.push_str(&format!(" · {failed} failed"));
     }
     out
+}
+
+/// Lines added and taken out by a group's edits that went through, like
+/// "+9 −5"; nothing when it changed no file.
+fn diffstat(calls: &[&Call]) -> Option<String> {
+    let (mut add, mut del) = (0, 0);
+    for c in calls {
+        if !matches!(c.result, Some((false, _))) {
+            continue;
+        }
+        let Some(text) = edit_text(c.name.trim_start_matches("waiting:"), &c.input()) else {
+            continue;
+        };
+        if c.name == "Write" {
+            add += text.lines().count();
+            continue;
+        }
+        for l in text.lines() {
+            if l.starts_with("+ ") || l == "+" {
+                add += 1;
+            } else if l.starts_with("- ") || l == "-" {
+                del += 1;
+            }
+        }
+    }
+    (add + del > 0).then(|| format!("+{add} −{del}"))
 }
 
 fn ask(

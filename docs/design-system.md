@@ -42,6 +42,7 @@ A 4 px grid, with 2 px allowed only inside a component for optical fixes.
 | `size.status` | 28 | Status bar |
 | `size.square` | 12 | Status squares |
 | `size.column` | 720 | Reading column max width |
+| `size.measure` | 540 | Longest line of running text (about 78 characters) |
 
 Hit targets are at least 24 px even when the visual is smaller.
 

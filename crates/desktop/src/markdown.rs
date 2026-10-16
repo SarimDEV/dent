@@ -21,7 +21,9 @@ use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
 use ratex_types::display_item::DisplayList;
 
 use crate::diagram;
-use crate::ds::{CODE, DISPLAY, DISPLAY_COMPACT, LABEL, READING, Type, Typed, UI, radius, space};
+use crate::ds::{
+    CODE, DISPLAY, DISPLAY_COMPACT, LABEL, READING, Type, Typed, UI, radius, size, space,
+};
 use crate::math;
 use crate::theme::{self, Theme};
 
@@ -273,7 +275,15 @@ impl Inline {
             if st.emph {
                 f.style = FontStyle::Italic;
             }
-            let color = if st.link { t.ink } else { face.ink };
+            // Code sits a step back from the words around it: its face is
+            // wider and darker, and at full ink each run looked bold.
+            let color = if st.link {
+                t.ink
+            } else if st.code {
+                theme::mix_pub(t.quiet, face.ink, 0.6)
+            } else {
+                face.ink
+            };
             let piece = &self.text[at..at + len];
             text.push_str(piece);
             // Split a run where the fade changes, word by word.
@@ -1156,6 +1166,7 @@ fn render_in(
             Block::Para(i) => {
                 let f = face(READING, reading, ink);
                 div()
+                    .max_w(px(size::MEASURE))
                     .ty(READING)
                     .text_color(ink)
                     .child(i.element(&key, t, f, None, &r.md, r.window))
@@ -1220,6 +1231,7 @@ fn render_in(
                     );
                 }
                 div()
+                    .max_w(px(size::MEASURE))
                     .flex()
                     .flex_col()
                     .gap(px(space::S1))

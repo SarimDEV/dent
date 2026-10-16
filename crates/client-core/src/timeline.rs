@@ -182,7 +182,12 @@ impl Call {
         let v = self.input();
         let short = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
         let what = match self.name.as_str() {
-            "Bash" => v["command"].as_str().map(|c| first_line(c, 80)),
+            // What the command is for, as the agent put it; the command
+            // itself waits inside, for when the line is opened.
+            "Bash" => v["description"]
+                .as_str()
+                .filter(|d| !d.trim().is_empty())
+                .map(|d| first_line(d, 80)),
             "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => {
                 self.path().map(|p| short(&p))
             }
@@ -215,11 +220,112 @@ impl Call {
             "TodoWrite" => "Updated",
             other => other,
         };
+        if self.name == "Bash" {
+            return match (&self.result, what) {
+                (Some((true, _)), Some(w)) => format!("Failed to {}", lower_first(&w)),
+                (Some((true, _)), None) => "Failed: a command".into(),
+                (_, Some(w)) => tensed(&w, running),
+                (None, None) => "Running a command".into(),
+                (Some(_), None) => "Ran a command".into(),
+            };
+        }
         match what {
-            Some(w) if self.name == "TodoWrite" => format!("{verb} {w}"),
             Some(w) => format!("{verb} {w}"),
             None => verb.to_string(),
         }
+    }
+}
+
+/// An agent's description of a command ("Run the tests") in the tense of
+/// the moment: "Running the tests" while it runs, "Ran the tests" after. A
+/// description that doesn't start with a verb we know reads as written.
+pub fn tensed(desc: &str, running: bool) -> String {
+    let (first, rest) = desc.split_once(' ').unwrap_or((desc, ""));
+    let Some(&(_, doing, did)) = TENSES
+        .iter()
+        .find(|(base, ..)| base.eq_ignore_ascii_case(first))
+    else {
+        return desc.to_string();
+    };
+    let verb = if running { doing } else { did };
+    if rest.is_empty() {
+        verb.to_string()
+    } else {
+        format!("{verb} {rest}")
+    }
+}
+
+/// The verbs command descriptions start with: base, doing, done.
+const TENSES: &[(&str, &str, &str)] = &[
+    ("Add", "Adding", "Added"),
+    ("Apply", "Applying", "Applied"),
+    ("Build", "Building", "Built"),
+    ("Check", "Checking", "Checked"),
+    ("Clean", "Cleaning", "Cleaned"),
+    ("Clone", "Cloning", "Cloned"),
+    ("Commit", "Committing", "Committed"),
+    ("Compare", "Comparing", "Compared"),
+    ("Compile", "Compiling", "Compiled"),
+    ("Confirm", "Confirming", "Confirmed"),
+    ("Copy", "Copying", "Copied"),
+    ("Count", "Counting", "Counted"),
+    ("Create", "Creating", "Created"),
+    ("Delete", "Deleting", "Deleted"),
+    ("Download", "Downloading", "Downloaded"),
+    ("Execute", "Executing", "Executed"),
+    ("Fetch", "Fetching", "Fetched"),
+    ("Find", "Finding", "Found"),
+    ("Fix", "Fixing", "Fixed"),
+    ("Format", "Formatting", "Formatted"),
+    ("Get", "Getting", "Got"),
+    ("Grep", "Searching", "Searched"),
+    ("Init", "Initializing", "Initialized"),
+    ("Initialize", "Initializing", "Initialized"),
+    ("Inspect", "Inspecting", "Inspected"),
+    ("Install", "Installing", "Installed"),
+    ("Lint", "Linting", "Linted"),
+    ("List", "Listing", "Listed"),
+    ("Look", "Looking", "Looked"),
+    ("Make", "Making", "Made"),
+    ("Move", "Moving", "Moved"),
+    ("Open", "Opening", "Opened"),
+    ("Print", "Printing", "Printed"),
+    ("Pull", "Pulling", "Pulled"),
+    ("Push", "Pushing", "Pushed"),
+    ("Read", "Reading", "Read"),
+    ("Rebuild", "Rebuilding", "Rebuilt"),
+    ("Remove", "Removing", "Removed"),
+    ("Rename", "Renaming", "Renamed"),
+    ("Rerun", "Rerunning", "Reran"),
+    ("Re-run", "Re-running", "Re-ran"),
+    ("Reset", "Resetting", "Reset"),
+    ("Restore", "Restoring", "Restored"),
+    ("Retry", "Retrying", "Retried"),
+    ("Run", "Running", "Ran"),
+    ("Save", "Saving", "Saved"),
+    ("Search", "Searching", "Searched"),
+    ("Set", "Setting", "Set"),
+    ("Show", "Showing", "Showed"),
+    ("Stage", "Staging", "Staged"),
+    ("Start", "Starting", "Started"),
+    ("Stash", "Stashing", "Stashed"),
+    ("Stop", "Stopping", "Stopped"),
+    ("Test", "Testing", "Tested"),
+    ("Update", "Updating", "Updated"),
+    ("Verify", "Verifying", "Verified"),
+    ("View", "Viewing", "Viewed"),
+    ("Write", "Writing", "Wrote"),
+];
+
+fn lower_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        // An acronym or a name ("PR", "Cargo") keeps its capital.
+        Some(f) if c.clone().next().is_some_and(|n| n.is_lowercase()) => {
+            f.to_lowercase().chain(c).collect()
+        }
+        Some(f) => std::iter::once(f).chain(c).collect(),
+        None => String::new(),
     }
 }
 
@@ -263,10 +369,16 @@ const VERBS: &[&str] = &[
 /// How much of a call's line is its verb, so the verb can sit quieter
 /// than what it worked on: 0 when the line starts with no known verb.
 pub fn verb_len(line: &str) -> usize {
+    let starts =
+        |v: &str| line.starts_with(v) && line[v.len()..].chars().next().is_none_or(|c| c == ' ');
     VERBS
         .iter()
-        .find(|v| line.starts_with(**v) && line[v.len()..].chars().next().is_none_or(|c| c == ' '))
-        .map_or(0, |v| v.len())
+        .copied()
+        .chain(TENSES.iter().flat_map(|(_, doing, did)| [*doing, *did]))
+        .filter(|v| starts(v))
+        .map(str::len)
+        .max()
+        .unwrap_or(0)
 }
 
 fn first_line(s: &str, max: usize) -> String {
@@ -950,7 +1062,13 @@ mod tests {
                 }],
                 uuid: None,
             },
-            tool("c", "Bash", r#"{"command":"cargo test\nmore"}"#, None),
+            tool(
+                "c",
+                "Bash",
+                r#"{"command":"cargo test\nmore","description":"Run the tests"}"#,
+                None,
+            ),
+            tool("d", "Bash", r#"{"command":"ls | wc -l"}"#, None),
         ]);
         let v = &s.list["s"];
         assert_eq!(v.entries.len(), 3);
@@ -964,9 +1082,32 @@ mod tests {
             other => panic!("{other:?}"),
         }
         match &v.entries[2] {
-            Entry::Tools { calls } => assert_eq!(calls[0].line(), "Running cargo test…"),
+            // A command reads as what it's for; with no description, as a
+            // command. The shell itself waits inside.
+            Entry::Tools { calls } => {
+                assert_eq!(calls[0].line(), "Running the tests");
+                assert_eq!(calls[1].line(), "Running a command");
+            }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn command_descriptions_take_the_tense_of_the_moment() {
+        assert_eq!(tensed("Run the tests", true), "Running the tests");
+        assert_eq!(
+            tensed("Stage all changes and commit", false),
+            "Staged all changes and commit"
+        );
+        assert_eq!(
+            tensed("Rerun tests after the fix", false),
+            "Reran tests after the fix"
+        );
+        // Not a verb we know: as written.
+        assert_eq!(tensed("Baseline test run", true), "Baseline test run");
+        assert_eq!(verb_len("Listed repo files"), "Listed".len());
+        assert_eq!(lower_first("List repo files"), "list repo files");
+        assert_eq!(lower_first("PR checks"), "PR checks");
     }
 
     /// A subagent sent to the background works on past its launch receipt

@@ -1729,15 +1729,22 @@ fn checks() -> Vec<(f32, Act)> {
                 10.,
             ),
         ),
-        (0.3, Shot("plan-folded")),
+        (0.4, Shot("plan")),
         (
             0.6,
+            Call(|d, _, cx| {
+                d.plan_open = false;
+                cx.notify();
+            }),
+        ),
+        (0.3, Shot("plan-folded")),
+        (
+            0.1,
             Call(|d, _, cx| {
                 d.plan_open = true;
                 cx.notify();
             }),
         ),
-        (0.4, Shot("plan")),
         (
             0.1,
             Until(
