@@ -4824,6 +4824,13 @@ fn ask_keys(keyed: bool, on: &'static str, off: &'static str, t: &theme::Theme) 
 /// item, when nothing but its end lies between them.
 pub fn change_after(items: &[Item], ix: usize) -> Option<usize> {
     turn_end_after(items, ix)?;
+    // A stopped turn's changes come just before its note.
+    if matches!(items.get(ix), Some(Item::Note { .. }))
+        && let Some(c) = ix.checked_sub(1)
+        && matches!(items.get(c), Some(Item::Changed { .. }))
+    {
+        return Some(c);
+    }
     for (j, i) in items.iter().enumerate().skip(ix + 1) {
         match i {
             Item::Changed { .. } => return Some(j),
@@ -4838,11 +4845,15 @@ pub fn change_after(items: &[Item], ix: usize) -> Option<usize> {
 /// above it, rather than on a line of its own.
 fn folded_change(items: &[Item], ix: usize) -> bool {
     matches!(items.get(ix), Some(Item::Changed { .. }))
-        && items[..ix]
+        && (items[..ix]
             .iter()
             .rposition(|i| matches!(i, Item::Text(_)))
             .is_some_and(|r| change_after(items, r) == Some(ix))
+            || change_after(items, ix + 1) == Some(ix))
 }
+
+/// The icon of the note a turn you stopped ends with.
+const STOPPED: &str = "square";
 
 /// Whether the reply at `ix` is a turn's answer: nothing but notes follow it
 /// before your next message, and its turn has ended. Everything else said in
@@ -4868,12 +4879,24 @@ pub fn is_answer(items: &[Item], ix: usize, running: bool) -> bool {
 /// For the last reply of a turn that has finished: when it finished, how
 /// long it took (ms), and whether it's the session's latest turn.
 pub fn turn_end_after(items: &[Item], ix: usize) -> Option<(u64, u64, bool)> {
-    if !matches!(items.get(ix), Some(Item::Text(_))) {
-        return None;
+    match items.get(ix) {
+        Some(Item::Text(_)) => {}
+        // A turn you stopped says so straight under its words, and its time
+        // and actions follow the note.
+        Some(Item::Note { icon: STOPPED, .. })
+            if items[..ix]
+                .iter()
+                .rev()
+                .take_while(|i| !matches!(i, Item::User { .. }))
+                .any(|i| matches!(i, Item::Text(_))) => {}
+        _ => return None,
     }
     for (j, i) in items.iter().enumerate().skip(ix + 1) {
         match i {
-            Item::Text(_) | Item::User { .. } | Item::Queued { .. } => return None,
+            Item::Text(_)
+            | Item::User { .. }
+            | Item::Queued { .. }
+            | Item::Note { icon: STOPPED, .. } => return None,
             Item::TurnEnd { at, took } => {
                 let latest = !items[j + 1..]
                     .iter()
@@ -4923,8 +4946,31 @@ fn keep(whole: bool, chip: AnyElement) -> AnyElement {
 
 #[cfg(test)]
 mod answer_tests {
-    use super::is_answer;
+    use super::{STOPPED, change_after, folded_change, is_answer, turn_end_after};
     use crate::data::Item;
+
+    #[test]
+    fn a_stopped_turns_actions_follow_its_note() {
+        let note = Item::Note {
+            icon: STOPPED,
+            text: "Stopped".into(),
+        };
+        let items = vec![
+            Item::Text("words".into()),
+            Item::Changed {
+                paths: vec!["a.rs".into()],
+            },
+            note.clone(),
+            Item::TurnEnd { at: 1, took: 0 },
+        ];
+        assert!(turn_end_after(&items, 0).is_none());
+        assert!(turn_end_after(&items, 2).is_some());
+        assert_eq!(change_after(&items, 2), Some(1));
+        assert!(folded_change(&items, 1));
+        // A turn stopped before it said anything keeps a plain note.
+        let bare = vec![note, Item::TurnEnd { at: 1, took: 0 }];
+        assert!(turn_end_after(&bare, 0).is_none());
+    }
 
     #[test]
     fn narration_is_never_the_answer_while_its_turn_runs() {
