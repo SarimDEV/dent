@@ -275,7 +275,7 @@ impl Dent {
         // The backdrop is dark in either theme, as photos are shown.
         // Dark enough that the chat behind stops reading, so a small
         // picture stands alone.
-        let shade = gpui_kit::black().opacity(if t.dark { 0.86 } else { 0.82 });
+        let shade = if t.dark { 0.86 } else { 0.82 };
         Some(
             div()
                 .id("lightbox")
@@ -296,7 +296,9 @@ impl Dent {
                     div()
                         .absolute()
                         .size_full()
-                        .bg(shade.opacity(shade.a * cover)),
+                        // (`opacity` scales the alpha it's given, so
+                        // from opaque black: the shade is applied once.)
+                        .bg(gpui_kit::black().opacity(shade * cover)),
                 )
                 .child(
                     div()
