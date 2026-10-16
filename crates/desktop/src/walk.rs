@@ -325,6 +325,14 @@ impl Walk {
                 v.extend(attaching());
                 v
             }
+            "composing" => {
+                let mut v = vec![(
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                )];
+                v.extend(composing());
+                v
+            }
             "typing" => {
                 let mut v = vec![(
                     0.,
@@ -2039,6 +2047,7 @@ fn checks() -> Vec<(f32, Act)> {
     v.extend(attaching());
     v.extend(turn_changes());
     v.extend(visuals());
+    v.extend(composing());
     v
 }
 
@@ -4763,6 +4772,65 @@ fn visuals() -> Vec<(f32, Act)> {
         ),
         (0.3, Call(to_end)),
         (0.4, Shot("stream-done")),
+    ]);
+    v
+}
+
+fn queued_now(d: &Dent) -> bool {
+    has(d, |i| matches!(i, Item::Queued { .. }))
+}
+
+fn composer_text(d: &Dent, cx: &App) -> String {
+    d.composer.read(cx).value().to_string()
+}
+
+/// The reply box and what it does with your words: what comes back to it,
+/// what Return does while a card waits, the queue's own keys, and drafts
+/// put aside.
+fn composing() -> Vec<(f32, Act)> {
+    let mut v = new_session("a long answer, slowly");
+    v.extend([
+        (0.1, Until("it streams", |d, _| streaming(d), 10.)),
+        (0.1, Type(Field::Composer, "queued one")),
+        (0.1, Key("enter")),
+        (0.1, Until("the message waits", |d, _| queued_now(d), 5.)),
+        // A draft holding a folded paste, then the queue comes back to it.
+        (0., Call(save_clipboard)),
+        (0., Call(copy_long_log)),
+        (0.1, Type(Field::Composer, "draft with ")),
+        (0.1, Key("cmd-v")),
+        (
+            0.1,
+            Until(
+                "the draft holds a folded paste",
+                |d, cx| chips(d, cx).len() == 1,
+                2.,
+            ),
+        ),
+        (0.1, Key("cmd-.")),
+        (
+            0.2,
+            Until(
+                "a take-back after a draft leaves the draft's paste a chip, so it's sent whole",
+                |d, cx| {
+                    let text = composer_text(d, cx);
+                    chips(d, cx).len() == 1
+                        && text.starts_with("draft with [Pasted text #")
+                        && text.ends_with("\n\nqueued one")
+                },
+                5.,
+            ),
+        ),
+        (0., Call(restore_clipboard)),
+        (0.1, Type(Field::Composer, "")),
+        (
+            0.1,
+            Until(
+                "it has stopped",
+                |d, _| !status_is(d, Status::Working),
+                10.,
+            ),
+        ),
     ]);
     v
 }

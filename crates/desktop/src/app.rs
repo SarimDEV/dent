@@ -330,6 +330,39 @@ pub fn put_undoable(
     cx.emit(InputEvent::Change);
 }
 
+/// Put `text` beside what's typed in a field, a blank line between: after
+/// the draft, or with `first` before it. The draft itself isn't touched,
+/// so its folded pastes stay chips (taking the whole text and putting it
+/// back would leave only their words, sent as typed). An edit ⌘Z undoes;
+/// the caret goes to the end.
+pub fn put_beside(
+    field: &mut TextareaState,
+    text: &str,
+    first: bool,
+    window: &mut Window,
+    cx: &mut Context<TextareaState>,
+) {
+    let draft = field.value().to_string();
+    if draft.trim().is_empty() {
+        put_undoable(field, text.to_string(), window, cx);
+        return;
+    }
+    if !text.is_empty() {
+        if first {
+            let lead = draft.len() - draft.trim_start().len();
+            field.set_selected_range(0..lead, cx);
+            field.replace(format!("{text}\n\n"), window, cx);
+        } else {
+            let end = draft.trim_end().len();
+            field.set_selected_range(end..draft.len(), cx);
+            field.replace(format!("\n\n{text}"), window, cx);
+        }
+    }
+    let end = field.value().len();
+    field.set_selected_range(end..end, cx);
+    cx.emit(InputEvent::Change);
+}
+
 /// What a prompt field holds, trimmed, its folded pastes opened in full:
 /// each chip by its token, not by its words.
 pub fn unfolded(field: &TextareaState, pastes: &std::collections::BTreeMap<u32, String>) -> String {
@@ -2499,10 +2532,8 @@ impl Dent {
             };
             match (field, session) {
                 (Some(field), _) => {
-                    let draft = field.read(cx).value().trim_end().to_string();
-                    let text = joined(&draft, &text);
                     field.update(cx, |c, cx| {
-                        put_undoable(c, text, window, cx);
+                        put_beside(c, &text, false, window, cx);
                         if open {
                             c.focus(window, cx);
                         }
@@ -4478,14 +4509,14 @@ impl Dent {
                 added.push(path);
             }
         }
-        // Whatever was typed stays, after it; and ⌘Z undoes the change.
-        let text = if keep_draft {
-            joined(&words, self.composer.read(cx).value().trim())
-        } else {
-            words
-        };
+        // Whatever was typed stays, after it, its pastes still folded; and
+        // ⌘Z undoes the change.
         self.composer.update(cx, |c, cx| {
-            put_undoable(c, text, window, cx);
+            if keep_draft {
+                put_beside(c, &words, true, window, cx);
+            } else {
+                put_undoable(c, words, window, cx);
+            }
             c.focus(window, cx);
         });
         added
