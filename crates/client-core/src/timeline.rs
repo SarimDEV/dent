@@ -518,7 +518,9 @@ impl Sessions {
     }
 
     fn event(&mut self, e: &Event) {
+        // An empty reading (an older daemon logged them) says nothing.
         if let Body::Limits { windows } = &e.body
+            && !windows.is_empty()
             && self.limits.as_ref().is_none_or(|(_, at)| *at <= e.at)
         {
             self.limits = Some((windows.clone(), e.at));
@@ -1094,6 +1096,24 @@ mod tests {
             output: "ok".into(),
             parent: None,
         }
+    }
+
+    #[test]
+    fn an_empty_limits_reading_keeps_the_last_one() {
+        let w = Window {
+            name: "five_hour".into(),
+            used: 0.2,
+            resets_at: 1,
+        };
+        let s = feed(vec![
+            Body::Limits {
+                windows: vec![w.clone()],
+            },
+            Body::Limits {
+                windows: Vec::new(),
+            },
+        ]);
+        assert_eq!(s.limits.map(|(w, _)| w), Some(vec![w]));
     }
 
     #[test]
