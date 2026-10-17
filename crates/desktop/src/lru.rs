@@ -41,6 +41,26 @@ impl<K: Hash + Eq + Clone, V: Clone> Lru<K, V> {
         }
     }
 
+    /// What's kept for `k`, or what `f` makes (then kept).
+    pub fn get_or_insert_with(&mut self, k: K, f: impl FnOnce() -> V) -> V {
+        if let Some(v) = self.get(&k) {
+            return v;
+        }
+        let v = f();
+        self.insert(k, v.clone());
+        v
+    }
+
+    pub fn remove(&mut self, k: &K) -> Option<V> {
+        self.map.remove(k).map(|(v, _)| v)
+    }
+
+    /// Keep at least `cap` (a cache whose working set grows, like Find's
+    /// counts for a growing chat).
+    pub fn at_least(&mut self, cap: usize) {
+        self.cap = self.cap.max(cap);
+    }
+
     /// What's kept for `k`, without counting it as a use.
     pub fn peek(&self, k: &K) -> Option<&V> {
         self.map.get(k).map(|(v, _)| v)

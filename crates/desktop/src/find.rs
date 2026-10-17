@@ -73,7 +73,7 @@ pub struct Find {
     /// In the chat: how many matches each item draws, and each item's count
     /// by its words, so only what changed is counted again.
     chat: std::rc::Rc<Vec<usize>>,
-    memo: std::collections::HashMap<u64, usize>,
+    memo: crate::lru::Lru<u64, usize>,
 }
 
 /// The words a chat item draws as text, a piece at a time: your message
@@ -196,7 +196,7 @@ impl Dent {
                 cells: Vec::new(),
                 page_count: 0,
                 chat: Default::default(),
-                memo: Default::default(),
+                memo: crate::lru::Lru::new(256),
             });
         }
         self.find_input.update(cx, |f, cx| {
@@ -417,9 +417,8 @@ impl Dent {
         }
         // The reply streaming in is drawn from its stream, not the cache.
         let live = self.births.get(&s.id).map(|(ix, _)| *ix);
-        if f.memo.len() > 2 * s.items.len() + 64 {
-            f.memo.clear();
-        }
+        // Room for every item's count, and those of the words before.
+        f.memo.at_least(2 * s.items.len() + 64);
         let counts = s
             .items
             .iter()
@@ -451,7 +450,7 @@ impl Dent {
                 }
                 let key = h.finish();
                 let md = &mut self.md;
-                *f.memo.entry(key).or_insert_with(|| {
+                f.memo.get_or_insert_with(key, || {
                     item_words(item, open, |src| {
                         if live == Some(ix) {
                             md.live(&s.id, src)

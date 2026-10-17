@@ -768,7 +768,7 @@ pub struct Dent {
     /// Where you were reading each session, and whether you were at the end.
     pub read_at: HashMap<String, (ListOffset, bool)>,
     /// Parsed documents by file and version.
-    pub md_docs: HashMap<(&'static str, usize), Rc<Vec<Block>>>,
+    pub md_docs: crate::lru::Lru<(&'static str, usize), Rc<Vec<Block>>>,
     /// Sessions closed while the Undo has been showing, oldest first.
     pub undo_closes: Vec<String>,
     /// The terminal session being picked up.
@@ -1215,7 +1215,7 @@ impl Dent {
             slash_shown: None,
             palette_scroll: ScrollHandle::new(),
             read_at: HashMap::new(),
-            md_docs: HashMap::new(),
+            md_docs: crate::lru::Lru::new(64),
             undo_closes: Vec::new(),
             adopting: None,
             inbox_hold: None,
@@ -5453,7 +5453,7 @@ impl Dent {
     /// each frame.
     pub fn doc_blocks(&mut self, art: &'static str, v: usize) -> Rc<Vec<Block>> {
         if let Some(b) = self.md_docs.get(&(art, v)) {
-            return b.clone();
+            return b;
         }
         let src = self
             .art(art)
@@ -5461,9 +5461,6 @@ impl Dent {
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .unwrap_or_default();
         let blocks = Rc::new(crate::markdown::parse(&src));
-        if self.md_docs.len() > 64 {
-            self.md_docs.clear();
-        }
         self.md_docs.insert((art, v), blocks.clone());
         blocks
     }

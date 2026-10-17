@@ -6,6 +6,7 @@
 //! typeset maths, finished diagrams, scroll positions of wide blocks and
 //! tall tables, and which Copy button was just pressed.
 
+use crate::lru::Lru;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
@@ -984,6 +985,7 @@ pub fn parse(src: &str) -> Vec<Block> {
 
 // ---- Render state ----
 
+#[derive(Clone)]
 enum Diagram {
     Pending,
     Ready(Rc<diagram::Drawn>),
@@ -991,6 +993,7 @@ enum Diagram {
 }
 
 /// A table's measured columns, kept while its rows don't change.
+#[derive(Clone)]
 struct TableCache {
     table: Weak<Table>,
     data: Rc<TableData>,
@@ -999,17 +1002,33 @@ struct TableCache {
     rows: Vec<(u64, Rc<[Measure]>)>,
 }
 
-#[derive(Default)]
+/// Every cache here forgets what was used longest ago, a quarter at a
+/// time, once full (`Lru`), never everything at once.
 struct State {
     probes: Probes,
-    math: HashMap<(String, bool), Option<Rc<DisplayList>>>,
-    diagrams: HashMap<(String, bool), Diagram>,
-    hscrolls: HashMap<String, ScrollHandle>,
-    lists: HashMap<String, ListState>,
-    tables: HashMap<String, TableCache>,
+    math: Lru<(String, bool), Option<Rc<DisplayList>>>,
+    diagrams: Lru<(String, bool), Diagram>,
+    hscrolls: Lru<String, ScrollHandle>,
+    lists: Lru<String, ListState>,
+    tables: Lru<String, TableCache>,
     copied: Option<(String, Instant)>,
     /// The capped table drawn last, for the walkthrough's checks.
     last_table: Option<String>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        State {
+            probes: Probes::default(),
+            math: Lru::new(2048),
+            diagrams: Lru::new(256),
+            hscrolls: Lru::new(4096),
+            lists: Lru::new(512),
+            tables: Lru::new(512),
+            copied: None,
+            last_table: None,
+        }
+    }
 }
 
 /// What Markdown rendering remembers between frames. Cheap to clone; every
@@ -1029,22 +1048,19 @@ impl Md {
     }
 
     fn typeset(&self, tex: &str, display: bool) -> Option<Rc<DisplayList>> {
-        let mut s = self.0.borrow_mut();
-        if s.math.len() > 2048 {
-            s.math.clear();
-        }
-        s.math
-            .entry((tex.to_string(), display))
-            .or_insert_with(|| math::typeset(tex, display).map(Rc::new))
-            .clone()
+        self.0
+            .borrow_mut()
+            .math
+            .get_or_insert_with((tex.to_string(), display), || {
+                math::typeset(tex, display).map(Rc::new)
+            })
     }
 
     fn hscroll_handle(&self, key: &str) -> ScrollHandle {
-        let mut s = self.0.borrow_mut();
-        if s.hscrolls.len() > 4096 {
-            s.hscrolls.clear();
-        }
-        s.hscrolls.entry(key.to_string()).or_default().clone()
+        self.0
+            .borrow_mut()
+            .hscrolls
+            .get_or_insert_with(key.to_string(), ScrollHandle::default)
     }
 
     fn copied(&self, key: &str) -> bool {
@@ -1058,7 +1074,7 @@ impl Md {
     /// The scroll position and end of the capped table drawn last.
     pub fn table_scroll(&self) -> Option<(f32, f32)> {
         let s = self.0.borrow();
-        let state = s.lists.get(s.last_table.as_ref()?)?;
+        let state = s.lists.peek(s.last_table.as_ref()?)?;
         Some((
             -state.scroll_px_offset_for_scrollbar().y.as_f32(),
             state.max_offset_for_scrollbar().y.as_f32(),
@@ -1795,7 +1811,7 @@ fn diagram_block(src: &str, closed: bool, t: &Theme, key: &str, r: &mut R) -> An
     let ck = (src.to_string(), dark);
     let state = {
         let s = r.md.0.borrow();
-        s.diagrams.get(&ck).map(|d| match d {
+        s.diagrams.peek(&ck).map(|d| match d {
             Diagram::Pending => Err(None),
             Diagram::Ready(d) => Ok(d.clone()),
             Diagram::Failed(e) => Err(Some(e.clone())),
@@ -1858,9 +1874,6 @@ fn diagram_block(src: &str, closed: bool, t: &Theme, key: &str, r: &mut R) -> An
 fn start_diagram(ck: (String, bool), r: &mut R) {
     {
         let mut s = r.md.0.borrow_mut();
-        if s.diagrams.len() > 256 {
-            s.diagrams.retain(|_, d| matches!(d, Diagram::Pending));
-        }
         s.diagrams.insert(ck.clone(), Diagram::Pending);
     }
     let palette = diagram::Palette::of(&if ck.1 {
@@ -2003,7 +2016,7 @@ fn measure(i: &Inline, head: bool, md: &Md, window: &Window) -> Measure {
 /// The table's column widths, measured once and kept while it is unchanged.
 /// While it streams in, only new or changed rows are measured.
 fn table_data(table: &Rc<Table>, key: &str, md: &Md, window: &Window) -> Rc<TableData> {
-    if let Some(c) = md.0.borrow().tables.get(key)
+    if let Some(c) = md.0.borrow().tables.peek(&key.to_string())
         && c.table.as_ptr() == Rc::as_ptr(table)
     {
         return c.data.clone();
@@ -2021,7 +2034,7 @@ fn table_data(table: &Rc<Table>, key: &str, md: &Md, window: &Window) -> Rc<Tabl
     let old =
         md.0.borrow_mut()
             .tables
-            .remove(key)
+            .remove(&key.to_string())
             .map(|c| c.rows)
             .unwrap_or_default();
     let mut rows = Vec::with_capacity(table.rows.len() + 1);
@@ -2059,9 +2072,6 @@ fn table_data(table: &Rc<Table>, key: &str, md: &Md, window: &Window) -> Rc<Tabl
         mins,
     });
     let mut s = md.0.borrow_mut();
-    if s.tables.len() > 512 {
-        s.tables.clear();
-    }
     s.tables.insert(
         key.to_string(),
         TableCache {
@@ -2247,14 +2257,9 @@ fn vfade(top: bool, bg: Hsla) -> Div {
 /// The list state behind a capped table, kept while its rows stream in.
 fn list_for(md: &Md, key: &str, n: usize) -> ListState {
     let mut s = md.0.borrow_mut();
-    if s.lists.len() > 512 {
-        s.lists.clear();
-    }
-    let state = s
-        .lists
-        .entry(key.to_string())
-        .or_insert_with(|| ListState::new(0, ListAlignment::Top, px(ROW_H * 4.)))
-        .clone();
+    let state = s.lists.get_or_insert_with(key.to_string(), || {
+        ListState::new(0, ListAlignment::Top, px(ROW_H * 4.))
+    });
     let have = state.item_count();
     if have != n {
         if have < n {
