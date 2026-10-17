@@ -5871,10 +5871,12 @@ fn breath() -> Vec<(f32, Act)> {
             0.1,
             Until(
                 "the session works, its square showing",
-                |d, _| status_is(d, Status::Working) && d.breathing(),
+                // With Reduce Motion it shows, still, and doesn't breathe.
+                |d, _| status_is(d, Status::Working) && (d.breathing() || crate::reduce_motion()),
                 10.,
             ),
         ),
+        (0.6, Shot("working-square")),
         // The inbox has the keyboard, so no caret blinks (Esc would stop
         // the turn).
         (3.5, Call(|d, w, cx| d.focus_inbox(w, cx))),
@@ -5906,7 +5908,6 @@ fn breath() -> Vec<(f32, Act)> {
                 }
             }),
         ),
-        (0.2, Shot("working-square")),
         (0.1, Key("cmd-.")),
         (
             0.1,
