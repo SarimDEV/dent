@@ -1153,11 +1153,21 @@ impl Dent {
         let t = self.t;
         match item {
             // A command, as it was run, until its answer comes.
-            Item::User { text, .. } if crate::data::command_name(text).is_some() => {
+            Item::User { text, files, .. } if crate::draft::sent_command(text, files).is_some() => {
                 crate::cards::command_line(text, "terminal", t.quiet, &t).into_any_element()
             }
-            Item::User { id: msg, text, at } => {
-                let (atts, body) = crate::data::attachment_lines(text);
+            Item::User {
+                id: msg,
+                text,
+                files,
+                at,
+            } => {
+                let (words, notes) = crate::draft::split_notes(text);
+                let body: Vec<&str> = if words.is_empty() {
+                    Vec::new()
+                } else {
+                    words.lines().collect()
+                };
                 let asking = self
                     .rewinding
                     .as_ref()
@@ -1184,30 +1194,34 @@ impl Dent {
                             .gap(px(space::S2))
                             .children({
                                 // The message's pictures step together.
-                                let lines: Vec<&str> =
-                                    atts.iter().map(|a| a.trim_start_matches("› ")).collect();
                                 let pictures: crate::lightbox::Set = std::rc::Rc::new(
-                                    lines
+                                    files
                                         .iter()
                                         .enumerate()
-                                        .filter_map(|(j, l)| {
-                                            let (place, what) = l.split_once(" · ")?;
-                                            (place == "Attached").then_some(())?;
+                                        .filter_map(|(j, f)| {
                                             Some(crate::lightbox::Shot {
                                                 key: SharedString::from(format!("pic-{msg}-{j}")),
-                                                path: picture_path(what, &s.cwd)?,
+                                                path: picture_path(f, &s.cwd)?,
                                             })
                                         })
                                         .collect(),
                                 );
-                                lines
-                                    .into_iter()
+                                let cwd = std::path::Path::new(&s.cwd);
+                                files
+                                    .iter()
                                     .enumerate()
-                                    .map(|(j, l)| {
+                                    .map(|(j, f)| {
                                         let key = SharedString::from(format!("pic-{msg}-{j}"));
                                         let at = pictures.iter().position(|p| p.key == key);
-                                        sent_attachment(l, at.map(|at| (&pictures, at)), &t)
+                                        sent_file(
+                                            &crate::bridge::relative(cwd, f),
+                                            at.map(|at| (&pictures, at)),
+                                            &t,
+                                        )
                                     })
+                                    .chain(notes.iter().map(|l| {
+                                        sent_note(l.trim_start_matches("› "), &t)
+                                    }))
                                     .collect::<Vec<_>>()
                             })
                             .when(!body.is_empty(), |d| {
@@ -1216,7 +1230,7 @@ impl Dent {
                                 let (shown, long) = user_shown(&body, open);
                                 let key = msg.clone();
                                 // A slash command reads as one.
-                                let command = crate::data::command_name(&shown).is_some()
+                                let command = crate::draft::sent_command(&shown, &[]).is_some()
                                     && shown.len() < 80;
                                 d.child(
                                     div()
@@ -2252,7 +2266,22 @@ impl Dent {
                 // Folded pastes show as their chips again, and long text
                 // folds as a sent message does.
                 let open = self.expanded.contains(msg);
-                let (refolded, pasted) = crate::compose::refold(text, &self.pastes);
+                let (refolded, pasted) = match self.sent_drafts.peek(msg) {
+                    Some(d) => {
+                        let (words, chips) = d.chips_apart(&self.pastes);
+                        // Its notes, as sent, after its words.
+                        let notes = crate::draft::split_notes(text).1.join("\n");
+                        (
+                            [words, notes]
+                                .into_iter()
+                                .filter(|s| !s.is_empty())
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                            chips,
+                        )
+                    }
+                    None => (text.clone(), Vec::new()),
+                };
                 let body: Vec<&str> = refolded.lines().collect();
                 let (shown, long) = user_shown(&body, open);
                 let fold_key = msg.clone();
@@ -2584,7 +2613,7 @@ impl Dent {
         // 15 Oct came 2 s after a send); ⌘. still stops at once.
         let settling = self
             .just_sent
-            .is_some_and(|at| at.elapsed().as_secs_f32() < 2.5);
+            .is_some_and(|at| at.elapsed() < crate::app::JUST_SENT);
         let id = s.id.clone();
         // While it works and nothing is typed, the button stops it. Right after
         // sending it stays inert, so a double press never lands on Stop.
@@ -4012,13 +4041,7 @@ impl Dent {
         let n = self.stashes.len();
         let rows = self.stashes.iter().enumerate().rev().map(|(i, st)| {
             // Folded pastes read as their chips do.
-            let mut text = st.text.clone();
-            for (n, full) in &self.pastes {
-                text = text.replace(
-                    &crate::compose::fold_label(*n, full),
-                    &crate::compose::chip_label(full),
-                );
-            }
+            let text = st.shown(&self.pastes);
             let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
             let name = if first.chars().count() > 60 {
                 format!("{}…", first.chars().take(60).collect::<String>().trim_end())
@@ -4032,7 +4055,7 @@ impl Dent {
             if lines > 1 {
                 note.push(format!("{lines} lines"));
             }
-            match st.files.len() {
+            match st.files().len() {
                 0 => {}
                 1 => note.push("1 file".into()),
                 k => note.push(format!("{k} files")),
@@ -4046,7 +4069,7 @@ impl Dent {
                 move |this: &mut Dent, _: &mut Window, cx: &mut Context<Dent>| {
                     if i < this.stashes.len() {
                         this.stashes.remove(i);
-                        this.save_prefs();
+                        this.prefs_changed();
                     }
                     if this.stashes.len() < 2 {
                         this.menu = None;
@@ -4479,14 +4502,10 @@ fn picture_path(shown: &str, cwd: &str) -> Option<std::path::PathBuf> {
     crate::data::is_file(&path).then_some(path)
 }
 
-/// One attachment line of a sent message; a picture (`shot`, its place in
-/// the message's pictures) shows as itself and opens large.
-fn sent_attachment(
-    line: &str,
-    shot: Option<(&crate::lightbox::Set, usize)>,
-    t: &theme::Theme,
-) -> Div {
-    let (place, what) = line.split_once(" · ").unwrap_or((line, ""));
+/// A file that went with a message you sent (`what`, as the session's
+/// folder names it): a picture shows as itself, anything else as the chip
+/// it was in the box.
+fn sent_file(what: &str, shot: Option<(&crate::lightbox::Set, usize)>, t: &theme::Theme) -> Div {
     // A picture shows as itself, with its name under it.
     if let Some((pictures, at)) = shot {
         let path = pictures[at].path.clone();
@@ -4518,25 +4537,28 @@ fn sent_attachment(
             ))
             .child(div().ty(LABEL).text_color(t.quiet).child(name));
     }
-    // Any other file goes as the chip it was in the box.
-    if place == "Attached" {
-        let name = what.rsplit('/').next().unwrap_or(what).to_string();
-        return div().flex().child(
-            // Not found as a picture (that would show above), so by its kind.
-            small_chip(
-                ChipFace::Icon(
-                    crate::app::Attachment::File {
-                        path: what.to_string(),
-                    }
-                    .icon(),
-                ),
-                name,
-                t,
-            )
-            .id(SharedString::from(format!("sent-file-{what}")))
-            .with_tip(crate::ui::tip_owned(what.to_string(), *t)),
-        );
-    }
+    let name = what.rsplit('/').next().unwrap_or(what).to_string();
+    // Not found as a picture (that would show above), so by its kind.
+    div().flex().child(
+        small_chip(
+            ChipFace::Icon(
+                crate::app::Attachment::File {
+                    path: what.to_string(),
+                }
+                .icon(),
+            ),
+            name,
+            t,
+        )
+        .id(SharedString::from(format!("sent-file-{what}")))
+        .with_tip(crate::ui::tip_owned(what.to_string(), *t)),
+    )
+}
+
+/// A note that went with a message you sent (`place · what`): a review
+/// comment, a picked element, a page error.
+fn sent_note(line: &str, t: &theme::Theme) -> Div {
+    let (place, what) = line.split_once(" · ").unwrap_or((line, ""));
     div()
         .flex()
         .items_start()
@@ -5128,6 +5150,7 @@ mod answer_tests {
             Item::User {
                 id: "u".into(),
                 text: "more".into(),
+                files: Vec::new(),
                 at: 0,
             },
             text(),

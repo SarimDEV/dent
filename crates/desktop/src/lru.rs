@@ -41,6 +41,11 @@ impl<K: Hash + Eq + Clone, V: Clone> Lru<K, V> {
         }
     }
 
+    /// What's kept for `k`, without counting it as a use.
+    pub fn peek(&self, k: &K) -> Option<&V> {
+        self.map.get(k).map(|(v, _)| v)
+    }
+
     pub fn clear(&mut self) {
         self.map.clear();
     }

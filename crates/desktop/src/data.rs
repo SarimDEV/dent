@@ -105,7 +105,10 @@ pub enum Item {
     /// Something you sent: its id, for rewinding to it, and its text.
     User {
         id: String,
+        /// As sent: the words, and any notes on lines after them.
         text: String,
+        /// The files that went with it, by full path.
+        files: Vec<String>,
         /// When you sent it, in Unix milliseconds.
         at: u64,
     },
@@ -182,7 +185,7 @@ impl Item {
     /// (thinking, tools) has none.
     pub fn plain(&self) -> Option<String> {
         match self {
-            Item::User { text, .. } => Some(attachment_lines(text).1.join("\n")),
+            Item::User { text, .. } => Some(crate::draft::split_notes(text).0.to_string()),
             Item::Text(t) | Item::Note { text: t, .. } | Item::Plan { plan: t, .. } => {
                 Some(t.clone())
             }
@@ -233,24 +236,6 @@ pub fn is_file(path: &std::path::Path) -> bool {
         seen.insert(path.to_path_buf(), (is, now));
         is
     })
-}
-
-/// A message you sent, split into the lines that say what went with it
-/// (files, a picked element, a page error, a review comment, as the
-/// composer writes them: `› what · detail`) and its words. Those lines
-/// lead the message; a line of your own that happens to start with `›`,
-/// after your words or without the ` · `, stays yours.
-pub fn attachment_lines(text: &str) -> (Vec<&str>, Vec<&str>) {
-    let lines: Vec<&str> = text.lines().collect();
-    let att = |l: &&&str| l.strip_prefix("› ").is_some_and(|r| r.contains(" · "));
-    // Files lead (the daemon writes them first); notes trail the words, so
-    // a command stays first.
-    let head = lines.iter().take_while(att).count();
-    let tail = lines[head..].iter().rev().take_while(att).count();
-    let end = lines.len() - tail;
-    let mut atts = lines[..head].to_vec();
-    atts.extend_from_slice(&lines[end..]);
-    (atts, lines[head..end].to_vec())
 }
 
 /// One line of an opened tool group. Subagents' work sits under the call
@@ -624,25 +609,6 @@ mod tests {
     }
 
     use super::*;
-
-    #[test]
-    fn attachment_lines_lead_or_trail_the_words() {
-        let (a, w) = attachment_lines("› Attached · a.png\n› x.rs:4 · why?\nLook at these");
-        assert_eq!(a, ["› Attached · a.png", "› x.rs:4 · why?"]);
-        assert_eq!(w, ["Look at these"]);
-        // Your own words that start with the mark stay yours.
-        let (a, w) = attachment_lines("› quoting the reply\nwhat does it mean?");
-        assert!(a.is_empty());
-        assert_eq!(w.len(), 2);
-        // Notes trail the words, files lead them.
-        let (a, w) = attachment_lines("› Attached · a.png\n/review now\n› a.rs:3 · why?");
-        assert_eq!(a, ["› Attached · a.png", "› a.rs:3 · why?"]);
-        assert_eq!(w, ["/review now"]);
-        // A mark in the middle stays yours.
-        let (a, w) = attachment_lines("first\n› a · b\nlast");
-        assert!(a.is_empty());
-        assert_eq!(w.len(), 3);
-    }
 
     #[test]
     fn spans_read_as_words() {

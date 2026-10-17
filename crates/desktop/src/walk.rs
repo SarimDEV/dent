@@ -2290,8 +2290,8 @@ fn composer_is(d: &Dent, cx: &App, text: &str) -> bool {
 }
 
 /// Walkthroughs don't save as they go; this saves once, as dent would.
-fn save_now(d: &mut Dent, _: &mut Window, _: &mut Context<Dent>) {
-    d.save_prefs();
+fn save_now(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
+    d.save_prefs(cx);
 }
 
 /// ↑ brings back what you sent, a waiting message first; drafts are kept.
@@ -2447,7 +2447,10 @@ fn recall() -> Vec<(f32, Act)> {
                 |d, _| {
                     let id = d.selected.clone().unwrap_or_default();
                     mine(d) == 4
-                        && crate::prefs::load().drafts.get(&id).map(String::as_str)
+                        && crate::prefs::load()
+                            .drafts
+                            .get(&id)
+                            .map(|d| d.text.as_str())
                             == Some("half a thought")
                 },
                 2.,
@@ -4982,7 +4985,7 @@ fn composing() -> Vec<(f32, Act)> {
             0.,
             Call(|d, _, cx| {
                 let sid = d.selected.clone().unwrap_or_default();
-                if let Some((_, msg, _)) = queued_ids(d).last().cloned() {
+                if let Some((_, msg, _)) = queued_ids(d).get(1).cloned() {
                     d.remove_queued(&sid, &msg, cx);
                 }
             }),
@@ -4992,7 +4995,7 @@ fn composing() -> Vec<(f32, Act)> {
             Until(
                 "Remove takes it out of the queue, with Undo",
                 |d, _| {
-                    waiting_texts(d) == ["one", "two"]
+                    waiting_texts(d) == ["one", "three"]
                         && d.toast.as_ref().is_some_and(|t| {
                             matches!(t.action, crate::app::ToastAction::Unremove { .. })
                         })
@@ -5000,16 +5003,43 @@ fn composing() -> Vec<(f32, Act)> {
                 3.,
             ),
         ),
+        (0.1, Type(Field::Composer, "")),
         (0.1, Key("cmd-z")),
+        (
+            0.3,
+            Until(
+                "⌘Z in the empty box leaves a removed message removed",
+                |d, cx| composer_is(d, cx, "") && waiting_texts(d) == ["one", "three"],
+                1.,
+            ),
+        ),
+        (0.1, Click("toast-action")),
         (
             0.1,
             Until(
-                "⌘Z puts it back in the box",
-                |d, cx| composer_is(d, cx, "three") && waiting_texts(d) == ["one", "two"],
-                2.,
+                "Undo puts it back in the queue where it waited, not in the box",
+                |d, cx| composer_is(d, cx, "") && waiting_texts(d) == ["one", "two", "three"],
+                3.,
             ),
         ),
-        (0.1, Type(Field::Composer, "")),
+        (
+            0.,
+            Call(|d, _, cx| {
+                let sid = d.selected.clone().unwrap_or_default();
+                if let Some((_, msg, _)) = queued_ids(d).last().cloned() {
+                    d.remove_queued(&sid, &msg, cx);
+                }
+                d.toast = None;
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "and Remove again",
+                |d, _| waiting_texts(d) == ["one", "two"],
+                3.,
+            ),
+        ),
         (
             0.,
             Call(|d, _, cx| {
@@ -5209,7 +5239,7 @@ fn composing() -> Vec<(f32, Act)> {
                     composer_is(d, cx, "")
                         && d.attachments.is_empty()
                         && d.stashes.len() == 1
-                        && d.stashes[0].files.len() == 1
+                        && d.stashes[0].files().len() == 1
                         && crate::prefs::load().stashes.len() == 1
                 },
                 2.,
@@ -5800,7 +5830,7 @@ fn ambient() -> Vec<(f32, Act)> {
             0.1,
             Call(|d, _, cx| {
                 crate::ambient::choose(None);
-                d.save_prefs();
+                d.save_prefs(cx);
                 cx.notify();
             }),
         ),

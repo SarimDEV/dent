@@ -84,12 +84,15 @@ pub fn item_words(
     parse: impl FnOnce(&str) -> std::rc::Rc<Vec<crate::markdown::Block>>,
 ) -> Vec<String> {
     match item {
-        Item::User { text, .. } if crate::data::command_name(text).is_some() => Vec::new(),
+        Item::User { text, files, .. } if crate::draft::sent_command(text, files).is_some() => {
+            Vec::new()
+        }
         Item::User { text, .. } => {
-            let (_, body) = crate::data::attachment_lines(text);
-            if body.is_empty() {
+            let words = crate::draft::split_notes(text).0;
+            if words.is_empty() {
                 return Vec::new();
             }
+            let body: Vec<&str> = words.lines().collect();
             vec![crate::chat::user_shown(&body, open).0]
         }
         Item::Text(src) => {
@@ -707,7 +710,8 @@ mod tests {
         let long = format!("start {} needle", "word ".repeat(200));
         let user = Item::User {
             id: "u".into(),
-            text: format!("› Attached · a.png\n{long}"),
+            text: long.clone(),
+            files: vec!["/p/a.png".into()],
             at: 0,
         };
         let n = |open| {

@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui_kit::base::input::{InlineToken, InputContent, InputEvent, TextareaState};
+use gpui_kit::base::input::{InlineToken, InputEvent, TextareaState};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -291,25 +291,14 @@ pub fn put(
     window: &mut Window,
     cx: &mut Context<TextareaState>,
 ) {
+    // The field's own `set_value` tells no one, so this says it changed,
+    // as typing would: whatever follows the field (a menu, a search) never
+    // misses it. A prompt's words go in with `draft::put_in` instead, which
+    // keeps its chips.
     let text: SharedString = text.into();
     let end = text.len();
-    put_at(field, text, end, window, cx);
-}
-
-/// Set a field's text with the caret at `caret`. The field's own
-/// `set_value` tells no one, so this says it changed, as typing would:
-/// whatever follows the field (a menu, a search) never misses it.
-pub fn put_at(
-    field: &mut TextareaState,
-    text: impl Into<SharedString>,
-    caret: usize,
-    window: &mut Window,
-    cx: &mut Context<TextareaState>,
-) {
-    let text: SharedString = text.into();
-    let caret = caret.min(text.len());
     field.set_value(text, window, cx);
-    field.set_selected_range(caret..caret, cx);
+    field.set_selected_range(end..end, cx);
     cx.emit(InputEvent::Change);
 }
 
@@ -331,96 +320,13 @@ pub fn put_undoable(
     cx.emit(InputEvent::Change);
 }
 
-/// Put `text` beside what's typed in a field, a blank line between: after
-/// the draft, or with `first` before it. The draft itself isn't touched,
-/// so its folded pastes stay chips (taking the whole text and putting it
-/// back would leave only their words, sent as typed). An edit ⌘Z undoes;
-/// the caret goes to the end.
-pub fn put_beside(
-    field: &mut TextareaState,
-    text: &str,
-    first: bool,
-    window: &mut Window,
-    cx: &mut Context<TextareaState>,
-) {
-    let draft = field.value().to_string();
-    if draft.trim().is_empty() {
-        put_undoable(field, text.to_string(), window, cx);
-        return;
-    }
-    if !text.is_empty() {
-        if first {
-            let lead = draft.len() - draft.trim_start().len();
-            field.set_selected_range(0..lead, cx);
-            field.replace(format!("{text}\n\n"), window, cx);
-        } else {
-            let end = draft.trim_end().len();
-            field.set_selected_range(end..draft.len(), cx);
-            field.replace(format!("\n\n{text}"), window, cx);
-        }
-    }
-    let end = field.value().len();
-    field.set_selected_range(end..end, cx);
-    cx.emit(InputEvent::Change);
-}
-
-/// What a prompt field holds, trimmed, its folded pastes opened in full:
-/// each chip by its token, not by its words.
-pub fn unfolded(field: &TextareaState, pastes: &std::collections::BTreeMap<u32, String>) -> String {
-    let text = field.value();
-    let chips: Vec<(std::ops::Range<usize>, &str)> = field
-        .tokens()
-        .iter()
-        .map(|t| (t.range(), t.token().id().as_ref()))
-        .collect();
-    crate::compose::unfold_tokens(&text, &chips, pastes)
-        .trim()
-        .to_string()
-}
-
-/// Put a draft back in a field, its folded pastes folded again.
-pub fn put_draft(
-    field: &mut TextareaState,
-    text: &str,
-    pastes: &std::collections::BTreeMap<u32, String>,
-    window: &mut Window,
-    cx: &mut Context<TextareaState>,
-) {
-    let mut content = InputContent::new(text.to_string());
-    for (r, n) in crate::compose::folded_in(text, pastes) {
-        let token = InlineToken::new(format!("paste-{n}"), text[r.clone()].to_string())
-            .with_label(crate::compose::chip_label(&pastes[&n]));
-        if let Ok(c) = content.clone().with_token(r, token) {
-            content = c;
-        }
-    }
-    field.set_value(content, window, cx);
-    field.set_selected_range(text.len()..text.len(), cx);
-    cx.emit(InputEvent::Change);
-}
+/// How long Send stays inert after sending, so a double press can't land
+/// on Stop.
+pub const JUST_SENT: Duration = Duration::from_millis(2500);
 
 /// Where the new-session page keeps its draft and files among the
 /// sessions' (in `drafts` and the prefs).
 pub const NEW_DRAFT: &str = "";
-
-/// The files a saved draft carried, as attachments.
-fn files_of(paths: Option<&Vec<String>>) -> Vec<Attachment> {
-    paths
-        .into_iter()
-        .flatten()
-        .filter(|p| std::path::Path::new(p).exists())
-        .map(|p| Attachment::File { path: p.clone() })
-        .collect()
-}
-
-/// Words added after a draft, a blank line between.
-pub fn joined(draft: &str, more: &str) -> String {
-    match (draft.is_empty(), more.is_empty()) {
-        (true, _) => more.to_string(),
-        (false, true) => draft.to_string(),
-        (false, false) => format!("{draft}\n\n{more}"),
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Field {
@@ -509,23 +415,27 @@ pub enum ToastAction {
     Resume(String),
     /// Put a project taken off the list back on it.
     UnhideProject(String),
-    /// A waiting message removed from the queue, back to its session's box.
+    /// A waiting message removed from the queue: Undo sends it again and
+    /// puts it back where it waited, before `place`.
     Unremove {
         session: String,
-        text: String,
-        files: Vec<String>,
+        back: Draft,
+        place: Option<String>,
     },
     /// Just a message, like a request the daemon refused.
     Info,
 }
 
 impl ToastAction {
-    /// Its button undoes something, and so does ⌘Z while it shows.
+    /// ⌘Z, with nothing else to undo, does what its button does.
     pub fn undoes(&self) -> bool {
-        matches!(
-            self,
-            Self::Undo(_) | Self::UnhideProject(_) | Self::Unremove { .. }
-        )
+        matches!(self, Self::Undo(_) | Self::UnhideProject(_))
+    }
+
+    /// Its button takes something back, so a passing message doesn't
+    /// push it away.
+    pub fn keeps(&self) -> bool {
+        self.undoes() || matches!(self, Self::Unremove { .. })
     }
 }
 
@@ -574,60 +484,16 @@ pub enum Then {
 /// sent twice or brought back.
 pub struct TakingBack {
     pub session: String,
+    /// The message as sent, to steer with.
     pub text: String,
     pub files: Vec<String>,
+    /// As it comes back to the box: chips, files and its place.
+    pub back: Draft,
     pub then: Then,
     pub at: Instant,
 }
 
-/// Something riding along with the next message.
-#[derive(Clone, PartialEq, Debug)]
-pub enum Attachment {
-    /// An element picked in the preview.
-    Element {
-        file: String,
-        tag: String,
-        text: String,
-        selector: String,
-    },
-    /// An error from the preview's console.
-    Error { file: String, message: String },
-    /// A file or picture, by its path.
-    File { path: String },
-    /// A review comment on a changed line.
-    Comment {
-        file: String,
-        line: u32,
-        text: String,
-    },
-}
-
-impl Attachment {
-    pub fn label(&self) -> String {
-        match self {
-            Attachment::Element { tag, text, .. } if !text.is_empty() => format!("{tag} “{text}”"),
-            Attachment::Element { tag, .. } => tag.clone(),
-            Attachment::Error { message, .. } => message.clone(),
-            Attachment::Comment { file, line, .. } => {
-                format!("{}:{line}", file.rsplit('/').next().unwrap_or(file))
-            }
-            Attachment::File { path } => path.rsplit('/').next().unwrap_or(path).to_string(),
-        }
-    }
-    pub fn icon(&self) -> &'static str {
-        match self {
-            Attachment::Element { .. } => "square-dashed-mouse-pointer",
-            Attachment::Error { .. } => "circle-alert",
-            Attachment::Comment { .. } => "message-square",
-            Attachment::File { path }
-                if crate::data::Kind::of(path) == Some(crate::data::Kind::Image) =>
-            {
-                "image"
-            }
-            Attachment::File { .. } => "paperclip",
-        }
-    }
-}
+pub use crate::draft::{Attachment, Draft, Place};
 
 /// Settings for a new session: chosen for you, each one click to change.
 #[derive(Clone)]
@@ -714,7 +580,7 @@ pub enum Waiting {
     Discard(String),
     /// A new session; one started from the new-session page carries what
     /// was typed and attached there, to put back if it fails.
-    Create(Option<(String, Vec<Attachment>)>),
+    Create(Option<Draft>),
     /// The folders for a typed path, as typed.
     Folders(String),
     ProjectMade,
@@ -760,13 +626,14 @@ pub struct Dent {
     pub rename_input: Entity<TextareaState>,
     /// The session whose name is being edited in the header.
     pub renaming: Option<String>,
-    pub drafts: HashMap<String, String>,
+    /// Each session's unsent draft, and under `NEW_DRAFT` the new-session
+    /// page's: the open session's (and the new-session field's) words live
+    /// in its field and are copied here as they change; its files are in
+    /// `attachments` while it shows.
+    pub drafts: HashMap<String, Draft>,
     /// Long pastes folded into a line in a prompt, by number: they open back
     /// up when sent.
-    pub pastes: std::collections::BTreeMap<u32, String>,
-    /// What each session's next message carries, kept while you look
-    /// elsewhere (`None`: the new-session page).
-    pub attached: HashMap<Option<String>, Vec<Attachment>>,
+    pub pastes: Rc<std::collections::BTreeMap<u32, String>>,
     /// Files being dragged in from another app, until they're let go.
     pub dragging_files: Option<Vec<std::path::PathBuf>>,
     /// Where those files are over the window, last we heard.
@@ -911,12 +778,22 @@ pub struct Dent {
     partial_seen: HashMap<String, String>,
     /// Send is inert for a moment after sending, so a double press can't stop.
     pub just_sent: Option<Instant>,
-    /// A waiting message taken back to edit: its session, and the waiting
-    /// message that came after it, so sending it again puts it back there
-    /// rather than at the end of the queue.
-    pub editing_queued: Option<(String, Option<String>)>,
+    /// The open box holds a waiting message taken back to edit: the
+    /// waiting message it goes back before when sent again (its draft's
+    /// place, while it shows).
+    pub box_place: Option<String>,
     /// Drafts put aside with ⌘S, oldest first; kept across launches.
-    pub stashes: Vec<crate::prefs::Stash>,
+    pub stashes: Vec<Draft>,
+    /// Messages sent from here with folded pastes, by id, as they were in
+    /// the box: a queued one shows its chips, and one coming back to the
+    /// box (Edit, Stop, Undo, ↑) comes back with them.
+    pub sent_drafts: crate::lru::Lru<String, Draft>,
+    /// Something kept in the prefs changed since they were last written.
+    prefs_dirty: bool,
+    /// A write of the prefs is on its way.
+    prefs_timer: bool,
+    /// The small prefs (layout, choices) as last seen, hashed.
+    prefs_light: u64,
     /// The message last sent, by session and id, and when: until the turn
     /// it starts shows as running, Esc and ⌘. can still stop it.
     pub sent_at: Option<(String, String, Instant)>,
@@ -1058,7 +935,7 @@ pub struct Dent {
     pub trying_again: Option<String>,
     /// A message to send again once its session has gone back to before it:
     /// the session, the message it went back to, and its text.
-    pub resend: Option<(String, String, String)>,
+    pub resend: Option<(String, String, String, Vec<String>)>,
     /// A session the daemon just created, to open once its events arrive.
     pub pending_select: Option<String>,
     /// Waiting messages being taken back out of the queue, by message id.
@@ -1066,7 +943,7 @@ pub struct Dent {
     /// Messages to put back in a prompt at the next draw (which has the
     /// window): the session (`None`: the new-session page), the words and
     /// what they carried. Nothing is put over a draft; it's added after.
-    pub restores: Vec<(Option<String>, String, Vec<Attachment>)>,
+    pub restores: Vec<(Option<String>, Draft)>,
     /// A scripted walkthrough, when running one.
     pub walk: Option<crate::walk::Walk>,
     pub last_frame: Instant,
@@ -1349,7 +1226,7 @@ impl Dent {
             rename_input: rename_input.clone(),
             renaming: None,
             drafts: prefs.drafts.clone().into_iter().collect(),
-            pastes: prefs.pastes.clone(),
+            pastes: Rc::new(prefs.pastes.clone()),
             appearance: prefs.appearance,
             pinned: prefs.pinned.clone(),
             forced_dark: forced,
@@ -1452,8 +1329,12 @@ impl Dent {
             saved_prefs: None,
             partial_seen: HashMap::new(),
             just_sent: None,
-            editing_queued: None,
+            box_place: None,
             stashes: prefs.stashes.clone(),
+            sent_drafts: crate::lru::Lru::new(256),
+            prefs_dirty: false,
+            prefs_timer: false,
+            prefs_light: 0,
             sent_at: None,
             panel_open: true,
             panel_width: prefs.panel_width.unwrap_or(600.),
@@ -1481,13 +1362,11 @@ impl Dent {
             live_words: Default::default(),
             meter_open: false,
             // The new-session page shows first: its files, as you left them.
-            attachments: files_of(prefs.attached.get(NEW_DRAFT)),
-            attached: prefs
-                .attached
-                .iter()
-                .filter(|(k, _)| k.as_str() != NEW_DRAFT)
-                .map(|(k, v)| (Some(k.clone()), files_of(Some(v))))
-                .collect(),
+            attachments: prefs
+                .drafts
+                .get(NEW_DRAFT)
+                .map(|d| d.atts.clone())
+                .unwrap_or_default(),
             dragging_files: None,
             drag_at: None,
             diff_file: HashMap::new(),
@@ -1541,9 +1420,17 @@ impl Dent {
         // What you were typing for a new session, as you left it.
         if let Some(draft) = this.drafts.get(NEW_DRAFT).cloned() {
             let pastes = this.pastes.clone();
-            this.starter
-                .update(cx, |c, cx| put_draft(c, &draft, &pastes, window, cx));
+            this.starter.update(cx, |c, cx| {
+                crate::draft::put_in(c, Place::Replace, &draft, &pastes, false, window, cx)
+            });
         }
+        // What's typed is written before quitting, not lost to the pause
+        // that gathers keystrokes into one write.
+        cx.on_app_quit(|this, cx| {
+            this.save_prefs(cx);
+            async {}
+        })
+        .detach();
         // Files you had opened come back as tabs, if they're still there.
         for (sid, paths) in &prefs.opened {
             for p in paths {
@@ -1617,7 +1504,7 @@ impl Dent {
         } else {
             self.pinned.push(id.to_string());
         }
-        self.save_prefs();
+        self.prefs_changed();
         cx.notify();
     }
 
@@ -1770,7 +1657,7 @@ impl Dent {
         }
         match self.load_opened(&s.id, path) {
             Some(id) => {
-                self.save_prefs();
+                self.prefs_changed();
                 self.mark_line(id, line);
                 self.open_art(id, None, cx);
             }
@@ -1898,7 +1785,7 @@ impl Dent {
                 }
             }
         }
-        self.save_prefs();
+        self.prefs_changed();
         cx.notify();
     }
 
@@ -1917,7 +1804,7 @@ impl Dent {
             }
         }
         self.tabs.insert(s.id.clone(), Tab::Art(keep));
-        self.save_prefs();
+        self.prefs_changed();
         cx.notify();
     }
     pub fn version(&self, art: &Artifact) -> usize {
@@ -1958,19 +1845,29 @@ impl Dent {
         if self.find.take().is_some() {
             crate::select::set_find(None);
         }
-        // Each session keeps its own draft.
-        let text = self.composer.read(cx).value().to_string();
-        if let Some(old) = &self.selected {
-            self.drafts.insert(old.clone(), text);
+        // Each session keeps its own draft, chips, files and place with it.
+        let key = |id: &Option<String>| id.clone().unwrap_or_else(|| NEW_DRAFT.to_string());
+        let mut leaving = match &self.selected {
+            Some(_) => Draft::read(self.composer.read(cx), Vec::new()),
+            None => Draft::read(self.starter.read(cx), Vec::new()),
+        };
+        leaving.atts = std::mem::take(&mut self.attachments);
+        leaving.place = self.box_place.take();
+        if leaving.is_empty() {
+            self.drafts.remove(&key(&self.selected));
+        } else {
+            self.drafts.insert(key(&self.selected), leaving);
         }
-        let draft = id
-            .as_ref()
-            .and_then(|i| self.drafts.get(i))
-            .cloned()
-            .unwrap_or_default();
-        let pastes = self.pastes.clone();
-        self.composer
-            .update(cx, |c, cx| put_draft(c, &draft, &pastes, window, cx));
+        let coming = self.drafts.get(&key(&id)).cloned().unwrap_or_default();
+        self.attachments = coming.atts.clone();
+        self.box_place = coming.place.clone();
+        if id.is_some() {
+            let pastes = self.pastes.clone();
+            self.composer.update(cx, |c, cx| {
+                crate::draft::put_in(c, Place::Replace, &coming, &pastes, false, window, cx)
+            });
+        }
+        self.prefs_changed();
         if let Some(new) = id.clone()
             && !self.commands.contains_key(&new)
         {
@@ -2000,12 +1897,6 @@ impl Dent {
             self.fetch_recent();
         }
         self.reveal_row = id.clone();
-        // Each session keeps what you attached, as it keeps its draft.
-        let held = std::mem::take(&mut self.attachments);
-        if !held.is_empty() {
-            self.attached.insert(self.selected.clone(), held);
-        }
-        self.attachments = self.attached.remove(&id).unwrap_or_default();
         self.selected = id;
         self.menu = None;
         self.end_pick();
@@ -2117,7 +2008,7 @@ impl Dent {
     pub fn toast(&mut self, action: ToastAction, text: String) {
         // A passing message doesn't push an Undo out of the way.
         if matches!(action, ToastAction::Info)
-            && self.toast.as_ref().is_some_and(|t| t.action.undoes())
+            && self.toast.as_ref().is_some_and(|t| t.action.keeps())
         {
             return;
         }
@@ -2152,17 +2043,15 @@ impl Dent {
             }
             ToastAction::Resume(id) => self.resume(&id, cx),
             ToastAction::UnhideProject(path) => self.hide_project(&path, false, cx),
+            // Back in the queue where it waited (or, the turn over
+            // meanwhile, sent as the next message would be).
             ToastAction::Unremove {
                 session,
-                text,
-                files,
+                back,
+                place,
             } => {
-                let atts = files
-                    .into_iter()
-                    .map(|path| Attachment::File { path })
-                    .collect();
-                self.restores.push((Some(session), text, atts));
-                self.take_restores(window, cx);
+                let d = Draft { place, ..back };
+                self.send_draft(&session, &d, false);
             }
             ToastAction::Info => {}
         }
@@ -2437,8 +2326,8 @@ impl Dent {
                 self.creating = false;
                 self.adopting = None;
                 // What you typed and attached comes back, to try again.
-                if let Some((text, atts)) = typed {
-                    self.restores.push((None, text, atts));
+                if let Some(d) = typed {
+                    self.restores.push((None, d));
                 }
                 self.toast(ToastAction::Info, message);
             }
@@ -2488,36 +2377,48 @@ impl Dent {
     fn took_back(&mut self, tb: TakingBack) {
         match tb.then {
             Then::Steer => {
-                self.live.send(Request::Send {
-                    session: tb.session,
-                    id: crate::message_id(),
-                    text: tb.text,
-                    steer: true,
-                    attachments: tb.files,
-                });
-                self.follow();
+                let d = Draft::with(
+                    tb.text,
+                    tb.files
+                        .into_iter()
+                        .map(|path| Attachment::File { path })
+                        .collect(),
+                );
+                self.send_draft(&tb.session, &d, true);
             }
-            Then::Restore => {
-                let atts = tb
-                    .files
-                    .into_iter()
-                    .map(|path| Attachment::File { path })
-                    .collect();
-                self.restores.push((Some(tb.session), tb.text, atts));
-            }
+            Then::Restore => self.restores.push((Some(tb.session), tb.back)),
         }
     }
 
-    /// Take waiting messages back out of the daemon's queue. Nothing more
-    /// happens until it says each is out (see `took_back`).
-    fn take_back(&mut self, session: &str, msgs: Vec<(String, String, Vec<String>)>, then: Then) {
-        for (msg, text, files) in msgs {
+    /// A message as it comes back to a box: as it was in the box when sent
+    /// from here (chips and all), else its words and files.
+    pub fn back_draft(&mut self, msg: &str, text: &str, files: &[String]) -> Draft {
+        self.sent_drafts
+            .get(&msg.to_string())
+            .unwrap_or_else(|| Draft::of_sent(text, files))
+    }
+
+    /// Take waiting messages back out of the daemon's queue, each with its
+    /// words, files and (for Edit) the place it goes back to. Nothing more
+    /// happens until the daemon says each is out (see `took_back`).
+    fn take_back(
+        &mut self,
+        session: &str,
+        msgs: Vec<(String, String, Vec<String>, Option<String>)>,
+        then: Then,
+    ) {
+        for (msg, text, files, place) in msgs {
+            let back = Draft {
+                place,
+                ..self.back_draft(&msg, &text, &files)
+            };
             self.taking_back.insert(
                 msg,
                 TakingBack {
                     session: session.to_string(),
                     text,
                     files,
+                    back,
                     then,
                     at: Instant::now(),
                 },
@@ -2564,47 +2465,66 @@ impl Dent {
                 self.took_back(tb);
             }
         }
-        for (session, text, atts) in std::mem::take(&mut self.restores) {
-            let open = session == self.selected;
-            let held = if open {
-                &mut self.attachments
-            } else {
-                self.attached.entry(session.clone()).or_default()
-            };
-            for a in atts {
-                if !held.contains(&a) {
-                    held.push(a);
-                }
-            }
-            // The new-session field keeps its text while a session shows;
-            // the open session's box is the composer; any other session's
-            // is its saved draft.
-            let field = match &session {
-                None => Some(self.starter.clone()),
-                Some(_) if open => Some(self.composer.clone()),
-                Some(_) => None,
-            };
-            match (field, session) {
-                (Some(field), _) => {
-                    field.update(cx, |c, cx| {
-                        put_beside(c, &text, false, window, cx);
-                        if open {
-                            c.focus_field(window, cx);
-                        }
-                    });
-                    // It's yours again to send: no double-press pause on it.
-                    if open {
-                        self.just_sent = None;
+        for (session, d) in std::mem::take(&mut self.restores) {
+            self.put_draft_in(session, Place::After, d, window, cx);
+        }
+    }
+
+    /// Put draft `d` in a session's box (`None`: the new-session field),
+    /// as an edit ⌘Z undoes: in the field if it shows (the open session's
+    /// box, or the new-session field, which keeps its words while a session
+    /// shows), else into the session's stored draft. Its files are attached
+    /// there, and a place it carries goes with it. The one way dent puts
+    /// words in a prompt; chips already there stay chips.
+    pub fn put_draft_in(
+        &mut self,
+        session: Option<String>,
+        place: Place,
+        d: Draft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let open = session == self.selected;
+        let field = match &session {
+            None => Some(self.starter.clone()),
+            Some(_) if open => Some(self.composer.clone()),
+            Some(_) => None,
+        };
+        let key = session.clone().unwrap_or_else(|| NEW_DRAFT.to_string());
+        match field {
+            Some(field) => {
+                let held = if open {
+                    &mut self.attachments
+                } else {
+                    &mut self.drafts.entry(key).or_default().atts
+                };
+                for a in &d.atts {
+                    if !held.contains(a) {
+                        held.push(a.clone());
                     }
                 }
-                (None, Some(id)) => {
-                    let draft = self.drafts.get(&id).cloned().unwrap_or_default();
-                    self.drafts.insert(id, joined(draft.trim_end(), &text));
+                if open && session.is_some() && d.place.is_some() {
+                    self.box_place = d.place.clone();
                 }
-                (None, None) => {}
+                let pastes = self.pastes.clone();
+                field.update(cx, |c, cx| {
+                    crate::draft::put_in(c, place, &d, &pastes, true, window, cx);
+                    if open {
+                        c.focus_field(window, cx);
+                    }
+                });
+                // It's yours again to send: no double-press pause on it.
+                if open {
+                    self.just_sent = None;
+                }
             }
-            cx.notify();
+            None => {
+                let first = place == Place::Before;
+                self.drafts.entry(key).or_default().join(d, first);
+            }
         }
+        self.prefs_changed();
+        cx.notify();
     }
 
     fn fetch_changes(&mut self, id: &str) {
@@ -3249,7 +3169,7 @@ impl Dent {
         self.appearance = a;
         self.forced_dark = None;
         self.apply_theme(window, cx);
-        self.save_prefs();
+        self.prefs_changed();
         cx.notify();
     }
 
@@ -3273,7 +3193,7 @@ impl Dent {
         self.md.clear();
         self.transcript.remeasure();
         self.diff_list.remeasure();
-        self.save_prefs();
+        self.prefs_changed();
         cx.notify();
     }
 
@@ -3546,15 +3466,10 @@ impl Dent {
         let token = complete::token(&field.value(), field.cursor());
         // A waiting message taken back to edit and then cleared away has
         // no place to go back to: what's typed next is a new message.
-        if field.value().trim().is_empty()
-            && self.taking_back.is_empty()
-            && self
-                .editing_queued
-                .as_ref()
-                .is_some_and(|(sid, _)| self.selected.as_ref() == Some(sid))
-        {
-            self.editing_queued = None;
+        if self.selected.is_some() && self.composer.read(cx).value().trim().is_empty() {
+            self.box_place = None;
         }
+        self.prefs_dirty = true;
         // Erased back to its bare `/` or `@`, the word starts over.
         if token.as_ref().map(|t| (t.kind, t.start)) != self.slash_dismissed
             || token.as_ref().is_some_and(|t| t.query.is_empty())
@@ -3611,10 +3526,36 @@ impl Dent {
             // `key=` stays in its word, for the value.
             complete::Kind::Arg => (name.to_string(), !name.ends_with('=')),
         };
-        let (value, caret) = complete::apply(&text, &c.token, &with, finished);
+        // Only the word changes, so chips elsewhere in the box stay chips
+        // and ⌘Z takes the pick back.
+        let (put, caret) = complete::apply_at(&text, &c.token, &with, finished);
+        let lead = text.len() - text.trim_start().len();
+        let pastes = self.pastes.clone();
         field.update(cx, |f, cx| {
-            let caret = caret.saturating_sub(value.len() - value.trim_start().len());
-            put_at(f, value.trim_start().to_string(), caret, window, cx);
+            let word = c.token.start..c.token.end;
+            crate::draft::put_in(
+                f,
+                Place::At(word),
+                &Draft::words(put),
+                &pastes,
+                true,
+                window,
+                cx,
+            );
+            // A command opens the message: spaces before it go.
+            if lead > 0 && c.token.start >= lead {
+                crate::draft::put_in(
+                    f,
+                    Place::At(0..lead),
+                    &Draft::default(),
+                    &pastes,
+                    true,
+                    window,
+                    cx,
+                );
+            }
+            let caret = caret - if c.token.start >= lead { lead } else { 0 };
+            f.set_selected_range(caret..caret, cx);
             f.focus_field(window, cx);
         });
         self.slash_ix = 0;
@@ -3898,25 +3839,127 @@ impl Dent {
         }
     }
 
-    /// Remember the current defaults and layout for next time, when they change.
-    /// The open session's draft is what its composer holds right now.
-    pub fn sync_draft(&mut self, cx: &App) {
-        let starter = self.starter.read(cx).value();
-        let open = self
-            .selected
-            .clone()
-            .map(|id| (id, self.composer.read(cx).value()));
-        for (id, text) in [(NEW_DRAFT.to_string(), starter)].into_iter().chain(open) {
-            if text.trim().is_empty() {
-                self.drafts.remove(&id);
-            } else if self.drafts.get(&id).is_none_or(|d| *d != *text) {
-                self.drafts.insert(id, text.to_string());
-            }
+    /// Every draft as it stands: the stored ones, with the open box's and
+    /// the new-session field's read from their fields.
+    pub fn drafts_now(&self, cx: &App) -> std::collections::BTreeMap<String, Draft> {
+        let mut all: std::collections::BTreeMap<String, Draft> = self
+            .drafts
+            .iter()
+            .map(|(k, d)| (k.clone(), d.clone()))
+            .collect();
+        let new_atts = match &self.selected {
+            None => self.attachments.clone(),
+            Some(_) => all
+                .get(NEW_DRAFT)
+                .map(|d| d.atts.clone())
+                .unwrap_or_default(),
+        };
+        all.insert(
+            NEW_DRAFT.to_string(),
+            Draft::read(self.starter.read(cx), new_atts),
+        );
+        if let Some(id) = &self.selected {
+            all.insert(
+                id.clone(),
+                Draft::read(self.composer.read(cx), self.attachments.clone()),
+            );
         }
+        all.retain(|_, d| !d.is_empty());
+        all
     }
 
-    pub fn save_prefs(&mut self) {
+    /// Something the prefs keep changed: they're written shortly, once,
+    /// however many changes come meanwhile.
+    pub fn prefs_changed(&mut self) {
+        self.prefs_dirty = true;
+    }
+
+    /// Each frame: notice a change to the small prefs (layout, choices)
+    /// cheaply, and write the prefs half a second after the last change,
+    /// never while a menu is open or something is dragged.
+    pub fn prefs_tick(&mut self, cx: &mut Context<Self>) {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (
+            &self.defaults.project,
+            &self.defaults.model,
+            format!("{:?}", self.defaults.permission),
+            &self.defaults.effort,
+        )
+            .hash(&mut h);
+        (self.panel_width.to_bits(), self.sidebar_w.to_bits()).hash(&mut h);
+        (
+            self.sidebar_off,
+            format!("{:?}", self.appearance),
+            &self.pinned,
+        )
+            .hash(&mut h);
+        crate::ds::zoom().to_bits().hash(&mut h);
+        let mut opened: Vec<_> = self.opened.iter().collect();
+        opened.sort();
+        opened.hash(&mut h);
+        let mut closed: Vec<(&String, Vec<(&&str, &usize)>)> = self
+            .closed_tabs
+            .iter()
+            .map(|(k, v)| {
+                let mut v: Vec<_> = v.iter().collect();
+                v.sort();
+                (k, v)
+            })
+            .collect();
+        closed.sort();
+        closed.hash(&mut h);
+        self.attachments.len().hash(&mut h);
+        for a in &self.attachments {
+            a.path().hash(&mut h);
+        }
+        let light = h.finish();
+        if light != self.prefs_light {
+            self.prefs_light = light;
+            self.prefs_dirty = true;
+        }
+        if !self.prefs_dirty || self.prefs_timer || self.walk.is_some() {
+            return;
+        }
+        self.prefs_timer = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.prefs_timer = false;
+                if this.menu.is_none() && !this.dragging && !this.dragging_sidebar {
+                    this.save_prefs(cx);
+                } else {
+                    // Tried again after the menu closes or the drag ends.
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Write the prefs now, if they changed.
+    pub fn save_prefs(&mut self, cx: &App) {
+        self.prefs_dirty = false;
+        let drafts = self.drafts_now(cx);
+        let held: std::collections::HashSet<u32> = drafts
+            .values()
+            .chain(&self.stashes)
+            .flat_map(|d| d.pastes())
+            .collect();
+        let saved = |d: &Draft| Draft {
+            // Only files are kept across quitting; notes go with the run.
+            atts: d
+                .atts
+                .iter()
+                .filter(|a| a.path().is_some())
+                .cloned()
+                .collect(),
+            ..d.clone()
+        };
         let p = crate::prefs::Prefs {
+            version: crate::prefs::VERSION,
             project: self.defaults.project.clone(),
             model: self.defaults.model.clone(),
             permission: self.defaults.permission,
@@ -3953,40 +3996,21 @@ impl Dent {
                     )
                 })
                 .collect(),
-            drafts: self
-                .drafts
+            drafts: drafts
                 .iter()
-                .filter(|(_, d)| !d.trim().is_empty())
-                .map(|(id, d)| (id.clone(), d.clone()))
+                .map(|(k, d)| (k.clone(), saved(d)))
+                .filter(|(_, d)| !d.is_empty())
                 .collect(),
-            attached: self
-                .attached
-                .iter()
-                .chain([(&self.selected, &self.attachments)])
-                .map(|(k, atts)| {
-                    let files: Vec<String> = atts
-                        .iter()
-                        .filter_map(|a| match a {
-                            Attachment::File { path } => Some(path.clone()),
-                            _ => None,
-                        })
-                        .collect();
-                    (k.clone().unwrap_or_default(), files)
-                })
-                .filter(|(_, f)| !f.is_empty())
-                .collect(),
-            // Only the pastes a draft still holds.
+            attached: Default::default(),
+            // Only the pastes a draft still holds (kept in files of their
+            // own, beside the prefs).
             pastes: self
                 .pastes
                 .iter()
-                .filter(|(n, full)| {
-                    let label = crate::compose::fold_label(**n, full);
-                    self.drafts.values().any(|d| d.contains(&label))
-                        || self.stashes.iter().any(|s| s.text.contains(&label))
-                })
+                .filter(|(n, _)| held.contains(n))
                 .map(|(n, full)| (*n, full.clone()))
                 .collect(),
-            stashes: self.stashes.clone(),
+            stashes: self.stashes.iter().map(saved).collect(),
         };
         if self.saved_prefs.as_ref() != Some(&p) {
             crate::prefs::save(&p);
@@ -4021,33 +4045,25 @@ impl Dent {
         let Some(id) = self.selected.clone() else {
             return;
         };
+        let mut d = self.box_draft(cx);
         // Folded pastes go in full.
-        let text = unfolded(self.composer.read(cx), &self.pastes);
-        if text.is_empty() && self.attachments.is_empty() {
+        let text = d.words_out(&self.pastes);
+        if text.is_empty() && d.atts.is_empty() {
             return;
         }
         // `/model` and the like are dent's to do, not the agent's.
-        if self.attachments.is_empty() && self.sent_own(&text, window, cx) {
+        if d.atts.is_empty() && self.sent_own(&text, window, cx) {
             return;
         }
-        let mut atts = std::mem::take(&mut self.attachments);
-        // Files travel as attachments; the rest are lines in the message.
-        let files: Vec<String> = atts
-            .iter()
-            .filter_map(|a| match a {
-                Attachment::File { path } => Some(path.clone()),
-                _ => None,
-            })
-            .collect();
-        atts.retain(|a| !matches!(a, Attachment::File { .. }));
-        let message = with_attachments(&text, &atts);
+        self.attachments.clear();
         self.composer.update(cx, |c, cx| put(c, "", window, cx));
         self.drafts.remove(&id);
         self.recall = None;
+        d.place = self.box_place.take().filter(|_| !steer);
         self.just_sent = Some(Instant::now());
         // Send wakes up again when the pause ends, whatever else happens.
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(1)).await;
+            cx.background_executor().timer(JUST_SENT).await;
             let _ = this.update(cx, |_, cx| cx.notify());
         })
         .detach();
@@ -4055,52 +4071,72 @@ impl Dent {
         // something, the text is the reason for denying; on a plan, it's
         // what to change. That's Return's (and the send button's): ⌘↩ only
         // ever steers.
-        if !steer && atts.is_empty() && files.is_empty() && self.answer_with_text(&id, &text, cx) {
-            return;
-        }
-        if !steer
-            && atts.is_empty()
-            && files.is_empty()
-            && let Some(Item::Approval { id: ask, .. } | Item::Plan { id: ask, .. }) =
+        if !steer && d.atts.is_empty() {
+            if self.answer_with_text(&id, &text, cx) {
+                return;
+            }
+            if let Some(Item::Approval { id: ask, .. } | Item::Plan { id: ask, .. }) =
                 self.open_ask(&id)
-        {
-            self.reply_to_ask(&id, ask, Answer::Deny { message: text }, cx);
-            return;
+            {
+                self.reply_to_ask(&id, ask, Answer::Deny { message: text }, cx);
+                return;
+            }
         }
+        self.send_draft(&id, &d, steer);
+        cx.notify();
+    }
+
+    /// What the open prompt holds, with what rides along: the one reader
+    /// every send, deny and answer uses, so a folded paste always goes in
+    /// full.
+    pub fn box_draft(&self, cx: &App) -> Draft {
+        Draft::read(self.prompt().read(cx), self.attachments.clone())
+    }
+
+    /// Send a message to a session: the one way a message leaves, from the
+    /// box, Send now, Try again, Undo, a command or one dent writes. Its
+    /// chips open in full, its notes become lines after its words, its
+    /// files go as attachments; one with a place waits before that
+    /// message again, while it's still waiting and the turn still runs.
+    /// Returns the message's id.
+    pub fn send_draft(&mut self, session: &str, d: &Draft, steer: bool) -> String {
         let msg = crate::message_id();
-        self.sent_at = Some((id.clone(), msg.clone(), Instant::now()));
-        // A waiting message taken back to edit goes back to its place, if
-        // the one after it is still waiting and this one will wait too.
-        let place = self
-            .editing_queued
-            .take_if(|(sid, _)| *sid == id)
-            .filter(|_| !steer)
-            .and_then(|(_, next)| next)
-            .filter(|next| {
-                self.session(&id).is_some_and(|s| {
+        self.live.send(Request::Send {
+            session: session.to_string(),
+            id: msg.clone(),
+            text: d.message(&self.pastes),
+            steer,
+            attachments: d.files(),
+        });
+        if !d.chips.is_empty() {
+            self.sent_drafts.insert(
+                msg.clone(),
+                Draft {
+                    place: None,
+                    ..d.clone()
+                },
+            );
+        }
+        self.sent_at = Some((session.to_string(), msg.clone(), Instant::now()));
+        let place = d.place.clone().filter(|next| {
+            !steer
+                && self.session(session).is_some_and(|s| {
                     s.running()
                         && s.items
                             .iter()
                             .any(|i| matches!(i, Item::Queued { id, .. } if id == next))
                 })
-            });
-        self.live.send(Request::Send {
-            session: id.clone(),
-            id: msg.clone(),
-            text: message,
-            steer,
-            attachments: files,
         });
         if let Some(next) = place {
             let n = self.live.send(Request::Requeue {
-                session: id,
-                id: msg,
+                session: session.to_string(),
+                id: msg.clone(),
                 before: Some(next),
             });
             self.waiting.insert(n, Waiting::Requeue);
         }
         self.follow();
-        cx.notify();
+        msg
     }
 
     /// Send a command to a session as if typed, leaving any draft alone.
@@ -4111,26 +4147,20 @@ impl Dent {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.live.send(Request::Send {
-            session: session.to_string(),
-            id: crate::message_id(),
-            text: text.to_string(),
-            steer: false,
-            attachments: Vec::new(),
-        });
-        self.follow();
+        self.send_draft(session, &Draft::words(text), false);
         cx.notify();
     }
 
     /// Start a new session from the starter box with the chosen defaults.
     pub fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = self.box_draft(cx);
         // Folded pastes go in full.
-        let text = unfolded(self.starter.read(cx), &self.pastes);
+        let text = typed.words_out(&self.pastes);
         // Files alone can start one, as they can be sent in a session.
-        if text.is_empty() && self.attachments.is_empty() || self.creating() {
+        if text.is_empty() && typed.atts.is_empty() || self.creating() {
             return;
         }
-        if self.attachments.is_empty() && self.sent_own(&text, window, cx) {
+        if typed.atts.is_empty() && self.sent_own(&text, window, cx) {
             return;
         }
         self.ambient.borrow_mut().submit();
@@ -4143,23 +4173,18 @@ impl Dent {
                 scratch.display().to_string()
             }
         };
-        let atts = std::mem::take(&mut self.attachments);
+        self.attachments.clear();
         let n = self.live.send(Request::Create {
             cwd,
             model: d.model,
             permission: d.permission,
             effort: d.effort,
             id: crate::message_id(),
-            text: text.clone(),
-            attachments: atts
-                .iter()
-                .filter_map(|a| match a {
-                    Attachment::File { path } => Some(path.clone()),
-                    _ => None,
-                })
-                .collect(),
+            text: typed.message(&self.pastes),
+            attachments: typed.files(),
         });
-        self.waiting.insert(n, Waiting::Create(Some((text, atts))));
+        // Back to the field, chips and files, if it can't be made.
+        self.waiting.insert(n, Waiting::Create(Some(typed)));
         self.creating = true;
         self.creating_at = Instant::now();
         self.starter.update(cx, |c, cx| put(c, "", window, cx));
@@ -4203,7 +4228,7 @@ impl Dent {
         // Stopping takes messages still waiting their turn out of the queue:
         // each the daemon says it took out comes back to the composer, files
         // and all, rather than vanishing.
-        let waiting: Vec<(String, String, Vec<String>)> = s
+        let waiting: Vec<(String, String, Vec<String>, Option<String>)> = s
             .items
             .iter()
             .filter_map(|i| match i {
@@ -4211,7 +4236,7 @@ impl Dent {
                     id,
                     text,
                     attachments,
-                } => Some((id.clone(), text.clone(), attachments.clone())),
+                } => Some((id.clone(), text.clone(), attachments.clone(), None)),
                 _ => None,
             })
             .collect();
@@ -4338,7 +4363,8 @@ impl Dent {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let reason = self.composer.read(cx).value().trim().to_string();
+        // The box's words, folded pastes in full, as any send reads them.
+        let reason = self.box_draft(cx).words_out(&self.pastes);
         if let Some(Item::Approval { id: ask, .. } | Item::Plan { id: ask, .. }) =
             self.ask_for(id, ask)
         {
@@ -4490,7 +4516,7 @@ impl Dent {
         let label = crate::compose::fold_label(n, &text);
         let token = InlineToken::new(format!("paste-{n}"), label)
             .with_label(crate::compose::chip_label(&text));
-        self.pastes.insert(n, text);
+        Rc::make_mut(&mut self.pastes).insert(n, text);
         self.field_entity(f)
             .clone()
             .update(cx, |c, cx| c.replace_with_token(token, window, cx))
@@ -4547,23 +4573,17 @@ impl Dent {
             return;
         };
         // Its place: sent again, it goes back before the one after it.
-        let next = self.session(id).and_then(|s| {
-            s.items
-                .iter()
-                .filter_map(|i| match i {
-                    Item::Queued { id, .. } => Some(id.clone()),
-                    _ => None,
-                })
-                .skip_while(|q| q != msg)
-                .nth(1)
-        });
-        self.editing_queued = Some((id.to_string(), next));
+        let next = self.queued_after(id, msg);
         let n = self.live.send(Request::Unqueue {
             session: id.to_string(),
             id: msg.to_string(),
         });
         self.waiting.insert(n, Waiting::Unqueue(msg.to_string()));
-        self.take_back(id, vec![(msg.to_string(), text, files)], Then::Restore);
+        self.take_back(
+            id,
+            vec![(msg.to_string(), text, files, next)],
+            Then::Restore,
+        );
         cx.notify();
     }
 
@@ -4572,26 +4592,24 @@ impl Dent {
     /// back, or with several a menu of them, newest first.
     pub fn stash_key(&mut self, f: Field, window: &mut Window, cx: &mut Context<Self>) {
         let field = self.field_entity(f).clone();
-        let text = field.read(cx).value().to_string();
-        let files: Vec<String> = self
+        // Notes (a comment, a picked element) stay with the box.
+        let files: Vec<Attachment> = self
             .attachments
             .iter()
-            .filter_map(|a| match a {
-                Attachment::File { path } => Some(path.clone()),
-                _ => None,
-            })
+            .filter(|a| a.path().is_some())
+            .cloned()
             .collect();
-        if !text.trim().is_empty() || !files.is_empty() {
-            self.stashes.push(crate::prefs::Stash { text, files });
-            self.attachments
-                .retain(|a| !matches!(a, Attachment::File { .. }));
+        let d = Draft::read(field.read(cx), files);
+        if !d.is_empty() {
+            self.stashes.push(d);
+            self.attachments.retain(|a| a.path().is_none());
             field.update(cx, |c, cx| put(c, "", window, cx));
             self.recall = None;
             self.toast(
                 ToastAction::Info,
                 "Draft put aside. ⌘S in an empty box brings it back.".into(),
             );
-            self.save_prefs();
+            self.save_prefs(cx);
         } else {
             match self.stashes.len() {
                 0 => self.toast(
@@ -4610,41 +4628,39 @@ impl Dent {
         cx.notify();
     }
 
-    /// Bring back draft `i` put aside, into the empty prompt, its files
-    /// attached again.
+    /// Bring back draft `i` put aside, into the prompt (after anything
+    /// typed there since), chips and files with it.
     pub fn unstash(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
         if i >= self.stashes.len() {
             return;
         }
-        let st = self.stashes.remove(i);
-        let pastes = self.pastes.clone();
-        let field = self.prompt().clone();
-        field.update(cx, |c, cx| {
-            if c.value().trim().is_empty() {
-                put_draft(c, &st.text, &pastes, window, cx);
-            } else {
-                put_beside(c, &st.text, false, window, cx);
-            }
-            c.focus_field(window, cx);
-        });
-        for path in st.files {
-            let a = Attachment::File { path };
-            if !self.attachments.contains(&a) {
-                self.attachments.push(a);
-            }
-        }
-        self.save_prefs();
+        let d = self.stashes.remove(i);
+        let target = self.selected.clone();
+        self.put_draft_in(target, Place::After, d, window, cx);
+        self.save_prefs(cx);
         cx.notify();
     }
 
-    /// Take a waiting message out of the queue for good. A toast offers
-    /// it back, into the box.
+    /// Take a waiting message out of the queue for good. A toast's Undo
+    /// puts it back where it waited.
     pub fn remove_queued(&mut self, id: &str, msg: &str, cx: &mut Context<Self>) {
         if self.pressed_again(format!("queued/{msg}")) {
             return;
         }
         let Some((text, files)) = self.queued(id, msg) else {
             return;
+        };
+        let place = self.queued_after(id, msg);
+        // As it was sent, chips and notes too: Undo sends it again so.
+        let back = match self.sent_drafts.get(&msg.to_string()) {
+            Some(d) => d,
+            None => Draft::with(
+                text,
+                files
+                    .into_iter()
+                    .map(|path| Attachment::File { path })
+                    .collect(),
+            ),
         };
         let n = self.live.send(Request::Unqueue {
             session: id.to_string(),
@@ -4655,12 +4671,27 @@ impl Dent {
             text: "Removed from the queue".into(),
             action: ToastAction::Unremove {
                 session: id.to_string(),
-                text,
-                files,
+                back,
+                place,
             },
             at: Instant::now(),
         });
         cx.notify();
+    }
+
+    /// The waiting message after `msg` in session `id`'s queue: where `msg`
+    /// goes back to.
+    fn queued_after(&self, id: &str, msg: &str) -> Option<String> {
+        self.session(id).and_then(|s| {
+            s.items
+                .iter()
+                .filter_map(|i| match i {
+                    Item::Queued { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .skip_while(|q| q != msg)
+                .nth(1)
+        })
     }
 
     /// Go back to just before message `msg`: the chat, and with `files` the
@@ -4672,21 +4703,23 @@ impl Dent {
         if self.pressed_again(format!("rewind/{msg}")) {
             return;
         }
-        let text = self.session(&id).and_then(|s| {
+        let sent = self.session(&id).and_then(|s| {
             s.items.iter().find_map(|i| match i {
-                Item::User { id: m, text, .. } if m == msg => Some(text.clone()),
+                Item::User {
+                    id: m, text, files, ..
+                } if m == msg => Some((text.clone(), files.clone())),
                 _ => None,
             })
         });
-        let cwd = self.session(&id).map(|s| s.cwd.clone()).unwrap_or_default();
         self.live.send(Request::Rewind {
             session: id,
             to: msg.to_string(),
             files,
         });
         self.rewinding = None;
-        if let Some(text) = text {
-            self.restore_message(&text, &cwd, true, window, cx);
+        if let Some((text, files)) = sent {
+            let d = self.back_draft(msg, &text, &files);
+            self.restore_message(d, true, window, cx);
         }
         cx.notify();
     }
@@ -4697,35 +4730,25 @@ impl Dent {
     /// behind. Returns the files it attached.
     fn restore_message(
         &mut self,
-        text: &str,
-        cwd: &str,
+        d: Draft,
         keep_draft: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<String> {
-        let (words, files) = message_parts(text, cwd, false);
-        let mut added = Vec::new();
-        for path in files {
-            if !self
-                .attachments
-                .iter()
-                .any(|a| matches!(a, Attachment::File { path: p } if *p == path))
-            {
-                self.attachments
-                    .push(Attachment::File { path: path.clone() });
-                added.push(path);
-            }
-        }
+        let added: Vec<String> = d
+            .files()
+            .into_iter()
+            .filter(|p| !self.attachments.iter().any(|a| a.path() == Some(p)))
+            .collect();
         // Whatever was typed stays, after it, its pastes still folded; and
         // ⌘Z undoes the change.
-        self.composer.update(cx, |c, cx| {
-            if keep_draft {
-                put_beside(c, &words, true, window, cx);
-            } else {
-                put_undoable(c, words, window, cx);
-            }
-            c.focus_field(window, cx);
-        });
+        let place = if keep_draft {
+            Place::Before
+        } else {
+            Place::Replace
+        };
+        let target = self.selected.clone();
+        self.put_draft_in(target, place, d, window, cx);
         added
     }
 
@@ -4777,7 +4800,7 @@ impl Dent {
         // Everything you sent, commands included (in the chat a command
         // that answered shows as its card, not your message), and dent's
         // own commands run here, newest first.
-        let mut mine: Vec<(u64, String)> = self
+        let mut mine: Vec<(u64, Draft)> = self
             .core
             .list
             .get(&s.id)
@@ -4786,30 +4809,32 @@ impl Dent {
                     .iter()
                     .filter_map(|e| match e {
                         dent_client_core::Entry::User {
+                            id,
                             text,
                             attachments,
                             queued: false,
                             at,
                             ..
-                        } => Some((
-                            *at,
-                            attachments
-                                .iter()
-                                .map(|p| format!("› Attached · {p}"))
-                                .chain((!text.is_empty()).then(|| text.clone()))
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        )),
+                        } => Some((*at, id.clone(), text.clone(), attachments.clone())),
                         _ => None,
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
             })
-            .unwrap_or_default();
-        mine.extend(self.ran_own.get(&s.id).into_iter().flatten().cloned());
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(at, id, text, files)| (at, self.back_draft(&id, &text, &files)))
+            .collect();
+        mine.extend(
+            self.ran_own
+                .get(&s.id)
+                .into_iter()
+                .flatten()
+                .map(|(at, t)| (*at, Draft::words(t.clone()))),
+        );
         // Newest first; where times tie, the later one written first.
         mine.reverse();
         mine.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
-        let mine: Vec<String> = mine.into_iter().map(|(_, t)| t).collect();
+        let mine: Vec<Draft> = mine.into_iter().map(|(_, d)| d).collect();
         let back = browsing.unwrap_or(0);
         let to = if up { back + 1 } else { back.saturating_sub(1) };
         if up && to > mine.len() {
@@ -4824,7 +4849,7 @@ impl Dent {
         if to == 0 {
             self.composer.update(cx, |c, cx| put(c, "", window, cx));
         } else {
-            let atts = self.restore_message(&mine[to - 1], &s.cwd, false, window, cx);
+            let atts = self.restore_message(mine[to - 1].clone(), false, window, cx);
             let shown = self.composer.read(cx).value().to_string();
             self.recall = Some(Recall {
                 session: s.id.clone(),
@@ -4862,12 +4887,12 @@ impl Dent {
         }
         let last = self.session(id).and_then(|s| {
             s.items.iter().rev().find_map(|i| match i {
-                Item::User { text, .. } => Some(text.clone()),
+                Item::User { text, files, .. } => Some((text.clone(), files.clone())),
                 _ => None,
             })
         });
-        if let Some(text) = last {
-            self.send_again(id, &text, cx);
+        if let Some((text, files)) = last {
+            self.send_again(id, &text, &files, cx);
         }
     }
 
@@ -4876,8 +4901,10 @@ impl Dent {
     /// asks whether to undo them too (`files` is the answer).
     pub fn try_again(&mut self, id: &str, files: Option<bool>, cx: &mut Context<Self>) {
         let Some(s) = self.session(id) else { return };
-        let Some((msg, text)) = s.items.iter().rev().find_map(|i| match i {
-            Item::User { id, text, .. } => Some((id.clone(), text.clone())),
+        let Some((msg, text, sent_files)) = s.items.iter().rev().find_map(|i| match i {
+            Item::User {
+                id, text, files, ..
+            } => Some((id.clone(), text.clone(), files.clone())),
             _ => None,
         }) else {
             return;
@@ -4907,13 +4934,13 @@ impl Dent {
             files,
         });
         self.waiting.insert(n, Waiting::Rewind(id.to_string()));
-        self.resend = Some((id.to_string(), msg, text));
+        self.resend = Some((id.to_string(), msg, text, sent_files));
         cx.notify();
     }
 
     /// Once a session has gone back for Try again, its message goes again.
     pub fn take_resend(&mut self, cx: &mut Context<Self>) {
-        let Some((id, msg, text)) = self.resend.clone() else {
+        let Some((id, msg, text, files)) = self.resend.clone() else {
             return;
         };
         let back = self.session(&id).is_some_and(|s| {
@@ -4923,22 +4950,21 @@ impl Dent {
         });
         if back {
             self.resend = None;
-            self.send_again(&id, &text, cx);
+            self.send_again(&id, &text, &files, cx);
         }
     }
 
     /// A message of yours sent again as it was: attached files go as
     /// attachments, and comments or picked elements stay in its text.
-    fn send_again(&mut self, id: &str, text: &str, cx: &mut Context<Self>) {
-        let cwd = self.session(id).map(|s| s.cwd.clone()).unwrap_or_default();
-        let (words, files) = message_parts(text, &cwd, true);
-        self.live.send(Request::Send {
-            session: id.to_string(),
-            id: crate::message_id(),
-            text: words,
-            steer: false,
-            attachments: files,
-        });
+    fn send_again(&mut self, id: &str, text: &str, files: &[String], cx: &mut Context<Self>) {
+        let d = Draft::with(
+            text,
+            files
+                .iter()
+                .map(|p| Attachment::File { path: p.clone() })
+                .collect(),
+        );
+        self.send_draft(id, &d, false);
         cx.notify();
     }
 
@@ -4971,7 +4997,7 @@ impl Dent {
             id: msg.to_string(),
         });
         self.waiting.insert(n, Waiting::Unqueue(msg.to_string()));
-        self.take_back(id, vec![(msg.to_string(), text, files)], Then::Steer);
+        self.take_back(id, vec![(msg.to_string(), text, files, None)], Then::Steer);
         cx.notify();
     }
 
@@ -5041,7 +5067,8 @@ impl Dent {
                 let held = if this.selected == session {
                     &mut this.attachments
                 } else {
-                    this.attached.entry(session).or_default()
+                    let key = session.unwrap_or_else(|| NEW_DRAFT.to_string());
+                    &mut this.drafts.entry(key).or_default().atts
                 };
                 let a = Attachment::File { path };
                 if !held.contains(&a) {
@@ -5296,7 +5323,7 @@ impl Dent {
             && let Some(c) = self.closed_tabs.get_mut(id)
             && c.remove(art).is_some()
         {
-            self.save_prefs();
+            self.prefs_changed();
         }
         // A version whose text wasn't captured (only edited) shows the latest.
         let captured = |a: &Artifact, v: usize| {
@@ -5783,26 +5810,7 @@ impl Dent {
         atts: &[Attachment],
         cx: &mut Context<Self>,
     ) {
-        let files: Vec<String> = atts
-            .iter()
-            .filter_map(|a| match a {
-                Attachment::File { path } => Some(path.clone()),
-                _ => None,
-            })
-            .collect();
-        let notes: Vec<Attachment> = atts
-            .iter()
-            .filter(|a| !matches!(a, Attachment::File { .. }))
-            .cloned()
-            .collect();
-        self.live.send(Request::Send {
-            session: id.to_string(),
-            id: crate::message_id(),
-            text: with_attachments(text, &notes),
-            steer: false,
-            attachments: files,
-        });
-        self.follow();
+        self.send_draft(id, &Draft::with(text, atts.to_vec()), false);
         cx.notify();
     }
 
@@ -6107,7 +6115,7 @@ impl Dent {
             self.sidebar_off = true;
             self.sidebar_forced = false;
         }
-        self.save_prefs();
+        self.prefs_changed();
         cx.notify();
     }
 
@@ -6301,53 +6309,6 @@ fn swap_due(was_step: bool, step: bool, up: f32, still: f32) -> bool {
     up >= held && still >= SETTLE
 }
 
-/// A message as sent, split back into its words and the files attached to
-/// it that are still there. Other attachment lines (comments, picked
-/// elements) stay in the words when it's sent again as it was (`notes`),
-/// and are left out when it comes back to the box to edit.
-fn message_parts(text: &str, cwd: &str, notes: bool) -> (String, Vec<String>) {
-    let mut files = Vec::new();
-    let mut words = Vec::new();
-    for l in text.lines() {
-        match l.strip_prefix("› Attached · ") {
-            Some(p) => {
-                let full = if p.starts_with('/') {
-                    std::path::PathBuf::from(p)
-                } else {
-                    std::path::Path::new(cwd).join(p)
-                };
-                if full.exists() {
-                    files.push(full.display().to_string());
-                }
-            }
-            None if !notes && l.starts_with("› ") => {}
-            None => words.push(l),
-        }
-    }
-    (words.join("\n"), files)
-}
-
-/// A message with its attachment lines after its words, so one starting
-/// with `/` still reaches the agent as a command.
-fn with_attachments(text: &str, atts: &[Attachment]) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    if !text.is_empty() {
-        lines.push(text.to_string());
-    }
-    lines.extend(atts.iter().map(|a| match a {
-        Attachment::Element {
-            file,
-            tag,
-            text,
-            selector,
-        } => format!("› {file} · {tag} “{text}” ({selector})"),
-        Attachment::Error { file, message } => format!("› {file} · {message}"),
-        Attachment::Comment { file, line, text } => format!("› {file}:{line} · {text}"),
-        Attachment::File { path } => format!("› Attached · {path}"),
-    }));
-    lines.join("\n")
-}
-
 /// More items than this landing at once (history arriving) just appear.
 const ARRIVE_AT_ONCE: usize = 3;
 
@@ -6382,28 +6343,6 @@ pub enum ChatScroll {
 
 #[cfg(test)]
 mod tests {
-    use super::{Attachment, joined, message_parts, with_attachments};
-
-    #[test]
-    fn attachment_lines_follow_the_words() {
-        let atts = [Attachment::Comment {
-            file: "a.rs".into(),
-            line: 3,
-            text: "why?".into(),
-        }];
-        // A command stays first, so it still runs as one.
-        assert_eq!(
-            with_attachments("/review now", &atts),
-            "/review now\n› a.rs:3 · why?"
-        );
-        assert_eq!(with_attachments("", &atts), "› a.rs:3 · why?");
-        // Brought back to edit, the note lines stay behind.
-        assert_eq!(
-            message_parts(&with_attachments("/review now", &atts), "/", false).0,
-            "/review now"
-        );
-    }
-
     #[test]
     fn the_working_line_keeps_up_with_the_plan() {
         // A step gives way to the plan's next step at the usual pace...
@@ -6413,13 +6352,6 @@ mod tests {
         assert!(super::swap_due(true, false, 2000., 300.));
         // New words always settle first.
         assert!(!super::swap_due(false, true, 5000., 100.));
-    }
-
-    #[test]
-    fn restored_words_go_after_a_draft() {
-        assert_eq!(joined("", "back"), "back");
-        assert_eq!(joined("mine", ""), "mine");
-        assert_eq!(joined("mine", "back"), "mine\n\nback");
     }
 }
 

@@ -17,6 +17,7 @@ mod compose;
 mod context;
 mod data;
 mod diagram;
+mod draft;
 mod ds;
 mod find;
 mod highlight;
@@ -260,12 +261,9 @@ impl Render for Dent {
         self.ask_keyed = self.ask_focus.is_focused(window);
         self.note_ask_shown();
         self.composer_keyed = self.composer.read(cx).focus_handle(cx).is_focused(window);
-        self.sync_draft(cx);
         self.take_resend(cx);
         self.take_restores(window, cx);
-        if self.menu.is_none() && !self.dragging && !self.dragging_sidebar && self.walk.is_none() {
-            self.save_prefs();
-        }
+        self.prefs_tick(cx);
         let visible = self.preview_visible();
         if let Some(p) = &self.preview {
             p.borrow_mut().set_visible(visible);
@@ -667,7 +665,7 @@ impl Render for Dent {
             .on_action(|_: &app::FullScreen, window, _| window.toggle_fullscreen())
             .on_action(cx.listener(|this, a: &ambient::SetAmbient, _, cx| {
                 ambient::choose(a.id.as_deref());
-                this.save_prefs();
+                this.prefs_changed();
                 app::refresh_menus(cx);
                 cx.notify();
             }))
@@ -675,7 +673,7 @@ impl Render for Dent {
                 use std::sync::atomic::Ordering::Relaxed;
                 let on = notify::SOUND.load(Relaxed);
                 notify::SOUND.store(!on, Relaxed);
-                this.save_prefs();
+                this.prefs_changed();
                 app::refresh_menus(cx);
             }))
             .on_action(|_: &app::Zoom, window, _| window.zoom_window())

@@ -215,7 +215,9 @@ pub fn opened(text: &str, at: &Range<usize>, full: &str) -> (Range<usize>, Strin
     )
 }
 
-/// Where folded pastes sit in `text`: each one's range and number.
+/// Where folded pastes sit in `text`, found by their labels: each one's
+/// range and number. Only for reading drafts saved before chips were saved
+/// by number (prefs version 0); chips are otherwise never found by words.
 pub fn folded_in(text: &str, pastes: &BTreeMap<u32, String>) -> Vec<(Range<usize>, u32)> {
     let mut found: Vec<(Range<usize>, u32)> = Vec::new();
     for (n, full) in pastes {
@@ -226,39 +228,6 @@ pub fn folded_in(text: &str, pastes: &BTreeMap<u32, String>) -> Vec<(Range<usize
     }
     found.sort_by_key(|(r, _)| r.start);
     found
-}
-
-/// `text` with each folded paste it holds whole taken out, and the chips
-/// they showed as: a queued message shows its pastes as chips again, the
-/// words around them closing up.
-pub fn refold(text: &str, pastes: &BTreeMap<u32, String>) -> (String, Vec<String>) {
-    // Only text this long can hold a folded paste.
-    if text.lines().nth(FOLD_LINES).is_none() && text.len() <= FOLD_BYTES {
-        return (text.to_string(), Vec::new());
-    }
-    let mut out = text.to_string();
-    let mut chips = Vec::new();
-    for full in pastes.values() {
-        let Some(at) = out.find(full.as_str()) else {
-            continue;
-        };
-        if full.trim().is_empty() {
-            continue;
-        }
-        let (a, b) = (&out[..at], &out[at + full.len()..]);
-        let (a, b) = (
-            a.trim_end_matches([' ', '\n']),
-            b.trim_start_matches([' ', '\n']),
-        );
-        let gap = if a.is_empty() || b.is_empty() {
-            ""
-        } else {
-            " "
-        };
-        out = format!("{a}{gap}{b}");
-        chips.push(chip_label(full));
-    }
-    (out, chips)
 }
 
 #[cfg(test)]
@@ -398,21 +367,5 @@ mod tests {
         std::fs::write(&txt, "not a picture").unwrap();
         assert!(to_jpeg(&txt, &dir.join("out")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_queued_message_shows_its_pastes_folded() {
-        let long: String = (0..60).map(|i| format!("line {i}\n")).collect();
-        let pastes = BTreeMap::from([(1, long.clone()), (2, "short".to_string())]);
-        let sent = format!("look at this {long} please");
-        assert_eq!(
-            refold(&sent, &pastes),
-            (
-                "look at this please".to_string(),
-                vec!["Pasted text · 60 lines".to_string()]
-            )
-        );
-        // Short text is left alone, even if a paste's words are in it.
-        assert_eq!(refold("short", &pastes), ("short".to_string(), vec![]));
     }
 }

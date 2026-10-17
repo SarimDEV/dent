@@ -201,13 +201,24 @@ pub fn arg_rows(args: &Args, before: &[String], query: &str) -> Option<Vec<Row>>
 /// The text with the token replaced by `with`, and the caret's new place.
 /// A finished word gets a space after it (or the caret steps over the one
 /// already there); a folder doesn't, so its files can follow.
+#[cfg(test)]
 pub fn apply(text: &str, t: &Token, with: &str, finished: bool) -> (String, usize) {
-    let rest = &text[t.end..];
-    let has_space = rest.starts_with(char::is_whitespace);
+    let (put, caret) = apply_at(text, t, with, finished);
+    (
+        format!("{}{put}{}", &text[..t.start], &text[t.end..]),
+        caret,
+    )
+}
+
+/// What [`apply`] puts in place of the word (`t.start..t.end`), and where
+/// the caret goes then: the edit alone, so the rest of the box is left as
+/// it is.
+pub fn apply_at(text: &str, t: &Token, with: &str, finished: bool) -> (String, usize) {
+    let has_space = text[t.end..].starts_with(char::is_whitespace);
     let space = if finished && !has_space { " " } else { "" };
-    let head = format!("{}{with}{space}", &text[..t.start]);
-    let caret = head.len() + usize::from(finished && has_space);
-    (format!("{head}{rest}"), caret)
+    let put = format!("{with}{space}");
+    let caret = t.start + put.len() + usize::from(finished && has_space);
+    (put, caret)
 }
 
 /// How a picked path is written: `@path`, quoted when it has a space, the

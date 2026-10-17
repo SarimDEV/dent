@@ -1,12 +1,19 @@
 //! Choices the app remembers between launches: the defaults for a new
 //! session and how the window was laid out. Kept beside the daemon's state.
 
+use crate::draft::Draft;
 use dent_protocol::Permission;
 use serde::{Deserialize, Serialize};
+
+/// The prefs' shape: 1 keeps drafts whole (chips by paste number, files
+/// with them) and pastes in files of their own.
+pub const VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
 #[serde(default)]
 pub struct Prefs {
+    /// Which shape these were written in (0: before `VERSION` 1).
+    pub version: u32,
     pub project: Option<String>,
     pub model: Option<String>,
     /// The permission a new session starts with: Full access until you pick
@@ -27,15 +34,19 @@ pub struct Prefs {
     /// Files opened from links in each session's viewer, by path.
     pub opened: std::collections::BTreeMap<String, Vec<String>>,
     pub closed_tabs: std::collections::BTreeMap<String, std::collections::BTreeMap<String, usize>>,
-    /// What you'd typed in each session and not sent, so quitting loses
-    /// nothing; under "" what was typed for a new session.
-    pub drafts: std::collections::BTreeMap<String, String>,
-    /// Files attached to each draft and not yet sent, by the same keys.
+    /// What you'd typed in each session and not sent, with its chips and
+    /// files, so quitting loses nothing; under "" what was typed for a new
+    /// session.
+    pub drafts: std::collections::BTreeMap<String, Draft>,
+    /// Before version 1: files attached to each draft, by the same keys.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub attached: std::collections::BTreeMap<String, Vec<String>>,
-    /// Long pastes folded into the drafts, by number.
+    /// Long pastes the drafts hold, by number. Kept in files of their own
+    /// beside the prefs (before version 1, in here).
+    #[serde(skip_serializing)]
     pub pastes: std::collections::BTreeMap<u32, String>,
     /// Drafts put aside with ⌘S, oldest first.
-    pub stashes: Vec<Stash>,
+    pub stashes: Vec<Draft>,
     /// Sessions kept at the top of the sidebar, in the order pinned.
     pub pinned: Vec<String>,
     /// The ambient background on the new-session page, by id; none when unset
@@ -43,15 +54,6 @@ pub struct Prefs {
     pub ambient: Option<String>,
     /// The app you picked to open each kind of file (by extension).
     pub open_with: std::collections::BTreeMap<String, String>,
-}
-
-/// A draft put aside with ⌘S: its words (folded pastes as their labels,
-/// as a saved draft keeps them) and the files attached to it.
-#[derive(Serialize, Deserialize, Default, Clone, PartialEq, Debug)]
-#[serde(default)]
-pub struct Stash {
-    pub text: String,
-    pub files: Vec<String>,
 }
 
 /// Which theme dent wears.
@@ -87,6 +89,13 @@ pub fn load() -> Prefs {
         .unwrap_or_default();
     // A marker beside the prefs, not a field in them: an older build
     // rewriting the prefs can't drop it and so undo a choice made since.
+    migrate(&mut p);
+    p.pastes = load_pastes(p.drafts.values().chain(&p.stashes));
+    // Files deleted since are no longer attached.
+    for d in p.drafts.values_mut().chain(p.stashes.iter_mut()) {
+        d.atts
+            .retain(|a| a.path().is_none_or(|f| std::path::Path::new(f).exists()));
+    }
     let marker = path().with_file_name(FULL_ACCESS_MARKER);
     if upgrade(&mut p, marker.exists()) {
         if let Some(dir) = marker.parent() {
@@ -111,7 +120,94 @@ fn upgrade(p: &mut Prefs, done: bool) -> bool {
     true
 }
 
+/// Older prefs into this shape: a draft's chips were found again by their
+/// labels and its files kept apart; pastes lived in the prefs.
+fn migrate(p: &mut Prefs) {
+    if p.version >= VERSION {
+        return;
+    }
+    for d in p.drafts.values_mut().chain(p.stashes.iter_mut()) {
+        if d.chips.is_empty() {
+            d.chips = crate::compose::folded_in(&d.text, &p.pastes)
+                .into_iter()
+                .map(|(r, paste)| crate::draft::Chip {
+                    start: r.start,
+                    end: r.end,
+                    paste,
+                })
+                .collect();
+        }
+    }
+    for (k, files) in std::mem::take(&mut p.attached) {
+        let d = p.drafts.entry(k).or_default();
+        for path in files {
+            let a = crate::draft::Attachment::File { path };
+            if !d.atts.contains(&a) {
+                d.atts.push(a);
+            }
+        }
+    }
+    for (n, full) in &p.pastes {
+        write_paste(*n, full);
+    }
+    p.version = VERSION;
+}
+
+fn pastes_dir() -> std::path::PathBuf {
+    path().with_file_name("desktop-pastes")
+}
+
+thread_local! {
+    /// Pastes known to be in their files already.
+    static WRITTEN: std::cell::RefCell<std::collections::HashSet<u32>> = Default::default();
+}
+
+fn write_paste(n: u32, full: &str) {
+    let dir = pastes_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    if std::fs::write(dir.join(n.to_string()), full).is_ok() {
+        WRITTEN.with(|w| w.borrow_mut().insert(n));
+    }
+}
+
+/// The pastes these drafts hold, read from their files.
+fn load_pastes<'a>(
+    drafts: impl Iterator<Item = &'a Draft>,
+) -> std::collections::BTreeMap<u32, String> {
+    let dir = pastes_dir();
+    let mut out = std::collections::BTreeMap::new();
+    for n in drafts.flat_map(|d| d.pastes()) {
+        if let Ok(full) = std::fs::read_to_string(dir.join(n.to_string())) {
+            WRITTEN.with(|w| w.borrow_mut().insert(n));
+            out.insert(n, full);
+        }
+    }
+    out
+}
+
+/// Each paste the prefs hold goes in its own file, once; files of pastes
+/// no draft holds any more go.
+fn save_pastes(pastes: &std::collections::BTreeMap<u32, String>) {
+    for (n, full) in pastes {
+        if !WRITTEN.with(|w| w.borrow().contains(n)) {
+            write_paste(*n, full);
+        }
+    }
+    if let Ok(dir) = std::fs::read_dir(pastes_dir()) {
+        for e in dir.flatten() {
+            let n = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok());
+            if n.is_none_or(|n| !pastes.contains_key(&n)) {
+                let _ = std::fs::remove_file(e.path());
+                if let Some(n) = n {
+                    WRITTEN.with(|w| w.borrow_mut().remove(&n));
+                }
+            }
+        }
+    }
+}
+
 pub fn save(p: &Prefs) {
+    save_pastes(&p.pastes);
     if let Ok(json) = serde_json::to_vec_pretty(p) {
         let path = path();
         let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
@@ -126,6 +222,32 @@ pub fn save(p: &Prefs) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn older_drafts_keep_their_chips_and_files() {
+        let long: String = (0..60).map(|i| format!("line {i}\n")).collect();
+        let label = crate::compose::fold_label(1, &long);
+        let mut p: Prefs = serde_json::from_str(
+            &serde_json::json!({
+                "drafts": {"s": format!("see {label}")},
+                "attached": {"s": ["/a.png"]},
+                "pastes": {"1": long},
+                "stashes": [{"text": "aside", "files": ["/b"]}],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        migrate(&mut p);
+        let d = &p.drafts["s"];
+        assert_eq!(&d.text[d.chips[0].range()], label);
+        assert_eq!(d.chips[0].paste, 1);
+        assert_eq!(d.files(), ["/a.png"]);
+        assert_eq!(p.stashes[0].files(), ["/b"]);
+        assert_eq!(p.version, VERSION);
+        // Written now, pastes aren't in the prefs file.
+        let json = serde_json::to_value(&p).unwrap();
+        assert!(json.get("pastes").is_none() && json.get("attached").is_none());
+    }
 
     #[test]
     fn new_sessions_start_in_full_access_until_you_choose() {

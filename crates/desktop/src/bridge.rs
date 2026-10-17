@@ -234,32 +234,18 @@ pub fn session(
             } => {
                 // A command that answered as a command: its card says what
                 // was run, so the message isn't shown twice.
-                let answered = crate::data::command_name(text.lines().next().unwrap_or(""))
-                    .is_some()
-                    && attachments.is_empty()
+                let answered = crate::draft::sent_command(text, attachments).is_some()
                     && v.entries[start + k + 1..]
                         .iter()
                         .take_while(|n| !matches!(n, Entry::User { queued: false, .. }))
                         .any(|n| matches!(n, Entry::Command { .. }));
                 if *q || answered {
                     // Waiting messages go last, below everything.
-                } else if attachments.is_empty() {
+                } else {
                     items.push(Item::User {
                         id: id.clone(),
                         text: text.clone(),
-                        at: *at,
-                    });
-                } else {
-                    let mut lines: Vec<String> = attachments
-                        .iter()
-                        .map(|p| format!("› Attached · {}", relative(cwd, p)))
-                        .collect();
-                    if !text.is_empty() {
-                        lines.push(text.clone());
-                    }
-                    items.push(Item::User {
-                        id: id.clone(),
-                        text: lines.join("\n"),
+                        files: attachments.clone(),
                         at: *at,
                     });
                 }

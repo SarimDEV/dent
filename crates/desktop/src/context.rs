@@ -1,7 +1,6 @@
 //! Right-click menus: a short list of actions at the pointer. One is open
 //! at a time; a click anywhere else or Esc closes it.
 
-use crate::ui::FocusField;
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
@@ -89,7 +88,7 @@ impl Dent {
             Do::Pin(id) => self.toggle_pin(&id, cx),
             Do::OpenWith(path, app) => {
                 crate::open::open_with(&path, app, cx);
-                self.save_prefs();
+                self.prefs_changed();
             }
             Do::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             Do::OpenLink(url) => crate::select::open_link(&url, window, cx),
@@ -112,17 +111,15 @@ impl Dent {
         if quoted.is_empty() {
             return;
         }
-        let draft = self.composer.read(cx).value().to_string();
-        let text = if draft.trim().is_empty() {
-            format!("{quoted}\n\n")
-        } else {
-            format!("{}\n\n{quoted}\n\n", draft.trim_end())
-        };
-        let caret = text.len();
-        self.composer.update(cx, |c, cx| {
-            crate::app::put_at(c, text, caret, window, cx);
-            c.focus_field(window, cx);
-        });
+        // Only after the draft: its folded pastes stay chips.
+        let target = self.selected.clone();
+        self.put_draft_in(
+            target,
+            crate::app::Place::After,
+            crate::app::Draft::words(format!("{quoted}\n\n")),
+            window,
+            cx,
+        );
         crate::select::clear(window);
     }
 
