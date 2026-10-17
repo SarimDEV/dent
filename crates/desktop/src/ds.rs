@@ -59,9 +59,13 @@ pub mod motion {
     /// How often (per second) the window looks for something to draw:
     /// a timer's second, a toast ending.
     pub const LOOK_FPS: f32 = 8.;
-    /// One breath of the working square (ms), eased in and out, drawn
-    /// every frame while a working session shows.
+    /// One breath of the working square (ms), eased in and out.
     pub const WORKING: f32 = 1600.;
+    /// How often a breathing working square is drawn while nothing else
+    /// moves: smooth to the eye over a 1.6 s breath, at a quarter of a
+    /// 120 Hz display's frames (each one draws the whole window; GPUI
+    /// can't repaint the square alone, see design-system.md).
+    pub const BREATH_FPS: f32 = 30.;
     /// Arrive rises this far (px); chrome moves half as far.
     pub const RISE: f32 = 6.;
     pub const NUDGE: f32 = 4.;

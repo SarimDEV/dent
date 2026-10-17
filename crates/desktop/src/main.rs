@@ -214,6 +214,29 @@ impl Render for Dent {
         }
         if self.animating() || toast_arriving || walking || ambient::wants_frames(self) {
             window.request_animation_frame();
+        } else if self.breathing() && !self.breath_timer {
+            // Only the square moves: drawn at its own rate, not the
+            // display's (`DENT_BREATH_FPS` overrides it for measuring; 0 is
+            // every frame).
+            let fps = std::env::var("DENT_BREATH_FPS")
+                .ok()
+                .and_then(|f| f.parse::<f32>().ok())
+                .unwrap_or(ds::motion::BREATH_FPS);
+            if fps <= 0. {
+                window.request_animation_frame();
+            } else {
+                self.breath_timer = true;
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_secs_f32(1. / fps))
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.breath_timer = false;
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
         }
         // The composer says what Enter will do in this session's state.
         let open = self.current().and_then(|s| {

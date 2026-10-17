@@ -532,25 +532,42 @@ impl Agent {
     /// Stream text as deltas, then the whole message.
     fn say(&mut self, text: &str, parent: Option<&str>) -> Result<(), Cut> {
         self.context += text.len() as u64 / 3 + 200;
-        let msg_id = format!("msg_fake_{}", new_id());
-        out(self.envelope(
-            json!({"type": "stream_event", "event": {"type": "message_start", "message": {
-                "id": msg_id, "role": "assistant", "content": [], "usage": self.usage()}}}),
-            parent,
-        ));
-        out(self.envelope(
-            json!({"type": "stream_event", "event": {"type": "content_block_start", "index": 0,
-            "content_block": {"type": "text", "text": ""}}}),
-            parent,
-        ));
         let words: Vec<&str> = text.split_inclusive(' ').collect();
-        for chunk in words.chunks(3) {
+        let deltas: Vec<(String, u64)> = words
+            .chunks(3)
+            .map(|c| (c.concat(), self.chunk_ms))
+            .collect();
+        self.stream_text(&deltas, parent).map(|_| ())
+    }
+
+    /// One reply as the real agent streams it: each delta and the pause
+    /// after it, then the whole message. Every way the fake speaks goes
+    /// through here.
+    fn stream_text(
+        &mut self,
+        deltas: &[(String, u64)],
+        parent: Option<&str>,
+    ) -> Result<String, Cut> {
+        let text: String = deltas.iter().map(|(d, _)| d.as_str()).collect();
+        let msg_id = format!("msg_fake_{}", new_id());
+        let ev = |e: Value| json!({"type": "stream_event", "event": e});
+        out(self.envelope(
+            ev(json!({"type": "message_start", "message": {
+                "id": msg_id, "role": "assistant", "content": [], "usage": self.usage()}})),
+            parent,
+        ));
+        out(self.envelope(
+            ev(json!({"type": "content_block_start", "index": 0,
+                "content_block": {"type": "text", "text": ""}})),
+            parent,
+        ));
+        for (delta, ms) in deltas {
             out(self.envelope(
-                json!({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
-                "delta": {"type": "text_delta", "text": chunk.concat()}}}),
+                ev(json!({"type": "content_block_delta", "index": 0,
+                    "delta": {"type": "text_delta", "text": delta}})),
                 parent,
             ));
-            self.pause(self.chunk_ms)?;
+            self.pause(*ms)?;
         }
         out(self.envelope(
             json!({"type": "assistant", "message": {"id": msg_id, "role": "assistant", "model": self.model,
@@ -558,14 +575,11 @@ impl Agent {
             parent,
         ));
         out(self.envelope(
-            json!({"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}}),
+            ev(json!({"type": "content_block_stop", "index": 0})),
             parent,
         ));
-        out(self.envelope(
-            json!({"type": "stream_event", "event": {"type": "message_stop"}}),
-            parent,
-        ));
-        Ok(())
+        out(self.envelope(ev(json!({"type": "message_stop"})), parent));
+        Ok(text)
     }
 
     /// One message as the real agent streams it: words, then a call whose
@@ -636,78 +650,30 @@ impl Agent {
         ));
     }
 
-    /// Stream `parts` a few characters at a time, stopping for a while
-    /// after each but the last, then the whole message.
     /// A reply streamed in the pieces given, one delta each, `ms` apart.
     fn say_parts(&mut self, parts: &[&str], ms: u64) -> Result<String, Cut> {
         let text = parts.concat();
         self.context += text.len() as u64 / 3 + 200;
-        let msg_id = format!("msg_fake_p{}", new_id());
-        let ev = |e: Value| json!({"type": "stream_event", "event": e});
-        out(self.envelope(
-            ev(json!({"type": "message_start", "message": {
-                "id": msg_id, "role": "assistant", "content": [], "usage": self.usage()}})),
-            None,
-        ));
-        out(self.envelope(
-            ev(json!({"type": "content_block_start", "index": 0,
-                "content_block": {"type": "text", "text": ""}})),
-            None,
-        ));
-        for part in parts {
-            out(self.envelope(
-                ev(json!({"type": "content_block_delta", "index": 0,
-                    "delta": {"type": "text_delta", "text": part}})),
-                None,
-            ));
-            self.pause(ms)?;
-        }
-        out(self.envelope(
-            json!({"type": "assistant", "message": {"id": msg_id, "role": "assistant", "model": self.model,
-                "content": [{"type": "text", "text": text}], "usage": self.usage()}}),
-            None,
-        ));
-        out(self.envelope(ev(json!({"type": "content_block_stop", "index": 0})), None));
-        out(self.envelope(ev(json!({"type": "message_stop"})), None));
-        Ok(text)
+        let deltas: Vec<(String, u64)> = parts.iter().map(|p| (p.to_string(), ms)).collect();
+        self.stream_text(&deltas, None)
     }
 
+    /// Stream `parts` a few characters at a time, stopping for a while
+    /// after each but the last, then the whole message.
     fn say_held(&mut self, parts: &[&str]) -> Result<String, Cut> {
-        let text = parts.concat();
-        let msg_id = format!("msg_fake_h{}", new_id());
-        let ev = |e: Value| json!({"type": "stream_event", "event": e});
-        out(self.envelope(
-            ev(json!({"type": "message_start", "message": {
-                "id": msg_id, "role": "assistant", "content": [], "usage": self.usage()}})),
-            None,
-        ));
-        out(self.envelope(
-            ev(json!({"type": "content_block_start", "index": 0,
-                "content_block": {"type": "text", "text": ""}})),
-            None,
-        ));
+        let mut deltas: Vec<(String, u64)> = Vec::new();
         for (n, part) in parts.iter().enumerate() {
             let chars: Vec<char> = part.chars().collect();
             for chunk in chars.chunks(4) {
-                out(self.envelope(
-                    ev(json!({"type": "content_block_delta", "index": 0,
-                        "delta": {"type": "text_delta", "text": chunk.iter().collect::<String>()}})),
-                    None,
-                ));
-                self.pause(60)?;
+                deltas.push((chunk.iter().collect(), 60));
             }
-            if n + 1 < parts.len() {
-                self.pause(12_000)?;
+            if n + 1 < parts.len()
+                && let Some(last) = deltas.last_mut()
+            {
+                last.1 += 12_000;
             }
         }
-        out(self.envelope(
-            json!({"type": "assistant", "message": {"id": msg_id, "role": "assistant", "model": self.model,
-                "content": [{"type": "text", "text": text}], "usage": self.usage()}}),
-            None,
-        ));
-        out(self.envelope(ev(json!({"type": "content_block_stop", "index": 0})), None));
-        out(self.envelope(ev(json!({"type": "message_stop"})), None));
-        Ok(text)
+        self.stream_text(&deltas, None)
     }
 
     fn tool(&mut self, name: &str, input: Value, parent: Option<&str>) -> String {

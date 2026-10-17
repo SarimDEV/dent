@@ -201,5 +201,5 @@ Motion is spring-based, short and always interruptible: input during an animatio
 
 - Panels slide and resize, messages settle in as they stream, status dots pulse gently while working.
 - Reduced-motion settings swap motion for fades.
-- The window redraws only when something on screen changes: a page event, a timer's second, a toast ending, and every frame while a working session's square shows (it breathes smoothly; nothing else does when the window is quiet). Long transcripts and diffs are virtualized lists that lay out only what's visible.
+- The window redraws only when something on screen changes: a page event, a timer's second, a toast ending, and 30 times a second while a working session's square shows (it breathes smoothly; nothing else does when the window is quiet, and with Reduce Motion it holds still). Long transcripts and diffs are virtualized lists that lay out only what's visible.
 - Frame time is measured in development builds, with a visible overlay (gpui-fps) and a CI check on scripted interactions. Scripted input goes through `Window::dispatch_event` with real wheel and key events; `ListState::scroll_by` is not a substitute on a bottom-aligned list ([spike 03](spikes/03-gpui-chat-and-diff.md)).

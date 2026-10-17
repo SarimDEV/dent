@@ -288,13 +288,11 @@ pub fn serif() -> &'static str {
 
 /// A 12px status square, drawn as a 4×4 pixel pattern so status never relies
 /// on colour alone (the same patterns as the phone): needs you = solid,
-/// done = a corner step, waiting = dots, idle = an outline. Working is the
-/// one that moves: a small rounded square that breathes smoothly between
-/// its paler partner and the signal, every frame while it shows.
-/// A 12px status square, drawn as a 4×4 pixel pattern so status never relies
-/// on colour alone (the same patterns as the phone): needs you = solid,
-/// done = a corner step, working = a checker that drifts at 8 fps, waiting =
-/// dots, idle = an outline.
+/// done = a corner step, working = a checker, waiting = dots, idle = an
+/// outline. Working is the one that moves: with motion on, a small rounded
+/// square that breathes smoothly between its paler partner and the signal
+/// (`motion::BREATH_FPS`); with Reduce Motion, it holds still as its
+/// checker, so it never reads as needs-you's solid square.
 pub fn status_square(status: Status, t: &Theme) -> Div {
     status_square_at(status, t, 1.)
 }
@@ -304,17 +302,13 @@ pub fn status_square(status: Status, t: &Theme) -> Div {
 pub fn status_square_at(status: Status, t: &Theme, scale: f32) -> Div {
     let (signal, partner) = t.signal(status);
     let s = crate::ds::size::SQUARE * scale;
-    if status == Status::Working {
+    if status == Status::Working && !crate::reduce_motion() {
         // One shared clock, so every working square breathes together.
-        let k = if crate::reduce_motion() {
-            1.
-        } else {
-            let secs = crate::PROCESS_START
-                .get()
-                .map(|p| p.elapsed().as_secs_f32())
-                .unwrap_or(0.);
-            breath(secs)
-        };
+        let secs = crate::PROCESS_START
+            .get()
+            .map(|p| p.elapsed().as_secs_f32())
+            .unwrap_or(0.);
+        let k = breath(secs);
         let inner = s * 0.84 * (0.9 + 0.1 * k);
         return div()
             .size(px(crate::ds::size::SQUARE))
@@ -344,7 +338,7 @@ pub fn status_square_at(status: Status, t: &Theme, scale: f32) -> Div {
                 let on = match status {
                     Status::Needs => true,
                     Status::Done => x <= y,
-                    Status::Working => true,
+                    Status::Working => (x + y).is_multiple_of(2),
                     Status::Waiting => x.is_multiple_of(2) && y.is_multiple_of(2),
                     Status::Idle => x == 0 || y == 0 || x == 3 || y == 3,
                 };

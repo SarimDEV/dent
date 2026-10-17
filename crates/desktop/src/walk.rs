@@ -155,6 +155,14 @@ impl Walk {
                 v.extend(demo(id));
                 v
             }
+            "breath" => {
+                let mut v = vec![(
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                )];
+                v.extend(breath());
+                v
+            }
             "ambient" => {
                 let mut v = vec![(
                     0.,
@@ -2089,6 +2097,7 @@ fn checks() -> Vec<(f32, Act)> {
     ]);
     // Daily use, after the scenes that lean on files written at the start
     // still being fresh.
+    v.extend(breath());
     v.extend(file_links());
     v.extend(recall());
     v.extend(find());
@@ -5823,6 +5832,74 @@ static AMBIENT_AT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsi
 static AMBIENT_COSTS: std::sync::Mutex<Vec<(&'static str, f32, f32, f32)>> =
     std::sync::Mutex::new(Vec::new());
 static COST_FROM: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+/// The process's CPU time so far (user and system), in ms.
+fn cpu_ms() -> f64 {
+    // SAFETY: getrusage only writes the struct it's given.
+    let mut u: libc::rusage = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut u) } != 0 {
+        return 0.;
+    }
+    let ms = |t: libc::timeval| t.tv_sec as f64 * 1000. + t.tv_usec as f64 / 1000.;
+    ms(u.ru_utime) + ms(u.ru_stime)
+}
+
+static CPU_FROM: std::sync::Mutex<Option<(Instant, f64)>> = std::sync::Mutex::new(None);
+
+/// A working square, and nothing else moving: what it costs. It's drawn at
+/// its own rate (`motion::BREATH_FPS`), not the display's, since GPUI
+/// redraws the whole window for it. `DENT_BREATH_FPS=0 scripts/walk.sh
+/// breath` measures it drawn every frame, for comparison.
+fn breath() -> Vec<(f32, Act)> {
+    let mut v = new_session("make a plan slowly");
+    v.extend([
+        (
+            0.1,
+            Until(
+                "the session works, its square showing",
+                |d, _| status_is(d, Status::Working) && d.breathing(),
+                10.,
+            ),
+        ),
+        // The inbox has the keyboard, so no caret blinks (Esc would stop
+        // the turn).
+        (3.5, Call(|d, w, cx| d.focus_inbox(w, cx))),
+        (
+            0.5,
+            Call(|_, _, _| {
+                *CPU_FROM.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some((Instant::now(), cpu_ms()));
+            }),
+        ),
+        (
+            0.,
+            Idle(
+                "a working square alone draws at its own rate, not the display's",
+                3.,
+                crate::ds::motion::BREATH_FPS + 3.,
+            ),
+        ),
+        (
+            0.,
+            Call(|_, _, _| {
+                if let Some((at, from)) = CPU_FROM.lock().unwrap_or_else(|e| e.into_inner()).take()
+                {
+                    let secs = at.elapsed().as_secs_f64().max(0.001);
+                    eprintln!(
+                        "      a working square costs {:.1} ms of CPU a second",
+                        (cpu_ms() - from) / secs
+                    );
+                }
+            }),
+        ),
+        (0.1, Key("cmd-.")),
+        (
+            0.1,
+            Until("and stops", |d, _| !status_is(d, Status::Working), 10.),
+        ),
+    ]);
+    v
+}
 
 fn start_cost(d: &mut Dent, _: &mut Window, _: &mut Context<Dent>) {
     d.ambient.borrow_mut().take_cost();

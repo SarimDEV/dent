@@ -885,6 +885,8 @@ pub struct Dent {
     pub last_frame: Instant,
     /// When `tick_due` last looked.
     last_tick: Instant,
+    /// The working square's next breath is on its way.
+    pub breath_timer: bool,
 }
 
 impl Dent {
@@ -1350,6 +1352,7 @@ impl Dent {
             walk: None,
             last_frame: Instant::now(),
             last_tick: Instant::now(),
+            breath_timer: false,
         };
         this.mdv = crate::markdown::Md::new(this.probes.clone());
         for input in this.fields() {
@@ -6178,11 +6181,8 @@ impl Dent {
                 at.elapsed() < Duration::from_millis(crate::ds::motion::BASE as u64 + 40)
             })
         });
-        // A working square breathes every frame, smoothly, but only while
-        // one shows: an idle window still draws nothing.
-        let breathing = !crate::reduce_motion() && self.working_shown();
+        // A working square's breath is drawn at its own rate (`breathing`).
         streaming
-            || breathing
             || !self.row_born.is_empty()
             || fresh(&self.finished_at)
             || fresh(&self.arrived_at)
@@ -6197,6 +6197,12 @@ impl Dent {
                 (w.next.is_some() && self.selected.as_deref() == Some(id.as_str()))
                     || w.at.elapsed() < Duration::from_millis(crate::ds::motion::BASE as u64 + 40)
             })
+    }
+
+    /// A working square breathes, smoothly, but only while one shows and
+    /// motion is on: an idle window still draws nothing.
+    pub fn breathing(&self) -> bool {
+        !crate::reduce_motion() && self.working_shown()
     }
 
     /// The working line's words for `session` as shown: what it was, what
