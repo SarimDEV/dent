@@ -28,6 +28,12 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 
 ## Open
 
+### Late in the full walk, a daemon restart loses the agents
+- Seen: 2026-10-16. The edges scene's "after a restart the approval still waits" fails in every full `checks`/`stills` run (8 of 8) and passes when the scene runs alone (7 of 7, including with 54 sessions, an earlier crash restart, or your terminal open first). Timed in one full run: the app reconnects 0.22 s after the kill, yet the holder logs "no daemon for a while; closing stdin" for every agent exactly 10 s later (the walk's orphan time) and exits, so the new daemon never held a connection to it; the session then ends "dent restarted while the agent was working". Earlier full runs used a 2 s orphan time and lost the agents sooner; walks now use 10 s, which fixed the take-back check but not this.
+- Cost: 3 failing checks per full walk run; a real restart late in a long day may lose running agents the same way (unconfirmed outside walks).
+- Fix: find which earlier scene leaves the restarted daemon without a holder connection (bisect the scenes before `edges` in `checks()`, with holder.log and daemon.log kept), then fix that path.
+- Check: `scripts/walk.sh checks` passes the edges restart checks.
+
 ### Real walkthroughs used for every visual check
 - Seen: 2026-10-15. Each UI tweak in the chat-polish round was checked with a full real-agent `walk.sh compare` run (Haiku, ~40 tool calls): six runs at ~3 min plus build each, and the owner waited on every one ("the walk is so annoying… it takes forever").
 - Cost: ~25 min of waiting in one session, plus real usage limits.
@@ -122,17 +128,11 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 
 ## Done
 
-### Walk agents died on every late daemon restart
-- Seen: 2026-10-16. In full stills runs (about 50 sessions by then, debug build) the edges scene's restart checks failed in all three sizes while the scene passed alone twice. The daemon log showed "agent unreachable ... stdin closed": walks set the holder's orphan time to 2 s, and a debug daemon restoring that many sessions took longer than that to reconnect, so the holder cut the agents off. The default is 600 s.
-- Cost: 4 false failures per full run, and the restart checks tested agent loss instead of reattaching.
-- Fix: walks use 10 s (`DENT_HOLDER_ORPHAN_MS=10000`); the scenes that mean to lose the agent kill the holder themselves.
-- Result: see the chat review record, round 3 (final `checks` run).
-
 ### The idle walk check is flaky: carets keep blinking in fields that lost focus
 - Seen: 2026-10-16. "idle, the window draws no more than a caret blink" read 2.3–6.0 frames a second across 15 runs, failing on `main` as well as the chat-fixes branch (main: 1 of 6, the branch: 5 of 9). Four fields blinked at once (composer, new-session field, side chat, rename) though none had focus. `TextareaState::focus` (gpui-base 0.7.1) starts the blink directly, but GPUI (gpui-pre 0.3.8) tells a field it lost focus only while the window is active, and walk windows never are; in real use, any field dent focused while in the background blinked for good.
 - Cost: a false failure in about half the branch's runs; about 2 needless repaints a second per stray caret.
 - Fix: without touching the crate. dent focuses its fields through `ui::FocusField::focus_field`: with the window in front it calls the field's `focus` as before; behind, it only moves the keyboard (`Window::focus`), and GPUI's focus-in on activation starts the blink. Deactivating already blurs the focused field.
-- Result: the edges walk's rest after thirty sessions' fields had the keyboard drew 0.3 frames a second in each of its runs (720x600 light, 900x700 dark, 720x600 light again; limit 0.5). The full `checks` run's original idle check: see the chat review record, round 3.
+- Result: the edges walk's rest after thirty sessions' fields had the keyboard drew 0.3 frames a second in each of its runs (720x600 light, 900x700 dark, 720x600 light again; limit 0.5). The original check in the full `checks` run read 0.3 frames a second in each of its 5 runs since (limit 2.5; it had read 2.3–6.0).
 
 ### walk.sh died before building on the Mac's bash
 - Seen: 2026-10-16. Every `scripts/walk.sh` run without `DENT_WALK_RELEASE` stopped at once with "release[@]: unbound variable": macOS bash 3.2 treats an empty array as unset under `set -u`. The wrapper exited 0, so a run looked like it passed with no checks run.
