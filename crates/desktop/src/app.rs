@@ -2913,10 +2913,11 @@ impl Dent {
             }
         }
         // A chip's menu over a prompt: typing there puts the menu away and
-        // types, Space included; the menu keeps only its own keys.
+        // types; the menu keeps its own keys, Space (it chooses) included.
         if let Some(which) = self.menu
             && !which.searches()
             && matches!(field, Some(Field::Composer | Field::Starter))
+            && k.key != "space"
             && !k.modifiers.platform
             && !k.modifiers.control
             && k.key_char
@@ -2928,12 +2929,12 @@ impl Dent {
             cx.notify();
             return false;
         }
-        // An open menu: arrows move, Return chooses, and Space too while no
-        // text field has the keyboard to type it in.
+        // An open menu: arrows move, Return chooses, and Space too unless
+        // the menu has a field to type it in.
         if let Some(which) = self.menu
             && plain
             && matches!(k.key.as_str(), "up" | "down" | "enter" | "space")
-            && !(k.key == "space" && (which.searches() || field.is_some()))
+            && !(k.key == "space" && which.searches())
         {
             let entries = self.menu_entries(which, cx);
             let ok: Vec<usize> = (0..entries.len())
@@ -3066,15 +3067,11 @@ impl Dent {
                 .to_lowercase()
                 .contains(&c.token.query.to_lowercase());
             let chosen = self.slash_ix > 0 || self.slash_moved;
-            let mention = c.token.kind == complete::Kind::Mention;
             if k.key == "enter" && slash && c.token.query.is_empty() && !chosen {
                 return true;
             }
-            let send = whole
-                || slash && !named && !chosen
-                || mention
-                    && !self.slash_moved
-                    && !complete::names(&c.items[at].name, &c.token.query);
+            // An `@` word: Return picks the lit file, as Tab does (0043).
+            let send = whole || slash && !named && !chosen;
             if !(k.key == "enter" && send) {
                 match k.key.as_str() {
                     "up" => {
