@@ -6223,7 +6223,9 @@ fn edges() -> Vec<(f32, Act)> {
             Idle(
                 "after thirty sessions' fields had the keyboard, the window rests (no caret blinks behind it)",
                 3.,
-                0.5,
+                // A stray caret draws 2 a second; the sidebar's once-a-minute
+                // redraw can land in the window, so 1 a second is the line.
+                1.0,
             ),
         ),
     ]);

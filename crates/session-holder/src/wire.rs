@@ -10,8 +10,12 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 pub const PROTO: u32 = 1;
 pub const PROTO_MIN: u32 = 1;
 
-/// Longest header line, and the most bytes one frame may carry.
-pub const MAX_HEADER: usize = 64 * 1024;
+/// Longest header line, and the most bytes one frame may carry. A list of
+/// running processes carries every one's command line in its header, and an
+/// agent's runs to kilobytes (its prompt and tool config): 64 KB was gone at
+/// about 45 agents, which lost them all when the daemon restarted. Writers
+/// were never bounded, so a holder already running needs no change.
+pub const MAX_HEADER: usize = 16 * 1024 * 1024;
 pub const MAX_PAYLOAD: usize = 64 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -163,4 +167,34 @@ pub fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_long_process_list_fits_in_one_frame() {
+        let procs: Vec<Proc> = (0..200)
+            .map(|i| Proc {
+                id: format!("s{i}-1"),
+                pid: i,
+                argv: vec![
+                    "claude".into(),
+                    "--append-system-prompt".into(),
+                    "x".repeat(4096),
+                ],
+                started: 0,
+                out: 0,
+                err: 0,
+                exited: false,
+            })
+            .collect();
+        let mut buf = Vec::new();
+        write_frame(&mut buf, 1, Msg::Procs { procs }, b"").unwrap();
+        assert!(buf.len() > 64 * 1024);
+        let mut r = std::io::BufReader::new(&buf[..]);
+        let (env, _) = read_frame::<Msg>(&mut r).unwrap().unwrap();
+        assert!(matches!(env.body, Msg::Procs { procs } if procs.len() == 200));
+    }
 }

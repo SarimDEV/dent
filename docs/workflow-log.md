@@ -28,12 +28,6 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 
 ## Open
 
-### Late in the full walk, a daemon restart loses the agents
-- Seen: 2026-10-16. The edges scene's "after a restart the approval still waits" fails in every full `checks`/`stills` run (8 of 8) and passes when the scene runs alone (7 of 7, including with 54 sessions, an earlier crash restart, or your terminal open first). Timed in one full run: the app reconnects 0.22 s after the kill, yet the holder logs "no daemon for a while; closing stdin" for every agent exactly 10 s later (the walk's orphan time) and exits, so the new daemon never held a connection to it; the session then ends "dent restarted while the agent was working". Earlier full runs used a 2 s orphan time and lost the agents sooner; walks now use 10 s, which fixed the take-back check but not this.
-- Cost: 3 failing checks per full walk run; a real restart late in a long day may lose running agents the same way (unconfirmed outside walks).
-- Fix: find which earlier scene leaves the restarted daemon without a holder connection (bisect the scenes before `edges` in `checks()`, with holder.log and daemon.log kept), then fix that path.
-- Check: `scripts/walk.sh checks` passes the edges restart checks.
-
 ### Real walkthroughs used for every visual check
 - Seen: 2026-10-15. Each UI tweak in the chat-polish round was checked with a full real-agent `walk.sh compare` run (Haiku, ~40 tool calls): six runs at ~3 min plus build each, and the owner waited on every one ("the walk is so annoying… it takes forever").
 - Cost: ~25 min of waiting in one session, plus real usage limits.
@@ -127,6 +121,12 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 - Check: lines read per walkthrough change.
 
 ## Done
+
+### Late in the full walk, a daemon restart lost the agents
+- Seen: 2026-10-16. "After a restart the approval still waits" failed in 8 of 8 full walks and passed in every `edges` run alone. The holder closed every agent's stdin 10 s after the kill, as if no daemon had come back.
+- Cause: a real bug, not the walk. The holder lists its processes with every command line in the frame's header. An agent's command line runs to kilobytes (prompt and tool config), and the reader capped headers at 64 KB. With about 45 live agents, the new daemon's `list` failed, it took the connection as closed, and the holder let the agents go. Any daemon restart or upgrade with that many live sessions would have lost them all.
+- Fix: the header limit is now 16 MiB. Writers were never bounded, so a holder already running needs no change. Test `a_long_process_list_fits_in_one_frame` (200 agents with 4 KB command lines) fails at the old limit.
+- Result: the full `walk.sh checks` passes every restart check. Found by keeping the walk's daemon log and printing what `restore` saw: 45 agents, then a second connect.
 
 ### The idle walk check is flaky: carets keep blinking in fields that lost focus
 - Seen: 2026-10-16. "idle, the window draws no more than a caret blink" read 2.3–6.0 frames a second across 15 runs, failing on `main` as well as the chat-fixes branch (main: 1 of 6, the branch: 5 of 9). Four fields blinked at once (composer, new-session field, side chat, rename) though none had focus. `TextareaState::focus` (gpui-base 0.7.1) starts the blink directly, but GPUI (gpui-pre 0.3.8) tells a field it lost focus only while the window is active, and walk windows never are; in real use, any field dent focused while in the background blinked for good.
