@@ -4820,11 +4820,6 @@ fn visuals() -> Vec<(f32, Act)> {
     v
 }
 
-thread_local! {
-    /// The session a walk forked from.
-    static FORKED_FROM: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
-}
-
 fn queued_now(d: &Dent) -> bool {
     has(d, |i| matches!(i, Item::Queued { .. }))
 }
@@ -5190,29 +5185,6 @@ fn composing() -> Vec<(f32, Act)> {
                 "↓ on its last line steps forward: the box empties",
                 |d, cx| composer_is(d, cx, ""),
                 1.,
-            ),
-        ),
-    ]);
-    // Fork from a reply: a new session with the conversation up to it.
-    v.extend([
-        (
-            0.,
-            Call(|d, _, _| {
-                FORKED_FROM.with(|f| *f.borrow_mut() = d.selected.clone().unwrap_or_default());
-            }),
-        ),
-        (0.2, Call(to_end)),
-        (0.3, Click("fork-reply")),
-        (
-            0.1,
-            Until(
-                "Fork from here under a reply opens a new session carrying the conversation to it",
-                |d, _| {
-                    let from = FORKED_FROM.with(|f| f.borrow().clone());
-                    d.selected.as_deref().is_some_and(|id| id != from)
-                        && sent_order(d).last().is_some_and(|t| t == WRAPS)
-                },
-                10.,
             ),
         ),
     ]);
