@@ -26,6 +26,7 @@ Set beside another agent app on the same turn, dent read as busy while it was th
 
 - 16 Oct 2026: the working square no longer steps a checker at 8 fps; it is a small rounded square that breathes smoothly, and it sits inside the reply column instead of hanging in the gutter, so the working line shares the reply's left edge. The owner found the stepped, hung square out of place.
 - 16 Oct 2026, measured: GPUI can't repaint the square alone (notifying any view marks every view above it dirty, so the whole window is drawn), so the breath is drawn at its own 30 fps rather than the display's. With only a working square moving, release build, window in the background (`scripts/walk.sh breath`): 30 fps cap, about 24 frames and 115 ms of CPU a second (about 4.8 ms a frame); uncapped, about 26 frames and 123 ms (macOS holds a background window near that, so an active 120 Hz window would cost several times more, which the walk can't measure as it never takes focus); the old 8 fps checker, about 51 ms. With Reduce Motion the square holds still as the checker, so Working never reads as Needs' solid square.
+- 16 Oct 2026, the owner: it's a small square, and a low rate is fine if it still feels smooth. The breath is now drawn at 12 fps: about 14 frames and 69 ms of CPU a second in the same walk, close to the old checker's 51 ms. A small square fading over 1.6 s changes too little a frame to read as stepped.
 
 ## Consequences
 

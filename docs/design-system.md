@@ -143,7 +143,7 @@ Shadows are drawn once per floating layer, never animated, never stacked on scro
 | `spring.snappy` | 0.25 s, no bounce | Interruptible values: title compaction, selection |
 | `spring.pop` | 0.3 s, bounce 0.2 | A completion mark, once |
 | `stagger` | 30 ms per item, 150 ms cap | Several things arriving together |
-| `dur.working` | 1.6 s | One breath of the working square, eased in and out, drawn at 30 fps (`motion::BREATH_FPS`) while nothing else moves |
+| `dur.working` | 1.6 s | One breath of the working square, eased in and out, drawn at 12 fps (`motion::BREATH_FPS`) while nothing else moves |
 
 - Exits are quicker than enters. Never ease-in.
 - Distances are small: 4 px for chrome, 6 px for a message. Presses read as 0.97, never smaller.
@@ -168,7 +168,7 @@ Each motion has one name and one job.
 | **Progress** | A hairline fill under a running tool line moves linearly towards 90% of its expected time and holds; a timer counts up | Running tools |
 | **Lift** | A picture zooms from where it sits to the middle of the window (`dur.slow` + 40 ms, `ease.out`) as the backdrop fades dark a little ahead of it; it zooms back in `dur.base`, the backdrop clearing first | Opening a picture large |
 | **Compact** | The serif title eases from 28 to 20 on `spring.snappy`; the live pill arrives with a 4 px slide | Reading history |
-| **Drift** | The working square, a small rounded square, breathes from its paler partner to the full signal and back over `dur.working` (and grows a touch), smoothly at 30 fps (GPUI redraws the whole window for it, so not at the display's rate; measured in [0047](decisions/0047-calmer-work.md)); every working square shares one clock. With Reduce Motion it holds still as Working's checker | Working status |
+| **Drift** | The working square, a small rounded square, breathes from its paler partner to the full signal and back over `dur.working` (and grows a touch), at 12 fps, which a slow fade of a small square reads as smooth (GPUI redraws the whole window for it, so not at the display's rate; measured in [0047](decisions/0047-calmer-work.md)); every working square shares one clock. With Reduce Motion it holds still as Working's checker | Working status |
 | **Hand-over** | The working line's words stay up at least 650 ms (a plan step 2 s, unless the plan's next step replaces it) and change only once the new words have held 250 ms; the old rise 3 px out, the new rise 3 px in, `dur.base` in all | Working line |
 | **Breathe** | After 3 s of work the working line's words ease between full and 60% opacity over 2 s | Working line |
 | **Press** | See States | Buttons, rows |
