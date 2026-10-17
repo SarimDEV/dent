@@ -4987,7 +4987,6 @@ fn folded_change(items: &[Item], ix: usize) -> bool {
             || change_after(items, ix + 1) == Some(ix))
 }
 
-
 /// Whether the reply at `ix` is a turn's answer: nothing but notes follow it
 /// before your next message, and its turn has ended. Everything else said in
 /// a turn is narration of the work.
