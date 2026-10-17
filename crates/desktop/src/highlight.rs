@@ -88,9 +88,10 @@ thread_local! {
     static HL: RefCell<Option<arborium::Highlighter>> = const { RefCell::new(None) };
     static CACHE: RefCell<Lru<u64, Spans>> = RefCell::new(Lru::new(512));
     static LINES: RefCell<Lru<u64, Lines>> = RefCell::new(Lru::new(256));
-    /// The block still streaming in, by language and the code highlighted:
-    /// one slot, so its every prefix doesn't fill the caches above.
-    static OPEN: RefCell<Option<(u64, Lines)>> = const { RefCell::new(None) };
+    /// Blocks still streaming in, by where they are (a few at once: a
+    /// reply and the side chat), each with the finished lines highlighted
+    /// so far, so their every prefix doesn't fill the caches above.
+    static OPEN: RefCell<Lru<String, (u64, Lines)>> = RefCell::new(Lru::new(8));
 }
 
 /// Each line's runs of (length, tag), for a whole block.
@@ -118,19 +119,19 @@ pub fn block_lines(lang: &str, code: &str) -> Lines {
 /// A block whose fence hasn't closed yet: its finished lines highlighted,
 /// worked out again only when a line is finished, and the line still being
 /// written plain.
-pub fn open_block_lines(lang: &str, code: &str) -> Lines {
+pub fn open_block_lines(slot: &str, lang: &str, code: &str) -> Lines {
     let Some(nl) = code.rfind('\n') else {
         return Rc::new(lines_of(code, &[]));
     };
     let head = &code[..nl];
     let key = key((lang, head));
-    let done = OPEN.with(|o| match &*o.borrow() {
-        Some((k, l)) if *k == key => Some(l.clone()),
+    let done = OPEN.with(|o| match o.borrow_mut().get(&slot.to_string()) {
+        Some((k, l)) if k == key => Some(l),
         _ => None,
     });
     let done = done.unwrap_or_else(|| {
         let l = Rc::new(lines_of(head, &find(lang, head)));
-        OPEN.with(|o| *o.borrow_mut() = Some((key, l.clone())));
+        OPEN.with(|o| o.borrow_mut().insert(slot.to_string(), (key, l.clone())));
         l
     });
     let mut out = (*done).clone();

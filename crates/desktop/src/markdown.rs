@@ -1089,6 +1089,10 @@ pub struct R<'a> {
     /// they're not tinted either. Elsewhere (documents, side chat) Find
     /// counts what's laid out, every row it reaches.
     pub counted: bool,
+    /// These blocks are the reply still streaming in: only here can a
+    /// fence be still open. Anywhere else a fence the agent never closed is
+    /// finished as it is (highlighted, typeset, drawn).
+    pub live: bool,
 }
 
 thread_local! {
@@ -1607,7 +1611,13 @@ fn math_line(md: &Md, list: Rc<DisplayList>, em: f32, face: Face) -> Div {
 /// never wraps and scrolls sideways. `dim` shows source still waiting to
 /// become maths or a diagram.
 fn code_frame(lang: &str, body: &str, t: &Theme, key: &str, dim: bool, r: &R) -> Div {
-    let lines = crate::highlight::block_lines(lang, body);
+    // Source still streaming in is highlighted as an open block, so its
+    // every prefix doesn't fill the cache of finished ones.
+    let lines = if dim && r.live {
+        crate::highlight::open_block_lines(key, lang, body)
+    } else {
+        crate::highlight::block_lines(lang, body)
+    };
     code_frame_with(lang, body, t, key, dim, lines, r)
 }
 
@@ -1717,10 +1727,10 @@ fn code_frame_with(
 }
 
 fn code_block(lang: &str, body: &str, closed: bool, t: &Theme, key: &str, r: &mut R) -> AnyElement {
-    let lines = if closed {
+    let lines = if closed || !r.live {
         crate::highlight::block_lines(lang, body)
     } else {
-        crate::highlight::open_block_lines(lang, body)
+        crate::highlight::open_block_lines(key, lang, body)
     };
     code_frame_with(lang, body, t, key, false, lines, r).into_any_element()
 }
@@ -1728,6 +1738,7 @@ fn code_block(lang: &str, body: &str, closed: bool, t: &Theme, key: &str, r: &mu
 /// Display maths, centred, scrolling sideways when wider than the column.
 /// TeX that won't typeset shows as source.
 fn display_math(tex: &str, closed: bool, t: &Theme, key: &str, r: &mut R) -> AnyElement {
+    let closed = closed || !r.live;
     let list = closed.then(|| r.md.typeset(tex, true)).flatten();
     let Some(list) = list else {
         return code_frame("tex", tex, t, key, !closed, r).into_any_element();
@@ -1776,6 +1787,7 @@ fn display_math(tex: &str, closed: bool, t: &Theme, key: &str, r: &mut R) -> Any
 /// source shown dimmed until then. Shrinks to fit the column, but never so
 /// far that labels get unreadable; past that it scrolls sideways.
 fn diagram_block(src: &str, closed: bool, t: &Theme, key: &str, r: &mut R) -> AnyElement {
+    let closed = closed || !r.live;
     if !closed {
         return code_frame("mermaid", src, t, key, true, r).into_any_element();
     }

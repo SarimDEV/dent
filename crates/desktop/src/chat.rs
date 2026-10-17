@@ -1427,7 +1427,8 @@ impl Dent {
                         .count()
                 );
                 // The reply streaming in: only its unfinished end is parsed.
-                let blocks = if births.is_some() {
+                let streaming = births.is_some();
+                let blocks = if streaming {
                     self.markdown_live(&s.id, src)
                 } else {
                     self.markdown(src)
@@ -1467,6 +1468,7 @@ impl Dent {
                     }
                     _ => {
                         let mut r = markdown::R {
+                            live: streaming,
                             counted: true,
                             md: self.mdv.clone(),
                             owner: cx.entity_id(),
@@ -1931,6 +1933,7 @@ impl Dent {
                 let (shown, long) = plan_shown(plan, open);
                 let blocks = self.markdown(&shown);
                 let mut r = markdown::R {
+                    live: false,
                     counted: true,
                     md: self.mdv.clone(),
                     owner: cx.entity_id(),
@@ -4433,6 +4436,7 @@ impl Dent {
             cx.notify();
         });
         let mut r = markdown::R {
+            live: false,
             counted: true,
             md: self.mdv.clone(),
             owner: cx.entity_id(),

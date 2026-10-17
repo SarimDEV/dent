@@ -1222,6 +1222,7 @@ impl Dent {
         let v = self.version(&a);
         let blocks = self.doc_blocks(id, v);
         let mut r = markdown::R {
+            live: false,
             counted: false,
             md: self.mdv.clone(),
             owner: cx.entity_id(),
@@ -2283,6 +2284,7 @@ impl Dent {
                     let promote =
                         cx.listener(move |this, _, _, cx| this.promote_aside(&sid, &aid, cx));
                     let mut r = markdown::R {
+                        live: false,
                         counted: false,
                         md: self.mdv.clone(),
                         owner: cx.entity_id(),
