@@ -34,6 +34,8 @@ pub enum Field {
 #[derive(Clone)]
 pub enum Act {
     Wait,
+    /// A key as the Mac sends it while held down: a repeat.
+    Held(&'static str),
     Click(&'static str),
     /// Right-click it: a press and release of the other button.
     RightClick(&'static str),
@@ -512,6 +514,18 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
         Key(k) => {
             if let Ok(ks) = Keystroke::parse(k) {
                 window.dispatch_keystroke(ks, cx);
+            }
+        }
+        Held(k) => {
+            if let Ok(keystroke) = Keystroke::parse(k) {
+                window.dispatch_event(
+                    PlatformInput::KeyDown(KeyDownEvent {
+                        keystroke,
+                        is_held: true,
+                        prefer_character_input: false,
+                    }),
+                    cx,
+                );
             }
         }
         Type(field, text) => {
@@ -4925,7 +4939,18 @@ fn composing() -> Vec<(f32, Act)> {
     v.extend(new_session("please run it"));
     v.extend([
         (0.1, Until("an approval waits", |d, _| asks(d), 10.)),
-        (0.4, Type(Field::Composer, "not that one")),
+        (0.4, Type(Field::Composer, "")),
+        (0.1, Key("escape")),
+        (0.3, Held("enter")),
+        (
+            0.2,
+            Until(
+                "a held Return on the card answers nothing",
+                |d, _| d.ask_keyed && asks(d),
+                1.,
+            ),
+        ),
+        (0.1, Type(Field::Composer, "not that one")),
         (0.1, Key("escape")),
         (
             0.1,
@@ -5290,6 +5315,52 @@ fn composing() -> Vec<(f32, Act)> {
                 2.,
             ),
         ),
+        // Picking a completion changes only its word: a folded paste
+        // beside it stays a chip and goes in full.
+        (0., Call(copy_long_log)),
+        (0.1, Type(Field::Composer, "")),
+        (0.1, Key("cmd-v")),
+        (0.1, Keys(" see @READ")),
+        (
+            0.1,
+            Until(
+                "the @ menu offers the README",
+                |d, cx| {
+                    d.completion(cx)
+                        .is_some_and(|c| c.items.iter().any(|i| i.name == "README.md"))
+                },
+                3.,
+            ),
+        ),
+        (0.1, Key("tab")),
+        (
+            0.1,
+            Until(
+                "picking a file keeps a folded paste a chip, sent in full",
+                |d, cx| {
+                    let f = d.composer.read(cx);
+                    f.tokens().len() == 1
+                        && f.value().contains("@README.md")
+                        && d.box_draft(cx)
+                            .words_out(&d.pastes)
+                            .contains("applied event 60")
+                },
+                3.,
+            ),
+        ),
+        (0.1, Key("cmd-z")),
+        (
+            0.1,
+            Until(
+                "⌘Z takes the pick back, the chip kept",
+                |d, cx| {
+                    let f = d.composer.read(cx);
+                    f.tokens().len() == 1 && !f.value().contains("@README.md")
+                },
+                2.,
+            ),
+        ),
+        (0., Call(restore_clipboard)),
         (0.1, Type(Field::Composer, "")),
         (0., Call(save_now)),
     ]);

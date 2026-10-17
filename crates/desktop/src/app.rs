@@ -176,79 +176,9 @@ pub fn refresh_menus(cx: &mut App) {
     ]);
 }
 
+/// Every key binding, from the one key registry (`keys::KEYS`).
 pub fn bind_keys(cx: &mut App) {
-    use gpui_kit::base::input;
-    cx.bind_keys([
-        KeyBinding::new("cmd-q", Quit, None),
-        KeyBinding::new("cmd-h", Hide, None),
-        KeyBinding::new("alt-cmd-h", HideOthers, None),
-        KeyBinding::new("cmd-m", Minimize, None),
-        KeyBinding::new("ctrl-cmd-f", FullScreen, None),
-        KeyBinding::new("cmd-n", NewSession, None),
-        KeyBinding::new("shift-cmd-a", AttachFiles, None),
-        KeyBinding::new("cmd-w", CloseSession, None),
-        KeyBinding::new("cmd-z", UndoClose, Some("Dent")),
-        KeyBinding::new("cmd-j", NextNeedsYou, None),
-        KeyBinding::new("cmd-\\", TogglePanel, None),
-        KeyBinding::new("ctrl-cmd-s", ToggleSidebar, None),
-        // The chat scrolls by page and to its ends from the reply box, as a
-        // Mac document does (the field's own binding for these moves the
-        // caret, which a short box doesn't need); your terminal and the
-        // viewer keep these keys.
-        KeyBinding::new("pageup", ChatPageUp, Some("Chat")),
-        KeyBinding::new("pagedown", ChatPageDown, Some("Chat")),
-        KeyBinding::new("home", ChatTop, Some("Chat")),
-        KeyBinding::new("end", ChatBottom, Some("Chat")),
-        KeyBinding::new("pageup", ChatPageUp, Some("Chat > Input")),
-        KeyBinding::new("pagedown", ChatPageDown, Some("Chat > Input")),
-        KeyBinding::new("home", ChatTop, Some("Chat > Input")),
-        KeyBinding::new("end", ChatBottom, Some("Chat > Input")),
-        KeyBinding::new("cmd-1", ShowFirst, None),
-        KeyBinding::new("cmd-2", ShowChanges, None),
-        KeyBinding::new("cmd-3", ShowTerminal, None),
-        KeyBinding::new("ctrl-`", ShowTerminal, None),
-        KeyBinding::new("escape", Escape, None),
-        KeyBinding::new("cmd-.", StopSession, None),
-        KeyBinding::new("cmd-enter", SteerSend, None),
-        KeyBinding::new("cmd-k", Search, None),
-        // In your terminal ⌘K clears it, as in Terminal.
-        KeyBinding::new("cmd-k", ClearTerminal, Some("Terminal")),
-        KeyBinding::new("cmd-f", FindInSession, None),
-        KeyBinding::new("cmd-g", FindNext, None),
-        KeyBinding::new("shift-cmd-g", FindPrev, None),
-        KeyBinding::new("ctrl-tab", SwitchNext, None),
-        KeyBinding::new("cmd-=", TextBigger, None),
-        KeyBinding::new("cmd-+", TextBigger, None),
-        KeyBinding::new("cmd--", TextSmaller, None),
-        KeyBinding::new("cmd-0", TextActual, None),
-        KeyBinding::new("cmd-/", ShowKeys, None),
-        KeyBinding::new("ctrl-shift-tab", SwitchPrev, None),
-        KeyBinding::new("cmd-;", SideChat, None),
-        KeyBinding::new("alt-cmd-up", SelectPrev, None),
-        KeyBinding::new("alt-cmd-down", SelectNext, None),
-        // A new line in any text box: ⌥ Return as well as Shift-Return.
-        KeyBinding::new(
-            "alt-enter",
-            gpui_kit::base::input::Enter {
-                secondary: false,
-                shift: true,
-            },
-            Some("Input"),
-        ),
-        // The Mac's Control keys in every text box, as anywhere else: the
-        // field brings ⌃A and ⌃E, these are the rest that get used.
-        KeyBinding::new("ctrl-f", input::MoveRight, Some("Input")),
-        KeyBinding::new("ctrl-b", input::MoveLeft, Some("Input")),
-        KeyBinding::new("ctrl-n", input::MoveDown, Some("Input")),
-        KeyBinding::new("ctrl-p", input::MoveUp, Some("Input")),
-        KeyBinding::new("ctrl-d", input::Delete, Some("Input")),
-        KeyBinding::new("ctrl-h", input::Backspace, Some("Input")),
-        KeyBinding::new("ctrl-k", input::DeleteToEndOfLine, Some("Input")),
-        // With the inbox focused (Esc from an empty composer), it works like mail.
-        KeyBinding::new("up", InboxUp, Some("Inbox")),
-        KeyBinding::new("down", InboxDown, Some("Inbox")),
-        KeyBinding::new("enter", InboxOpen, Some("Inbox")),
-    ]);
+    cx.bind_keys(crate::keys::bindings());
 }
 
 /// A thought's key for being opened: its session and which thought of
@@ -761,9 +691,6 @@ pub struct Dent {
     /// dent's own commands you ran in each session (`/model`, `/rename`…),
     /// with when: they never reach the agent's log, but ↑ brings them back.
     pub ran_own: HashMap<String, Vec<(u64, String)>>,
-    /// The key last pressed and not yet let go, and when it last came: a
-    /// held key keeps coming back, and a card is never answered by one.
-    pub held_key: Option<(String, Instant)>,
     /// The waiting approval, plan or question, and when it showed: its
     /// keys answer only once it has been seen.
     pub ask_shown: Option<(String, Instant)>,
@@ -1313,7 +1240,6 @@ impl Dent {
             usage: None,
             recent: Vec::new(),
             slash_ix: 0,
-            held_key: None,
             ran_own: HashMap::new(),
             ask_shown: None,
             asked_permission: None,
@@ -2609,23 +2535,6 @@ impl Dent {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        // A key held down comes back again and again with no key-up between:
-        // a repeat. (A key-up missed while away is outlived by a pause.)
-        // The whole keystroke counts, so Return after ⌘↩ (whose key-up
-        // macOS may never send) is a fresh press.
-        let stroke = k.unparse();
-        let repeat = self
-            .held_key
-            .as_ref()
-            .is_some_and(|(key, at)| *key == stroke && at.elapsed() < Duration::from_millis(2100));
-        self.held_key = Some((stroke, Instant::now()));
-        // A card's keys can't be taken back: never from a held key, and
-        // only once the card has been up long enough to be read.
-        let card_keys = !repeat
-            && self
-                .ask_shown
-                .as_ref()
-                .is_some_and(|(_, at)| at.elapsed() >= Duration::from_millis(150));
         // Your terminal takes every key but ⌘ while it has focus.
         if self.shell_key(k, window, cx) {
             return true;
@@ -2838,11 +2747,12 @@ impl Dent {
             return false;
         }
         // An open menu: arrows move, Return chooses, and Space too unless
-        // the menu has a field to type it in.
+        // the menu has a field to type it in, or was opened by ⌘S from the
+        // box you're typing in (there a space is a space).
         if let Some(which) = self.menu
             && plain
             && matches!(k.key.as_str(), "up" | "down" | "enter" | "space")
-            && !(k.key == "space" && which.searches())
+            && !(k.key == "space" && (which.searches() || which == Menu::Stash))
         {
             let entries = self.menu_entries(which, cx);
             let ok: Vec<usize> = (0..entries.len())
@@ -2881,69 +2791,6 @@ impl Dent {
         {
             self.step_selection(if k.key == "up" { -1 } else { 1 }, false, window, cx);
             return true;
-        }
-        // A question's options answer to their number keys, but only while
-        // the keyboard isn't in a text field: there a number is a number,
-        // so an answer like "2 days" types.
-        if plain
-            && field.is_none()
-            && k.key.len() == 1
-            && card_keys
-            && let Some(d) = k.key.chars().next().and_then(|c| c.to_digit(10))
-            && d > 0
-            && let Some(id) = self.selected.clone()
-            && let Some(Item::Question { id: ask, questions }) = self.open_ask(&id)
-        {
-            let picks = self.picks.get(&ask).cloned().unwrap_or_default();
-            let q = (0..questions.len())
-                .find(|q| picks.get(*q).is_none_or(Option::is_none))
-                .unwrap_or(0);
-            if let Some((label, _)) = questions.get(q).and_then(|q| q.options.get(d as usize - 1)) {
-                let label = label.clone();
-                self.pick_option(&id, &ask, q, label, cx);
-                return true;
-            }
-        }
-        // An approval or a plan answers to its keys while its card has the
-        // keyboard (Esc from the empty reply box gets there): never from
-        // a stray key elsewhere, as what it allows can't be taken back.
-        if plain
-            && self.ask_focus.is_focused(window)
-            && let Some(id) = self.selected.clone()
-            && let Some(item @ (Item::Approval { .. } | Item::Plan { .. })) = self.open_ask(&id)
-        {
-            // A held or early key does nothing here, and goes nowhere else.
-            if !card_keys {
-                return matches!(k.key.as_str(), "enter" | "1" | "2" | "3" | "4");
-            }
-            let plan = matches!(item, Item::Plan { .. });
-            let keeps = matches!(item, Item::Approval { keeps: true, .. });
-            // The keys follow the buttons, left to right.
-            match (k.key.as_str(), plan) {
-                ("enter" | "1", _) => self.allow(&id, None, Scope::Once, cx),
-                ("2", false) => self.allow(&id, None, Scope::Session, cx),
-                ("3", false) if keeps => self.allow(&id, None, Scope::Project, cx),
-                ("2", true) | ("4", false) => self.deny(&id, None, window, cx),
-                _ => return false,
-            }
-            return true;
-        }
-        // On the card, Return finishes a question that takes several.
-        if plain
-            && k.key == "enter"
-            && self.ask_focus.is_focused(window)
-            && card_keys
-            && let Some(id) = self.selected.clone()
-            && let Some(Item::Question { id: ask, questions }) = self.open_ask(&id)
-        {
-            let picks = self.picks.get(&ask).cloned().unwrap_or_default();
-            if let Some(q) = (0..questions.len())
-                .find(|q| picks.get(*q).is_none_or(Option::is_none))
-                .filter(|q| questions[*q].multi)
-            {
-                self.finish_ticks(&id, &ask, q, cx);
-                return true;
-            }
         }
         // The prompt's menu: arrows move round it, Tab or Return picks.
         // Return sends instead when the command is typed in full, or when
@@ -3073,9 +2920,89 @@ impl Dent {
         false
     }
 
-    /// A key let go: the next press is a fresh one.
-    pub fn key_up(&mut self) {
-        self.held_key = None;
+    /// A waiting card's keys: a question's numbers (outside a text field),
+    /// and an approval's or plan's keys while its card has the keyboard.
+    /// Called where the key's own `held` flag is known (the window's
+    /// capture of key-downs), which is the one test for a held key: a card
+    /// is never answered by one, nor in its first moment on screen, since
+    /// what it allows can't be taken back. Returns whether the key was used.
+    pub fn card_key(
+        &mut self,
+        k: &Keystroke,
+        held: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let plain = !k.modifiers.modified();
+        let card_keys = !held
+            && self
+                .ask_shown
+                .as_ref()
+                .is_some_and(|(_, at)| at.elapsed() >= Duration::from_millis(150));
+        // A question's options answer to their number keys, but only while
+        // the keyboard isn't in a text field: there a number is a number,
+        // so an answer like "2 days" types.
+        if plain
+            && self.field_focused(window, cx).is_none()
+            && k.key.len() == 1
+            && card_keys
+            && let Some(d) = k.key.chars().next().and_then(|c| c.to_digit(10))
+            && d > 0
+            && let Some(id) = self.selected.clone()
+            && let Some(Item::Question { id: ask, questions }) = self.open_ask(&id)
+        {
+            let picks = self.picks.get(&ask).cloned().unwrap_or_default();
+            let q = (0..questions.len())
+                .find(|q| picks.get(*q).is_none_or(Option::is_none))
+                .unwrap_or(0);
+            if let Some((label, _)) = questions.get(q).and_then(|q| q.options.get(d as usize - 1)) {
+                let label = label.clone();
+                self.pick_option(&id, &ask, q, label, cx);
+                return true;
+            }
+        }
+        // An approval or a plan answers to its keys while its card has the
+        // keyboard (Esc from the empty reply box gets there): never from
+        // a stray key elsewhere, as what it allows can't be taken back.
+        if plain
+            && self.ask_focus.is_focused(window)
+            && let Some(id) = self.selected.clone()
+            && let Some(item @ (Item::Approval { .. } | Item::Plan { .. })) = self.open_ask(&id)
+        {
+            // A held or early key does nothing here, and goes nowhere else.
+            if !card_keys {
+                return matches!(k.key.as_str(), "enter" | "1" | "2" | "3" | "4");
+            }
+            let plan = matches!(item, Item::Plan { .. });
+            let keeps = matches!(item, Item::Approval { keeps: true, .. });
+            // The keys follow the buttons, left to right.
+            match (k.key.as_str(), plan) {
+                ("enter" | "1", _) => self.allow(&id, None, Scope::Once, cx),
+                ("2", false) => self.allow(&id, None, Scope::Session, cx),
+                ("3", false) if keeps => self.allow(&id, None, Scope::Project, cx),
+                ("2", true) | ("4", false) => self.deny(&id, None, window, cx),
+                _ => return false,
+            }
+            return true;
+        }
+        // On the card, Return finishes a question that takes several.
+        if plain
+            && k.key == "enter"
+            && self.ask_focus.is_focused(window)
+            && card_keys
+            && let Some(id) = self.selected.clone()
+            && let Some(Item::Question { id: ask, questions }) = self.open_ask(&id)
+        {
+            let picks = self.picks.get(&ask).cloned().unwrap_or_default();
+            if let Some(q) = (0..questions.len())
+                .find(|q| picks.get(*q).is_none_or(Option::is_none))
+                .filter(|q| questions[*q].multi)
+            {
+                self.finish_ticks(&id, &ask, q, cx);
+                return true;
+            }
+        }
+        false
     }
 
     /// Notes when the waiting approval, plan or question first showed.

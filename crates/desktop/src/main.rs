@@ -511,9 +511,6 @@ impl Render for Dent {
                 }
             }))
             // A key let go: its next press is a fresh one (see `intercept`).
-            .capture_key_up(cx.listener(|this, _: &KeyUpEvent, _, _| {
-                this.key_up();
-            }))
             // Esc reaches the app before a text field swallows it.
             .capture_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
                 let k = &e.keystroke;
@@ -531,6 +528,12 @@ impl Render for Dent {
                         && (matches!(k.key.as_str(), "z" | "v")
                             || !k.modifiers.platform && k.key.len() == 1))
                 {
+                    cx.stop_propagation();
+                    return;
+                }
+                // A waiting card's keys, never from a held key: gpui's own
+                // flag is the one test for that, and it's known only here.
+                if this.card_key(k, e.is_held, window, cx) {
                     cx.stop_propagation();
                     return;
                 }
