@@ -5046,16 +5046,12 @@ fn composing() -> Vec<(f32, Act)> {
                 2.,
             ),
         ),
-        (
-            0.2,
-            Call(|d, _, cx| {
-                d.edit_last_queued(cx);
-            }),
-        ),
+        (0.2, Type(Field::Composer, "")),
+        (0.1, Key("up")),
         (
             0.1,
             Until(
-                "Edit on the newest waiting message brings it back to the box",
+                "↑ in the empty box takes the newest waiting message back to it",
                 |d, cx| composer_is(d, cx, "two") && waiting_texts(d) == ["one edited"],
                 3.,
             ),

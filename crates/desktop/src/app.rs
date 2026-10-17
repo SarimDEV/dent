@@ -4663,22 +4663,6 @@ impl Dent {
         cx.notify();
     }
 
-    /// The newest waiting message comes back to the box to edit, keeping
-    /// its place, as its Edit does. True if there was one.
-    pub fn edit_last_queued(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(s) = self.current_rc() else {
-            return false;
-        };
-        let Some(msg) = s.items.iter().rev().find_map(|i| match i {
-            Item::Queued { id, .. } => Some(id.clone()),
-            _ => None,
-        }) else {
-            return false;
-        };
-        self.unqueue(&s.id, &msg, cx);
-        true
-    }
-
     /// Go back to just before message `msg`: the chat, and with `files` the
     /// working tree. The message returns to the composer to edit.
     pub fn rewind(&mut self, msg: &str, files: bool, window: &mut Window, cx: &mut Context<Self>) {
