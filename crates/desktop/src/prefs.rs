@@ -89,7 +89,13 @@ pub fn load() -> Prefs {
         .unwrap_or_default();
     // A marker beside the prefs, not a field in them: an older build
     // rewriting the prefs can't drop it and so undo a choice made since.
-    migrate(&mut p);
+    if p.version < VERSION {
+        migrate(&mut p);
+        // Pastes kept in the prefs go to files of their own.
+        for (n, full) in &p.pastes {
+            write_paste(*n, full);
+        }
+    }
     p.pastes = load_pastes(p.drafts.values().chain(&p.stashes));
     // Files deleted since are no longer attached.
     for d in p.drafts.values_mut().chain(p.stashes.iter_mut()) {
@@ -121,7 +127,7 @@ fn upgrade(p: &mut Prefs, done: bool) -> bool {
 }
 
 /// Older prefs into this shape: a draft's chips were found again by their
-/// labels and its files kept apart; pastes lived in the prefs.
+/// labels and its files kept apart. No files are touched here.
 fn migrate(p: &mut Prefs) {
     if p.version >= VERSION {
         return;
@@ -146,9 +152,6 @@ fn migrate(p: &mut Prefs) {
                 d.atts.push(a);
             }
         }
-    }
-    for (n, full) in &p.pastes {
-        write_paste(*n, full);
     }
     p.version = VERSION;
 }

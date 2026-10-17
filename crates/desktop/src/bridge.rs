@@ -592,9 +592,9 @@ fn agent_step(v: &SessionView) -> Option<String> {
             return None;
         };
         let running = |id: &str| {
-            calls.iter().find(|c| {
-                c.id == id && c.result.is_none() && matches!(c.name.as_str(), "Task" | "Agent")
-            })
+            calls
+                .iter()
+                .find(|c| c.id == id && c.result.is_none() && dent_protocol::runs_subagent(&c.name))
         };
         calls.iter().rev().find_map(|step| {
             let agent = running(step.parent.as_deref()?)?;
@@ -611,7 +611,7 @@ fn preparing(tool: &str, what: Option<&str>) -> String {
         ("Write", None) => "Writing a file".into(),
         ("Edit" | "MultiEdit" | "NotebookEdit", Some(f)) => format!("Editing {f}"),
         ("Edit" | "MultiEdit" | "NotebookEdit", None) => "Preparing an edit".into(),
-        ("Task" | "Agent", _) => match what {
+        (t, _) if dent_protocol::runs_subagent(t) => match what {
             Some(w) => format!("Briefing a subagent: {w}"),
             None => "Briefing a subagent".into(),
         },
@@ -758,7 +758,7 @@ fn branch(calls: &[Call], parent: Option<&str>, depth: usize, cwd: &Path, out: &
         Some(p) => c.parent.as_deref() == Some(p),
     };
     for c in calls.iter().filter(here) {
-        let agent = matches!(c.name.as_str(), "Task" | "Agent");
+        let agent = dent_protocol::runs_subagent(&c.name);
         let mut text = line(c, cwd);
         if agent {
             // A subagent says how far it got.
@@ -941,7 +941,7 @@ fn summary(calls: &[Call], cwd: &Path) -> String {
     let mut kinds: Vec<(u8, &str, usize, usize)> = Vec::new();
     let mut touched: Vec<(String, &str)> = Vec::new();
     for (i, c) in top.iter().enumerate() {
-        let agent = matches!(c.name.as_str(), "Task" | "Agent");
+        let agent = dent_protocol::runs_subagent(&c.name);
         let kind = match c.name.trim_start_matches("waiting:") {
             _ if agent && c.result.is_none() => (2, "working"),
             n @ ("Write" | "Edit" | "MultiEdit" | "NotebookEdit") => {
@@ -963,7 +963,7 @@ fn summary(calls: &[Call], cwd: &Path) -> String {
             "WebFetch" => (1, "fetched"),
             "WebSearch" => (1, "searched the web"),
             "Bash" => (2, "ran"),
-            "Task" | "Agent" => (2, "agents"),
+            t if dent_protocol::runs_subagent(t) => (2, "agents"),
             _ => (2, "used"),
         };
         match kinds.iter_mut().find(|k| k.1 == kind.1) {
@@ -1011,7 +1011,7 @@ fn summary(calls: &[Call], cwd: &Path) -> String {
                 let task = top
                     .iter()
                     .find(|c| {
-                        matches!(c.name.as_str(), "Task" | "Agent")
+                        dent_protocol::runs_subagent(&c.name)
                             && c.result.is_none() == (kind == "working")
                     })
                     .and_then(|c| c.input()["description"].as_str().map(str::to_owned))

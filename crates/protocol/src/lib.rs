@@ -398,6 +398,13 @@ pub enum Activity {
     },
 }
 
+/// Whether a call (by its tool's name, as `Block::Tool` carries it) runs a
+/// subagent, whose result is its report: the one rule for it, read by the
+/// daemon (live and imported sessions alike), client-core and the desktop.
+pub fn runs_subagent(tool: &str) -> bool {
+    matches!(tool, "Task" | "Agent")
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Block {

@@ -242,6 +242,19 @@ impl Store {
         Ok(())
     }
 
+    /// Every key starting with `prefix`, with its value.
+    pub fn with_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        let mut q = self
+            .db
+            .prepare("SELECT key, value FROM kv WHERE substr(key, 1, ?2) = ?1")?;
+        let rows = q
+            .query_map(params![prefix, prefix.len() as i64], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn del(&self, key: &str) -> Result<()> {
         self.db
             .execute("DELETE FROM kv WHERE key = ?1", params![key])?;

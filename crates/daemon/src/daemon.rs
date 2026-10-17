@@ -83,6 +83,9 @@ pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Where `made_once` keeps its claims in the store's key-value table.
+const MADE: &str = "made.";
+
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -448,16 +451,40 @@ impl Daemon {
         let Some(key) = key.filter(|k| !k.is_empty()) else {
             return Ok((new_id(), false));
         };
-        let key = format!("made.{key}");
+        let key = format!("{MADE}{key}");
         let store = self.store();
-        if let Some(s) = store.get(&key)?
+        if let Some(v) = store.get(&key)?
+            && let s = v.split_whitespace().next().unwrap_or_default().to_string()
             && store.session(&s)?.is_some()
         {
             return Ok((s, true));
         }
         let session = new_id();
-        store.put(&key, &session)?;
+        // When, so a claim no resend can still need is let go (`restore`).
+        store.put(&key, &format!("{session} {}", now_ms()))?;
         Ok((session, false))
+    }
+
+    /// Claims of `made_once` older than a day go: a request is only ever
+    /// resent minutes after it was made, and otherwise there'd be one row
+    /// for every session ever made. One kept from before claims were dated
+    /// is let go too.
+    fn forget_old_claims(&self) {
+        let store = self.store();
+        let Ok(rows) = store.with_prefix(MADE) else {
+            return;
+        };
+        let day_ago = now_ms().saturating_sub(24 * 60 * 60 * 1000);
+        for (k, v) in rows {
+            let at = v
+                .split_whitespace()
+                .nth(1)
+                .and_then(|t| t.parse::<u64>().ok())
+                .unwrap_or(0);
+            if at < day_ago {
+                let _ = store.del(&k);
+            }
+        }
     }
 
     /// Start a session and send its first message.
@@ -879,6 +906,7 @@ impl Daemon {
     /// Bring back every session after a start: reattach running agents and
     /// mark turns that died with the old daemon.
     pub async fn restore(self: &Arc<Self>) -> Result<()> {
+        self.forget_old_claims();
         let rows = self.store().sessions()?;
         let live = if rows.iter().any(|r| r.proc.is_some()) {
             match self.holder().await {

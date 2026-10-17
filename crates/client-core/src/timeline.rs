@@ -204,7 +204,9 @@ impl Call {
             "LS" => v["path"].as_str().map(|p| first_line(p, 60)),
             "WebFetch" => v["url"].as_str().map(|u| first_line(u, 80)),
             "WebSearch" => v["query"].as_str().map(|q| first_line(q, 80)),
-            "Task" | "Agent" => v["description"].as_str().map(|d| first_line(d, 80)),
+            t if dent_protocol::runs_subagent(t) => {
+                v["description"].as_str().map(|d| first_line(d, 80))
+            }
             "TodoWrite" => Some("updated the plan".into()),
             _ => None,
         };
@@ -228,7 +230,7 @@ impl Call {
             "LS" => tense("Listing", "Listed"),
             "WebFetch" => tense("Fetching", "Fetched"),
             "WebSearch" => tense("Searching the web for", "Searched the web for"),
-            "Task" | "Agent" => "Subagent:",
+            t if dent_protocol::runs_subagent(t) => "Subagent:",
             "TodoWrite" => "Updated",
             other => other,
         };

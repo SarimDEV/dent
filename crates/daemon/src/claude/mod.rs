@@ -243,9 +243,74 @@ pub fn default_models() -> Vec<Model> {
     .into()
 }
 
-/// A call that runs a subagent: its result is the subagent's report.
-pub fn runs_subagent(tool: &str) -> bool {
-    matches!(tool, "Task" | "Agent")
+pub use dent_protocol::runs_subagent;
+
+/// Calls that run a subagent and whose report hasn't come yet: a report,
+/// being the subagent's whole answer, keeps more of itself (`wire::keep`).
+#[derive(Default)]
+pub struct Reports(std::collections::HashSet<String>);
+
+impl Reports {
+    /// Note the subagent calls in an assistant message as logged (live,
+    /// imported, or read back from the log after a restart).
+    pub fn note(&mut self, blocks: &[Block]) {
+        for b in blocks {
+            if let Block::Tool { id, name, .. } = b
+                && runs_subagent(name)
+            {
+                self.0.insert(id.clone());
+            }
+        }
+    }
+
+    /// Whether call `id`'s result is a report; it's answered now.
+    pub fn answered(&mut self, id: &str) -> bool {
+        self.0.remove(id)
+    }
+}
+
+/// What an assistant message becomes in the log: its blocks, then the
+/// results of server tools that came with it. The same for a live session
+/// and one picked up from the terminal.
+pub fn assistant_bodies(
+    parent: Option<String>,
+    uuid: Option<String>,
+    blocks: Vec<AssistantBlock>,
+    results: Vec<wire::ToolResult>,
+    reports: &mut Reports,
+) -> Vec<Body> {
+    let blocks = self::blocks(blocks);
+    reports.note(&blocks);
+    let mut out = Vec::new();
+    if !blocks.is_empty() {
+        out.push(Body::Assistant {
+            parent: parent.clone(),
+            blocks,
+            uuid,
+        });
+    }
+    out.extend(result_bodies(parent, results, reports));
+    out
+}
+
+/// What tool results become in the log, a subagent's report keeping more.
+pub fn result_bodies(
+    parent: Option<String>,
+    results: Vec<wire::ToolResult>,
+    reports: &mut Reports,
+) -> Vec<Body> {
+    results
+        .into_iter()
+        .map(|r| {
+            let report = reports.answered(&r.tool_use_id);
+            Body::ToolResult {
+                tool: r.tool_use_id,
+                error: r.is_error,
+                output: wire::keep(r.output, report),
+                parent: parent.clone(),
+            }
+        })
+        .collect()
 }
 
 /// What a call being written out works on, once its input has streamed
@@ -254,7 +319,7 @@ pub fn target(tool: &str, head: &str) -> Option<String> {
     let key = match tool {
         "Write" | "Edit" | "MultiEdit" | "Read" => "file_path",
         "NotebookEdit" => "notebook_path",
-        "Task" | "Agent" => "description",
+        t if runs_subagent(t) => "description",
         _ => return None,
     };
     // `"key": "value"`, the value complete.

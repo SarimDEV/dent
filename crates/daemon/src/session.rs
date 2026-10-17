@@ -20,12 +20,12 @@ use crate::claude::{self, wire, wire::Inbound};
 use crate::daemon::Daemon;
 use crate::store::{Row, Source};
 
-/// An agent with nothing to do is stopped after this long, and resumed from
-/// its transcript on the next message.
 /// How long messages left waiting across a restart wait for reconnecting
 /// clients before they go.
 const RELEASE_GRACE: Duration = Duration::from_secs(5);
 
+/// An agent with nothing to do is stopped after this long, and resumed from
+/// its transcript on the next message.
 fn idle() -> Duration {
     std::env::var("DENT_IDLE_MS")
         .ok()
@@ -208,6 +208,9 @@ struct Session {
     stop_at: Option<Instant>,
     /// When a starting agent must have answered by.
     start_by: Option<Instant>,
+    /// After a restart: the turn is in progress only because a waiting
+    /// message was handed over whose turn hadn't started.
+    owed: bool,
     /// Replies owed to the agent, written once its output is handled.
     outbox: Vec<Value>,
     /// The last message sent, to send again if the agent has to start over.
@@ -222,7 +225,7 @@ struct Session {
     sheets: HashMap<String, Vec<Section>>,
     /// Calls that run a subagent, whose result is its report and is kept
     /// far longer than other output ([`wire::keep`]).
-    reports: HashSet<String>,
+    reports: claude::Reports,
     /// A sign-in finishing in the browser: refresh this command's sheet
     /// now and then until it's done or the time's up.
     watch: Option<Watch>,
@@ -269,12 +272,13 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
         release_at: None,
         stop_at: None,
         start_by: None,
+        owed: false,
         outbox: Vec::new(),
         last: None,
         forgot: false,
         stop_asked: false,
         sheets: HashMap::new(),
-        reports: HashSet::new(),
+        reports: claude::Reports::default(),
         watch: None,
     };
     s.rebuild();
@@ -373,7 +377,17 @@ impl Session {
                 Body::Answered { id, .. } => {
                     self.asked.remove(&id);
                 }
-                Body::Assistant { parent: None, .. } => self.said = true,
+                // A subagent still running across a restart keeps its
+                // report whole when it comes.
+                Body::Assistant { parent, blocks, .. } => {
+                    self.reports.note(&blocks);
+                    if parent.is_none() {
+                        self.said = true;
+                    }
+                }
+                Body::ToolResult { tool, .. } => {
+                    self.reports.answered(&tool);
+                }
                 Body::TurnStarted => {
                     self.in_turn = true;
                     self.said = false;
@@ -407,6 +421,7 @@ impl Session {
         if matches!(self.status, Status::Working | Status::NeedsYou) || handed {
             self.in_turn = true;
         }
+        self.owed = handed;
         // A fork the agent hasn't picked up yet: it starts from the copy.
         if let Some(at) = forked_at {
             self.resume_at = Some(at);
@@ -460,8 +475,10 @@ impl Session {
                 // A stop the last daemon didn't see through: the agent was
                 // asked, so its process goes if the turn doesn't end soon.
                 self.stop_at = Some(now + STOP_GRACE);
-            } else if row.proc_off == 0 {
-                // It has said nothing yet: still starting, or stuck.
+            } else if row.proc_off == 0 || self.owed {
+                // It has said nothing yet, or a message was handed to it
+                // whose turn never started (the last daemon may have gone
+                // before writing it): still starting, or stuck.
                 self.start_by = Some(now + start_limit());
             }
         } else {
@@ -1362,55 +1379,21 @@ impl Session {
                 {
                     self.context = Some(c);
                 }
-                for b in &blocks {
-                    if let wire::AssistantBlock::ToolUse { id, name, .. } = b
-                        && claude::runs_subagent(name)
-                    {
-                        self.reports.insert(id.clone());
-                    }
-                }
-                let blocks = claude::blocks(blocks);
                 if parent.is_none() {
                     self.said = true;
                     if self.preparing.take().is_some() {
                         self.d.set_activity(&self.id, None);
                     }
                 }
-                if !blocks.is_empty() {
-                    self.log_from(
-                        Body::Assistant {
-                            parent: parent.clone(),
-                            blocks,
-                            uuid,
-                        },
-                        end,
-                    );
-                }
                 // A server tool's result comes with its call.
-                for r in results {
-                    self.log_from(
-                        Body::ToolResult {
-                            tool: r.tool_use_id,
-                            error: r.is_error,
-                            output: wire::keep(r.output, false),
-                            parent: parent.clone(),
-                        },
-                        end,
-                    );
+                for b in claude::assistant_bodies(parent, uuid, blocks, results, &mut self.reports)
+                {
+                    self.log_from(b, end);
                 }
             }
             Inbound::ToolResults { parent, results } => {
-                for r in results {
-                    let report = self.reports.remove(&r.tool_use_id);
-                    self.log_from(
-                        Body::ToolResult {
-                            tool: r.tool_use_id,
-                            error: r.is_error,
-                            output: wire::keep(r.output, report),
-                            parent: parent.clone(),
-                        },
-                        end,
-                    );
+                for b in claude::result_bodies(parent, results, &mut self.reports) {
+                    self.log_from(b, end);
                 }
             }
             Inbound::RateLimit(info) => self.log_from(claude::limits(&info), end),

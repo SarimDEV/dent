@@ -273,7 +273,7 @@ pub fn import(path: &Path, media: &Path) -> Option<Imported> {
     // Each prompt opens a turn; the next one, or the end, closes it.
     let mut open = false;
     // Calls that run a subagent: their result is its report, kept longer.
-    let mut reports = std::collections::HashSet::new();
+    let mut reports = claude::Reports::default();
     let close = |bodies: &mut Vec<Body>, open: &mut bool, outcome: Outcome| {
         if std::mem::take(open) {
             bodies.push(Body::TurnEnded { outcome });
@@ -375,33 +375,25 @@ pub fn import(path: &Path, media: &Path) -> Option<Imported> {
                     .join("\n");
                 close(&mut bodies, &mut open, Outcome::Error { message });
             }
-            Ok(wire::Inbound::Assistant { uuid, blocks, .. }) => {
-                for b in &blocks {
-                    if let wire::AssistantBlock::ToolUse { id, name, .. } = b
-                        && claude::runs_subagent(name)
-                    {
-                        reports.insert(id.clone());
-                    }
-                }
-                let blocks = claude::blocks(blocks);
-                if !blocks.is_empty() {
-                    bodies.push(Body::Assistant {
-                        parent: None,
-                        blocks,
-                        uuid: uuid.or_else(|| v["uuid"].as_str().map(str::to_owned)),
-                    });
-                }
+            // As a live session logs it: web search and fetch results
+            // with their calls, a subagent's report kept whole.
+            Ok(wire::Inbound::Assistant {
+                uuid,
+                blocks,
+                results,
+                ..
+            }) => {
+                let uuid = uuid.or_else(|| v["uuid"].as_str().map(str::to_owned));
+                bodies.extend(claude::assistant_bodies(
+                    None,
+                    uuid,
+                    blocks,
+                    results,
+                    &mut reports,
+                ));
             }
             Ok(wire::Inbound::ToolResults { results, .. }) => {
-                for r in results {
-                    let report = reports.remove(&r.tool_use_id);
-                    bodies.push(Body::ToolResult {
-                        tool: r.tool_use_id,
-                        error: r.is_error,
-                        output: wire::keep(r.output, report),
-                        parent: None,
-                    });
-                }
+                bodies.extend(claude::result_bodies(None, results, &mut reports));
             }
             _ => {}
         }
@@ -677,6 +669,36 @@ mod tests {
                 "end: Done",
             ]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_import_keeps_what_a_live_session_logs() {
+        let dir = std::env::temp_dir().join(format!("dent-import-web-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let long = "r".repeat(40 * 1024);
+        let t = format!(
+            r#"{{"type":"user","cwd":"/tmp/p","uuid":"u1","message":{{"role":"user","content":"Look it up"}}}}
+{{"type":"assistant","uuid":"a1","message":{{"model":"m","content":[{{"type":"server_tool_use","id":"srv1","name":"web_search","input":{{"query":"dent"}}}},{{"type":"web_search_tool_result","tool_use_id":"srv1","content":[{{"type":"web_search_result","title":"Dent","url":"https://dent.dev"}}]}},{{"type":"tool_use","id":"t1","name":"Task","input":{{"description":"Survey"}}}}]}}}}
+{{"type":"user","uuid":"r1","message":{{"content":[{{"type":"tool_result","tool_use_id":"t1","content":"{long}"}}]}}}}
+"#
+        );
+        std::fs::write(&path, t).unwrap();
+        let got = import(&path, &dir.join("media")).unwrap();
+        let results: Vec<(&str, usize)> = got
+            .bodies
+            .iter()
+            .filter_map(|b| match b {
+                Body::ToolResult { tool, output, .. } => Some((tool.as_str(), output.len())),
+                _ => None,
+            })
+            .collect();
+        // The web search's result comes with its call, as live.
+        assert_eq!(results[0].0, "srv1");
+        // A subagent's report keeps its whole 40 KB (a call's output would
+        // be cut to 32 KB).
+        assert_eq!(results[1], ("t1", long.len()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
