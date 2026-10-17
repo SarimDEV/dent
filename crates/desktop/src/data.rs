@@ -179,6 +179,100 @@ pub enum Item {
     },
 }
 
+/// A text's fingerprint, cheap to take each frame: its length and its
+/// first and last 32 bytes. Streaming only appends, which changes the
+/// length; hashing a long session's text whole would cost megabytes a
+/// frame.
+pub fn fingerprint<H: std::hash::Hasher>(t: &str, h: &mut H) {
+    use std::hash::Hash;
+    t.len().hash(h);
+    let b = t.as_bytes();
+    b[..b.len().min(32)].hash(h);
+    b[b.len().saturating_sub(32)..].hash(h);
+}
+
+/// Everything in the chat that folds, and the key it's kept open under
+/// (in `Dent::expanded`). One place, so the row signature that decides
+/// when a row is measured again (`item_sig`) and Find's counts see every
+/// fold an item has: a new fold added here can't be missed by either.
+pub enum Fold<'a> {
+    /// A long message of yours, sent or waiting.
+    Message(&'a str),
+    /// A long plan's card.
+    Plan(&'a str),
+    /// A subagent's report, by its call.
+    Report(&'a str),
+    /// A call's input and output shown whole: session, call.
+    CallIn(&'a str, &'a str),
+    CallOut(&'a str, &'a str),
+    /// A subagent's earlier steps, by the key its lines carry.
+    Steps(&'a str),
+    /// A command's long answer: name, text.
+    Command(&'a str, &'a str),
+    /// A section of a command's sheet: session, item, section.
+    Sheet(&'a str, usize, usize),
+}
+
+impl Fold<'_> {
+    pub fn key(&self) -> String {
+        match self {
+            Fold::Message(id) => id.to_string(),
+            Fold::Plan(ask) => format!("plan-open-{ask}"),
+            Fold::Report(call) => format!("report-{call}"),
+            Fold::CallIn(s, call) => format!("call-in-all-{s}/{call}"),
+            Fold::CallOut(s, call) => format!("call-out-all-{s}/{call}"),
+            Fold::Steps(k) => k.to_string(),
+            Fold::Command(name, text) => crate::app::command_key(name, text),
+            Fold::Sheet(s, ix, si) => format!("sheet/{s}/{ix}/{si}"),
+        }
+    }
+
+    /// Every fold item `ix` of session `sid` has.
+    pub fn of<'a>(sid: &'a str, ix: usize, item: &'a Item) -> Vec<Fold<'a>> {
+        match item {
+            Item::User { id, .. } | Item::Queued { id, .. } => vec![Fold::Message(id)],
+            Item::Plan { id, .. } => vec![Fold::Plan(id)],
+            Item::Tools { lines, .. } => lines
+                .iter()
+                .flat_map(|l| {
+                    let mut f = Vec::new();
+                    if l.report.is_some() {
+                        f.push(Fold::Report(&l.id));
+                    }
+                    if l.detail.is_some() {
+                        f.push(Fold::CallIn(sid, &l.id));
+                        f.push(Fold::CallOut(sid, &l.id));
+                    }
+                    if let Some((k, _)) = &l.opens {
+                        f.push(Fold::Steps(k));
+                    }
+                    f
+                })
+                .collect(),
+            Item::Command {
+                name, text, view, ..
+            } => {
+                let mut f = vec![Fold::Command(name, text)];
+                if let Some(dent_protocol::View::Sheet { sections }) = view {
+                    f.extend((0..sections.len()).map(|si| Fold::Sheet(sid, ix, si)));
+                }
+                f
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The fold that decides how much of an item's words show (and so
+    /// what Find searches): a message's or a plan's.
+    pub fn words<'a>(item: &'a Item) -> Option<Fold<'a>> {
+        match item {
+            Item::User { id, .. } | Item::Queued { id, .. } => Some(Fold::Message(id)),
+            Item::Plan { id, .. } => Some(Fold::Plan(id)),
+            _ => None,
+        }
+    }
+}
+
 impl Item {
     /// What it reads as in plain text, for copying when it isn't drawn:
     /// your messages and the replies, the plan and notes. Folded work
@@ -635,5 +729,36 @@ mod tests {
                 (Some(5), Some(6))
             ]
         );
+    }
+
+    #[test]
+    fn every_fold_is_listed_for_its_item() {
+        use super::{Fold, Item};
+        let plan = Item::Plan {
+            id: "p".into(),
+            plan: "x".into(),
+        };
+        let keys: Vec<String> = Fold::of("s", 3, &plan).iter().map(Fold::key).collect();
+        assert_eq!(keys, ["plan-open-p"]);
+        assert_eq!(Fold::words(&plan).unwrap().key(), "plan-open-p");
+        let queued = Item::Queued {
+            id: "q".into(),
+            text: "t".into(),
+            attachments: Vec::new(),
+        };
+        assert_eq!(Fold::of("s", 0, &queued).len(), 1);
+        // Each kind keeps its own key.
+        let all = [
+            Fold::Message("a"),
+            Fold::Plan("a"),
+            Fold::Report("a"),
+            Fold::CallIn("s", "a"),
+            Fold::CallOut("s", "a"),
+            Fold::Command("a", ""),
+            Fold::Sheet("s", 1, 2),
+        ]
+        .map(|f| f.key());
+        let unique: std::collections::HashSet<_> = all.iter().collect();
+        assert_eq!(unique.len(), all.len());
     }
 }

@@ -20,6 +20,7 @@ use crate::app::{Dent, Menu, Tab, home};
 use crate::complete;
 use dent_protocol::Permission;
 
+use crate::data::Fold;
 use crate::data::{Item, Kind, Session};
 use crate::ds::{
     CODE, DISPLAY, DISPLAY_COMPACT, LABEL, NUMERAL, READING, Typed, UI, motion, radius, size, space,
@@ -277,11 +278,12 @@ impl Dent {
     fn call_detail(
         &self,
         s: &Session,
-        key: &str,
+        call: &str,
         d: &crate::data::CallDetail,
         cx: &mut Context<Self>,
     ) -> Div {
         let t = self.t;
+        let key = &format!("{}/{call}", s.id);
         // Long text shows its start, and a line that opens the rest: held
         // to so many lines, and so many characters, so one enormous line
         // can't stall the chat.
@@ -305,8 +307,13 @@ impl Dent {
         // The line under a clipped block: how much more, and a press shows
         // it all; shown whole, a press folds it again.
         let rest = |which: &str, text: &str, cx: &mut Context<Self>| -> Option<AnyElement> {
-            let fold = format!("call-{which}-all-{key}");
-            let all = self.expanded.contains(&fold);
+            let fold = if which == "in" {
+                Fold::CallIn(&s.id, call)
+            } else {
+                Fold::CallOut(&s.id, call)
+            };
+            let all = self.is_open(&fold);
+            let fold = fold.key();
             let (_, lines, chars) = crate::ansi::clip(text, false);
             (lines + chars > 0).then(|| {
                 let label = if all {
@@ -322,9 +329,7 @@ impl Dent {
                     .self_start()
                     .relative()
                     .on_press(cx.listener(move |this, _, _, cx| {
-                        if !this.expanded.remove(&fold) {
-                            this.expanded.insert(fold.clone());
-                        }
+                        this.toggle_fold(&fold);
                         cx.notify();
                     }))
                     .child(probe(&self.probes, format!("call-{which}-all")))
@@ -332,7 +337,7 @@ impl Dent {
             })
         };
         if !d.input.trim().is_empty() {
-            let all = self.expanded.contains(&format!("call-in-all-{key}"));
+            let all = self.is_open(&Fold::CallIn(&s.id, call));
             let text = clip(&d.input, all);
             // Its label sits on the text's edge, the ghost's padding
             // hanging out to the left.
@@ -348,7 +353,7 @@ impl Dent {
             && !out.trim().is_empty()
             && !d.edits
         {
-            let all = self.expanded.contains(&format!("call-out-all-{key}"));
+            let all = self.is_open(&Fold::CallOut(&s.id, call));
             // Colour codes become colours; other escapes go.
             let parsed = crate::ansi::parsed(out);
             let (plain, spans) = (&parsed.0, &parsed.1);
@@ -1226,9 +1231,9 @@ impl Dent {
                             })
                             .when(!body.is_empty(), |d| {
                                 // Long messages fold, so the reply stays in view.
-                                let open = self.expanded.contains(msg);
+                                let open = self.is_open(&Fold::Message(msg));
                                 let (shown, long) = user_shown(&body, open);
-                                let key = msg.clone();
+                                let key = Fold::Message(msg).key();
                                 // A slash command reads as one.
                                 let command = crate::draft::sent_command(&shown, &[]).is_some()
                                     && shown.len() < 80;
@@ -1261,9 +1266,7 @@ impl Dent {
                                             .cursor_pointer()
                                             .hover(|d| d.text_color(t.ink))
                                             .on_press(cx.listener(move |this, _, _, cx| {
-                                                if !this.expanded.remove(&key) {
-                                                    this.expanded.insert(key.clone());
-                                                }
+                                                this.toggle_fold(&key);
                                                 cx.notify();
                                             }))
                                             .child(if open {
@@ -1560,7 +1563,7 @@ impl Dent {
                     )
                     .when(open && lone, |d| {
                         let detail = lines[0].detail.clone();
-                        let call = format!("{}/{}", s.id, lines[0].id);
+                        let call = lines[0].id.clone();
                         d.children(
                             detail.map(|dt| self.call_detail(s, &call, &dt, cx).mt(px(space::S1H))),
                         )
@@ -1571,7 +1574,9 @@ impl Dent {
                             .iter()
                             .enumerate()
                             .filter(|(_, l)| {
-                                l.fold.as_ref().is_none_or(|k| self.expanded.contains(k))
+                                l.fold
+                                    .as_ref()
+                                    .is_none_or(|k| self.is_open(&Fold::Steps(k)))
                             })
                             .collect();
                         let depths: Vec<usize> = shown.iter().map(|(_, l)| l.depth).collect();
@@ -1637,7 +1642,7 @@ impl Dent {
                                     );
                                 }
                                 if let Some((key, hidden)) = l.opens.clone() {
-                                    let opened = self.expanded.contains(&key);
+                                    let opened = self.is_open(&Fold::Steps(&key));
                                     let steps = if hidden == 1 { "step" } else { "steps" };
                                     return row
                                         .child(
@@ -1650,9 +1655,7 @@ impl Dent {
                                                 .cursor_pointer()
                                                 .hover(|d| d.text_color(t.ink))
                                                 .on_press(cx.listener(move |this, _, _, cx| {
-                                                    if !this.expanded.remove(&key) {
-                                                        this.expanded.insert(key.clone());
-                                                    }
+                                                    this.toggle_fold(&key);
                                                     cx.notify();
                                                 }))
                                                 .child(if opened {
@@ -1713,13 +1716,8 @@ impl Dent {
                                                 .flex_col()
                                                 .child(line)
                                                 .children(detail.map(|dt| {
-                                                    self.call_detail(
-                                                        s,
-                                                        &format!("{}/{}", s.id, l.id),
-                                                        &dt,
-                                                        cx,
-                                                    )
-                                                    .my(px(space::S1))
+                                                    self.call_detail(s, &l.id, &dt, cx)
+                                                        .my(px(space::S1))
                                                 })),
                                         )
                                         .into_any_element()
@@ -1927,8 +1925,8 @@ impl Dent {
                 let (a, d) = (s.id.clone(), s.id.clone());
                 let (k1, k3) = (ask.clone(), ask.clone());
                 // A long plan shows its start until expanded.
-                let fold_key = plan_key(ask);
-                let open = self.expanded.contains(&fold_key);
+                let fold_key = Fold::Plan(ask).key();
+                let open = self.is_open(&Fold::Plan(ask));
                 let (shown, long) = plan_shown(plan, open);
                 let blocks = self.markdown(&shown);
                 let mut r = markdown::R {
@@ -1969,9 +1967,7 @@ impl Dent {
                                     .relative()
                                     .ml(px(-space::S2))
                                     .on_press(cx.listener(move |this, _, _, cx| {
-                                        if !this.expanded.remove(&fold_key) {
-                                            this.expanded.insert(fold_key.clone());
-                                        }
+                                        this.toggle_fold(&fold_key);
                                         cx.notify();
                                     }))
                                     .child(probe(&self.probes, "plan-fold")),
@@ -2265,7 +2261,7 @@ impl Dent {
                 });
                 // Folded pastes show as their chips again, and long text
                 // folds as a sent message does.
-                let open = self.expanded.contains(msg);
+                let open = self.is_open(&Fold::Message(msg));
                 let (refolded, pasted) = match self.sent_drafts.peek(msg) {
                     Some(d) => {
                         let (words, chips) = d.chips_apart(&self.pastes);
@@ -2324,9 +2320,7 @@ impl Dent {
                                         .cursor_pointer()
                                         .hover(|d| d.text_color(t.ink))
                                         .on_press(cx.listener(move |this, _, _, cx| {
-                                            if !this.expanded.remove(&fold_key) {
-                                                this.expanded.insert(fold_key.clone());
-                                            }
+                                            this.toggle_fold(&fold_key);
                                             cx.notify();
                                         }))
                                         .child(if open {
@@ -4425,17 +4419,15 @@ impl Dent {
                 )
                 .into_any_element();
         }
-        let key = format!("report-{call}");
-        let open = self.expanded.contains(&key);
+        let key = Fold::Report(call).key();
+        let open = self.is_open(&Fold::Report(call));
         // Folded, it shows its first two blocks whole, never half a table.
         let all = self.markdown(report);
         let blocks: &[markdown::Block] = &all;
         let long = blocks.len() > 2;
         let blocks = if long && !open { &blocks[..2] } else { blocks };
         let fold = cx.listener(move |this, _, _, cx| {
-            if !this.expanded.remove(&key) {
-                this.expanded.insert(key.clone());
-            }
+            this.toggle_fold(&key);
             cx.notify();
         });
         let mut r = markdown::R {
@@ -4647,11 +4639,6 @@ pub fn working_host(s: &Session) -> Option<usize> {
         .take_while(|i| matches!(i, Item::Queued { .. }))
         .count();
     (tail > 0).then(|| s.items.len() - tail)
-}
-
-/// What keeps a plan card opened in full.
-pub fn plan_key(ask: &str) -> String {
-    format!("plan-open-{ask}")
 }
 
 /// A plan as its card shows it, and whether it's long enough to fold: past

@@ -10,7 +10,7 @@ use gpui_kit::*;
 
 use dent_protocol::{Act, Activity, Bar, CommandOutcome, Field, Mark, Part, Row, Section, View};
 
-use crate::app::{Dent, command_key};
+use crate::app::Dent;
 use crate::data::Session;
 use crate::ds::{CODE, LABEL, Typed, UI, motion, radius, space};
 use crate::markdown;
@@ -534,8 +534,8 @@ impl Dent {
             }
             _ => {}
         }
-        let key = command_key(name, text);
-        let open = self.expanded.contains(&key);
+        let key = crate::data::Fold::Command(name, text).key();
+        let open = self.is_open(&crate::data::Fold::Command(name, text));
         let long = text.lines().count() > 6 || text.len() > 600;
         // The view says it; the words are there for the detail. A sheet
         // says all of it.
@@ -612,9 +612,7 @@ impl Dent {
                                 .ml(px(-space::S2))
                                 .relative()
                                 .on_press(cx.listener(move |this, _, _, cx| {
-                                    if !this.expanded.remove(&key) {
-                                        this.expanded.insert(key.clone());
-                                    }
+                                    this.toggle_fold(&key);
                                     cx.notify();
                                 }))
                                 .child(probe(&self.probes, format!("fold-{ix}"))),
@@ -710,8 +708,8 @@ impl Dent {
             .flex_col()
             .gap(px(space::S2))
             .children(sections.iter().enumerate().map(|(si, sec)| {
-                let fold_key = format!("sheet/{}/{ix}/{si}", s.id);
-                let open = self.expanded.contains(&fold_key);
+                let fold = crate::data::Fold::Sheet(&s.id, ix, si);
+                let (fold_key, open) = (fold.key(), self.is_open(&fold));
                 // A long section folds after its first few rows.
                 let n = sec.rows.len();
                 let (shown, folded): (Vec<usize>, Vec<usize>) = if open || n <= SHEET_ROWS + 1 {
@@ -735,9 +733,7 @@ impl Dent {
                         .ml(px(-space::S2))
                         .relative()
                         .on_press(cx.listener(move |this, _, _, cx| {
-                            if !this.expanded.remove(&key) {
-                                this.expanded.insert(key.clone());
-                            }
+                            this.toggle_fold(&key);
                             cx.notify();
                         }))
                         .child(probe(&self.probes, gid))

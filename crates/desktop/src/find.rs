@@ -12,6 +12,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use crate::app::{Dent, Tab};
+use crate::data::Fold;
 use crate::data::{Item, Kind, Line, Session};
 use crate::ds::{LABEL, Typed, UI, motion, radius, size, space};
 use crate::select::Area;
@@ -317,13 +318,15 @@ impl Dent {
             Scope::Chat => {
                 s.items.len().hash(&mut h);
                 for i in s.items.iter() {
+                    // How much of it shows: a long message or plan opened.
+                    Fold::words(i)
+                        .is_some_and(|f| self.is_open(&f))
+                        .hash(&mut h);
                     match i {
-                        Item::User { id, text, .. } => {
-                            (text.len(), self.expanded.contains(id)).hash(&mut h)
-                        }
-                        Item::Text(t) | Item::Plan { plan: t, .. } | Item::Note { text: t, .. } => {
-                            t.len().hash(&mut h)
-                        }
+                        Item::User { text: t, .. }
+                        | Item::Text(t)
+                        | Item::Plan { plan: t, .. }
+                        | Item::Note { text: t, .. } => t.len().hash(&mut h),
                         _ => 0.hash(&mut h),
                     }
                 }
@@ -422,17 +425,28 @@ impl Dent {
             .iter()
             .enumerate()
             .map(|(ix, item)| {
-                let open = match item {
-                    Item::User { id, .. } => self.expanded.contains(id),
-                    Item::Plan { id, .. } => self.expanded.contains(&crate::chat::plan_key(id)),
-                    _ => false,
-                };
+                let open = Fold::words(item).is_some_and(|f| self.is_open(&f));
                 let mut h = std::hash::DefaultHasher::new();
+                // Fingerprinted, not hashed whole: each streamed chunk would
+                // otherwise hash the whole transcript.
+                let fp = crate::data::fingerprint::<std::hash::DefaultHasher>;
                 match item {
-                    Item::User { text, .. } => (0u8, text, open).hash(&mut h),
-                    Item::Text(t) => (1u8, t).hash(&mut h),
-                    Item::Plan { plan, .. } => (2u8, plan, open).hash(&mut h),
-                    Item::Note { text, .. } => (3u8, text).hash(&mut h),
+                    Item::User { text, .. } => {
+                        (0u8, open).hash(&mut h);
+                        fp(text, &mut h);
+                    }
+                    Item::Text(t) => {
+                        1u8.hash(&mut h);
+                        fp(t, &mut h);
+                    }
+                    Item::Plan { plan, .. } => {
+                        (2u8, open).hash(&mut h);
+                        fp(plan, &mut h);
+                    }
+                    Item::Note { text, .. } => {
+                        3u8.hash(&mut h);
+                        fp(text, &mut h);
+                    }
                     _ => return 0,
                 }
                 let key = h.finish();

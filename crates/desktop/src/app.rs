@@ -5496,12 +5496,13 @@ impl Dent {
         let sigs: Vec<u64> = s
             .items
             .iter()
-            .map(|i| {
+            .enumerate()
+            .map(|(ix, i)| {
                 let thought = matches!(i, Item::Thinking(_)).then(|| {
                     thoughts += 1;
                     thought_key(&s.id, thoughts - 1)
                 });
-                self.item_sig(i, thought.as_deref())
+                self.item_sig(&s.id, ix, i, thought.as_deref())
             })
             .chain((s.status == Status::Working).then_some(u64::MAX))
             .collect();
@@ -5563,26 +5564,21 @@ impl Dent {
 
     /// Anything about an item that changes its height.
     /// `thought` is a thought's key, for whether it's open.
-    fn item_sig(&self, item: &Item, thought: Option<&str>) -> u64 {
+    fn item_sig(&self, sid: &str, ix: usize, item: &Item, thought: Option<&str>) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         std::mem::discriminant(item).hash(&mut h);
-        // Text is fingerprinted, not hashed whole: a long session would
-        // otherwise hash megabytes each frame. Streaming only ever appends,
-        // which changes the length.
-        let fp = |t: &str, h: &mut std::collections::hash_map::DefaultHasher| {
-            t.len().hash(h);
-            let b = t.as_bytes();
-            b[..b.len().min(32)].hash(h);
-            b[b.len().saturating_sub(32)..].hash(h);
-        };
+        // Every fold it has changes its height.
+        for f in crate::data::Fold::of(sid, ix, item) {
+            self.is_open(&f).hash(&mut h);
+        }
+        let fp = crate::data::fingerprint::<std::collections::hash_map::DefaultHasher>;
         match item {
             Item::User { text: t, id, .. } => {
                 fp(t, &mut h);
-                (
-                    self.rewinding.as_ref().is_some_and(|(_, m)| m == id),
-                    self.expanded.contains(id),
-                )
+                self.rewinding
+                    .as_ref()
+                    .is_some_and(|(_, m)| m == id)
                     .hash(&mut h)
             }
             Item::Text(t) => fp(t, &mut h),
@@ -5606,11 +5602,6 @@ impl Dent {
                     .hash(&mut h);
                 for l in lines.iter().filter(|l| l.detail.is_some()) {
                     self.open_calls.contains(&l.id).hash(&mut h);
-                }
-                for l in lines.iter().filter(|l| l.report.is_some()) {
-                    self.expanded
-                        .contains(&format!("report-{}", l.id))
-                        .hash(&mut h);
                 }
             }
             Item::Made {
@@ -5649,12 +5640,21 @@ impl Dent {
             } => {
                 (name, args).hash(&mut h);
                 fp(text, &mut h);
-                self.expanded
-                    .contains(&command_key(name, text))
-                    .hash(&mut h);
             }
         }
         h.finish()
+    }
+
+    /// Whether a fold in the chat is open.
+    pub fn is_open(&self, f: &crate::data::Fold) -> bool {
+        self.expanded.contains(&f.key())
+    }
+
+    /// Open a fold, or close it again, by its key.
+    pub fn toggle_fold(&mut self, key: &str) {
+        if !self.expanded.remove(key) {
+            self.expanded.insert(key.to_string());
+        }
     }
 
     /// Open a page in a window of its own, or bring that window forward.
