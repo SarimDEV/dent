@@ -155,6 +155,20 @@ impl Walk {
                 v.extend(demo(id));
                 v
             }
+            // The scenes whose look the review fixes changed, for stills:
+            // the approval keys, the queue and its Remove, the reply's
+            // actions, the working square.
+            "looks" => {
+                let mut v = vec![(
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                )];
+                v.extend(answer_keys());
+                v.extend(reply_actions());
+                v.extend(composing());
+                v.extend(breath());
+                v
+            }
             "breath" => {
                 let mut v = vec![(
                     0.,
@@ -801,7 +815,7 @@ fn sweep_step(me: &Entity<Dent>, window: &mut Window, cx: &mut App) -> bool {
                     SweepStep::ScrollTo(|i| matches!(i, Item::User { text, files, .. } if crate::draft::sent_command(text, files).is_some())),
                     SweepStep::Frame,
                     SweepStep::Still(format!("session-{n}-slash")),
-                    SweepStep::ScrollTo(|i| matches!(i, Item::User { text, .. } if text.contains("Attached"))),
+                    SweepStep::ScrollTo(|i| matches!(i, Item::User { files, .. } if !files.is_empty())),
                     SweepStep::Frame,
                     SweepStep::Still(format!("session-{n}-picture")),
                     SweepStep::OpenAgents,
@@ -1851,7 +1865,7 @@ fn checks() -> Vec<(f32, Act)> {
         (0.3, Shot("attachment")),
         (0.1, Type(Field::Composer, "what is in this picture")),
         (0.1, Key("enter")),
-        (0.1, Until("a dropped picture goes with the message", |d, _| has(d, |i| matches!(i, Item::User { text: t, .. } if t.contains("Attached") && t.contains("red.png"))) && status_is(d, Status::Done), 10.)),
+        (0.1, Until("a dropped picture goes with the message", |d, _| has(d, |i| matches!(i, Item::User { files, .. } if files.iter().any(|f| f.ends_with("red.png")))) && status_is(d, Status::Done), 10.)),
     ]);
     v.extend(new_session("this will fail"));
     v.extend([
@@ -5892,6 +5906,7 @@ fn breath() -> Vec<(f32, Act)> {
                 }
             }),
         ),
+        (0.2, Shot("working-square")),
         (0.1, Key("cmd-.")),
         (
             0.1,
