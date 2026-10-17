@@ -1517,7 +1517,7 @@ fn checks() -> Vec<(f32, Act)> {
                 "⌘↩ steers into the running turn",
                 |d, _| {
                     done_saying(d, "steer thing")
-                        && !has(d, |i| matches!(i, Item::Note { icon: "square", .. }))
+                        && !has(d, |i| matches!(i, Item::Note { kind: crate::data::NoteKind::Stopped, .. }))
                 },
                 20.,
             ),
@@ -1865,7 +1865,7 @@ fn checks() -> Vec<(f32, Act)> {
                             matches!(
                                 i,
                                 Item::Note {
-                                    icon: "circle-alert",
+                                    kind: crate::data::NoteKind::Error,
                                     ..
                                 }
                             )
@@ -3710,7 +3710,7 @@ fn failures() -> Vec<(f32, Act)> {
             Until(
                 "when Claude Code stops unexpectedly, the note offers Try again",
                 |d, _| {
-                    has(d, |i| matches!(i, Item::Note { icon: "circle-alert", text } if text.contains("stopped unexpectedly")))
+                    has(d, |i| matches!(i, Item::Note { kind: crate::data::NoteKind::Error, text, .. } if text.contains("stopped unexpectedly")))
                         && (drawn(d, "retry-1").is_some() || drawn(d, "retry-2").is_some())
                 },
                 15.,
@@ -3730,7 +3730,7 @@ fn failures() -> Vec<(f32, Act)> {
                             matches!(
                                 i,
                                 Item::Note {
-                                    icon: "circle-alert",
+                                    kind: crate::data::NoteKind::Error,
                                     ..
                                 }
                             )

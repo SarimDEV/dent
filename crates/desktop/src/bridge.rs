@@ -418,6 +418,11 @@ pub fn session(
                     Note::Info => "info",
                 },
                 text: text.clone(),
+                kind: match note {
+                    Note::Stopped => crate::data::NoteKind::Stopped,
+                    Note::Error => crate::data::NoteKind::Error,
+                    Note::Info => crate::data::NoteKind::Other,
+                },
             }),
         }
     }
@@ -1253,7 +1258,11 @@ fn answered(tool: &str, input: &Value, a: &Answer, cwd: &Path) -> Item {
         ),
         Answer::Expired => ("clock", "No longer needed".to_string()),
     };
-    Item::Note { icon, text }
+    Item::Note {
+        icon,
+        text,
+        kind: crate::data::NoteKind::Other,
+    }
 }
 
 #[cfg(test)]

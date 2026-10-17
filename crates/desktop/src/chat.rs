@@ -633,7 +633,7 @@ impl Dent {
             matches!(
                 i,
                 Item::Note {
-                    icon: "circle-alert",
+                    kind: crate::data::NoteKind::Error,
                     ..
                 }
             )
@@ -951,11 +951,7 @@ impl Dent {
                         .gap(px(space::S1H))
                         .rounded_full()
                         // On Carbon a raised fill is barely off the page: lift it a step.
-                        .bg(if t.dark {
-                            theme::mix_pub(t.raised, t.ink, 0.08)
-                        } else {
-                            t.raised
-                        })
+                        .bg(t.lifted())
                         .border_1()
                         .border_color(t.hairline)
                         .shadow_md()
@@ -1831,11 +1827,7 @@ impl Dent {
                                 // Raised off the card in both themes: on
                                 // Carbon the magenta wash is about as light
                                 // as a raised fill, so it lifts a step more.
-                                .bg(if t.dark {
-                                    theme::mix_pub(t.raised, t.ink, 0.08)
-                                } else {
-                                    t.raised
-                                })
+                                .bg(t.lifted())
                                 .border_1()
                                 .border_color(t.hairline)
                                 .ty(CODE)
@@ -2161,7 +2153,9 @@ impl Dent {
                     .child(div().ty(LABEL).text_color(t.faint).child(hint))
                     .into_any_element()
             }
-            Item::Note { icon: name, text } => {
+            Item::Note {
+                icon: name, text, ..
+            } => {
                 // The latest failure, while a usage limit is used up, says
                 // which and when it starts over, in plain words.
                 let latest_failure = *name == "circle-alert"
@@ -4994,7 +4988,6 @@ fn folded_change(items: &[Item], ix: usize) -> bool {
 }
 
 /// The icon of the note a turn you stopped ends with.
-const STOPPED: &str = "square";
 
 /// Whether the reply at `ix` is a turn's answer: nothing but notes follow it
 /// before your next message, and its turn has ended. Everything else said in
@@ -5024,12 +5017,14 @@ pub fn turn_end_after(items: &[Item], ix: usize) -> Option<(u64, u64, bool)> {
         Some(Item::Text(_)) => {}
         // A turn you stopped says so straight under its words, and its time
         // and actions follow the note.
-        Some(Item::Note { icon: STOPPED, .. })
-            if items[..ix]
-                .iter()
-                .rev()
-                .take_while(|i| !matches!(i, Item::User { .. }))
-                .any(|i| matches!(i, Item::Text(_))) => {}
+        Some(Item::Note {
+            kind: crate::data::NoteKind::Stopped,
+            ..
+        }) if items[..ix]
+            .iter()
+            .rev()
+            .take_while(|i| !matches!(i, Item::User { .. }))
+            .any(|i| matches!(i, Item::Text(_))) => {}
         _ => return None,
     }
     for (j, i) in items.iter().enumerate().skip(ix + 1) {
@@ -5037,7 +5032,10 @@ pub fn turn_end_after(items: &[Item], ix: usize) -> Option<(u64, u64, bool)> {
             Item::Text(_)
             | Item::User { .. }
             | Item::Queued { .. }
-            | Item::Note { icon: STOPPED, .. } => return None,
+            | Item::Note {
+                kind: crate::data::NoteKind::Stopped,
+                ..
+            } => return None,
             Item::TurnEnd { at, took } => {
                 let latest = !items[j + 1..]
                     .iter()
@@ -5087,14 +5085,15 @@ fn keep(whole: bool, chip: AnyElement) -> AnyElement {
 
 #[cfg(test)]
 mod answer_tests {
-    use super::{STOPPED, change_after, folded_change, is_answer, turn_end_after};
+    use super::{change_after, folded_change, is_answer, turn_end_after};
     use crate::data::Item;
 
     #[test]
     fn a_stopped_turns_actions_follow_its_note() {
         let note = Item::Note {
-            icon: STOPPED,
+            icon: "square",
             text: "Stopped".into(),
+            kind: crate::data::NoteKind::Stopped,
         };
         let items = vec![
             Item::Text("words".into()),

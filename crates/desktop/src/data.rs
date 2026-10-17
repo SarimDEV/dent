@@ -151,7 +151,12 @@ pub enum Item {
         questions: Vec<Question>,
     },
     /// One quiet line: Allowed, Stopped, an error…
-    Note { icon: &'static str, text: String },
+    Note {
+        icon: &'static str,
+        text: String,
+        /// What it says, for what follows it: the icon is only its look.
+        kind: NoteKind,
+    },
     /// A message waiting for the turn to end, with the files it carries.
     Queued {
         id: String,
@@ -177,6 +182,16 @@ pub enum Item {
         outcome: dent_protocol::CommandOutcome,
         view: Option<dent_protocol::View>,
     },
+}
+
+/// What a note in the chat is, apart from how it looks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum NoteKind {
+    /// The turn was stopped: its footer goes after this note.
+    Stopped,
+    /// The turn ended in an error: it carries its own Try again.
+    Error,
+    Other,
 }
 
 /// A text's fingerprint, cheap to take each frame: its length and its

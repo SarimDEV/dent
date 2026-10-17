@@ -171,6 +171,18 @@ impl Theme {
     pub fn selected(&self) -> Hsla {
         self.ink.opacity(self.a(0.10, 0.12))
     }
+    /// A fill lifted off what's under it (`lifted`): `raised` on Paper; on
+    /// Carbon, where a raised fill is barely off the page or a magenta
+    /// wash, a step lighter. A floating control over the chat ("Latest")
+    /// and an approval's command box.
+    pub fn lifted(&self) -> Hsla {
+        if self.dark {
+            mix(self.raised, self.ink, 0.08)
+        } else {
+            self.raised
+        }
+    }
+
     /// Selected text, in replies and in inputs alike: a calm blue, as the
     /// Mac tints a selection in the window in use (a grey one reads as a
     /// window in the background), light enough that grey text stays legible

@@ -95,6 +95,7 @@ Three layers. Components never use a hex value.
 | `state.press` | ink 9% | ink 10% | Pressed |
 | `tint` | ink 5% | ink 7% | Your messages' fill (no edge), a tool call's opened detail |
 | `state.selected` | ink 10% | ink 12% | Selected row (twice hover, so a hovered row never reads as a second selection) |
+| `lifted` | `raised` | `raised` mixed 8% toward ink | A fill lifted off what's under it: a floating control over the chat (Latest), an approval's command box on its wash |
 | `selection` | blue 22% | blue 30% | Selected text: the code tints it with the system's selection blue (hue 212°) |
 | `signal.wash` | signal 7% | signal 12% | Approval card fill, signal tints |
 | `signal.edge` | signal 45% | signal 50% | Approval card edge |

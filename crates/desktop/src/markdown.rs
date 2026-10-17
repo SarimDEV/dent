@@ -1567,34 +1567,49 @@ fn hscroll(md: &Md, key: &str, child: impl IntoElement, bg: Hsla, ink: Hsla) -> 
 
 /// The sideways twin of `scrollbar`, along the bottom of an `hscroll`.
 fn hbar(handle: ScrollHandle, ink: Hsla) -> impl IntoElement {
-    canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _| {
-            let view = bounds.size.width.as_f32();
-            let max = handle.max_offset().x.as_f32();
-            if max <= 0.5 {
-                return;
-            }
-            let x = -handle.offset().x.as_f32();
-            let thumb = (view * view / (view + max)).max(24.);
-            let at = (x / max).clamp(0., 1.) * (view - thumb);
-            window.paint_quad(
-                fill(
-                    Bounds::new(
-                        point(bounds.left() + px(at), bounds.bottom() - px(5.)),
-                        size(px(thumb), px(4.)),
-                    ),
-                    ink.opacity(0.28),
-                )
-                .corner_radii(px(2.)),
-            );
-        },
-    )
+    thumb_bar(false, ink, move || {
+        (-handle.offset().x.as_f32(), handle.max_offset().x.as_f32())
+    })
     .absolute()
     .left_0()
     .right_0()
     .bottom_0()
     .h(px(8.))
+}
+
+/// The one scrollbar thumb, down the side (`down`) or along the bottom:
+/// `read` gives how far it's scrolled and how far it can go. The thumb is
+/// the view's share of the whole, at least 24 px, in ink at 28%.
+fn thumb_bar(down: bool, ink: Hsla, read: impl Fn() -> (f32, f32) + 'static) -> Canvas<()> {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let (at, max) = read();
+            let view = if down {
+                bounds.size.height
+            } else {
+                bounds.size.width
+            }
+            .as_f32();
+            if max <= 0.5 {
+                return;
+            }
+            let thumb = (view * view / (view + max)).max(24.);
+            let pos = (at / max).clamp(0., 1.) * (view - thumb);
+            let quad = if down {
+                Bounds::new(
+                    point(bounds.right() - px(7.), bounds.top() + px(pos + 2.)),
+                    size(px(4.), px(thumb - 4.)),
+                )
+            } else {
+                Bounds::new(
+                    point(bounds.left() + px(pos), bounds.bottom() - px(5.)),
+                    size(px(thumb), px(4.)),
+                )
+            };
+            window.paint_quad(fill(quad, ink.opacity(0.28)).corner_radii(px(2.)));
+        },
+    )
 }
 
 /// Inline maths too wide for a line, at text size on a line of its own.
@@ -2203,30 +2218,12 @@ fn handoff(state: ListState) -> impl IntoElement {
 /// A scrollbar that is always visible while there is more to see, so a
 /// capped table reads as scrollable before anyone touches it.
 fn scrollbar(state: ListState, t: &Theme) -> impl IntoElement {
-    let ink = t.ink;
-    canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _| {
-            let view = bounds.size.height.as_f32();
-            let max = state.max_offset_for_scrollbar().y.as_f32();
-            if max <= 0.5 {
-                return;
-            }
-            let top = -state.scroll_px_offset_for_scrollbar().y.as_f32();
-            let thumb = (view * view / (view + max)).max(24.);
-            let y = (top / max).clamp(0., 1.) * (view - thumb);
-            window.paint_quad(
-                fill(
-                    Bounds::new(
-                        point(bounds.right() - px(7.), bounds.top() + px(y + 2.)),
-                        size(px(4.), px(thumb - 4.)),
-                    ),
-                    ink.opacity(0.28),
-                )
-                .corner_radii(px(2.)),
-            );
-        },
-    )
+    thumb_bar(true, t.ink, move || {
+        (
+            -state.scroll_px_offset_for_scrollbar().y.as_f32(),
+            state.max_offset_for_scrollbar().y.as_f32(),
+        )
+    })
     .absolute()
     .top_0()
     .right_0()
