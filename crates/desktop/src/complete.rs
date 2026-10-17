@@ -83,10 +83,10 @@ pub fn token(text: &str, caret: usize) -> Option<Token> {
         && !word.starts_with('@')
         && let Some(rest) = text.strip_prefix('/')
     {
-        let name = rest.split(char::is_whitespace).next().unwrap_or_default();
-        if name.is_empty() || name.contains('/') {
-            return None;
-        }
+        // Only after a command's name, by the one rule for that: a path
+        // like `/notes.md` or `/Users/me` takes no arguments.
+        let first = rest.lines().next().unwrap_or_default();
+        let name = crate::data::command_name(&format!("/{first}")).map(str::to_string)?;
         let before: Vec<String> = text[1 + name.len()..start]
             .split_whitespace()
             .map(str::to_string)

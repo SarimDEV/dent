@@ -790,7 +790,7 @@ fn sweep_step(me: &Entity<Dent>, window: &mut Window, cx: &mut App) -> bool {
                     SweepStep::ScrollTo(|i| matches!(i, Item::Note { text, .. } if text == "Conversation compacted")),
                     SweepStep::Frame,
                     SweepStep::Still(format!("session-{n}-compacted")),
-                    SweepStep::ScrollTo(|i| matches!(i, Item::User { text, .. } if text.starts_with('/'))),
+                    SweepStep::ScrollTo(|i| matches!(i, Item::User { text, files, .. } if crate::draft::sent_command(text, files).is_some())),
                     SweepStep::Frame,
                     SweepStep::Still(format!("session-{n}-slash")),
                     SweepStep::ScrollTo(|i| matches!(i, Item::User { text, .. } if text.contains("Attached"))),

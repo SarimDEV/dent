@@ -1748,14 +1748,10 @@ impl Session {
                 view,
             } => {
                 // A refusal doesn't say which command; it's the one sent.
-                let sent = self
-                    .last
-                    .as_ref()
-                    .and_then(|(_, t, _)| t.strip_prefix('/'))
-                    .map(|t| {
-                        let (n, a) = t.split_once(char::is_whitespace).unwrap_or((t, ""));
-                        (n.to_string(), a.trim().to_string())
-                    });
+                let sent = self.last.as_ref().and_then(|(_, t, _)| {
+                    let n = dent_protocol::command_name(t)?;
+                    Some((n.to_string(), t[1 + n.len()..].trim().to_string()))
+                });
                 let (name, args) = match (name, sent) {
                     (Some(n), _) => (n, args),
                     (None, Some((n, a))) => (n, a),

@@ -291,21 +291,7 @@ impl Item {
     }
 }
 
-/// The command a one-line message of yours runs (`/compact`,
-/// `/model opus`, `/mcp__x__y`): its name. A message that only starts with
-/// a slash, like a pasted path (`/Users/me/app/crash.log why…`), isn't one.
-pub fn command_name(text: &str) -> Option<&str> {
-    if text.contains('\n') {
-        return None;
-    }
-    let rest = text.strip_prefix('/')?;
-    let name = rest.split(char::is_whitespace).next()?;
-    (!name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ':')))
-    .then_some(name)
-}
+pub use dent_protocol::command_name;
 
 /// Whether `path` is a file, asked of the disk at most every few seconds:
 /// drawing asks every frame, for every line that names one.

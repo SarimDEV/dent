@@ -398,6 +398,22 @@ pub enum Activity {
     },
 }
 
+/// The command a one-line message runs (`/compact`,
+/// `/model opus`, `/mcp__x__y`): its name. A message that only starts with
+/// a slash, like a pasted path (`/Users/me/app/crash.log why…`), isn't one.
+pub fn command_name(text: &str) -> Option<&str> {
+    if text.contains('\n') {
+        return None;
+    }
+    let rest = text.strip_prefix('/')?;
+    let name = rest.split(char::is_whitespace).next()?;
+    (!name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ':')))
+    .then_some(name)
+}
+
 /// Whether a call (by its tool's name, as `Block::Tool` carries it) runs a
 /// subagent, whose result is its report: the one rule for it, read by the
 /// daemon (live and imported sessions alike), client-core and the desktop.

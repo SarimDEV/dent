@@ -3550,10 +3550,11 @@ impl Dent {
     /// A sent message that is one of dent's own commands, done here rather
     /// than sent to the agent. True if it was one.
     pub fn sent_own(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(rest) = text.strip_prefix('/') else {
+        // One line that is a command, by the one rule for that.
+        let Some(name) = crate::data::command_name(text) else {
             return false;
         };
-        let (name, arg) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        let arg = &text[1 + name.len()..];
         let in_session = self.current_rc().is_some();
         if !complete::OWN
             .iter()
