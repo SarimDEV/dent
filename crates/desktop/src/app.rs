@@ -253,6 +253,15 @@ pub fn put_undoable(
 /// How long Send stays inert after sending, so a double press can't land
 /// on Stop.
 pub const JUST_SENT: Duration = Duration::from_millis(2500);
+/// How long after sending Esc and ⌘. can stop the turn a message starts,
+/// before it shows as running.
+pub const STOPPABLE: Duration = Duration::from_secs(3);
+/// How long a waiting message being taken back, or a session being made,
+/// waits for the daemon before dent stops waiting.
+pub const DAEMON_WAIT: Duration = Duration::from_secs(30);
+/// How long a permission mode just asked for shows before the daemon's
+/// answer.
+pub const ASKED_WAIT: Duration = Duration::from_secs(3);
 
 /// Where the new-session page keeps its draft and files among the
 /// sessions' (in `drafts` and the prefs).
@@ -874,6 +883,8 @@ pub struct Dent {
     /// A scripted walkthrough, when running one.
     pub walk: Option<crate::walk::Walk>,
     pub last_frame: Instant,
+    /// When `tick_due` last looked.
+    last_tick: Instant,
 }
 
 impl Dent {
@@ -1338,6 +1349,7 @@ impl Dent {
             restores: Vec::new(),
             walk: None,
             last_frame: Instant::now(),
+            last_tick: Instant::now(),
         };
         this.mdv = crate::markdown::Md::new(this.probes.clone());
         for input in this.fields() {
@@ -2370,7 +2382,7 @@ impl Dent {
         let stale: Vec<String> = self
             .taking_back
             .iter()
-            .filter(|(_, tb)| tb.at.elapsed() >= Duration::from_secs(30))
+            .filter(|(_, tb)| tb.at.elapsed() >= DAEMON_WAIT)
             .map(|(id, _)| id.clone())
             .collect();
         for id in stale {
@@ -2882,6 +2894,10 @@ impl Dent {
             && self.palette.is_none()
             && let Some(f @ (Field::Composer | Field::Starter)) = field
         {
+            // Pictures and files first, in the same order as ⌘V.
+            if self.paste_attachment(window, cx) {
+                return true;
+            }
             if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
                 self.field_entity(f).clone().update(cx, |c, cx| {
                     c.replace(text, window, cx);
@@ -2889,7 +2905,7 @@ impl Dent {
                 });
                 return true;
             }
-            return self.paste_attachment(window, cx);
+            return false;
         }
         // ⌘V with a picture or files on the clipboard attaches them.
         if k.key == "v"
@@ -3546,15 +3562,17 @@ impl Dent {
             return false;
         }
         let name = name.to_string();
-        // ↑ brings it back like anything else you sent here.
+        // ↑ brings it back like anything else you sent here, in order
+        // among them: stamped on the daemon's clock (just after its last
+        // event), which is what your sent messages carry, not this
+        // machine's. Only the latest few are kept.
         if let Some(id) = self.selected.clone() {
-            let at = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as u64);
-            self.ran_own
-                .entry(id)
-                .or_default()
-                .push((at, text.to_string()));
+            let at = self.session(&id).map_or(0, |s| s.updated + 1);
+            let mine = self.ran_own.entry(id).or_default();
+            mine.push((at, text.to_string()));
+            if mine.len() > 50 {
+                mine.remove(0);
+            }
         }
         self.prompt()
             .clone()
@@ -3987,13 +4005,8 @@ impl Dent {
         self.drafts.remove(&id);
         self.recall = None;
         d.place = self.box_place.take().filter(|_| !steer);
+        // Send wakes up again when the pause ends (see `deadlines`).
         self.just_sent = Some(Instant::now());
-        // Send wakes up again when the pause ends, whatever else happens.
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(JUST_SENT).await;
-            let _ = this.update(cx, |_, cx| cx.notify());
-        })
-        .detach();
         // Typing while it asks a question answers it; while it asks to run
         // something, the text is the reason for denying; on a plan, it's
         // what to change. That's Return's (and the send button's): ⌘↩ only
@@ -4126,7 +4139,7 @@ impl Dent {
             || self
                 .sent_at
                 .as_ref()
-                .is_some_and(|(s, _, at)| s == id && at.elapsed() < Duration::from_secs(3))
+                .is_some_and(|(s, _, at)| s == id && at.elapsed() < STOPPABLE)
     }
 
     pub fn stop(&mut self, id: &str, by: &str, _window: &mut Window, cx: &mut Context<Self>) {
@@ -4181,7 +4194,7 @@ impl Dent {
     /// last few seconds, so a double-click doesn't do it twice.
     /// A new session is on its way (asked for in the last 30 seconds).
     pub fn creating(&self) -> bool {
-        self.creating && self.creating_at.elapsed() < Duration::from_secs(30)
+        self.creating && self.creating_at.elapsed() < DAEMON_WAIT
     }
 
     pub fn pressed_again(&mut self, key: String) -> bool {
@@ -5157,19 +5170,15 @@ impl Dent {
     pub fn permission_shown(&self, s: &Session) -> Permission {
         self.asked_permission
             .as_ref()
-            .filter(|(id, _, at)| *id == s.id && at.elapsed() < Duration::from_secs(3))
+            .filter(|(id, _, at)| *id == s.id && at.elapsed() < ASKED_WAIT)
             .map_or(s.permission, |(_, p, _)| *p)
     }
 
     pub fn set_permission(&mut self, p: Permission, cx: &mut Context<Self>) {
         if let Some(id) = self.selected.clone() {
+            // A refusal shows once the wait is over (see `deadlines`): the
+            // chip goes back.
             self.asked_permission = Some((id.clone(), p, Instant::now()));
-            // A refusal shows once the wait is over: the chip goes back.
-            cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(Duration::from_secs(3)).await;
-                let _ = this.update(cx, |_, cx| cx.notify());
-            })
-            .detach();
             self.live.send(Request::SetPermission {
                 session: id,
                 permission: p,
@@ -6072,7 +6081,32 @@ impl Dent {
 
     /// Whether the next tick needs a frame. Nothing on screen moving means
     /// nothing is drawn.
+    /// When each timed state that changes what shows ends: one list, so
+    /// the window wakes for every one of them (`tick_due`), not only those
+    /// that remembered to set a timer.
+    fn deadlines(&self) -> Vec<Instant> {
+        let mut d = Vec::new();
+        d.extend(self.just_sent.map(|at| at + JUST_SENT));
+        d.extend(self.sent_at.as_ref().map(|(_, _, at)| *at + STOPPABLE));
+        d.extend(
+            self.asked_permission
+                .as_ref()
+                .map(|(_, _, at)| *at + ASKED_WAIT),
+        );
+        d.extend(self.taking_back.values().map(|tb| tb.at + DAEMON_WAIT));
+        if self.creating {
+            d.push(self.creating_at + DAEMON_WAIT);
+        }
+        d
+    }
+
     pub fn tick_due(&mut self) -> bool {
+        let now = Instant::now();
+        let since = std::mem::replace(&mut self.last_tick, now);
+        let ended = self
+            .deadlines()
+            .iter()
+            .any(|end| *end > since && *end <= now);
         let page = self.preview.as_ref().is_some_and(|p| {
             let p = p.borrow();
             let owed = p.tick();
@@ -6105,6 +6139,7 @@ impl Dent {
         // Once a second, whether the file you opened in the viewer changed.
         let disk = new_second && self.opened_changed();
         let due = page
+            || ended
             || toast_expired
             || copied
             || (working_shown && new_second)

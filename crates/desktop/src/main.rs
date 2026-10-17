@@ -251,7 +251,7 @@ impl Render for Dent {
             .filter(|_| self.panel_open);
         let field = self.field_focused(window, cx);
         if field == Some(app::Field::Aside) && shown != Some(Tab::Aside)
-            || field == Some(app::Field::Comment) && !self.panel_open
+            || field == Some(app::Field::Comment) && shown != Some(Tab::Changes)
             || self.term_focus.is_focused(window) && shown != Some(Tab::Terminal)
         {
             let prompt = self.prompt().clone();
