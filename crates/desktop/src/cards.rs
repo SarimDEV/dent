@@ -572,6 +572,7 @@ impl Dent {
                     Shape::Markdown | Shape::Columns => {
                         let blocks = self.markdown(&as_markdown(&src));
                         let mut r = markdown::R {
+                            counted: true,
                             md: self.mdv.clone(),
                             owner: cx.entity_id(),
                             window,

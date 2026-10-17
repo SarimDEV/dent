@@ -1467,6 +1467,7 @@ impl Dent {
                     }
                     _ => {
                         let mut r = markdown::R {
+                            counted: true,
                             md: self.mdv.clone(),
                             owner: cx.entity_id(),
                             window,
@@ -1930,6 +1931,7 @@ impl Dent {
                 let (shown, long) = plan_shown(plan, open);
                 let blocks = self.markdown(&shown);
                 let mut r = markdown::R {
+                    counted: true,
                     md: self.mdv.clone(),
                     owner: cx.entity_id(),
                     window,
@@ -4431,6 +4433,7 @@ impl Dent {
             cx.notify();
         });
         let mut r = markdown::R {
+            counted: true,
             md: self.mdv.clone(),
             owner: cx.entity_id(),
             window,

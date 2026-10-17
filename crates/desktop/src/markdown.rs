@@ -1084,6 +1084,11 @@ pub struct R<'a> {
     /// The folder relative links and pictures are found from: the
     /// document's own, or the session's.
     pub base: Option<std::path::PathBuf>,
+    /// Find counts these blocks from their words, before they're laid out
+    /// (the chat): a long table's rows past the tenth aren't counted, so
+    /// they're not tinted either. Elsewhere (documents, side chat) Find
+    /// counts what's laid out, every row it reaches.
+    pub counted: bool,
 }
 
 thread_local! {
@@ -2260,6 +2265,7 @@ fn list_for(md: &Md, key: &str, n: usize) -> ListState {
 /// a footer giving the row count. Wider than the column, it scrolls sideways.
 fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement {
     let data = table_data(table, key, &r.md, r.window);
+    let counted = r.counted;
     let n = table.rows.len();
     // The header copies with the block's lead; each row on a line of its own.
     let head_lead = crate::select::take_lead().to_string();
@@ -2305,7 +2311,7 @@ fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement
                     // Find counts the rows shown before scrolling; those
                     // past them aren't tinted either, so its numbering
                     // stays true.
-                    let _quiet = (ix >= TABLE_ROWS).then(crate::select::unsearched);
+                    let _quiet = (counted && ix >= TABLE_ROWS).then(crate::select::unsearched);
                     row(
                         &format!("{k}/r{ix}"),
                         &pre,
