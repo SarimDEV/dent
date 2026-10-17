@@ -180,7 +180,11 @@ fn commit_point(tail: &str) -> Option<usize> {
     let mut depth = 0usize;
     // The last two top-level blocks' starts.
     let (mut prev, mut last) = (None, None);
+    // A top-level block starts its line: an indented code block's own
+    // range starts after its indent, and a cut there would leave the
+    // indent behind and make the code a paragraph.
     let mut start = |at: usize| {
+        let at = tail[..at].rfind('\n').map_or(0, |n| n + 1);
         if last != Some(at) {
             prev = last;
             last = Some(at);
@@ -744,37 +748,87 @@ mod tests {
         }
     }
 
-    /// Streamed a character at a time, every prefix parses without a panic,
-    /// finished blocks never change, and the end matches the plain parse.
+    /// A block, written out whole: kind, words, and what's inside, so two
+    /// parses compare block by block.
+    fn sig(b: &Block) -> String {
+        let all = |bs: &[Block]| bs.iter().map(sig).collect::<Vec<_>>().join("|");
+        match b {
+            Block::Heading(l, i) => format!("h{l}({})", i.text),
+            Block::Para(i) => format!("p({})", i.text),
+            Block::List(items) => format!(
+                "list[{}]",
+                items
+                    .iter()
+                    .map(|it| format!("{:?}{:?}:{}", it.number, it.task, all(&it.blocks)))
+                    .collect::<Vec<_>>()
+                    .join(";")
+            ),
+            Block::Quote(c, bs) => format!("quote{c:?}[{}]", all(bs)),
+            Block::Image(a, b) => format!("img({a},{b})"),
+            Block::Code(l, c, closed) => format!("code({l},{c},{closed})"),
+            Block::Math(m, closed) => format!("math({m},{closed})"),
+            Block::Diagram(d, closed) => format!("diagram({d},{closed})"),
+            Block::Table(t) => format!("table({})", t.markdown()),
+            Block::Rule => "rule".into(),
+        }
+    }
+
+    /// Replies with what streaming gets wrong if anything does: lists that
+    /// go on after a gap, fences, tables growing a row at a time, quotes
+    /// and callouts, maths and diagrams, HTML, a footnote and a link
+    /// definition read after their use.
+    const CORPUS: &[&str] = &[
+        "# Plan\n\nFirst **bold** and *it* with `code` and [a link](https://x.y).\n\n\
+         1. one\n2. two\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n\
+         ```rust\nfn main() {}\n```\n\n> quoted **text**\n\nLast line.",
+        "Intro.\n\n1. one\n\n2. two after a gap\n   - nested\n   - more\n\n3. three\n\nAfter.",
+        "- [ ] todo\n- [x] done\n\n* other\n\n---\n\n## Next\n\ntext",
+        "Code:\n\n```python\ndef f():\n    return 1\n\n\nprint(f())\n```\n\n~~~\ntilde\n~~~\n\n    indented\n    code\n\nend",
+        "> [!NOTE]\n> a callout\n> over lines\n\n> plain\n>\n> two paras\n\nout",
+        "| x | y | z |\n|:--|:-:|--:|\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |\n| 7 | 8 | 9 |\n\nunder",
+        "Maths $a+b$ inline.\n\n$$\n\\frac{1}{2}\n$$\n\n```math\nx^2\n```\n\n```mermaid\ngraph TD; A-->B\n```\n\ndone",
+        "<details>\n<summary>more</summary>\n\nhidden\n\n</details>\n\nvisible",
+        "See [the docs][d] and a note[^1].\n\nMore text.\n\n[d]: https://d.example\n\n[^1]: The note.",
+        "Unclosed at the end:\n\n```sh\necho hi\n",
+    ];
+
+    /// Every reply above, streamed a character at a time: every prefix
+    /// parses without a panic, blocks once finished never change (except
+    /// when a link or footnote definition arrives, which reads the finished
+    /// part again, by design), and the end matches the plain parse block by
+    /// block. Decision 0013 rests on this.
     #[test]
     fn streaming_ends_where_parsing_does() {
-        let doc = "# Plan\n\nFirst **bold** and *it* with `code` and [a link](https://x.y).\n\n\
-                   1. one\n2. two\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n\
-                   ```rust\nfn main() {}\n```\n\n> quoted **text**\n\nLast line.";
-        let mut s = Stream::default();
-        let mut prev_committed = 0;
-        for (i, _) in doc.char_indices().skip(1) {
-            let _ = s.update(&doc[..i]);
-            assert!(s.committed.len() >= prev_committed);
-            prev_committed = s.committed.len();
+        for doc in CORPUS {
+            let mut s = Stream::default();
+            let mut finished: Vec<String> = Vec::new();
+            let mut kept = 0;
+            for (i, _) in doc.char_indices().skip(1) {
+                let defs = s.defs.len();
+                let _ = s.update(&doc[..i]);
+                let now: Vec<String> = s.committed.iter().map(sig).collect();
+                if s.defs.len() == defs {
+                    assert!(
+                        now.len() >= finished.len(),
+                        "{doc:?} at {i}: blocks un-finished"
+                    );
+                    assert_eq!(
+                        &now[..finished.len()],
+                        &finished[..],
+                        "{doc:?} at {i}: a finished block changed"
+                    );
+                }
+                kept = kept.max(now.len());
+                finished = now;
+            }
+            let streamed: Vec<String> = s.update(doc).iter().map(sig).collect();
+            let whole: Vec<String> = parse(doc).iter().map(sig).collect();
+            assert_eq!(streamed, whole, "{doc:?}");
+            // The first, of separate blocks, keeps most as it goes.
+            if std::ptr::eq(doc, &CORPUS[0]) {
+                assert!(kept > 3, "finished blocks were kept");
+            }
         }
-        let streamed = s.update(doc);
-        let whole = parse(doc);
-        let shape = |b: &[Block]| -> Vec<String> {
-            b.iter()
-                .map(|b| match b {
-                    Block::Heading(l, i) => format!("h{l}:{}", i.text),
-                    Block::Para(i) => format!("p:{}", i.text),
-                    Block::List(items) => format!("list:{}", items.len()),
-                    Block::Quote(_, b) => format!("quote:{}", b.len()),
-                    Block::Code(l, c, closed) => format!("code:{l}:{c}:{closed}"),
-                    Block::Table(t) => format!("table:{}", t.rows.len()),
-                    _ => "other".into(),
-                })
-                .collect()
-        };
-        assert_eq!(shape(&streamed), shape(&whole));
-        assert!(prev_committed > 3, "finished blocks were kept");
     }
 
     /// While a long line is being typed, the blocks before the one above it
