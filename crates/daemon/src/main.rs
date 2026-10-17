@@ -13,6 +13,7 @@ mod check;
 mod claude;
 mod daemon;
 mod env;
+mod escapes;
 mod git;
 mod holder;
 mod login;

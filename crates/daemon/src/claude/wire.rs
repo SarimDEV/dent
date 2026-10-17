@@ -666,7 +666,8 @@ pub fn keep(text: String, report: bool) -> String {
 }
 
 /// Where the kept start ends: after the last line break before `at` if
-/// one is near, else at a character boundary outside any escape sequence.
+/// one is near, else at a character boundary outside any escape sequence
+/// (before the one it falls in).
 fn cut_back(text: &str, at: usize) -> usize {
     let mut end = at;
     while !text.is_char_boundary(end) {
@@ -677,21 +678,13 @@ fn cut_back(text: &str, at: usize) -> usize {
     {
         return nl + 1;
     }
-    // Not inside an escape sequence: one starts at the last ESC unless a
-    // final byte closes it before the cut.
-    if let Some(esc) = text[..end].rfind('\x1b')
-        && !text[esc + 1..end]
-            .bytes()
-            .skip(1)
-            .any(|b| (0x40..=0x7e).contains(&b))
-    {
-        return esc;
-    }
-    end
+    crate::escapes::around(text, end).map_or(end, |r| r.start)
 }
 
 /// Where the kept end starts: after the first line break from `at` if one
-/// is near, else at the next character boundary.
+/// is near, else at the next character boundary outside any escape
+/// sequence (after the one it falls in), so the tail never starts inside
+/// a colour code.
 fn cut_forward(text: &str, at: usize) -> usize {
     let mut start = at;
     while !text.is_char_boundary(start) {
@@ -699,7 +692,7 @@ fn cut_forward(text: &str, at: usize) -> usize {
     }
     match text[start..].find('\n') {
         Some(nl) if nl < 2048 => start + nl + 1,
-        _ => start,
+        _ => crate::escapes::around(text, start).map_or(start, |r| r.end),
     }
 }
 
@@ -1110,6 +1103,22 @@ mod tests {
         );
         let parsed_ok = |s: &str| !s.contains("\x1b[3\n") && !s.contains("\x1b\n");
         assert!(parsed_ok(&out));
+        // The tail side too: it starts at an escape or between them, never
+        // inside one, whatever the offset the cut first lands on.
+        for pad in 0..12 {
+            let coloured = format!(
+                "{}{}",
+                "x".repeat(pad),
+                "\x1b[38;2;255;0;0mred ".repeat(HEAD)
+            );
+            let out = keep(coloured, false);
+            let (_, tail) = out.split_once("not kept …\n").unwrap();
+            assert!(
+                tail.starts_with('\x1b') || tail.starts_with("red") || tail.starts_with(' '),
+                "{pad}: {:?}",
+                &tail[..12]
+            );
+        }
     }
 
     #[test]

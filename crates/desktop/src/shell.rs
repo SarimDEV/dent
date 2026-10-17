@@ -381,6 +381,9 @@ pub fn rgb_of(c: Rgb) -> Hsla {
     rgb((u32::from(c.r) << 16) | (u32::from(c.g) << 8) | u32::from(c.b)).into()
 }
 
+/// How faint dim text draws, here and in a call's output in the chat.
+pub const DIM: f32 = 0.66;
+
 /// The 256-colour palette past the first 16: a 6×6×6 cube, then greys.
 pub fn indexed(t: &Theme, i: u8) -> Hsla {
     match i {
@@ -638,7 +641,7 @@ impl Dent {
                 bg = Some(was);
             }
             if cell.flags.contains(Flags::DIM) {
-                fg = fg.opacity(0.66);
+                fg = fg.opacity(DIM);
             }
             let at_cursor = focused
                 && mode.contains(TermMode::SHOW_CURSOR)

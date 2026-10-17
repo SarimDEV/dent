@@ -4740,10 +4740,8 @@ fn output_lines(
             if st.italic {
                 f.style = FontStyle::Italic;
             }
+            // Coloured as the terminal tab colours the same output.
             color = match st.fg {
-                // Grey is a program saying "less important": a step below
-                // the output's own quiet ink, as dim is.
-                Some(crate::ansi::Colour::Indexed(8)) => t.faint,
                 Some(crate::ansi::Colour::Indexed(i)) => crate::shell::indexed(t, i),
                 Some(crate::ansi::Colour::Rgb(r, g, b)) => {
                     gpui_kit::rgb((u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)).into()
@@ -4751,11 +4749,7 @@ fn output_lines(
                 None => ink,
             };
             if st.dim {
-                color = if st.fg.is_none() {
-                    t.faint
-                } else {
-                    color.opacity(0.6)
-                };
+                color = color.opacity(crate::shell::DIM);
             }
         }
         TextRun {

@@ -535,21 +535,7 @@ fn without_image_marks(t: &str) -> String {
 
 /// Text without terminal colour codes.
 fn strip_ansi(s: &str) -> String {
-    let mut out = String::new();
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            // ESC [ ... letter
-            for c in chars.by_ref() {
-                if c.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out.trim().to_string()
+    crate::escapes::strip(s).trim().to_string()
 }
 
 fn between<'a>(t: &'a str, open: &str, close: &str) -> Option<&'a str> {

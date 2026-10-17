@@ -1,4 +1,5 @@
-//! Terminal output in the chat: colour codes become styles, other escape
+//! Terminal output in the chat: colour codes become styles (read by the
+//! terminal tab's own parser, and coloured as it colours them), other escape
 //! sequences go, and a carriage return overwrites its line as a terminal
 //! would (progress bars end as their last state). Long output is clipped
 //! by lines and by characters, so one huge line can't stall a frame.
@@ -22,124 +23,88 @@ pub struct Sgr {
     pub underline: bool,
 }
 
-/// `s` as plain text, with the style of each stretch that has one.
+/// `s` as plain text, with the style of each stretch that has one. The
+/// escapes are read by the same parser the terminal tab uses (vte, through
+/// alacritty_terminal): only colours and text styles are kept.
 pub fn parse(s: &str) -> (String, Vec<(Range<usize>, Sgr)>) {
-    let mut out = String::with_capacity(s.len());
-    let mut spans: Vec<(Range<usize>, Sgr)> = Vec::new();
-    let mut cur = Sgr::default();
-    // Where the line being written starts, for a carriage return.
-    let mut line = 0;
-    let mut chars = s.char_indices().peekable();
-    // Where the plain text not yet copied out starts.
-    let mut plain_from = None::<usize>;
-    // Copy the plain text before `to` out, in the current style.
-    macro_rules! flush {
-        ($to:expr) => {
-            if let Some(f) = plain_from.take() {
-                let text = &s[f..$to];
-                let at = out.len();
-                out.push_str(text);
-                if cur != Sgr::default() {
-                    match spans.last_mut() {
-                        Some((r, st)) if r.end == at && *st == cur => r.end = out.len(),
-                        _ => spans.push((at..out.len(), cur)),
-                    }
-                }
-            }
-        };
-    }
-    while let Some((i, c)) = chars.next() {
-        match c {
-            '\x1b' => {
-                flush!(i);
-                match chars.peek().map(|&(_, c)| c) {
-                    // CSI: parameters, then a final byte. Something that
-                    // can't be in one (a cut-off sequence) ends it, and shows.
-                    Some('[') => {
-                        chars.next();
-                        let mut params = String::new();
-                        let mut fin = None;
-                        while let Some(&(j, c)) = chars.peek() {
-                            if ('\x40'..='\x7e').contains(&c) {
-                                chars.next();
-                                fin = Some(c);
-                                break;
-                            }
-                            if !('\x20'..='\x3f').contains(&c) {
-                                plain_from = Some(j);
-                                break;
-                            }
-                            chars.next();
-                            params.push(c);
-                        }
-                        // A private mode (`ESC[>4;2m`) isn't a style.
-                        if fin == Some('m') && !params.starts_with(['<', '=', '>', '?']) {
-                            sgr(&params, &mut cur);
-                        }
-                    }
-                    // OSC (titles, links): up to BEL or ST.
-                    Some(']') => {
-                        chars.next();
-                        while let Some((_, c)) = chars.next() {
-                            if c == '\x07' {
-                                break;
-                            }
-                            if c == '\x1b' {
-                                if chars.peek().map(|&(_, c)| c) == Some('\\') {
-                                    chars.next();
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    // Charset choices and the like take one more byte.
-                    Some('(' | ')' | '*' | '+') => {
-                        chars.next();
-                        if chars.peek().is_some_and(|&(_, c)| c != '\n') {
-                            chars.next();
-                        }
-                    }
-                    // A stray ESC before a line break leaves the break.
-                    Some('\n' | '\r') => {}
-                    Some(_) => {
-                        chars.next();
-                    }
-                    None => {}
-                }
-            }
-            // A line end, however many returns come before it (a PTY's
-            // `\r\r\n`), is just a line end.
-            '\r' if s[i..].trim_start_matches('\r').starts_with('\n') => {
-                flush!(i);
-            }
-            // Back to the start of the line: what follows overwrites it.
-            '\r' => {
-                flush!(i);
-                // Only when something follows on this line.
-                if chars.peek().is_some_and(|&(_, c)| c != '\n') {
-                    out.truncate(line);
-                    spans.retain_mut(|(r, _)| {
-                        r.end = r.end.min(line);
-                        r.start < r.end
-                    });
-                }
-            }
-            '\n' => {
-                flush!(i);
-                out.push('\n');
-                line = out.len();
-            }
-            // Other control characters (bell, backspace) draw nothing.
-            c if c.is_control() && c != '\t' => {
-                flush!(i);
-            }
-            _ => {
-                plain_from.get_or_insert(i);
+    use alacritty_terminal::vte;
+    let mut p = Plain {
+        out: String::with_capacity(s.len()),
+        spans: Vec::new(),
+        cur: Sgr::default(),
+        line: 0,
+        cr: false,
+    };
+    vte::Parser::new().advance(&mut p, s.as_bytes());
+    (p.out, p.spans)
+}
+
+/// What [`parse`] builds as the parser reads.
+struct Plain {
+    out: String,
+    spans: Vec<(Range<usize>, Sgr)>,
+    cur: Sgr,
+    /// Where the line being written starts, for a carriage return.
+    line: usize,
+    /// A carriage return came: what's printed next overwrites the line
+    /// (a line end first makes it just a line end, as a PTY's `\r\r\n`).
+    cr: bool,
+}
+
+impl Plain {
+    fn push(&mut self, c: char) {
+        if std::mem::take(&mut self.cr) {
+            let line = self.line;
+            self.out.truncate(line);
+            self.spans.retain_mut(|(r, _)| {
+                r.end = r.end.min(line);
+                r.start < r.end
+            });
+        }
+        let at = self.out.len();
+        self.out.push(c);
+        if self.cur != Sgr::default() {
+            match self.spans.last_mut() {
+                Some((r, st)) if r.end == at && *st == self.cur => r.end = self.out.len(),
+                _ => self.spans.push((at..self.out.len(), self.cur)),
             }
         }
     }
-    flush!(s.len());
-    (out, spans)
+}
+
+impl alacritty_terminal::vte::Perform for Plain {
+    fn print(&mut self, c: char) {
+        self.push(c);
+    }
+
+    fn execute(&mut self, byte: u8) {
+        match byte {
+            b'\n' => {
+                self.cr = false;
+                self.out.push('\n');
+                self.line = self.out.len();
+            }
+            // Back to the start of the line: what follows overwrites it.
+            b'\r' => self.cr = true,
+            b'\t' => self.push('\t'),
+            // Other control characters (bell, backspace) draw nothing.
+            _ => {}
+        }
+    }
+
+    fn csi_dispatch(
+        &mut self,
+        params: &alacritty_terminal::vte::Params,
+        intermediates: &[u8],
+        ignore: bool,
+        action: char,
+    ) {
+        // A private mode (`ESC[>4;2m`, keyboard modes) isn't a style.
+        if action == 'm' && intermediates.is_empty() && !ignore {
+            let groups: Vec<Vec<u16>> = params.iter().map(<[u16]>::to_vec).collect();
+            sgr(&groups, &mut self.cur);
+        }
+    }
 }
 
 /// Plain text and its styles.
@@ -164,23 +129,20 @@ pub fn parsed(s: &str) -> Parsed {
     p
 }
 
-/// Apply one SGR sequence's parameters to `st`. Parameters are split by
-/// `;`; a parameter's own sub-parameters follow it after `:` (`4:3`, a
-/// curly underline; `38:2::255:0:0`, a colour).
-fn sgr(params: &str, st: &mut Sgr) {
-    let groups: Vec<Vec<u16>> = if params.is_empty() {
-        vec![vec![0]]
-    } else {
-        params
-            .split(';')
-            .map(|g| g.split(':').map(|p| p.parse().unwrap_or(0)).collect())
-            .collect()
-    };
+/// Apply one SGR sequence's parameters to `st`: each parameter with its
+/// own sub-parameters, those after `:` (`4:3`, a curly underline;
+/// `38:2::255:0:0`, a colour).
+fn sgr(groups: &[Vec<u16>], st: &mut Sgr) {
+    let reset = [vec![0]];
+    let groups: &[Vec<u16>] = if groups.is_empty() { &reset } else { groups };
     // The flat list, for the `38;5;n` and `38;2;r;g;b` forms.
-    let nums: Vec<u16> = groups.iter().map(|g| g[0]).collect();
+    let nums: Vec<u16> = groups
+        .iter()
+        .map(|g| g.first().copied().unwrap_or(0))
+        .collect();
     let mut i = 0;
     while i < groups.len() {
-        let sub = &groups[i][1..];
+        let sub = groups[i].get(1..).unwrap_or(&[]);
         match nums[i] {
             0 => *st = Sgr::default(),
             1 => st.bold = true,
@@ -238,8 +200,10 @@ fn colour(sub: &[u16]) -> Option<Colour> {
 pub const LINES: usize = 60;
 /// …each up to this many characters…
 pub const LINE_CHARS: usize = 300;
-/// …and this many in all. Shown whole, lines and the whole are still held
-/// to these, so one enormous output can't stall the chat.
+/// …and this many in all. Shown whole, a line is still held to
+/// `ALL_LINE_CHARS` (cut with `…`; Copy still takes it whole), so one
+/// enormous line can't stall the chat. `ALL_CHARS` is a guard only: the
+/// daemon keeps at most 64 KB of any output.
 pub const ALL_LINE_CHARS: usize = 20_000;
 pub const ALL_CHARS: usize = 200_000;
 
@@ -325,11 +289,12 @@ mod tests {
     fn edge_cases_from_real_output() {
         // A PTY's \r\r\n is one line end, not an overwrite.
         assert_eq!(parse("hello\r\r\nnext").0, "hello\nnext");
-        // A stray ESC before a line break doesn't join the lines.
-        assert_eq!(parse("a\x1b\nb").0, "a\nb");
-        // A sequence cut off by something that can't be in one ends there:
-        // what cut it shows.
-        assert_eq!(parse("x\x1b[3…").0, "x…");
+        // A stray ESC before a line break doesn't join the lines (what
+        // the ESC takes as its final byte goes, as in the terminal tab).
+        assert_eq!(parse("a\x1b\nb\nc").0, "a\n\nc");
+        // A sequence cut off by something that can't be in one is dropped
+        // as a terminal drops it, and what follows shows.
+        assert_eq!(parse("x\x1b[3…\x1b[0mok").0, "xok");
         // Colon sub-parameters belong to their parameter: a curly
         // underline isn't italic, and colon truecolour keeps its colour.
         let (_, spans) = parse("\x1b[4:3mx");
