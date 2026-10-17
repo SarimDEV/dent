@@ -3117,19 +3117,6 @@ impl Dent {
         {
             return true;
         }
-        // ⌥↑ in the empty reply box brings back the newest waiting message
-        // to edit, keeping its place in the queue.
-        if k.modifiers.alt
-            && !k.modifiers.platform
-            && !k.modifiers.shift
-            && k.key == "up"
-            && in_composer
-            && self.composer.read(cx).value().is_empty()
-            && self.attachments.is_empty()
-            && self.edit_last_queued(cx)
-        {
-            return true;
-        }
         // Alt+Up and Alt+Down move between your own messages, while the
         // composer has nothing to edit.
         if k.modifiers.alt
@@ -4743,8 +4730,8 @@ impl Dent {
         cx.notify();
     }
 
-    /// ⌥↑ in the empty reply box: the newest waiting message comes back to
-    /// edit, keeping its place. True if there was one.
+    /// The newest waiting message comes back to the box to edit, keeping
+    /// its place, as its Edit does. True if there was one.
     pub fn edit_last_queued(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(s) = self.current_rc() else {
             return false;
