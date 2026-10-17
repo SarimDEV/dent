@@ -37,7 +37,6 @@ pub const SHEET: &[(&str, &[(&str, &str)])] = &[
             ("Bring back what you sent", "↑"),
             ("Cycle the permission mode", "⇧ Tab"),
             ("Answer a waiting card", "Esc, then 1–4"),
-            ("Deny with the note typed", "⌘ ↩"),
         ],
     ),
     (

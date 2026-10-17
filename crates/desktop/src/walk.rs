@@ -4919,7 +4919,8 @@ fn composing() -> Vec<(f32, Act)> {
             ),
         ),
     ]);
-    // While an approval waits, words in the box are a note, sent with ⌘↩.
+    // While an approval waits, Return sends what's typed as the reason for
+    // denying (main's rule), and Esc with words typed keeps the keyboard.
     fn asks(d: &Dent) -> bool {
         has(d, |i| matches!(i, Item::Approval { .. })) && status_is(d, Status::Needs)
     }
@@ -4927,33 +4928,20 @@ fn composing() -> Vec<(f32, Act)> {
     v.extend([
         (0.1, Until("an approval waits", |d, _| asks(d), 10.)),
         (0.4, Type(Field::Composer, "not that one")),
-        (0.1, Key("enter")),
-        (
-            0.2,
-            Until(
-                "Return with a note doesn't deny: the approval waits, the note stays, the box says ⌘↩ sends it",
-                |d, cx| {
-                    asks(d) && composer_is(d, cx, "not that one") && drawn(d, "deny-hint").is_some()
-                },
-                2.,
-            ),
-        ),
-        (0.3, Shot("deny-hint")),
         (0.1, Key("escape")),
         (
             0.1,
             Until(
-                "Esc goes to the card even with words typed, and keeps them",
-                |d, cx| d.ask_keyed && composer_is(d, cx, "not that one"),
+                "Esc with words typed keeps the keyboard in the box",
+                |d, cx| !d.ask_keyed && d.composer_keyed && composer_is(d, cx, "not that one"),
                 1.,
             ),
         ),
-        (0.1, Type(Field::Composer, "not that one")),
-        (0.1, Key("cmd-enter")),
+        (0.1, Key("enter")),
         (
             0.1,
             Until(
-                "⌘↩ denies with the note",
+                "Return denies with what's typed as the reason",
                 |d, _| {
                     status_is(d, Status::Done)
                         && current(d).is_some_and(|s| {

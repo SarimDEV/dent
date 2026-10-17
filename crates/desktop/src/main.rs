@@ -221,12 +221,8 @@ impl Render for Dent {
                     Some("Pick one above")
                 }
                 data::Item::Question { .. } => Some("Type your own answer, or pick one above"),
-                data::Item::Plan { .. } => {
-                    Some("What to change in the plan, sent with ⌘ ↩ · Esc for the card")
-                }
-                data::Item::Approval { .. } => {
-                    Some("A note to deny with, sent with ⌘ ↩ · Esc for the card")
-                }
+                data::Item::Plan { .. } => Some("What to change in the plan (optional)"),
+                data::Item::Approval { .. } => Some("Reason for denying (optional)"),
                 _ => None,
             })
         });
@@ -613,16 +609,6 @@ impl Render for Dent {
                     // Esc in the reply box stops a running turn, like ⌘.; a
                     // draft stays where it is. A waiting card still takes Esc.
                     this.stop(&id, "Esc", window, cx);
-                } else if this.field_focused(window, cx) == Some(app::Field::Composer)
-                    && this
-                        .selected
-                        .clone()
-                        .is_some_and(|id| this.open_ask(&id).is_some())
-                {
-                    // With a question, approval or plan waiting, Esc from the
-                    // box goes to its card, where keys answer it; what's
-                    // typed stays (4 denies with it as the note).
-                    window.focus(&this.ask_focus, cx);
                 } else if this
                     .field_focused(window, cx)
                     .is_some_and(|f| matches!(f, app::Field::Composer | app::Field::Starter))
@@ -630,6 +616,15 @@ impl Render for Dent {
                 {
                     // A draft keeps the keyboard: Esc doesn't throw you out of
                     // it, in a session or a new one.
+                } else if this.field_focused(window, cx) == Some(app::Field::Composer)
+                    && this
+                        .selected
+                        .clone()
+                        .is_some_and(|id| this.open_ask(&id).is_some())
+                {
+                    // With a question, approval or plan waiting, Esc from the
+                    // empty box goes to its card, where keys answer it.
+                    window.focus(&this.ask_focus, cx);
                 } else {
                     this.focus_inbox(window, cx);
                 }
