@@ -133,8 +133,9 @@ pub fn title_argv(claude: &str, path: &str, conversation: &str) -> Vec<String> {
     v.extend([
         "-p".into(),
         format!(
-            "Title this conversation between a person and a coding agent in 3 to 6 words, \
-             sentence case, no quotes and no full stop. Reply with the title only.\n\n{conversation}"
+            "Title this conversation between a person and a coding agent. The title is at most \
+             5 words, like a short task name (\"Fix the footer on mobile\"), sentence case, with no \
+             colon, quotes or full stop. Reply with the title only.\n\n{conversation}"
         ),
     ]);
     v

@@ -1025,7 +1025,14 @@ fn clean_title(answer: &str) -> String {
         .trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '*' | '“' | '”'))
         .trim_end_matches('.')
         .trim();
-    title(t)
+    // A title with a subtitle keeps the title.
+    let t = match t.split_once([':', '—']) {
+        Some((head, _)) if head.split_whitespace().count() >= 2 => head.trim(),
+        _ => t,
+    };
+    // Past eight words it's a sentence, not a title.
+    let words: Vec<&str> = t.split_whitespace().collect();
+    title(&words[..words.len().min(8)].join(" "))
 }
 
 /// Set once every session older than seen marks has one.
@@ -1196,5 +1203,9 @@ mod tests {
             "Cache with Redis"
         );
         assert_eq!(super::clean_title("# Landing page"), "Landing page");
+        assert_eq!(
+            super::clean_title("Checking the hero on mobile: the screenshot and more"),
+            "Checking the hero on mobile"
+        );
     }
 }
