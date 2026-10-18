@@ -508,6 +508,7 @@ pub(super) fn find_viewer() -> Vec<(f32, Act)> {
                         && current(d).is_some_and(
                             |s| matches!(d.tab(s), Tab::Art(a) if a.ends_with("page.html")),
                         )
+                        && drawn(d, "preview").is_some()
                 },
                 10.,
             ),

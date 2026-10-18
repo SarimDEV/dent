@@ -31,6 +31,7 @@ mod failures;
 mod find;
 mod finish;
 mod keys;
+mod look;
 mod markdown;
 mod motion;
 mod narration;
@@ -49,9 +50,9 @@ mod view;
 mod visuals;
 use {
     ambient::*, attaching::*, changes::*, checks::*, common::*, composing::*, demo::*, edges::*,
-    failures::*, find::*, finish::*, keys::*, markdown::*, motion::*, narration::*, pickup::*,
-    pins::*, polish::*, queue::*, real::*, recall::*, reply::*, stills::*, sweep::*, switching::*,
-    typing::*, view::*, visuals::*,
+    failures::*, find::*, finish::*, keys::*, look::*, markdown::*, motion::*, narration::*,
+    pickup::*, pins::*, polish::*, queue::*, real::*, recall::*, reply::*, stills::*, sweep::*,
+    switching::*, typing::*, view::*, visuals::*,
 };
 
 type Pred = fn(&Dent, &App) -> bool;
@@ -180,6 +181,7 @@ type Scene = fn() -> Vec<(f32, Act)>;
 /// Join names with `+` to run several in one window (`find+keys`), so a
 /// change walks only the scenes it touched. `checks` is the full suite.
 const SCENES: &[(&str, &[Scene])] = &[
+    ("look", &[look]),
     ("typing", &[typing]),
     ("finish", &[finish]),
     ("pictures", &[pictures]),

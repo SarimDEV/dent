@@ -130,6 +130,7 @@ pub(super) fn narration() -> Vec<(f32, Act)> {
             |d, _| {
                 current(d)
                     .is_some_and(|s| s.detail.starts_with("Subagent: Survey the tests · Read"))
+                    && drawn(d, "working-line").is_some()
             },
             10.,
         ),

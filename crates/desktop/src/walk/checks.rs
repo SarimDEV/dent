@@ -790,7 +790,7 @@ pub(super) fn checks() -> Vec<(f32, Act)> {
                 |d, _| {
                     current(d).is_some_and(|s| {
                         s.todos.len() == 3 && s.todos.iter().any(|(st, ..)| st == "in_progress")
-                    })
+                    }) && plan_above_composer(d)
                 },
                 10.,
             ),

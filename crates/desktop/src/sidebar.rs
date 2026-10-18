@@ -81,6 +81,7 @@ impl Dent {
             .flex_none()
             .h_full()
             .relative()
+            .child(probe(&self.probes, "sidebar"))
             // Its right edge resizes it, as the viewer's left edge does.
             .child(
                 div()

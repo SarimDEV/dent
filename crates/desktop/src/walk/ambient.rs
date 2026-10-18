@@ -37,7 +37,11 @@ pub(super) fn breath() -> Vec<(f32, Act)> {
             Until(
                 "the session works, its square showing",
                 // With Reduce Motion it shows, still, and doesn't breathe.
-                |d, _| status_is(d, Status::Working) && (d.breathing() || crate::reduce_motion()),
+                |d, _| {
+                    status_is(d, Status::Working)
+                        && (d.breathing() || crate::reduce_motion())
+                        && drawn(d, "working-line").is_some()
+                },
                 10.,
             ),
         ),

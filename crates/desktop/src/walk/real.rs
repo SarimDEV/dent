@@ -93,11 +93,6 @@ pub(super) fn compare() -> Vec<(f32, Act)> {
         static ASKED: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
         static SETTLED: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
     }
-    fn theme(d: &mut Dent, dark: bool, w: &mut Window, cx: &mut Context<Dent>) {
-        d.forced_dark = Some(dark);
-        d.apply_theme(w, cx);
-        cx.notify();
-    }
     fn scroll(d: &mut Dent, at: fn(usize) -> usize, cx: &mut Context<Dent>) {
         let n = current(d).map_or(0, |s| s.items.len());
         d.transcript.scroll_to(ListOffset {
@@ -105,15 +100,6 @@ pub(super) fn compare() -> Vec<(f32, Act)> {
             offset_in_item: px(0.),
         });
         cx.notify();
-    }
-    fn both(v: &mut Vec<(f32, Act)>, name: &str) {
-        v.extend([
-            (0.0, Call(|d, w, cx| theme(d, false, w, cx))),
-            (0.35, Shot(leak(format!("{name}-light")))),
-            (0.2, Call(|d, w, cx| theme(d, true, w, cx))),
-            (0.35, Shot(leak(format!("{name}-dark")))),
-            (0.2, Call(|d, w, cx| theme(d, false, w, cx))),
-        ]);
     }
     fn pace(d: &mut Dent, _: &mut Window, _: &mut Context<Dent>) {
         let now = Instant::now();
@@ -150,7 +136,7 @@ pub(super) fn compare() -> Vec<(f32, Act)> {
         ];
         for (name, go) in stops {
             v.push((0.3, Call(go)));
-            both(&mut v, name);
+            both_themes(&mut v, name);
         }
         walk.steps.extend(v);
     }
@@ -172,7 +158,7 @@ pub(super) fn compare() -> Vec<(f32, Act)> {
     ];
     v.extend(new_session(prompt));
     for i in 0..600 {
-        both(&mut v, &format!("{i:03}"));
+        both_themes(&mut v, &format!("{i:03}"));
         v.push((0.9, Call(pace)));
     }
     v

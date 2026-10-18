@@ -489,7 +489,10 @@ pub(super) fn attaching() -> Vec<(f32, Act)> {
             0.1,
             Until(
                 "⌃⌘S shows or hides the sidebar",
-                |d, _| d.sidebar_hidden != SIDEBAR_WAS.with(|w| w.get()),
+                |d, _| {
+                    d.sidebar_hidden != SIDEBAR_WAS.with(|w| w.get())
+                        && drawn(d, "sidebar").is_some() != d.sidebar_hidden
+                },
                 3.,
             ),
         ),

@@ -261,3 +261,28 @@ pub(super) fn outside(name: &str) -> std::path::PathBuf {
 pub(super) fn queued_now(d: &Dent) -> bool {
     has(d, |i| matches!(i, Item::Queued { .. }))
 }
+
+/// Light or dark, whatever the system's appearance.
+pub(super) fn set_dark(d: &mut Dent, dark: bool, w: &mut Window, cx: &mut Context<Dent>) {
+    d.forced_dark = Some(dark);
+    d.apply_theme(w, cx);
+    cx.notify();
+}
+
+/// A still in the light theme, then the dark one, ending light.
+pub(super) fn both_themes(v: &mut Vec<(f32, Act)>, name: &str) {
+    v.extend([
+        (0.0, Call(|d, w, cx| set_dark(d, false, w, cx))),
+        (0.35, Shot(leak(format!("{name}-light")))),
+        (0.2, Call(|d, w, cx| set_dark(d, true, w, cx))),
+        (0.35, Shot(leak(format!("{name}-dark")))),
+        (0.2, Call(|d, w, cx| set_dark(d, false, w, cx))),
+    ]);
+}
+
+/// The plan's strip is drawn, above the composer.
+pub(super) fn plan_above_composer(d: &Dent) -> bool {
+    drawn(d, "plan-strip")
+        .zip(drawn(d, "composer"))
+        .is_some_and(|(p, c)| p.bottom() <= c.top())
+}
