@@ -100,6 +100,46 @@ const PLAN_NUDGE: &str = "Before you start any task with three or more steps, ca
 
 /// A one-off side question: the conversation `agent_session` so far, forked
 /// so the original never sees it, answered without changing anything.
+/// Claude Code asked for a short title for a conversation: a small model,
+/// one turn, no tools, nothing of the person's settings that could act.
+pub fn title_argv(claude: &str, path: &str, conversation: &str) -> Vec<String> {
+    let mut v: Vec<String> = [
+        "/usr/bin/env",
+        "-u",
+        "CLAUDECODE",
+        "-u",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "-u",
+        "CLAUDE_CODE_SSE_PORT",
+    ]
+    .map(String::from)
+    .into();
+    v.push(format!("PATH={path}"));
+    v.push(claude.into());
+    v.extend(
+        [
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--model",
+            "haiku",
+            "--max-turns",
+            "1",
+            "--disallowedTools",
+            "Bash,Write,Edit,MultiEdit,NotebookEdit,Read,Glob,Grep,WebFetch,WebSearch,Task,Agent",
+        ]
+        .map(String::from),
+    );
+    v.extend([
+        "-p".into(),
+        format!(
+            "Title this conversation between a person and a coding agent in 3 to 6 words, \
+             sentence case, no quotes and no full stop. Reply with the title only.\n\n{conversation}"
+        ),
+    ]);
+    v
+}
+
 pub fn aside_argv(
     claude: &str,
     path: &str,
@@ -289,28 +329,73 @@ pub fn assistant_bodies(
             uuid,
         });
     }
-    out.extend(result_bodies(parent, results, reports));
+    out.extend(result_bodies(parent, results, reports, None));
     out
 }
 
 /// What tool results become in the log, a subagent's report keeping more.
+/// Pictures in a result are saved under `media` (the session's
+/// attachments), so the chat can show them; without it, or if one can't be
+/// saved, the output says a picture was there.
 pub fn result_bodies(
     parent: Option<String>,
     results: Vec<wire::ToolResult>,
     reports: &mut Reports,
+    media: Option<&std::path::Path>,
 ) -> Vec<Body> {
     results
         .into_iter()
         .map(|r| {
             let report = reports.answered(&r.tool_use_id);
+            let mut output = r.output;
+            let mut images = Vec::new();
+            for (n, source) in r.images.iter().enumerate() {
+                let name = format!("tool-{}-{}", safe_name(&r.tool_use_id), n + 1);
+                match media.and_then(|m| save_picture(source, m, &name)) {
+                    Some(path) => images.push(path),
+                    None => {
+                        if !output.is_empty() {
+                            output.push('\n');
+                        }
+                        output.push_str("[image]");
+                    }
+                }
+            }
             Body::ToolResult {
                 tool: r.tool_use_id,
                 error: r.is_error,
-                output: wire::keep(r.output, report),
+                output: wire::keep(output, report),
                 parent: parent.clone(),
+                images,
             }
         })
         .collect()
+}
+
+/// Letters, digits, `-` and `_` only: an id made safe for a file name.
+fn safe_name(id: &str) -> String {
+    id.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect()
+}
+
+/// A base64 picture (an image block's `source`) written to `media` as
+/// `name` and its kind's extension. Its path, or None if it isn't a kind
+/// that shows or can't be written.
+pub fn save_picture(source: &Value, media: &std::path::Path, name: &str) -> Option<String> {
+    let data = source["data"].as_str()?;
+    let ext = match source["media_type"].as_str()? {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => return None,
+    };
+    let bytes = dent_protocol::b64::decode(data)?;
+    std::fs::create_dir_all(media).ok()?;
+    let path = media.join(format!("{name}.{ext}"));
+    std::fs::write(&path, bytes).ok()?;
+    Some(path.display().to_string())
 }
 
 /// What a call being written out works on, once its input has streamed

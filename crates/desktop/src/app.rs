@@ -767,10 +767,18 @@ pub struct Dent {
     pub palette_scroll: ScrollHandle,
     /// Where you were reading each session, and whether you were at the end.
     pub read_at: HashMap<String, (ListOffset, bool)>,
+    /// Seen marks sent and not yet back from the daemon, by session.
+    pub seen_sent: HashMap<String, u64>,
+    /// The count last put on the Dock icon.
+    pub badged: Option<usize>,
     /// Parsed documents by file and version.
     pub md_docs: crate::lru::Lru<(&'static str, usize), Rc<Vec<Block>>>,
     /// Sessions closed while the Undo has been showing, oldest first.
-    pub undo_closes: Vec<String>,
+    pub undo_closes: Vec<Vec<String>>,
+    /// Closing several picked sessions at once: they undo together.
+    pub closing_together: bool,
+    /// Sessions picked in the sidebar with Shift or ⌘, to act on together.
+    pub picked: Vec<String>,
     /// The terminal session being picked up.
     pub adopting: Option<String>,
     /// While the pointer is over the sidebar: each session's section and
@@ -1069,8 +1077,11 @@ impl Dent {
         .detach();
         cx.observe_window_appearance(window, |this, window, cx| this.apply_theme(window, cx))
             .detach();
-        cx.observe_window_activation(window, |this, window, _| {
+        cx.observe_window_activation(window, |this, window, cx| {
             this.window_active = window.is_window_active();
+            // Coming back to the window is looking at the open session.
+            this.mark_seen();
+            cx.notify();
         })
         .detach();
         cx.observe_window_visibility(window, |this, _, window, cx| {
@@ -1215,8 +1226,12 @@ impl Dent {
             slash_shown: None,
             palette_scroll: ScrollHandle::new(),
             read_at: HashMap::new(),
+            seen_sent: HashMap::new(),
+            badged: None,
             md_docs: crate::lru::Lru::new(64),
             undo_closes: Vec::new(),
+            closing_together: false,
+            picked: Vec::new(),
             adopting: None,
             inbox_hold: None,
             sidebar_hovered: false,
@@ -1839,6 +1854,7 @@ impl Dent {
         }
         self.reveal_row = id.clone();
         self.selected = id;
+        self.mark_seen();
         self.menu = None;
         self.end_pick();
         self.commenting = None;
@@ -1847,6 +1863,23 @@ impl Dent {
             None => self.starter.update(cx, |c, cx| c.focus_field(window, cx)),
         }
         cx.notify();
+    }
+
+    /// The open session has been looked at, if the window is in front: what
+    /// it finished or asked is no longer new. Sent once per mark.
+    pub fn mark_seen(&mut self) {
+        if !self.window_active || !self.core.live {
+            return;
+        }
+        let Some(s) = self.current_rc() else { return };
+        if !s.unread() || self.seen_sent.get(&s.id).is_some_and(|&n| n >= s.news) {
+            return;
+        }
+        self.seen_sent.insert(s.id.clone(), s.news);
+        self.live.send(Request::Seen {
+            session: s.id.clone(),
+            upto: s.news,
+        });
     }
 
     /// Closing archives: it can always be reopened. The next thing to clear opens.
@@ -1913,10 +1946,13 @@ impl Dent {
         {
             self.undo_closes.clear();
         }
-        if !self.undo_closes.iter().any(|c| c == id) {
-            self.undo_closes.push(id.to_string());
+        if !self.undo_closes.iter().flatten().any(|c| c == id) {
+            match self.undo_closes.last_mut() {
+                Some(group) if self.closing_together => group.push(id.to_string()),
+                _ => self.undo_closes.push(vec![id.to_string()]),
+            }
         }
-        let n = self.undo_closes.len();
+        let n = self.undo_closes.iter().map(Vec::len).sum::<usize>();
         self.toast = Some(Toast {
             text: if n == 1 {
                 "Session closed".into()
@@ -1933,6 +1969,78 @@ impl Dent {
         }
         cx.notify();
         true
+    }
+
+    /// Shift-click picks every row from the last one picked (or the open
+    /// session) to this one; ⌘-click picks or unpicks this one.
+    pub fn pick(&mut self, id: &str, run: bool, cx: &mut Context<Self>) {
+        if self.picked.is_empty()
+            && let Some(open) = self.selected.clone()
+        {
+            self.picked.push(open);
+        }
+        let order = self.order();
+        match (run, self.picked.last().cloned()) {
+            (true, Some(from)) => {
+                let (a, b) = (
+                    order.iter().position(|x| *x == from),
+                    order.iter().position(|x| x == id),
+                );
+                if let (Some(a), Some(b)) = (a, b) {
+                    for x in &order[a.min(b)..=a.max(b)] {
+                        if !self.picked.contains(x) {
+                            self.picked.push(x.clone());
+                        }
+                    }
+                }
+                // The row clicked is where the next run starts.
+                self.picked.retain(|x| x != id);
+                self.picked.push(id.to_string());
+            }
+            _ => {
+                if let Some(at) = self.picked.iter().position(|x| x == id) {
+                    self.picked.remove(at);
+                } else {
+                    self.picked.push(id.to_string());
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Close every picked session that can be closed, as one Undo; those
+    /// still working stay, and a toast says so.
+    pub fn close_picked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = std::mem::take(&mut self.picked);
+        let (can, busy): (Vec<String>, Vec<String>) = picked.into_iter().partition(|id| {
+            self.session(id)
+                .is_some_and(|s| !s.closed && Self::can_close(s))
+        });
+        // A fresh group for this batch, then every close joins it.
+        let had_undo = self
+            .toast
+            .as_ref()
+            .is_some_and(|t| matches!(t.action, ToastAction::Undo(_)));
+        if !had_undo {
+            self.undo_closes.clear();
+        }
+        self.undo_closes.push(Vec::new());
+        self.closing_together = true;
+        for id in &can {
+            self.close(id, window, cx);
+        }
+        self.closing_together = false;
+        if self.undo_closes.last().is_some_and(Vec::is_empty) {
+            self.undo_closes.pop();
+        }
+        if !busy.is_empty() {
+            let n = busy.len();
+            self.toast(
+                ToastAction::Info,
+                format!("{n} still working, so left open: a session can be closed once it's done"),
+            );
+        }
+        cx.notify();
     }
 
     pub fn reopen(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -1965,12 +2073,17 @@ impl Dent {
         let Some(t) = self.toast.take() else { return };
         match t.action {
             ToastAction::Undo(_) => {
-                if let Some(id) = self.undo_closes.pop() {
-                    self.reopen(&id, cx);
-                    self.select(Some(id), window, cx);
+                // Sessions closed together come back together.
+                if let Some(group) = self.undo_closes.pop() {
+                    for id in &group {
+                        self.reopen(id, cx);
+                    }
+                    if let Some(id) = group.first() {
+                        self.select(Some(id.clone()), window, cx);
+                    }
                 }
-                if let Some(next) = self.undo_closes.last().cloned() {
-                    let n = self.undo_closes.len();
+                if let Some(next) = self.undo_closes.last().and_then(|g| g.last()).cloned() {
+                    let n = self.undo_closes.iter().map(Vec::len).sum::<usize>();
                     self.toast = Some(Toast {
                         text: if n == 1 {
                             "Session closed".into()
@@ -3781,6 +3894,15 @@ impl Dent {
             Some(i) => self.sessions[i] = Rc::new(s),
             None => self.sessions.push(Rc::new(s)),
         }
+        if following {
+            self.mark_seen();
+        }
+        // The Dock says how many need you, as the status bar does.
+        let needs = self.needs().len();
+        if self.badged != Some(needs) {
+            self.badged = Some(needs);
+            crate::notify::badge(needs);
+        }
         // Newest first; the inbox groups them by what they need.
         self.sessions.sort_by_key(|s| std::cmp::Reverse(s.updated));
         if following && self.transcript.is_following_tail() {
@@ -5499,7 +5621,7 @@ impl Dent {
             .iter()
             .enumerate()
             .map(|(ix, i)| {
-                let thought = matches!(i, Item::Thinking(_)).then(|| {
+                let thought = matches!(i, Item::Thinking(..)).then(|| {
                     thoughts += 1;
                     thought_key(&s.id, thoughts - 1)
                 });
@@ -5589,7 +5711,7 @@ impl Dent {
                 fp(text, &mut h);
                 attachments.hash(&mut h);
             }
-            Item::Thinking(t) => {
+            Item::Thinking(t, _) => {
                 fp(t, &mut h);
                 thought
                     .is_some_and(|k| self.open_calls.contains(k))

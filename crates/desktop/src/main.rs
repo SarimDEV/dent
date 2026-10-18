@@ -185,6 +185,16 @@ impl Render for Dent {
             let typing_next =
                 self.selected.is_none() && !self.starter.read(cx).value().trim().is_empty();
             if clicked.is_some() || !typing_next {
+                // A notification is about what's new: the end, where the
+                // card or the finished reply is, not where you left off.
+                if clicked.is_some() {
+                    if self.selected.as_ref() == Some(&id) {
+                        self.transcript.set_follow_mode(FollowMode::Tail);
+                        self.transcript.scroll_to_end();
+                    } else {
+                        self.read_at.remove(&id);
+                    }
+                }
                 self.select(Some(id), window, cx);
             }
         }
@@ -469,6 +479,12 @@ impl Render for Dent {
                 cx.listener(|this, _: &NewSession, window, cx| this.select(None, window, cx)),
             )
             .on_action(cx.listener(|this, _: &CloseSession, window, cx| {
+                // Sessions picked in the sidebar close together.
+                if this.picked.len() > 1 {
+                    this.close_picked(window, cx);
+                    this.focus_inbox(window, cx);
+                    return;
+                }
                 // After closing you're in the inbox, like mail: arrows move,
                 // Enter opens, and ⌘Z undoes without a text field taking it.
                 if let Some(id) = this.selected.clone()
@@ -606,6 +622,7 @@ impl Render for Dent {
                     || std::mem::take(&mut this.keys_open)
                     || this.close_lightbox(cx)
                     || this.context.take().is_some()
+                    || !std::mem::take(&mut this.picked).is_empty()
                 {
                 } else if this.palette.is_some() {
                     this.close_palette(window, cx);

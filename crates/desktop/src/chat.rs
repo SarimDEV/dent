@@ -861,7 +861,7 @@ impl Dent {
                                         i,
                                         None | Some(
                                             Item::Tools { .. }
-                                                | Item::Thinking(_)
+                                                | Item::Thinking(..)
                                                 | Item::Note { .. }
                                         )
                                     )
@@ -1486,6 +1486,7 @@ impl Dent {
                 summary,
                 lines,
                 counted,
+                pictures,
             } => {
                 // A lone call opens straight to what it did; a group opens
                 // to its calls, each of which opens in turn.
@@ -1741,12 +1742,17 @@ impl Dent {
                                 .children(rows),
                         )
                     })
+                    // What the calls brought back as pictures shows whether
+                    // the line is open or not: a screenshot is the point.
+                    .when(!pictures.is_empty(), |d| {
+                        d.child(tool_pictures(&s.id, ix, pictures, &t))
+                    })
                     .into_any_element()
             }
-            Item::Thinking(text) => {
+            Item::Thinking(text, took) => {
                 let nth = s.items[..ix]
                     .iter()
-                    .filter(|i| matches!(i, Item::Thinking(_)))
+                    .filter(|i| matches!(i, Item::Thinking(..)))
                     .count();
                 let key = crate::app::thought_key(&s.id, nth);
                 let open = self.open_calls.contains(&key);
@@ -1771,10 +1777,14 @@ impl Dent {
                                 }
                                 cx.notify();
                             }))
-                            .child(format!(
-                                "Thought · {words} word{}",
-                                if words == 1 { "" } else { "s" }
-                            ))
+                            .child(if *took >= 1000 {
+                                format!("Thought for {}", duration(took / 1000))
+                            } else {
+                                format!(
+                                    "Thought · {words} word{}",
+                                    if words == 1 { "" } else { "s" }
+                                )
+                            })
                             .child(crate::ui::disclosure("fold", open, 11., t.faint)),
                     )
                     .when(open, |d| {
@@ -4498,6 +4508,50 @@ fn picture_path(shown: &str, cwd: &str) -> Option<std::path::PathBuf> {
 /// A file that went with a message you sent (`what`, as the session's
 /// folder names it): a picture shows as itself, anything else as the chip
 /// it was in the box.
+/// Pictures a group of tool calls brought back, side by side, each opening
+/// large; they step together in the large view.
+fn tool_pictures(session: &str, ix: usize, paths: &[String], t: &theme::Theme) -> Div {
+    let set: crate::lightbox::Set = std::rc::Rc::new(
+        paths
+            .iter()
+            .enumerate()
+            .map(|(j, p)| crate::lightbox::Shot {
+                key: SharedString::from(format!("tool-pic-{session}-{ix}-{j}")),
+                path: std::path::PathBuf::from(p),
+            })
+            .collect(),
+    );
+    div()
+        .mt(px(space::S2))
+        .flex()
+        .flex_wrap()
+        .gap(px(space::S2))
+        .children((0..set.len()).map(|j| {
+            let path = set[j].path.clone();
+            crate::lightbox::picture(
+                &set,
+                j,
+                div()
+                    .max_w(px(TOOL_PICTURE_W))
+                    .max_h(px(TOOL_PICTURE_H))
+                    .rounded(px(radius::MD))
+                    .border_1()
+                    .border_color(t.hairline)
+                    .overflow_hidden()
+                    .child(
+                        img(path)
+                            .max_w(px(TOOL_PICTURE_W))
+                            .max_h(px(TOOL_PICTURE_H))
+                            .object_fit(ObjectFit::Contain),
+                    ),
+            )
+        }))
+}
+
+/// The most a tool's picture takes in the chat; it opens large on a click.
+const TOOL_PICTURE_W: f32 = 420.;
+const TOOL_PICTURE_H: f32 = 280.;
+
 fn sent_file(what: &str, shot: Option<(&crate::lightbox::Set, usize)>, t: &theme::Theme) -> Div {
     // A picture shows as itself, with its name under it.
     if let Some((pictures, at)) = shot {
@@ -5001,7 +5055,7 @@ pub fn is_answer(items: &[Item], ix: usize, running: bool) -> bool {
         match i {
             Item::TurnEnd { .. } => return true,
             Item::User { .. } | Item::Queued { .. } => return !open,
-            Item::Text(_) | Item::Tools { .. } | Item::Thinking(_) => return false,
+            Item::Text(_) | Item::Tools { .. } | Item::Thinking(..) => return false,
             _ => {}
         }
     }
@@ -5125,7 +5179,12 @@ mod answer_tests {
         ];
         assert!(!is_answer(&q, 0, true));
         // The turn ended: the last words are its answer, narration before isn't.
-        let done = vec![text(), Item::Thinking(String::new()), text(), end.clone()];
+        let done = vec![
+            text(),
+            Item::Thinking(String::new(), 0),
+            text(),
+            end.clone(),
+        ];
         assert!(is_answer(&done, 2, false));
         assert!(!is_answer(&done, 0, false));
         // An older turn's answer stays one while a new turn runs.

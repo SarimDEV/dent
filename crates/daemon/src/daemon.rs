@@ -858,6 +858,8 @@ impl Daemon {
             },
             None,
         )?;
+        // A terminal session keeps the title it came with.
+        self.store().put(&titled_key(&session), "1")?;
         self.append(
             &session,
             Body::Agent {
@@ -903,11 +905,90 @@ impl Daemon {
         Ok(session)
     }
 
+    /// Title a session from its conversation, with a small model and no
+    /// tools, run in dent's own folder so it leaves nothing in the project's
+    /// history. Without `force`, only once and never after you've named it.
+    pub async fn title_session(self: &Arc<Self>, session: &str, force: bool) -> Result<()> {
+        let key = titled_key(session);
+        if !force && self.store().get(&key)?.is_some() {
+            return Ok(());
+        }
+        self.store().put(&key, "1")?;
+        let events = self.store().session_events(session)?;
+        let clip = |t: &str, n: usize| -> String { t.chars().take(n).collect() };
+        let mut said = Vec::new();
+        for e in &events {
+            match &e.body {
+                Body::User { text, .. } => said.push(format!("Person: {}", clip(text, 1500))),
+                Body::Assistant {
+                    parent: None,
+                    blocks,
+                    ..
+                } => {
+                    for b in blocks {
+                        if let dent_protocol::Block::Text { text } = b {
+                            said.push(format!("Agent: {}", clip(text, 1500)));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if said.is_empty() {
+            return Ok(());
+        }
+        // The start says what it set out to do; the end, where it went.
+        let keep = if said.len() > 8 {
+            let mut k = said[..2].to_vec();
+            k.push("…".into());
+            k.extend_from_slice(&said[said.len() - 6..]);
+            k
+        } else {
+            said
+        };
+        let env = self.env();
+        let argv = crate::claude::title_argv(&env.claude, &env.path, &keep.join("\n\n"));
+        let dir = self.paths.state.join("titles");
+        std::fs::create_dir_all(&dir)?;
+        let dir = dir.display().to_string();
+        let got = tokio::task::spawn_blocking(move || run_aside(&argv, &dir))
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let t = clean_title(&got.0);
+        if !t.is_empty() {
+            self.append(
+                session,
+                Body::Settings {
+                    effort: None,
+                    model: None,
+                    permission: None,
+                    title: Some(t),
+                },
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Bring back every session after a start: reattach running agents and
     /// mark turns that died with the old daemon.
     pub async fn restore(self: &Arc<Self>) -> Result<()> {
         self.forget_old_claims();
         let rows = self.store().sessions()?;
+        // Sessions from before dent kept track of what you'd seen start out
+        // seen, so an upgrade doesn't mark them all as new.
+        if self.store().get(SEEN_MARKS)?.is_none() {
+            let upto = self.store().last_seq()?;
+            for row in &rows {
+                self.append(&row.id, Body::Seen { upto }, None)?;
+            }
+            self.store().put(SEEN_MARKS, "1")?;
+            // Their titles stand: dent doesn't retitle them on its own.
+            for row in &rows {
+                self.store().put(&titled_key(&row.id), "1")?;
+            }
+        }
         let live = if rows.iter().any(|r| r.proc.is_some()) {
             match self.holder().await {
                 Ok(h) => h.list().await.unwrap_or_default(),
@@ -925,6 +1006,30 @@ impl Daemon {
         Ok(())
     }
 }
+
+/// Set once a session has been titled (by dent or by you), so a session is
+/// titled on its own only once.
+pub fn titled_key(session: &str) -> String {
+    format!("titled:{session}")
+}
+
+/// A model's answer as a title: its first line, without quotes, a heading
+/// mark, a "Title:" label or a closing full stop, at most 60 characters.
+fn clean_title(answer: &str) -> String {
+    let line = answer.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let mut t = line.trim().trim_start_matches('#').trim();
+    for label in ["Title:", "title:"] {
+        t = t.strip_prefix(label).unwrap_or(t).trim();
+    }
+    let t = t
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '*' | '“' | '”'))
+        .trim_end_matches('.')
+        .trim();
+    title(t)
+}
+
+/// Set once every session older than seen marks has one.
+const SEEN_MARKS: &str = "seen-marks";
 
 /// What a new session starts with.
 pub struct NewSession {
@@ -1079,4 +1184,17 @@ fn hostname() -> String {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "this computer".into())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_models_answer_becomes_a_title() {
+        assert_eq!(super::clean_title("\"Fix the footer.\""), "Fix the footer");
+        assert_eq!(
+            super::clean_title("Title: Cache with Redis\nmore"),
+            "Cache with Redis"
+        );
+        assert_eq!(super::clean_title("# Landing page"), "Landing page");
+    }
 }

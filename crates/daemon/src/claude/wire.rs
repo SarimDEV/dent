@@ -162,6 +162,8 @@ pub struct ToolResult {
     pub tool_use_id: String,
     pub is_error: bool,
     pub output: String,
+    /// Pictures in the result, as their `source` objects.
+    pub images: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -310,6 +312,7 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
                                 tool_use_id: s(b, "tool_use_id"),
                                 is_error: is_error || b["is_error"] == true,
                                 output,
+                                images: Vec::new(),
                             }
                         })
                         .collect()
@@ -339,6 +342,7 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
                             tool_use_id: s(b, "tool_use_id"),
                             is_error: b["is_error"].as_bool().unwrap_or(false),
                             output: output(&b["content"]),
+                            images: images(&b["content"]),
                         })
                         .collect()
                 })
@@ -577,14 +581,22 @@ fn output(content: &Value) -> String {
         Value::String(t) => t.clone(),
         Value::Array(parts) => parts
             .iter()
-            .filter_map(|p| match p["type"].as_str() {
-                Some("image") => Some("[image]"),
-                _ => p["text"].as_str(),
-            })
+            .filter_map(|p| p["text"].as_str())
             .collect::<Vec<_>>()
             .join("\n"),
         _ => String::new(),
     }
+}
+
+/// A result's pictures: their `source` objects, kept apart from the text.
+fn images(content: &Value) -> Vec<Value> {
+    content
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["type"] == "image")
+        .map(|p| p["source"].clone())
+        .collect()
 }
 
 /// What a server tool's result says: the search hits, the page fetched,
@@ -1020,7 +1032,10 @@ mod tests {
         }
         let r = br#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"x"}}]}]}}"#;
         match parse(r).unwrap() {
-            Inbound::ToolResults { results, .. } => assert_eq!(results[0].output, "[image]"),
+            Inbound::ToolResults { results, .. } => {
+                assert_eq!(results[0].output, "");
+                assert_eq!(results[0].images.len(), 1);
+            }
             other => panic!("{other:?}"),
         }
         let m = br#"{"type":"result","subtype":"error_max_turns","is_error":true}"#;

@@ -258,6 +258,19 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             d.command(&session, Op::Reopen).await?;
             Reply::Ok
         }
+        Request::Retitle { session } => {
+            let d = d.clone();
+            tokio::spawn(async move {
+                if let Err(e) = d.title_session(&session, true).await {
+                    eprintln!("dent-daemon: {session}: couldn't title it: {e:#}");
+                }
+            });
+            Reply::Ok
+        }
+        Request::Seen { session, upto } => {
+            d.command(&session, Op::Seen(upto)).await?;
+            Reply::Ok
+        }
         Request::Projects => Reply::Projects {
             projects: project_list(d).await?,
         },

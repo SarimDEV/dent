@@ -312,7 +312,9 @@ impl Dent {
 
     fn row(&mut self, s: &Session, quiet: bool, cx: &mut Context<Self>) -> AnyElement {
         let t = self.t;
-        let selected = self.selected.as_deref() == Some(s.id.as_str());
+        let open = self.selected.as_deref() == Some(s.id.as_str());
+        // Picked with Shift or ⌘, a row looks selected too.
+        let selected = open || self.picked.contains(&s.id);
         let closable = Self::can_close(s);
         // A row that just finished pops its square once; a row that just
         // arrived rises into place.
@@ -351,6 +353,24 @@ impl Dent {
         } else {
             format!("{} · {}", s.project, s.detail)
         };
+        // What it finished or asked since you last looked: a dot, until you
+        // open it. The open row is being looked at.
+        let unread = s.unread() && !open && !s.closed;
+        // Words or files left in its reply box, unsent: the row says so in
+        // place of what it's doing, so they aren't forgotten.
+        let draft = (!open)
+            .then(|| self.drafts.get(&s.id))
+            .flatten()
+            .filter(|d| !d.is_empty())
+            .map(|d| {
+                let words = d.text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if words.is_empty() {
+                    let n = d.atts.len();
+                    format!("{n} file{}", if n == 1 { "" } else { "s" })
+                } else {
+                    words
+                }
+            });
         // The close (or reopen) button shows on whichever row is under the
         // pointer right now: after a close, the next row slides in with its
         // own button rather than opening on the next click.
@@ -411,6 +431,18 @@ impl Dent {
             .flex()
             .items_center()
             .justify_end()
+            .gap(px(space::S1H))
+            .when(unread, |d| {
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("unread-{id}")))
+                        .size(px(UNREAD_DOT))
+                        .rounded_full()
+                        .bg(t.ink)
+                        .when(has_button, |d| d.hide_on_hover(group.clone()))
+                        .with_tip(tip("New since you looked", None, t)),
+                )
+            })
             .child(
                 div()
                     .ty(NUMERAL)
@@ -436,7 +468,7 @@ impl Dent {
             .py(px(space::S2))
             .rounded(px(radius::MD))
             // Keyboard focus in the inbox: a 2 px ink ring on the selected row.
-            .when(selected && self.inbox_focused, |d| {
+            .when(open && self.inbox_focused, |d| {
                 d.border_2()
                     .border_color(t.ink)
                     .px(px(space::S2 - 2.))
@@ -451,16 +483,42 @@ impl Dent {
             .when(!selected, |d| {
                 d.hover(|d| d.bg(t.hover())).active(|d| d.bg(t.press()))
             })
-            .on_press(
-                cx.listener(move |this, _, window, cx| this.select(Some(id.clone()), window, cx)),
-            )
+            .on_press(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                // Shift picks a run of rows, ⌘ one more; a plain click opens.
+                let m = e.modifiers();
+                if m.shift || m.platform {
+                    this.pick(&id, m.shift, cx);
+                } else {
+                    this.picked.clear();
+                    this.select(Some(id.clone()), window, cx)
+                }
+            }))
             .on_mouse_down(MouseButton::Right, {
                 let (sid, cwd, closed) = (s.id.clone(), s.cwd.clone(), s.closed);
                 let resume = s.resume_command();
                 cx.listener(move |this, e: &MouseDownEvent, _, cx| {
                     use crate::context::Do;
+                    // On one of several picked rows: what they can do together.
+                    if this.picked.len() > 1 && this.picked.contains(&sid) {
+                        let n = this.picked.len();
+                        let all_pinned = this.picked.iter().all(|id| this.pinned.contains(id));
+                        let items = vec![
+                            (format!("Close {n} sessions"), Do::ClosePicked),
+                            (
+                                if all_pinned {
+                                    format!("Unpin {n} sessions")
+                                } else {
+                                    format!("Pin {n} sessions to top")
+                                },
+                                Do::PinPicked,
+                            ),
+                        ];
+                        this.open_context(e.position, items, cx);
+                        return;
+                    }
                     let mut items = vec![
                         ("Rename", Do::Rename(sid.clone())),
+                        ("Regenerate Title", Do::Retitle(sid.clone())),
                         ("Fork", Do::Fork(sid.clone())),
                     ];
                     if !closed {
@@ -517,7 +575,19 @@ impl Dent {
                             )
                             .child(div().h(px(20.)).flex().items_center().child(trailing)),
                     )
-                    .child(div().truncate().ty(UI).text_color(t.quiet).child(detail)),
+                    .child(match draft {
+                        Some(words) => div().truncate().ty(UI).text_color(t.quiet).child(
+                            StyledText::new(format!("Draft · {words}")).with_highlights([(
+                                0..5,
+                                HighlightStyle {
+                                    color: Some(t.ink),
+                                    font_weight: Some(FontWeight::MEDIUM),
+                                    ..Default::default()
+                                },
+                            )]),
+                        ),
+                        None => div().truncate().ty(UI).text_color(t.quiet).child(detail),
+                    }),
             )
             .child(probe(&self.probes, format!("row-{}", s.id)))
             .into_any_element()
@@ -655,3 +725,6 @@ impl InboxRow {
         h.finish()
     }
 }
+
+/// The unread mark beside a row's time.
+const UNREAD_DOT: f32 = 7.;

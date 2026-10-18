@@ -55,6 +55,7 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 ### Verify and walkthroughs aren't scoped to the change
 - Seen: 2026-10-15. `just verify` always runs every test in every crate, and the full walkthrough suite (~272 checks) runs once per batch, besides each feature's own scene. `docs/building-with-agents.md` promises "replays and UI checks for the areas the change touched".
 - Cost: unmeasured. A small change still pays for the whole workspace. Measured once: a one-step Esc fix ran the full `walk.sh checks` (310 checks, 3 min 43 s) to see a single new check, with no way to run just the Stop scene.
+- Seen again: 2026-10-17, the chat-polish batch: the full `walk.sh checks` (433 checks) took 6 min 13 s, run once for the batch after its own `polish` scene (about 1 min a run, three runs for stills); `just verify` 47 s.
 - Fix: `just verify` picks crates from `git diff` against `origin/main` (full run only when shared crates change or before pushing to main). The full walkthrough suite runs in the background while the next item starts, not as a blocking step.
 - Check: wall-clock time from "change done" to "landed" on a typical batch item.
 

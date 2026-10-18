@@ -70,7 +70,6 @@ impl Store {
         Ok(Self { db })
     }
 
-    #[cfg(test)]
     pub fn last_seq(&self) -> Result<u64> {
         Ok(self
             .db

@@ -51,6 +51,13 @@ Every session is an append-only log of typed events in SQLite: user message, ass
 - Session status (working, blocked on approval, idle, done, errored) is derived from events and indexed, so every client can show it without replaying logs.
 - SQLite runs in WAL mode with one writer task per daemon; reads never block writes.
 
+Two small things live in the log beside the conversation ([0050](decisions/0050-titles-and-seen-marks.md)):
+
+- **Seen marks:** `seen { upto }` when someone looks at the session; it is unread while a turn's end or a question is past the mark. Looking doesn't change the session's last-activity time.
+- **Titles:** after the first turn, a one-turn `claude -p` on `haiku`, with no tools, run in the state folder's `titles/`, proposes a title, logged as `settings`. Never on its own after a rename; `retitle` asks again.
+
+Pictures in a tool's result (`image` blocks) are written to the session's attachments folder as `tool-<call>-<n>.<ext>` and named in the `tool_result` event's `images`; one that can't be written reads `[image]` in the output.
+
 ## Persistence
 
 "Everything survives" means three layers:

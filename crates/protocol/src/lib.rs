@@ -130,6 +130,10 @@ pub enum Body {
         output: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent: Option<String>,
+        /// Pictures that came back (a screenshot, an image read), saved on
+        /// the session's machine, by path.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<String>,
     },
     /// The agent is blocked until the person answers.
     Asked {
@@ -216,6 +220,11 @@ pub enum Body {
     },
     Closed,
     Reopened,
+    /// Someone looked at the session after event `upto`: what finished or
+    /// asked before then is no longer new to them.
+    Seen {
+        upto: u64,
+    },
     /// A side question: asked with the conversation's context, kept out of
     /// the conversation itself.
     Aside {
@@ -781,6 +790,16 @@ pub enum Request {
         session: SessionId,
     },
     Reopen {
+        session: SessionId,
+    },
+    /// The session was looked at, up to event `upto`.
+    Seen {
+        session: SessionId,
+        upto: u64,
+    },
+    /// Title the session again from what it's about now; the new title
+    /// arrives as a `settings` event.
+    Retitle {
         session: SessionId,
     },
     /// Ask a side question; the answer arrives as an `aside_reply` event.

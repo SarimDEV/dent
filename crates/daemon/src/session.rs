@@ -95,6 +95,7 @@ pub enum Op {
     Rename(String),
     Close,
     Reopen,
+    Seen(u64),
     Output {
         proc: String,
         err: bool,
@@ -617,12 +618,21 @@ impl Session {
                 Ok(())
             }
             Op::Rename(title) => {
+                // Named by you: dent never titles it again on its own.
+                let _ = self
+                    .d
+                    .store()
+                    .put(&crate::daemon::titled_key(&self.id), "1");
                 self.log(Body::Settings {
                     effort: None,
                     model: None,
                     permission: None,
                     title: Some(title),
                 });
+                Ok(())
+            }
+            Op::Seen(upto) => {
+                self.log(Body::Seen { upto });
                 Ok(())
             }
             Op::Close => {
@@ -1392,7 +1402,8 @@ impl Session {
                 }
             }
             Inbound::ToolResults { parent, results } => {
-                for b in claude::result_bodies(parent, results, &mut self.reports) {
+                let media = self.d.paths.state.join("attachments").join(&self.id);
+                for b in claude::result_bodies(parent, results, &mut self.reports, Some(&media)) {
                     self.log_from(b, end);
                 }
             }
@@ -1871,6 +1882,15 @@ impl Session {
             Some(off) => self.log_from(body, off),
             None if was || self.status != self.settled => self.log(body),
             None => {}
+        }
+        // After its first turn, a session is titled from what it's about.
+        if was {
+            let (d, id) = (self.d.clone(), self.id.clone());
+            tokio::spawn(async move {
+                if let Err(e) = d.title_session(&id, false).await {
+                    eprintln!("dent-daemon: {id}: couldn't title it: {e:#}");
+                }
+            });
         }
         if self.proc.is_some() {
             self.idle_at = Some(Instant::now() + idle());

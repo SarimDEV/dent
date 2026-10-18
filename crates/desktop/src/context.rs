@@ -28,11 +28,17 @@ pub enum Do {
     CopyPath(String),
     Reveal(String),
     Rename(String),
+    /// Ask for a new title from what the session is about now.
+    Retitle(String),
     Fork(String),
     CloseSession(String),
     Reopen(String),
     /// Pin to the top of the sidebar, or unpin.
     Pin(String),
+    /// The sessions picked with Shift or ⌘: close them, or pin or unpin
+    /// them, together.
+    ClosePicked,
+    PinPicked,
     /// Open a file with this app from now on (`None`: the Mac's default).
     OpenWith(String, Option<String>),
     /// Put text on the clipboard: a link, a command, what's selected.
@@ -80,12 +86,29 @@ impl Dent {
                     .unwrap_or_default();
                 self.start_rename(&id, &title, window, cx);
             }
+            Do::Retitle(id) => {
+                self.live
+                    .send(dent_protocol::Request::Retitle { session: id });
+                self.toast(crate::ToastAction::Info, "Finding a new title…".into());
+                cx.notify();
+            }
             Do::Fork(id) => self.fork(&id, None, cx),
             Do::CloseSession(id) => {
                 self.close(&id, window, cx);
             }
             Do::Reopen(id) => self.reopen(&id, cx),
             Do::Pin(id) => self.toggle_pin(&id, cx),
+            Do::ClosePicked => self.close_picked(window, cx),
+            Do::PinPicked => {
+                // All pinned already: unpin them; otherwise pin the rest.
+                let picked = std::mem::take(&mut self.picked);
+                let all = picked.iter().all(|id| self.pinned.contains(id));
+                for id in &picked {
+                    if all == self.pinned.contains(id) {
+                        self.toggle_pin(id, cx);
+                    }
+                }
+            }
             Do::OpenWith(path, app) => {
                 crate::open::open_with(&path, app, cx);
                 self.prefs_changed();
