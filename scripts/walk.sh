@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Walk through the real desktop app against a daemon running the fake agent.
-#   scripts/walk.sh checks [--dark] [--size WxH] [--shots DIR]
+#   scripts/walk.sh checks [--dark] [--size WxH] [--shots DIR]   (the full suite)
+#   scripts/walk.sh look --shots DIR [--size WxH]   (a recorded real turn replayed, stilled in both themes: for visual changes)
+#   scripts/walk.sh find+keys ...   (scenes joined with +: only what a change touched; names in crates/desktop/src/walk/mod.rs)
 #   scripts/walk.sh stills --shots DIR [--dark] [--size WxH]
 #   scripts/walk.sh pickup --shots DIR [--dark] [--size WxH]   (the new-session page with many terminal sessions)
 #   scripts/walk.sh finish [--shots DIR] [--dark] [--size WxH]   (thinking, background work, limits, crashes, MCP, versions, tables)
