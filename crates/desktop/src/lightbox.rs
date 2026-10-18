@@ -87,8 +87,18 @@ thread_local! {
 /// what's shown in place (the thumbnail, sized by the caller); the wrapper
 /// notes where it sits.
 pub fn picture(set: &Set, at: usize, inner: impl IntoElement) -> Stateful<Div> {
+    pictures(set, at, at + 1, inner)
+}
+
+/// Like [`picture`], for a tile that also stands for the pictures after it
+/// up to `upto` (a "+3" tile): stepping onto one of those and closing goes
+/// back to this tile.
+pub fn pictures(set: &Set, at: usize, upto: usize, inner: impl IntoElement) -> Stateful<Div> {
     let id = set[at].key.clone();
-    let mark = id.clone();
+    let marks: Vec<SharedString> = set[at..upto.clamp(at + 1, set.len())]
+        .iter()
+        .map(|s| s.key.clone())
+        .collect();
     let set = set.clone();
     div()
         .id(id)
@@ -97,14 +107,19 @@ pub fn picture(set: &Set, at: usize, inner: impl IntoElement) -> Stateful<Div> {
         // A press here opens the picture, never starts a text selection.
         .control()
         .on_press(move |_, window, _| {
-            ASKED.with(|a| *a.borrow_mut() = Some((set.clone(), at)));
+            ask(set.clone(), at);
             window.refresh();
         })
         .child(inner)
         .child(
             canvas(
                 move |bounds, _, _| {
-                    PLACED.with(|p| p.borrow_mut().insert(mark.clone(), bounds));
+                    PLACED.with(|p| {
+                        let mut p = p.borrow_mut();
+                        for mark in &marks {
+                            p.insert(mark.clone(), bounds);
+                        }
+                    });
                 },
                 |_, _, _, _| {},
             )
@@ -113,6 +128,39 @@ pub fn picture(set: &Set, at: usize, inner: impl IntoElement) -> Stateful<Div> {
             .left_0()
             .size_full(),
         )
+}
+
+/// Open the `at`th picture of `set` on the next frame, as a click does.
+pub fn ask(set: Set, at: usize) {
+    if at < set.len() {
+        ASKED.with(|a| *a.borrow_mut() = Some((set, at)));
+    }
+}
+
+/// What the large view calls a picture. A tool's pictures are kept under
+/// made-up names (`tool-<call>-<n>.png`) that mean nothing to you; a long
+/// name keeps its start and end so the band stays on screen.
+fn shown_name(path: &std::path::Path) -> String {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if name.starts_with("tool-")
+        && path
+            .parent()
+            .and_then(|p| p.parent())
+            .is_some_and(|p| p.ends_with("attachments"))
+    {
+        return "From a tool".into();
+    }
+    const MOST: usize = 48;
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= MOST {
+        return name;
+    }
+    let head: String = chars[..MOST / 2].iter().collect();
+    let tail: String = chars[chars.len() - (MOST / 2 - 1)..].iter().collect();
+    format!("{head}…{tail}")
 }
 
 /// A picture's size in pixels, read from the file's header.
@@ -257,10 +305,7 @@ impl Dent {
         let w = lerp(f.size.width.as_f32(), tw, open);
         let h = lerp(f.size.height.as_f32(), th, open);
         let path = l.shot().path.clone();
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name = shown_name(&path);
         let mut caption = match l.size {
             (0, 0) => name,
             (pw, ph) => format!("{name} · {pw} × {ph}"),

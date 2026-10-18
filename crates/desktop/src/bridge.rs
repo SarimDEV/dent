@@ -255,7 +255,7 @@ pub fn session(
                 at: *at,
                 took: *took,
             }),
-            Entry::Thinking { text } => items.push(Item::Thinking(text.clone())),
+            Entry::Thinking { text, took } => items.push(Item::Thinking(text.clone(), *took)),
             Entry::Tools { calls } => {
                 // The plan belongs with the composer, and questions and plans
                 // have their own cards.
@@ -306,10 +306,19 @@ pub fn session(
                         l.depth -= 1;
                     }
                 }
+                // A lone call's line is the summary: it carries the time too.
+                if let [c] = calls.as_slice()
+                    && let Some(took) = c.took.filter(|&ms| ms >= TIMED_MS)
+                    && !summary.ends_with(&crate::chat::duration(took / 1000))
+                {
+                    summary = format!("{summary} · {}", crate::chat::duration(took / 1000));
+                }
+                let pictures = calls.iter().flat_map(|c| c.images.clone()).collect();
                 items.push(Item::Tools {
                     summary,
                     lines,
                     counted,
+                    pictures,
                 });
             }
             Entry::Ask {
@@ -492,7 +501,49 @@ pub fn session(
         made_sig: v.made.iter().map(|m| m.versions.len()).sum::<usize>() + v.made.len() * 1000,
         todos: todos(v),
         agent_session: v.agent_session.clone(),
+        news: v.news,
+        seen: v.seen,
+        background: v.background.clone(),
+        resume_at: v.resume_at,
+        versions: versions(v, None),
+        old: None,
     }
+}
+
+/// Your messages with earlier versions, as `Session::versions` has them,
+/// when earlier version `viewing` (or the latest) shows.
+pub fn versions(v: &SessionView, viewing: Option<usize>) -> Vec<(String, usize, usize, usize)> {
+    let mut ats: Vec<usize> = v.branches.iter().map(|b| b.at).collect();
+    ats.dedup();
+    ats.sort();
+    ats.dedup();
+    let first_user = |es: &[Entry]| {
+        es.iter().find_map(|e| match e {
+            Entry::User {
+                id, queued: false, ..
+            } => Some(id.clone()),
+            _ => None,
+        })
+    };
+    ats.into_iter()
+        .filter_map(|at| {
+            let group: Vec<usize> = (0..v.branches.len())
+                .filter(|&i| v.branches[i].at == at)
+                .collect();
+            let total = group.len() + 1;
+            match viewing.filter(|b| v.branches[*b].at == at) {
+                Some(b) => {
+                    let id = first_user(&v.branches[b].entries)?;
+                    let cur = group.iter().position(|&i| i == b)? + 1;
+                    Some((id, at, cur, total))
+                }
+                None => {
+                    let id = first_user(v.entries.get(at..)?)?;
+                    Some((id, at, total, total))
+                }
+            }
+        })
+        .collect()
 }
 
 /// Local dev-server addresses in an entry: command output and replies.
@@ -633,6 +684,10 @@ fn preparing(tool: &str, what: Option<&str>) -> String {
 
 /// What it's doing or wants, for the inbox row and the working line.
 fn detail(v: &SessionView) -> String {
+    // Waiting for a used-up limit to reset, to carry on by itself.
+    if let Some(at) = v.resume_at {
+        return format!("Carries on at {}", crate::data::clock(at * 1000));
+    }
     match v.status {
         Wire::NeedsYou => match v.open_ask() {
             Some(Entry::Ask { tool, input, .. }) => match tool.as_str() {
@@ -657,6 +712,8 @@ fn detail(v: &SessionView) -> String {
                 Some(dent_protocol::Activity::Preparing { tool, what }) => {
                     return preparing(tool, what.as_deref());
                 }
+                // Its latest thought, as it thinks.
+                Some(dent_protocol::Activity::Thinking { latest }) => return latest.clone(),
                 None => {}
             }
             if !v.partial.is_empty() {
@@ -742,6 +799,9 @@ fn first_line(s: &str) -> String {
     out
 }
 
+/// Calls that took at least this long (ms) show their time.
+const TIMED_MS: u64 = 2000;
+
 /// How many of a subagent's steps show before the rest fold away.
 const LATEST_STEPS: usize = 5;
 
@@ -788,6 +848,11 @@ fn branch(calls: &[Call], parent: Option<&str>, depth: usize, cwd: &Path, out: &
             if let Some((true, why)) = &c.result {
                 text = format!("{text} · {}", first_line(why));
             }
+        }
+        // A finished call that took a while says how long, so a slow step
+        // stands out from the quick ones around it.
+        if let Some(took) = c.took.filter(|&ms| ms >= TIMED_MS) {
+            text = format!("{text} · {}", crate::chat::duration(took / 1000));
         }
         out.push(ToolLine {
             text,
@@ -1285,7 +1350,7 @@ mod tests {
             .map(|i| match i {
                 Item::User { text, .. } => format!("user {text}"),
                 Item::Text(t) => format!("text {t}"),
-                Item::Thinking(t) => format!("thinking {t}"),
+                Item::Thinking(t, _) => format!("thinking {t}"),
                 Item::Tools { summary, lines, .. } => format!("tools {summary} {}", lines.len()),
                 Item::Note { text, .. } => format!("note {text}"),
                 Item::Approval { id, .. } | Item::Plan { id, .. } | Item::Question { id, .. } => {
@@ -1331,6 +1396,7 @@ mod tests {
             error: false,
             output: "ok".into(),
             parent: None,
+            images: Vec::new(),
         };
         let bash = r#"{"command":"ls"}"#;
         let plan = r#"{"plan":"Do it"}"#;
@@ -1541,6 +1607,7 @@ mod bench {
                         error: false,
                         output: "x".repeat(4000),
                         parent: None,
+                        images: Vec::new(),
                     },
                 );
             }

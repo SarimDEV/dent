@@ -9,7 +9,7 @@
 use crate::lru::Lru;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::prelude::*;
@@ -472,6 +472,13 @@ pub enum Callout {
     Caution,
 }
 
+/// Blocks are parsed off the UI thread too (finished replies, ahead of
+/// time), so they must be able to cross threads.
+const _: fn() = || {
+    fn send<T: Send>() {}
+    send::<Vec<Block>>();
+};
+
 #[derive(Clone)]
 pub enum Block {
     Heading(u8, Inline),
@@ -488,10 +495,11 @@ pub enum Block {
     Math(String, bool),
     /// A Mermaid diagram, and whether its fence has closed.
     Diagram(String, bool),
-    Table(Rc<Table>),
+    Table(std::sync::Arc<Table>),
     Rule,
 }
 
+#[derive(Clone)]
 pub struct Table {
     pub head: Vec<Inline>,
     pub rows: Vec<Vec<Inline>>,
@@ -562,9 +570,11 @@ fn push_linking(cur: &mut Inline, s: &str, st: Style) {
 fn url_spans(s: &str) -> Vec<std::ops::Range<usize>> {
     let mut out = Vec::new();
     let mut from = 0;
-    while let Some(at) = s[from..]
-        .find("https://")
-        .or_else(|| s[from..].find("http://"))
+    // Whichever comes first: an http:// address before an https:// one.
+    while let Some(at) = [s[from..].find("https://"), s[from..].find("http://")]
+        .into_iter()
+        .flatten()
+        .min()
     {
         let start = from + at;
         let tail = &s[start..];
@@ -690,11 +700,10 @@ pub fn drawn(blocks: &[Block], out: &mut Vec<String>) {
             }
             Block::Quote(_, inner) => drawn(inner, out),
             Block::Code(_, body, _) => out.extend(body.split('\n').map(str::to_owned)),
-            // A long table's rows past those it shows before scrolling
-            // inside the chat aren't searched (see `table_block`).
+            // Every row, those a long table keeps out of view too: ⌘F
+            // reaches them (see `table_block`).
             Block::Table(t) => {
-                let shown = if capped(t) { TABLE_ROWS } else { t.rows.len() };
-                for row in std::iter::once(&t.head).chain(&t.rows[..shown]) {
+                for row in std::iter::once(&t.head).chain(&t.rows) {
                     out.extend(row.iter().map(|c| c.text.clone()));
                 }
             }
@@ -952,7 +961,7 @@ pub fn parse(src: &str) -> Vec<Block> {
                 if let Some((head, rows, _, aligns)) = table.take() {
                     push_block(
                         &mut stack,
-                        Block::Table(Rc::new(Table { head, rows, aligns })),
+                        Block::Table(std::sync::Arc::new(Table { head, rows, aligns })),
                     );
                 }
             }
@@ -995,7 +1004,7 @@ enum Diagram {
 /// A table's measured columns, kept while its rows don't change.
 #[derive(Clone)]
 struct TableCache {
-    table: Weak<Table>,
+    table: std::sync::Weak<Table>,
     data: Rc<TableData>,
     /// Each row's measurements by its text, so a table streaming in measures
     /// only its new rows.
@@ -1917,6 +1926,9 @@ fn start_diagram(ck: (String, bool), r: &mut R) {
 
 /// Body rows a table shows before it scrolls inside the chat…
 const TABLE_ROWS: usize = 10;
+/// In a document or the viewer (where a table from the chat opens), a long
+/// table shows this many rows before scrolling.
+const DOC_TABLE_ROWS: usize = 40;
 /// …once that hides a meaningful number of rows.
 const TABLE_SLACK: usize = 3;
 /// Columns never get wider than this before their text wraps…
@@ -1942,7 +1954,7 @@ struct Measure {
 
 /// A table with its shared column widths, kept so every row lines up.
 pub struct TableData {
-    table: Rc<Table>,
+    table: std::sync::Arc<Table>,
     widths: Vec<f32>,
     mins: Vec<f32>,
     total: f32,
@@ -2030,9 +2042,9 @@ fn measure(i: &Inline, head: bool, md: &Md, window: &Window) -> Measure {
 
 /// The table's column widths, measured once and kept while it is unchanged.
 /// While it streams in, only new or changed rows are measured.
-fn table_data(table: &Rc<Table>, key: &str, md: &Md, window: &Window) -> Rc<TableData> {
+fn table_data(table: &std::sync::Arc<Table>, key: &str, md: &Md, window: &Window) -> Rc<TableData> {
     if let Some(c) = md.0.borrow().tables.peek(&key.to_string())
-        && c.table.as_ptr() == Rc::as_ptr(table)
+        && c.table.as_ptr() == std::sync::Arc::as_ptr(table)
     {
         return c.data.clone();
     }
@@ -2090,7 +2102,7 @@ fn table_data(table: &Rc<Table>, key: &str, md: &Md, window: &Window) -> Rc<Tabl
     s.tables.insert(
         key.to_string(),
         TableCache {
-            table: Rc::downgrade(table),
+            table: std::sync::Arc::downgrade(table),
             data: data.clone(),
             rows,
         },
@@ -2251,6 +2263,11 @@ fn vfade(top: bool, bg: Hsla) -> Div {
         ))
 }
 
+thread_local! {
+    /// A table from the chat to open in the viewer, as Markdown.
+    pub static OPEN_TABLE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
 /// The list state behind a capped table, kept while its rows stream in.
 fn list_for(md: &Md, key: &str, n: usize) -> ListState {
     let mut s = md.0.borrow_mut();
@@ -2277,15 +2294,51 @@ fn list_for(md: &Md, key: &str, n: usize) -> ListState {
 /// A table: header, rows, and copying. Past 13 rows it shows 10½ of them
 /// and scrolls inside the chat, with an always-visible scrollbar, fades and
 /// a footer giving the row count. Wider than the column, it scrolls sideways.
-fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement {
+fn table_block(table: &std::sync::Arc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement {
     let data = table_data(table, key, &r.md, r.window);
     let counted = r.counted;
     let n = table.rows.len();
     // The header copies with the block's lead; each row on a line of its own.
     let head_lead = crate::select::take_lead().to_string();
     let prefix = COPY_PREFIX.with(|p| p.borrow().clone());
-    let capped = data.capped();
+    // The chat keeps tall tables short; a document has room for more.
+    let before = if counted { TABLE_ROWS } else { DOC_TABLE_ROWS };
+    let capped = if counted {
+        data.capped()
+    } else {
+        n > DOC_TABLE_ROWS + TABLE_SLACK
+    };
     let bg = r.bg;
+    // ⌘F in the chat counts every row, those out of view too: what each
+    // row holds is known here, and the running count is set as if they'd
+    // all been painted (see `select::at_paint`).
+    let finding = (counted && capped)
+        .then(crate::select::here_item)
+        .flatten()
+        .and_then(|(area, item)| crate::select::find_needle(area).map(|n| (area, item, n)));
+    let found = finding.as_ref().map(|(area, item, needle)| {
+        let count = |cells: &[Inline]| -> usize {
+            cells
+                .iter()
+                .map(|c| crate::select::matches(&c.text, needle).len())
+                .sum()
+        };
+        let head_n = count(&table.head);
+        let mut before = Vec::with_capacity(n + 1);
+        let mut sum = 0;
+        for r in &table.rows {
+            before.push(sum);
+            sum += count(r);
+        }
+        before.push(sum);
+        (
+            *area,
+            *item,
+            head_n,
+            Rc::new(before),
+            Rc::new(std::cell::Cell::new(0usize)),
+        )
+    });
     // The header first: it reads, and copies, before the rows.
     let head = row(
         &format!("{key}/h"),
@@ -2299,12 +2352,45 @@ fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement
         r.window,
         t,
     );
+    let mut start_mark = None;
     let body: AnyElement = if capped {
         let state = list_for(&r.md, key, n);
+        // Where the table's count starts; and stepping to a match in a row
+        // out of view scrolls the table to it.
+        start_mark = found.clone().map(|(area, item, head_n, before, base)| {
+            let state = state.clone();
+            crate::select::at_paint(move |window| {
+                base.set(crate::select::found_so_far(item));
+                let Some((at, k)) = crate::select::find_current(area) else {
+                    return;
+                };
+                let first = base.get() + head_n;
+                let total = before.last().copied().unwrap_or(0);
+                if at == item && k >= first && k < first + total && crate::select::take_reveal_row()
+                {
+                    let row = before
+                        .partition_point(|&b| b <= k - first)
+                        .saturating_sub(1);
+                    // The row a few down from the top, clear of the fade.
+                    state.scroll_to(ListOffset {
+                        item_ix: row.saturating_sub(3),
+                        offset_in_item: px(0.),
+                    });
+                    window.refresh();
+                }
+            })
+        });
+        let end = found.clone().map(|(_, item, head_n, before, base)| {
+            crate::select::at_paint(move |_| {
+                let total = before.last().copied().unwrap_or(0);
+                crate::select::set_found(item, base.get() + head_n + total);
+            })
+        });
+        let per_row = found.clone();
         let top = -state.scroll_px_offset_for_scrollbar().y.as_f32();
         let max = state.max_offset_for_scrollbar().y.as_f32();
         // Half a row peeks out at the bottom: a cut-off row says "more".
-        let h = (TABLE_ROWS as f32 + 0.5) * ROW_H;
+        let h = (before as f32 + 0.5) * ROW_H;
         let (rows, md, t2, k, pre) = (
             data.clone(),
             r.md.clone(),
@@ -2322,26 +2408,32 @@ fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement
             .child(
                 list(state.clone(), move |ix, window, _| {
                     let _place = slot.enter(ix);
-                    // Find counts the rows shown before scrolling; those
-                    // past them aren't tinted either, so its numbering
-                    // stays true.
-                    let _quiet = (counted && ix >= TABLE_ROWS).then(crate::select::unsearched);
-                    row(
-                        &format!("{k}/r{ix}"),
-                        &pre,
-                        &rows,
-                        &rows.table.rows[ix],
-                        false,
-                        ix + 1 < rows.table.rows.len(),
-                        true,
-                        &md,
-                        window,
-                        &t2,
-                    )
-                    .into_any_element()
+                    // Each row's matches number on from the rows before it,
+                    // drawn or not.
+                    let mark = per_row.clone().map(|(_, item, head_n, before, base)| {
+                        crate::select::at_paint(move |_| {
+                            crate::select::set_found(item, base.get() + head_n + before[ix]);
+                        })
+                    });
+                    div()
+                        .children(mark)
+                        .child(row(
+                            &format!("{k}/r{ix}"),
+                            &pre,
+                            &rows,
+                            &rows.table.rows[ix],
+                            false,
+                            ix + 1 < rows.table.rows.len(),
+                            true,
+                            &md,
+                            window,
+                            &t2,
+                        ))
+                        .into_any_element()
                 })
                 .size_full(),
             )
+            .children(end)
             .when(top > 0.5, |d| d.child(vfade(true, bg)))
             .when(top < max - 0.5, |d| d.child(vfade(false, bg)))
             .child(scrollbar(state, t))
@@ -2376,6 +2468,7 @@ fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement
         .border_color(t.hairline)
         .rounded(px(radius::LG))
         .overflow_hidden()
+        .children(start_mark)
         .child(head)
         .child(body);
     let scroller = hscroll(&r.md, key, grid, bg, t.ink);
@@ -2403,6 +2496,16 @@ fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement
     // The footer spans the table, not the column, so its actions sit under
     // the table they act on.
     let probes = r.md.probes();
+    // In the chat, Open shows it in the viewer, with room for every row.
+    let open = counted.then(|| {
+        let whole = table.clone();
+        crate::ui::ghost(SharedString::from(format!("md-open-{key}")), "Open", t)
+            .child(crate::ui::probe(&probes, "md-open-table"))
+            .on_click(move |_, window, _| {
+                OPEN_TABLE.with(|o| *o.borrow_mut() = Some(whole.markdown()));
+                window.refresh();
+            })
+    });
     div()
         .flex()
         .flex_col()
@@ -2426,6 +2529,7 @@ fn table_block(table: &Rc<Table>, t: &Theme, key: &str, r: &mut R) -> AnyElement
                     div()
                         .flex()
                         .gap(px(space::S1))
+                        .children(open)
                         .child(md.child(crate::ui::probe(&probes, "md-copy-md")))
                         .child(csv.child(crate::ui::probe(&probes, "md-copy-csv"))),
                 ),
@@ -2456,6 +2560,13 @@ fn checkbox(done: bool, t: &Theme) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{Block, Callout, is_price, parse, resolve};
+
+    #[test]
+    fn an_http_address_before_an_https_one_is_a_link_too() {
+        let s = "open http://localhost:3000 then see https://docs.example";
+        let spans: Vec<&str> = super::url_spans(s).into_iter().map(|r| &s[r]).collect();
+        assert_eq!(spans, ["http://localhost:3000", "https://docs.example"]);
+    }
 
     #[test]
     fn your_own_words_link_addresses_and_files() {

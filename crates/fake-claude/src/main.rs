@@ -15,6 +15,16 @@
 //! - `dev server`: serves a page on a free port and prints its address
 //! - `long`: a long reply, for stopping halfway (`slowly`: ten times slower;
 //!   with `make a plan`, each step holds ten times longer)
+//! - `keep watching`: two pieces of background work (a dev server, a test
+//!   watcher) writing output files, running until stopped or 20 s pass
+//! - `long table`: a reply with a 60-row table (`/api/needle` in row 48)
+//! - `nearly full`: the context reads nearly full from then on
+//! - `mcp trouble`: from then on, init lists the MCP servers (one failed,
+//!   two wanting sign-in)
+//! - `screenshot`: thinks, runs a slow build, then a browser tool returns
+//!   a picture of a page
+//! - `every size`: screenshots the page at four widths in a row, the last
+//!   call bringing back three pictures (six in the group)
 //! - `colour output`: a Bash call whose output is coloured, with a
 //!   progress line and one very long line
 //! - `half-typed`: a reply that stops for a while each time bold, a link,
@@ -32,6 +42,8 @@
 //! - `/status`, `/mcp`, `/skills`, `/memory`, `/hooks`, `/permissions`:
 //!   refused as dialogs, with their control requests answered; the MCP
 //!   servers turn on and off, reconnect (except `figma`) and sign in
+//! - `-p` starting "Title this conversation": the person's first message
+//!   as the title ("Checking the landing page" for a screenshot session)
 //! - anything else: a short Markdown reply
 //!
 //! `FAKE_CLAUDE_SPEED` scales every pause (0 makes it instant);
@@ -61,6 +73,10 @@ struct Agent {
     steer: bool,
     /// MCP servers: name, status, scope.
     mcp: Vec<(String, String, String)>,
+    /// Init lists the MCP servers (a message said `mcp trouble`).
+    show_mcp: bool,
+    /// Background work running now: id and description.
+    bg: Vec<(String, String)>,
     /// How long `say` waits between chunks, unscaled.
     chunk_ms: u64,
 }
@@ -102,6 +118,8 @@ fn main() {
                 .or_else(|| arg("--session-id"))
                 .unwrap_or_else(new_id)
         },
+        show_mcp: false,
+        bg: Vec::new(),
         mcp: [
             ("docs", "connected", "user"),
             ("tickets", "needs-auth", "project"),
@@ -130,6 +148,24 @@ fn main() {
     if !args.iter().any(|x| x == "--input-format")
         && let Some(prompt) = arg("-p").filter(|p| !p.starts_with("--"))
     {
+        // Asked for a title: the person's first message as it was, so
+        // walks still find sessions by what they sent; a screenshot
+        // session gets a title of its own.
+        if prompt.starts_with("Title this conversation") {
+            let first = prompt
+                .lines()
+                .find_map(|l| l.strip_prefix("Person: "))
+                .unwrap_or("A conversation");
+            let t = if first.contains("screenshot") {
+                "Checking the landing page".to_string()
+            } else {
+                first.to_string()
+            };
+            a.init();
+            a.say(&t, None).ok();
+            a.end("done", false);
+            return;
+        }
         let _ = a.turn(&prompt);
         return;
     }
@@ -310,6 +346,24 @@ impl Agent {
                         json!({})
                     }
                     "interrupt" => json!({ "still_queued": [] }),
+                    // Background work stops: the set goes out without it.
+                    "stop_task" => {
+                        let task = v["request"]["task_id"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string();
+                        self.bg.retain(|(id, _)| *id != task);
+                        let tasks: Vec<Value> = self
+                            .bg
+                            .iter()
+                            .map(|(id, d)| json!({"task_id": id, "description": d, "task_type": "local_bash"}))
+                            .collect();
+                        out(self.envelope(
+                            json!({"type": "system", "subtype": "background_tasks_changed", "tasks": tasks}),
+                            None,
+                        ));
+                        json!({})
+                    }
                     "get_usage" => json!({"rate_limits": {
                         "five_hour": {"utilization": 18, "resets_at": "2030-01-01T00:00:00+00:00"},
                         "seven_day": {"utilization": 41, "resets_at": "2030-01-05T00:00:00+00:00"}}}),
@@ -640,6 +694,20 @@ impl Agent {
         Ok(id)
     }
 
+    /// Thinking streamed a piece at a time (800 ms apart), then whole.
+    fn think_streamed(&mut self, parts: &[&str]) -> Result<(), Cut> {
+        for p in parts {
+            out(self.envelope(
+                json!({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+                    "delta": {"type": "thinking_delta", "thinking": p}}}),
+                None,
+            ));
+            self.pause(800)?;
+        }
+        self.think(&parts.concat());
+        Ok(())
+    }
+
     /// A thinking block, whole, as the agent sends one before acting.
     fn think(&mut self, text: &str) {
         out(self.envelope(
@@ -736,12 +804,17 @@ impl Agent {
     }
 
     fn init(&self) {
-        out(self.envelope(
-            json!({"type": "system", "subtype": "init", "cwd": std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(),
-                "tools": ["Bash", "Read", "Write", "Edit", "Task", "AskUserQuestion"], "model": self.model,
-                "permissionMode": self.mode, "claude_code_version": "0.0.0-fake"}),
-            None,
-        ));
+        let mut v = json!({"type": "system", "subtype": "init", "cwd": std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(),
+            "tools": ["Bash", "Read", "Write", "Edit", "Task", "AskUserQuestion"], "model": self.model,
+            "permissionMode": self.mode, "claude_code_version": "0.0.0-fake"});
+        if self.show_mcp {
+            v["mcp_servers"] = self
+                .mcp
+                .iter()
+                .map(|(n, st, _)| json!({"name": n, "status": st}))
+                .collect();
+        }
+        out(self.envelope(v, None));
     }
 
     fn end(&self, text: &str, error: bool) {
@@ -754,6 +827,7 @@ impl Agent {
     }
 
     fn turn(&mut self, text: &str) -> Result<(), ()> {
+        self.show_mcp |= text.to_lowercase().contains("mcp trouble");
         self.init();
         if !self.sent_limits {
             self.sent_limits = true;
@@ -934,6 +1008,82 @@ impl Agent {
             };
             self.say(said, None)?;
             self.end(said, false);
+            return Ok(());
+        }
+        if lower.contains("every size") {
+            // Screenshots one after another, as a check across widths does;
+            // the last call brings back more than one picture.
+            let page = base64(include_bytes!("../assets/page.png"));
+            let tablet = base64(include_bytes!("../assets/page-tablet.png"));
+            let phone = base64(include_bytes!("../assets/page-phone.png"));
+            let hero = base64(include_bytes!("../assets/page-hero.png"));
+            let shots: [(&str, Vec<&str>); 4] = [
+                ("1280", vec![&page]),
+                ("768", vec![&tablet]),
+                ("390", vec![&phone]),
+                ("390, scrolled", vec![&hero, &tablet, &page]),
+            ];
+            for (width, pictures) in shots {
+                let id = self.tool(
+                    "mcp__browser__take_screenshot",
+                    json!({"url": "http://localhost:5173/", "width": width}),
+                    None,
+                );
+                self.pause(300)?;
+                let mut content =
+                    vec![json!({"type": "text", "text": format!("Took a screenshot at {width}")})];
+                content.extend(pictures.iter().map(|data| {
+                    json!({"type": "image", "source": {"type": "base64",
+                        "media_type": "image/png", "data": data}})
+                }));
+                out(self.envelope(
+                    json!({"type": "user", "message": {"role": "user", "content": [
+                        {"tool_use_id": id, "type": "tool_result", "is_error": false,
+                            "content": content}]}}),
+                    None,
+                ));
+            }
+            self.say(
+                "It holds up at every width; on a phone the cards stack.",
+                None,
+            )?;
+            self.end("done", false);
+            return Ok(());
+        }
+        if lower.contains("screenshot") {
+            // Thinks a while, runs something slow, then a browser tool
+            // answers with a picture, as screenshot tools do.
+            self.think_streamed(&[
+                "The page should be up on the dev server. ",
+                "A fresh build first, so the screenshot shows the latest hero. ",
+                "Then I'll look at it.",
+            ])?;
+            let id = self.tool(
+                "Bash",
+                json!({"command": "npm run build", "description": "Build the site"}),
+                None,
+            );
+            self.pause(3200)?;
+            self.result(&id, "Built in 3.1s", false, None);
+            let id = self.tool(
+                "mcp__browser__take_screenshot",
+                json!({"url": "http://localhost:5173/"}),
+                None,
+            );
+            self.pause(600)?;
+            out(self.envelope(
+                json!({"type": "user", "message": {"role": "user", "content": [
+                    {"tool_use_id": id, "type": "tool_result", "is_error": false, "content": [
+                        {"type": "text", "text": "Took a screenshot of http://localhost:5173/"},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                            "data": base64(include_bytes!("../assets/page.png"))}}]}]}}),
+                None,
+            ));
+            self.say(
+                "The page renders: the header, the hero and three cards.",
+                None,
+            )?;
+            self.end("done", false);
             return Ok(());
         }
         if lower.contains("colour output") {
@@ -1249,6 +1399,87 @@ impl Agent {
             self.end("done", false);
             return Ok(());
         }
+        if lower.contains("keep watching") {
+            // Two pieces of background work that run on (each writing its
+            // output to a file) until stopped or a while has passed.
+            let dir = std::env::temp_dir().join(format!("fake-claude-{}", self.session));
+            let _ = std::fs::create_dir_all(&dir);
+            for (task, cmd, desc, text) in [
+                (
+                    "bdev",
+                    "npm run dev",
+                    "Start the dev server",
+                    "  VITE ready in 312 ms\n  ➜  Local:   http://localhost:5173/\n",
+                ),
+                (
+                    "btest",
+                    "cargo watch -x test",
+                    "Watch the tests",
+                    "[Running 'cargo test']\ntest result: ok. 42 passed\n",
+                ),
+            ] {
+                let path = dir.join(format!("{task}.output"));
+                let _ = std::fs::write(&path, text);
+                let id = self.tool(
+                    "Bash",
+                    json!({"command": cmd, "description": desc, "run_in_background": true}),
+                    None,
+                );
+                out(self.envelope(
+                    json!({"type": "system", "subtype": "task_started", "task_id": task, "tool_use_id": id,
+                        "description": desc, "is_backgrounded": true}),
+                    None,
+                ));
+                self.result(
+                    &id,
+                    &format!("Command running in background with ID: {task}. Output is being written to: {}", path.display()),
+                    false,
+                    None,
+                );
+                self.bg.push((task.to_string(), desc.to_string()));
+            }
+            let tasks: Vec<Value> = self
+                .bg
+                .iter()
+                .map(|(id, d)| json!({"task_id": id, "description": d, "task_type": "local_bash"}))
+                .collect();
+            out(self.envelope(
+                json!({"type": "system", "subtype": "background_tasks_changed", "tasks": tasks}),
+                None,
+            ));
+            self.say(
+                "The dev server and the test watcher are running in the background.",
+                None,
+            )?;
+            self.end("done", false);
+            let _ = self.pause(20_000);
+            self.bg.clear();
+            out(self.envelope(
+                json!({"type": "system", "subtype": "background_tasks_changed", "tasks": []}),
+                None,
+            ));
+            return Ok(());
+        }
+        if lower.contains("long table") {
+            let mut t = String::from(
+                "Here are the 60 routes, slowest first:\n\n| # | Route | p95 |\n| --- | --- | ---: |\n",
+            );
+            for i in 1..=60 {
+                let route = if i == 48 {
+                    "/api/needle".to_string()
+                } else {
+                    format!("/api/route-{i}")
+                };
+                t.push_str(&format!("| {i} | `{route}` | {} ms |\n", 900 - i * 13));
+            }
+            t.push_str("\nThe slowest ones share the same query.");
+            self.say(&t, None)?;
+            self.end("done", false);
+            return Ok(());
+        }
+        if lower.contains("nearly full") {
+            self.context = 186_000;
+        }
         if lower.contains("background") {
             let id = self.tool(
                 "Bash",
@@ -1445,3 +1676,22 @@ fn file_body(path: &str, prompt: &str) -> String {
 }
 
 const LONG: &str = "Let me walk through the whole design before changing anything, because the pieces depend on each other more than it first looks.\n\n## The event log\n\nEvery session is a list of events, and each one gets a number. A client that drops off asks for everything after the last number it saw, so catching up and staying live are the same thing. Nothing is ever rewritten, which keeps the log simple to reason about and cheap to copy.\n\n## The agents\n\nThe agent runs as a child of a tiny holder process rather than of the daemon itself. That way the daemon can restart, crash or upgrade without the agent noticing: the holder keeps the pipes open and writes everything to disk, and the new daemon picks up from the last byte it recorded.\n\n## The clients\n\nThe desktop and the phone are views. They keep a cache so they open instantly, and they send commands to the daemon that owns the session. They never decide anything on their own, so two of them can't disagree about what happened.\n\n## What I'd change\n\n1. Batch events while catching up, so a phone isn't held back by the cost of each message.\n2. Store only complete messages, and stream the rest.\n3. Keep the last usage reading per account, since the agent only reports it when it changes.\n\nThat's the plan. Shall I start with the first one?";
+
+/// Standard base64, padded, as tool results carry pictures.
+fn base64(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let n = (c[0] as u32) << 16
+            | (*c.get(1).unwrap_or(&0) as u32) << 8
+            | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            if i <= c.len() {
+                s.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                s.push('=');
+            }
+        }
+    }
+    s
+}

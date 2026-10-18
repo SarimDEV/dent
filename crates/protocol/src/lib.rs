@@ -130,6 +130,10 @@ pub enum Body {
         output: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent: Option<String>,
+        /// Pictures that came back (a screenshot, an image read), saved on
+        /// the session's machine, by path.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<String>,
     },
     /// The agent is blocked until the person answers.
     Asked {
@@ -216,6 +220,17 @@ pub enum Body {
     },
     Closed,
     Reopened,
+    /// The session will carry on by itself at `at` (Unix seconds), when a
+    /// used-up limit resets; `None` takes that back.
+    Resume {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<u64>,
+    },
+    /// Someone looked at the session after event `upto`: what finished or
+    /// asked before then is no longer new to them.
+    Seen {
+        upto: u64,
+    },
     /// A side question: asked with the conversation's context, kept out of
     /// the conversation itself.
     Aside {
@@ -396,6 +411,8 @@ pub enum Activity {
         #[serde(default)]
         what: Option<String>,
     },
+    /// Thinking, and the last thing it thought, a sentence at most.
+    Thinking { latest: String },
 }
 
 /// The command a one-line message runs (`/compact`,
@@ -532,6 +549,13 @@ pub struct Window {
 pub struct Task {
     pub id: String,
     pub description: String,
+    /// What kind of work: `local_bash` for a shell, `local_agent` for a
+    /// subagent, and so on.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    /// The tool call that started it, when the agent said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<String>,
 }
 
 /// A model the agent offers.
@@ -729,6 +753,10 @@ pub enum Request {
         session: SessionId,
         #[serde(default)]
         before: Option<String>,
+        /// Fork from an earlier version: everything before event `until`
+        /// (the rewind that left it behind).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        until: Option<u64>,
         /// The client's id for this fork, so a resend after a reconnect
         /// gets the same session rather than a second one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -781,6 +809,32 @@ pub enum Request {
         session: SessionId,
     },
     Reopen {
+        session: SessionId,
+    },
+    /// Carry on by itself at `at` (Unix seconds), as a limit resets, or
+    /// not (`None`).
+    Resume {
+        session: SessionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<u64>,
+    },
+    /// Stop one piece of background work.
+    StopTask {
+        session: SessionId,
+        task: String,
+    },
+    /// Keep the machine awake while any agent works (on by default).
+    KeepAwake {
+        on: bool,
+    },
+    /// The session was looked at, up to event `upto`.
+    Seen {
+        session: SessionId,
+        upto: u64,
+    },
+    /// Title the session again from what it's about now; the new title
+    /// arrives as a `settings` event.
+    Retitle {
         session: SessionId,
     },
     /// Ask a side question; the answer arrives as an `aside_reply` event.
@@ -1148,7 +1202,8 @@ pub mod b64 {
     pub fn decode(s: &str) -> Option<Vec<u8>> {
         let mut out = Vec::with_capacity(s.len() / 4 * 3);
         let (mut acc, mut bits) = (0u32, 0);
-        for b in s.bytes().filter(|b| *b != b'=') {
+        // Padding and line breaks (some encoders wrap at 76) carry nothing.
+        for b in s.bytes().filter(|b| *b != b'=' && !b.is_ascii_whitespace()) {
             let v = ABC.iter().position(|c| *c == b)? as u32;
             acc = (acc << 6) | v;
             bits += 6;
@@ -1170,6 +1225,7 @@ pub mod b64 {
             }
             assert_eq!(super::encode(b"foobar"), "Zm9vYmFy");
             assert_eq!(super::encode(b"fo"), "Zm8=");
+            assert_eq!(super::decode("Zm9v\nYmFy\r\n").unwrap(), b"foobar");
         }
     }
 }

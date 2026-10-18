@@ -143,7 +143,8 @@ impl Dent {
             .gap_x(px(space::S1H))
             .ty(LABEL)
             .text_color(t.quiet)
-            .child(div().flex_none().child(s.project.clone()))
+            // A name too long for the row ends in an ellipsis, not mid-glyph.
+            .child(div().max_w_full().truncate().child(s.project.clone()))
             // The separator travels with the machine, so it never dangles.
             .child(
                 div()
@@ -512,6 +513,25 @@ impl Dent {
             .overflow_hidden()
             .child(half("mine-prev", true, prev, cx))
             .child(half("mine-next", false, next, cx))
+            // All of them, to search and pick from.
+            .child(
+                div()
+                    .id("mine-all")
+                    .relative()
+                    .size(px(26.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .border_l_1()
+                    .border_color(t.hairline)
+                    .child(icon("list", 14., t.quiet))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(t.hover()))
+                    .active(|d| d.bg(t.press()))
+                    .with_tip(tip("Your messages", Some("⇧ ⌘ K"), t))
+                    .on_click(cx.listener(|this, _, window, cx| this.open_messages(window, cx)))
+                    .child(probe(&self.probes, "mine-all")),
+            )
     }
 
     /// A Copy that says "Copied" for a moment. `text` runs only when
@@ -861,7 +881,7 @@ impl Dent {
                                         i,
                                         None | Some(
                                             Item::Tools { .. }
-                                                | Item::Thinking(_)
+                                                | Item::Thinking(..)
                                                 | Item::Note { .. }
                                         )
                                     )
@@ -1018,7 +1038,11 @@ impl Dent {
                         )),
                 )
                 .children(latest)
-                .child(self.composer_box(s, cx))
+                .child(if s.old.is_some() {
+                    self.old_version_bar(s, cx)
+                } else {
+                    self.composer_box(s, cx).into_any_element()
+                })
                 .into_any_element()
         };
         div()
@@ -1054,7 +1078,9 @@ impl Dent {
         let kind = match &s.activity {
             Some(dent_protocol::Activity::Compacting { .. }) => "compacting",
             Some(dent_protocol::Activity::Retrying { .. }) => "retrying",
-            Some(dent_protocol::Activity::Preparing { .. }) | None => "working",
+            Some(dent_protocol::Activity::Preparing { .. })
+            | Some(dent_protocol::Activity::Thinking { .. })
+            | None => "working",
         };
         // The plan's current step, as the working line would say it.
         let step = s
@@ -1176,6 +1202,8 @@ impl Dent {
                 let busy = s.running();
                 let has_files = s.checkpoints.contains(msg);
                 let group = SharedString::from(format!("user-{ix}"));
+                // A few emoji and nothing else read large, without a bubble.
+                let big = files.is_empty() && notes.is_empty() && emoji_only(words);
                 let (m1, m2, m3, sid) = (msg.clone(), msg.clone(), msg.clone(), s.id.clone());
                 div()
                     .group(group.clone())
@@ -1189,7 +1217,8 @@ impl Dent {
                             .px(px(space::S3 + space::HALF))
                             .py(px(space::S2))
                             .rounded(px(radius::LG + space::HALF))
-                            .bg(t.tint())
+                            .when(!big, |d| d.bg(t.tint()))
+                            .when(big, |d| d.text_size(px(EMOJI_SIZE)).line_height(px(EMOJI_SIZE * 1.25)))
                             .flex()
                             .flex_col()
                             .gap(px(space::S2))
@@ -1235,7 +1264,7 @@ impl Dent {
                                     && shown.len() < 80;
                                 d.child(
                                     div()
-                                        .ty(if command { CODE } else { READING })
+                                        .when(!big, |d| d.ty(if command { CODE } else { READING }))
                                         .text_color(t.ink)
                                         .child({
                                             // Addresses and files you named open
@@ -1368,6 +1397,39 @@ impl Dent {
                                             cx,
                                         )
                                     })
+                                    .child({
+                                        // A prompt worth keeping becomes a
+                                        // skill: it's in the / menu after.
+                                        let (words, cwd) = (body.join("\n"), s.cwd.clone());
+                                        ghost(
+                                            SharedString::from(format!("save-skill-{ix}")),
+                                            "Save as skill",
+                                            &t,
+                                        )
+                                        .relative()
+                                        .child(probe(&self.probes, format!("save-skill-{ix}")))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                                use crate::context::Do;
+                                                cx.stop_propagation();
+                                                this.open_context(
+                                                    e.position,
+                                                    vec![
+                                                        (
+                                                            "Save for this project",
+                                                            Do::SaveSkill(words.clone(), Some(cwd.clone())),
+                                                        ),
+                                                        (
+                                                            "Save for every project",
+                                                            Do::SaveSkill(words.clone(), None),
+                                                        ),
+                                                    ],
+                                                    cx,
+                                                );
+                                            }),
+                                        )
+                                    })
                                     .child(
                                         ghost(
                                             SharedString::from(format!("fork-from-{ix}")),
@@ -1396,6 +1458,13 @@ impl Dent {
                             )
                         }
                     })
+                    // Earlier versions of this message: step through them.
+                    .children(
+                        s.versions
+                            .iter()
+                            .find(|(m, ..)| m == msg)
+                            .map(|&(_, at, cur, total)| self.version_stepper(&s.id, at, cur, total, cx)),
+                    )
                     .into_any_element()
             }
             Item::Text(src) => {
@@ -1486,6 +1555,7 @@ impl Dent {
                 summary,
                 lines,
                 counted,
+                pictures,
             } => {
                 // A lone call opens straight to what it did; a group opens
                 // to its calls, each of which opens in turn.
@@ -1601,9 +1671,12 @@ impl Dent {
                                         d.border_t_1().border_color(t.hairline)
                                     });
                                 let rail = t.quiet.opacity(0.35);
-                                for k in 1..=l.depth {
+                                // Past a few levels deep, rails stop
+                                // stepping in, so the step keeps its room.
+                                let deep = l.depth.min(MOST_RAILS);
+                                for k in 1..=deep {
                                     let more = continues(&depths, i, k);
-                                    let own = k == l.depth;
+                                    let own = k == deep;
                                     row = row.child(
                                         div()
                                             .w(px(space::S4))
@@ -1741,12 +1814,17 @@ impl Dent {
                                 .children(rows),
                         )
                     })
+                    // What the calls brought back as pictures shows whether
+                    // the line is open or not: a screenshot is the point.
+                    .when(!pictures.is_empty(), |d| {
+                        d.child(tool_pictures(&s.id, ix, pictures, &t))
+                    })
                     .into_any_element()
             }
-            Item::Thinking(text) => {
+            Item::Thinking(text, took) => {
                 let nth = s.items[..ix]
                     .iter()
-                    .filter(|i| matches!(i, Item::Thinking(_)))
+                    .filter(|i| matches!(i, Item::Thinking(..)))
                     .count();
                 let key = crate::app::thought_key(&s.id, nth);
                 let open = self.open_calls.contains(&key);
@@ -1771,10 +1849,14 @@ impl Dent {
                                 }
                                 cx.notify();
                             }))
-                            .child(format!(
-                                "Thought · {words} word{}",
-                                if words == 1 { "" } else { "s" }
-                            ))
+                            .child(if *took >= 1000 {
+                                format!("Thought for {}", duration(took / 1000))
+                            } else {
+                                format!(
+                                    "Thought · {words} word{}",
+                                    if words == 1 { "" } else { "s" }
+                                )
+                            })
                             .child(crate::ui::disclosure("fold", open, 11., t.faint)),
                     )
                     .when(open, |d| {
@@ -2200,6 +2282,29 @@ impl Dent {
                             ))
                             .when_some(limit, |d, l| d.child(div().text_color(t.ink).child(l))),
                     )
+                    // An MCP server in trouble: its sheet reconnects it or
+                    // signs in.
+                    .when(
+                        text.starts_with("The MCP server ")
+                            && !matches!(s.items.get(ix + 1), Some(Item::Note { text: next, .. }) if next.starts_with("The MCP server ")),
+                        |d| {
+                        let sid = s.id.clone();
+                        d.child(
+                            ghost(
+                                SharedString::from(format!("mcp-{ix}")),
+                                "Manage servers",
+                                &t,
+                            )
+                            .relative()
+                            .child(probe(&self.probes, format!("mcp-{ix}")))
+                            .on_press(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.run_command(&sid, "/mcp", window, cx)
+                                },
+                            )),
+                        )
+                    },
+                    )
                     // The last thing that went wrong can be tried again: once
                     // the limit it hit starts over, if it hit one.
                     .when(
@@ -2215,17 +2320,93 @@ impl Dent {
                                     .relative()
                                     .child(probe(&self.probes, format!("retry-{ix}")));
                             match self.limit_hit() {
-                                Some((_, at)) => d.child(crate::ui::off_owned(
-                                    retry,
-                                    format!(
-                                        "Once it resets, at {}",
-                                        crate::data::clock(at as u64 * 1000)
-                                    ),
-                                    &t,
-                                )),
-                                None => d.child(retry.on_press(
-                                    cx.listener(move |this, _, _, cx| this.retry(&sid, cx)),
-                                )),
+                                Some((which, at)) => {
+                                    let at = at.max(0) as u64;
+                                    let when = crate::data::clock(at * 1000);
+                                    let (a, b) = (s.id.clone(), s.id.clone());
+                                    // Carrying on by itself once the limit
+                                    // resets; the daemon holds it, so it
+                                    // goes with the app closed.
+                                    let resume: AnyElement = match s.resume_at {
+                                        Some(_) => div()
+                                            .flex()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .px(px(space::S2))
+                                                    .text_color(t.ink)
+                                                    .child(format!("Carries on at {when}")),
+                                            )
+                                            .child(
+                                                ghost(
+                                                    SharedString::from(format!("unresume-{ix}")),
+                                                    "Cancel",
+                                                    &t,
+                                                )
+                                                .on_press(cx.listener(move |this, _, _, cx| {
+                                                    this.resume_at(&a, None, cx)
+                                                })),
+                                            )
+                                            .into_any_element(),
+                                        None => ghost(
+                                            SharedString::from(format!("resume-{ix}")),
+                                            format!("Carry on at {when}"),
+                                            &t,
+                                        )
+                                        .relative()
+                                        .child(probe(&self.probes, format!("resume-{ix}")))
+                                        .on_press(cx.listener(move |this, _, _, cx| {
+                                            this.resume_at(&b, Some(at), cx)
+                                        }))
+                                        .into_any_element(),
+                                    };
+                                    // A limit on one model leaves the others.
+                                    let other = which.contains("Opus") || which.contains("Sonnet");
+                                    d.child(resume)
+                                        .when(other, |d| {
+                                            d.child(
+                                                ghost(
+                                                    SharedString::from(format!("other-model-{ix}")),
+                                                    "Use another model",
+                                                    &t,
+                                                )
+                                                .on_press(cx.listener(|this, _, _, cx| {
+                                                    this.menu =
+                                                        Some(crate::app::Menu::SessionModel);
+                                                    cx.notify();
+                                                })),
+                                            )
+                                        })
+                                        .child(crate::ui::off_owned(
+                                            retry,
+                                            format!("Once it resets, at {when}"),
+                                            &t,
+                                        ))
+                                }
+                                None => {
+                                    let again = s.id.clone();
+                                    d.child(
+                                        ghost(
+                                            SharedString::from(format!("carry-on-{ix}")),
+                                            "Continue",
+                                            &t,
+                                        )
+                                        .relative()
+                                        .child(probe(&self.probes, format!("carry-on-{ix}")))
+                                        .with_tip(crate::ui::tip_owned(
+                                            "Carry on from where it was cut off".to_string(),
+                                            t,
+                                        ))
+                                        .on_press(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.carry_on(&again, cx)
+                                            }),
+                                        ),
+                                    )
+                                    .child(retry.on_press(
+                                        cx.listener(move |this, _, _, cx| this.retry(&sid, cx)),
+                                    ))
+                                }
                             }
                         },
                     )
@@ -2597,6 +2778,111 @@ impl Dent {
             .into_any_element()
     }
 
+    /// "‹ 2 / 3 ›" under a message with earlier versions.
+    fn version_stepper(
+        &self,
+        sid: &str,
+        at: usize,
+        cur: usize,
+        total: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.t;
+        let arrow =
+            |older: bool, on: bool| {
+                let sid = sid.to_string();
+                div()
+                    .id(SharedString::from(format!(
+                        "version-{}-{at}",
+                        if older { "older" } else { "newer" }
+                    )))
+                    .relative()
+                    .size(px(20.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(radius::SM))
+                    .child(icon(
+                        if older {
+                            "chevron-left"
+                        } else {
+                            "chevron-right"
+                        },
+                        12.,
+                        if on { t.quiet } else { t.faint },
+                    ))
+                    .when(on, |d| {
+                        d.cursor_pointer()
+                            .hover(|d| d.bg(t.hover()))
+                            .active(|d| d.bg(t.press()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.step_version(&sid, at, older, cx)
+                            }))
+                    })
+                    .child(probe(
+                        &self.probes,
+                        format!("version-{}", if older { "older" } else { "newer" }),
+                    ))
+            };
+        div()
+            .flex()
+            .items_center()
+            .ty(LABEL)
+            .text_color(t.quiet)
+            .child(arrow(true, cur > 1))
+            .child(div().px(px(space::S1)).child(format!("{cur} / {total}")))
+            .child(arrow(false, cur < total))
+            .into_any_element()
+    }
+
+    /// In place of the reply box while an earlier version shows: it's read
+    /// only, so back to the latest, or carry it on as a new session.
+    fn old_version_bar(&self, s: &Session, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.t;
+        let (a, b) = (s.id.clone(), s.id.clone());
+        div()
+            .w_full()
+            .max_w(px(size::COLUMN + space::S8 * 2.))
+            .mx_auto()
+            .px(px(space::S8))
+            .pb(px(space::S4))
+            .child(
+                div()
+                    .px(px(space::S4))
+                    .py(px(space::S3))
+                    .rounded(px(radius::XL))
+                    .border_1()
+                    .border_color(t.hairline)
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S2))
+                    .child(icon("rotate-ccw-clock", 14., t.quiet))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .ty(UI)
+                            .text_color(t.quiet)
+                            .child("An earlier version, as it was. Replies go to the latest."),
+                    )
+                    .child(
+                        ghost("fork-version", "Carry this one on", &t)
+                            .relative()
+                            .child(probe(&self.probes, "fork-version"))
+                            .on_press(cx.listener(move |this, _, _, cx| this.fork_version(&a, cx))),
+                    )
+                    .child(
+                        crate::ui::button("latest-version", "Back to latest", true, &t)
+                            .relative()
+                            .child(probe(&self.probes, "latest-version"))
+                            .on_press(
+                                cx.listener(move |this, _, _, cx| this.latest_version(&b, cx)),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn composer_box(&mut self, s: &Session, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = self.t;
         let text = self.composer.read(cx).value();
@@ -2735,6 +3021,7 @@ impl Dent {
             .pb(px(space::S4))
             // The plan stands on its own over the composer, not inside it.
             .children(self.plan_strip(s, cx))
+            .children(self.background_strip(s, cx))
             .child(
                 div()
                     .relative()
@@ -2937,6 +3224,124 @@ impl Dent {
         )
     }
 
+    /// What the agent left running in the background (a dev server, a
+    /// watcher, a subagent), over the composer while it runs, each with its
+    /// output when there is a file of it, and a Stop.
+    fn background_strip(&self, s: &Session, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if s.background.is_empty() {
+            return None;
+        }
+        let t = self.t;
+        let n = s.background.len();
+        let rows = s.background.iter().map(|task| {
+            let kind = match task.kind.as_str() {
+                "local_bash" => "shell",
+                "local_agent" => "subagent",
+                "" => "",
+                _ => "task",
+            };
+            let output = task
+                .call
+                .as_deref()
+                .and_then(|call| call_output(s, call))
+                .and_then(|out| output_file(&out));
+            let (sid, tid) = (s.id.clone(), task.id.clone());
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::S2))
+                .ty(UI)
+                .child(
+                    div()
+                        .w(px(14.))
+                        .flex_none()
+                        .flex()
+                        .justify_center()
+                        .child(status_square(Status::Working, &t)),
+                )
+                .child(div().flex_1().min_w_0().truncate().text_color(t.ink).child(
+                    if task.description.trim().is_empty() {
+                        "Background work".to_string()
+                    } else {
+                        task.description.clone()
+                    },
+                ))
+                .when(!kind.is_empty(), |d| {
+                    d.child(div().flex_none().text_color(t.faint).child(kind))
+                })
+                .when_some(output, |d, path| {
+                    d.child(
+                        ghost(
+                            SharedString::from(format!("bg-out-{}", task.id)),
+                            "Output",
+                            &t,
+                        )
+                        .on_press(cx.listener(move |this, _, _, cx| this.open_file(&path, cx))),
+                    )
+                })
+                .child(
+                    ghost(
+                        SharedString::from(format!("bg-stop-{}", task.id)),
+                        "Stop",
+                        &t,
+                    )
+                    .child(probe(&self.probes, format!("bg-stop-{}", task.id)))
+                    .on_press(cx.listener(move |this, _, _, cx| {
+                        this.live.send(dent_protocol::Request::StopTask {
+                            session: sid.clone(),
+                            task: tid.clone(),
+                        });
+                        cx.notify();
+                    })),
+                )
+        });
+        let all: Vec<String> = s.background.iter().map(|t| t.id.clone()).collect();
+        let sid = s.id.clone();
+        Some(
+            div()
+                .id("background-strip")
+                .mb(px(space::S2))
+                .px(px(space::S4))
+                .py(px(space::S2))
+                .rounded(px(radius::XL))
+                .border_1()
+                .border_color(t.hairline)
+                .flex()
+                .flex_col()
+                .gap(px(space::S1))
+                .child(probe(&self.probes, "background-strip"))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S2))
+                        .ty(UI)
+                        .text_color(t.quiet)
+                        .child(icon("activity", 13., t.quiet))
+                        .child(div().flex_1().child(if n == 1 {
+                            "Running in the background".to_string()
+                        } else {
+                            format!("Running in the background · {n}")
+                        }))
+                        .when(n > 1, |d| {
+                            d.child(ghost("bg-stop-all", "Stop all", &t).on_press(cx.listener(
+                                move |this, _, _, cx| {
+                                    for task in &all {
+                                        this.live.send(dent_protocol::Request::StopTask {
+                                            session: sid.clone(),
+                                            task: task.clone(),
+                                        });
+                                    }
+                                    cx.notify();
+                                },
+                            )))
+                        }),
+                )
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
     /// What rides along with the next message, as chips above whichever
     /// prompt is showing: a session's composer or a new session's field.
     fn attachment_chips(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -3130,7 +3535,28 @@ impl Dent {
                     .on_press(cx.listener(move |this, _, window, cx| {
                         this.pick_completion(&name, window, cx);
                     }));
-                let row = if mention {
+                let row = if mention && item.session.is_some() {
+                    // Another session: its title, then what it is.
+                    row.child(icon("message-square", 13., t.quiet))
+                        .child(
+                            div()
+                                .flex_none()
+                                .max_w(relative(0.6))
+                                .truncate()
+                                .ty(UI)
+                                .text_color(t.ink)
+                                .child(item.label.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .ty(UI)
+                                .text_color(t.quiet)
+                                .child(item.about.clone()),
+                        )
+                } else if mention {
                     // The name first; where it is, quieter, after.
                     let folder = item.name.ends_with('/');
                     let base = complete::base(&item.name);
@@ -4354,7 +4780,9 @@ fn needs_title(text: &str, t: &theme::Theme) -> Div {
         )
 }
 
-/// What rode along with a message, shown above its text.
+/// The most subagent rails drawn side by side.
+const MOST_RAILS: usize = 6;
+
 /// Whether level `k` of the tree carries on below row `i`: another row at
 /// that level comes before the tree steps out past it.
 fn continues(depths: &[usize], i: usize, k: usize) -> bool {
@@ -4495,6 +4923,103 @@ fn picture_path(shown: &str, cwd: &str) -> Option<std::path::PathBuf> {
     crate::data::is_file(&path).then_some(path)
 }
 
+/// Pictures a group of tool calls brought back, each opening large; they
+/// step together in the large view. One shows at a readable size; more
+/// sit in one row of small tiles, and past [`TOOL_TILES`] the last tile
+/// counts the rest.
+fn tool_pictures(session: &str, ix: usize, paths: &[String], t: &theme::Theme) -> Div {
+    let set: crate::lightbox::Set = std::rc::Rc::new(
+        paths
+            .iter()
+            .enumerate()
+            .map(|(j, p)| crate::lightbox::Shot {
+                key: SharedString::from(format!("tool-pic-{session}-{ix}-{j}")),
+                path: std::path::PathBuf::from(p),
+            })
+            .collect(),
+    );
+    let frame = || {
+        div()
+            .rounded(px(radius::MD))
+            .border_1()
+            .border_color(t.hairline)
+            .overflow_hidden()
+    };
+    if set.len() == 1 {
+        // As wide as it is, up to the cap, and narrower with the column.
+        return div().mt(px(space::S2)).flex().child(
+            crate::lightbox::picture(
+                &set,
+                0,
+                frame().max_w_full().max_h(px(TOOL_PICTURE_H)).child(
+                    img(set[0].path.clone())
+                        .max_w_full()
+                        .max_h(px(TOOL_PICTURE_H))
+                        .object_fit(ObjectFit::Contain),
+                ),
+            )
+            .min_w_0()
+            .max_w(px(TOOL_PICTURE_W)),
+        );
+    }
+    let shown = set.len().min(TOOL_TILES);
+    // The rest past the last tile, which then counts them over itself.
+    let more = set.len() - shown;
+    div()
+        .mt(px(space::S2))
+        .flex()
+        .gap(px(space::S1H))
+        .children((0..shown).map(|j| {
+            let last = j + 1 == shown && more > 0;
+            // A tile gives way evenly when the column narrows, rather than
+            // wrapping or being cut off at the edge.
+            // The last tile stands for itself and every picture after it.
+            let upto = if last { set.len() } else { j + 1 };
+            crate::lightbox::pictures(
+                &set,
+                j,
+                upto,
+                frame()
+                    .relative()
+                    .size_full()
+                    .bg(t.panel)
+                    .child(
+                        img(set[j].path.clone())
+                            .size_full()
+                            .object_fit(ObjectFit::Cover),
+                    )
+                    .when(last, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full()
+                                .bg(gpui_kit::black().opacity(0.55))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .ty(LABEL)
+                                .text_color(gpui_kit::white())
+                                .child(format!("+{}", more + 1)),
+                        )
+                    }),
+            )
+            .w(px(TOOL_TILE_W))
+            .h(px(TOOL_TILE_H))
+            .min_w_0()
+            .flex_shrink(1.)
+        }))
+}
+
+/// The most a tool's picture takes in the chat; it opens large on a click.
+const TOOL_PICTURE_W: f32 = 420.;
+const TOOL_PICTURE_H: f32 = 280.;
+/// Several pictures: how many tiles show, and each tile's size.
+const TOOL_TILES: usize = 5;
+const TOOL_TILE_W: f32 = 120.;
+const TOOL_TILE_H: f32 = 76.;
+
 /// A file that went with a message you sent (`what`, as the session's
 /// folder names it): a picture shows as itself, anything else as the chip
 /// it was in the box.
@@ -4528,7 +5053,14 @@ fn sent_file(what: &str, shot: Option<(&crate::lightbox::Set, usize)>, t: &theme
                             .object_fit(ObjectFit::Contain),
                     ),
             ))
-            .child(div().ty(LABEL).text_color(t.quiet).child(name));
+            .child(
+                div()
+                    .max_w(px(320.))
+                    .truncate()
+                    .ty(LABEL)
+                    .text_color(t.quiet)
+                    .child(name),
+            );
     }
     let name = what.rsplit('/').next().unwrap_or(what).to_string();
     // Not found as a picture (that would show above), so by its kind.
@@ -5001,7 +5533,7 @@ pub fn is_answer(items: &[Item], ix: usize, running: bool) -> bool {
         match i {
             Item::TurnEnd { .. } => return true,
             Item::User { .. } | Item::Queued { .. } => return !open,
-            Item::Text(_) | Item::Tools { .. } | Item::Thinking(_) => return false,
+            Item::Text(_) | Item::Tools { .. } | Item::Thinking(..) => return false,
             _ => {}
         }
     }
@@ -5081,6 +5613,53 @@ fn keep(whole: bool, chip: AnyElement) -> AnyElement {
     }
 }
 
+/// What a tool call printed, found by its id in the session's tool lines.
+fn call_output(s: &Session, call: &str) -> Option<String> {
+    s.items.iter().find_map(|i| match i {
+        Item::Tools { lines, .. } => lines.iter().find(|l| l.id == call).and_then(|l| {
+            l.detail
+                .as_ref()
+                .and_then(|d| d.output.as_ref().map(|(_, o)| o.clone()))
+        }),
+        _ => None,
+    })
+}
+
+/// The file background work writes its output to, as the agent's receipt
+/// names it ("Output is being written to: /tmp/…/b1.output").
+fn output_file(receipt: &str) -> Option<String> {
+    let at = receipt.find("written to:")? + "written to:".len();
+    let path = receipt[at..].split_whitespace().next()?;
+    let path = path.trim_end_matches(['.', ',']);
+    std::path::Path::new(path)
+        .is_file()
+        .then(|| path.to_string())
+}
+
+/// How large a message of only emoji reads.
+const EMOJI_SIZE: f32 = 40.;
+
+/// A message of one to eight emoji and nothing else (spaces aside).
+fn emoji_only(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() {
+        return false;
+    }
+    let mut shown = 0;
+    for c in t.chars() {
+        let u = c as u32;
+        match u {
+            // Joiners, variation selectors, skin tones and tags ride on
+            // the emoji before them.
+            0x200D | 0xFE0E | 0xFE0F | 0x1F3FB..=0x1F3FF | 0xE0020..=0xE007F => {}
+            _ if c.is_whitespace() => {}
+            0x1F000..=0x1FAFF | 0x2600..=0x27BF | 0x2300..=0x23FF | 0x2B00..=0x2BFF => shown += 1,
+            _ => return false,
+        }
+    }
+    (1..=8).contains(&shown)
+}
+
 #[cfg(test)]
 mod answer_tests {
     use super::{change_after, folded_change, is_answer, turn_end_after};
@@ -5125,7 +5704,12 @@ mod answer_tests {
         ];
         assert!(!is_answer(&q, 0, true));
         // The turn ended: the last words are its answer, narration before isn't.
-        let done = vec![text(), Item::Thinking(String::new()), text(), end.clone()];
+        let done = vec![
+            text(),
+            Item::Thinking(String::new(), 0),
+            text(),
+            end.clone(),
+        ];
         assert!(is_answer(&done, 2, false));
         assert!(!is_answer(&done, 0, false));
         // An older turn's answer stays one while a new turn runs.
@@ -5178,5 +5762,20 @@ mod clip_tests {
         assert_eq!(&shown[r.clone()], "…");
         let copied = format!("{}{with}{}", &shown[..r.start], &shown[r.end..]);
         assert_eq!(copied, text);
+    }
+}
+
+#[cfg(test)]
+mod emoji_tests {
+    use super::emoji_only;
+
+    #[test]
+    fn only_a_few_emoji_read_large() {
+        assert!(emoji_only("🎉🚀"));
+        assert!(emoji_only(" 👍🏽 "));
+        assert!(emoji_only("👨‍👩‍👧"));
+        assert!(!emoji_only("Ship it 🚀"));
+        assert!(!emoji_only("🎉🎉🎉🎉🎉🎉🎉🎉🎉"));
+        assert!(!emoji_only(""));
     }
 }

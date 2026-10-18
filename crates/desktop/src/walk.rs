@@ -158,6 +158,32 @@ impl Walk {
             // The scenes whose look the review fixes changed, for stills:
             // the approval keys, the queue and its Remove, the reply's
             // actions, the working square.
+            "finish" => {
+                let mut v = vec![(
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                )];
+                v.extend(finish());
+                v
+            }
+            // Several pictures from one group of calls, and the large view
+            // stepping through them.
+            "pictures" => {
+                let mut v = vec![(
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                )];
+                v.extend(pictures());
+                v
+            }
+            "polish" => {
+                let mut v = vec![(
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                )];
+                v.extend(polish());
+                v
+            }
             "looks" => {
                 let mut v = vec![(
                     0.,
@@ -2034,7 +2060,8 @@ fn checks() -> Vec<(f32, Act)> {
                             s.todos.iter().filter(|(st, ..)| st == "completed").count() == 1
                         })
                 },
-                20.,
+                // Two steps held 12 s each: the turn runs about 24 s.
+                30.,
             ),
         ),
         (
@@ -6394,6 +6421,371 @@ fn edges() -> Vec<(f32, Act)> {
         ),
     ]);
     v
+}
+
+/// The chat's small things, for stills: a tool's picture, thinking and
+/// call times, and the sidebar's marks (unread, a draft).
+fn polish() -> Vec<(f32, Act)> {
+    let mut v = new_session("first notes");
+    v.push((
+        0.1,
+        Until("the first session answers", |d, _| answered(d), 20.),
+    ));
+    v.extend(new_session("take a screenshot of the page please"));
+    v.extend([
+        (
+            0.1,
+            Until("the screenshot turn ends", |d, _| answered(d), 30.),
+        ),
+        (0.6, Shot("screenshot")),
+        (0.2, Call(open_every_group)),
+        (0.3, Call(to_tools)),
+        (0.6, Shot("screenshot-open")),
+        (
+            0.2,
+            Type(Field::Composer, "half a thought about the footer"),
+        ),
+    ]);
+    v.extend(new_session("second notes"));
+    v.extend([
+        (0.1, Call(|d, w, cx| select_titled(d, w, cx, "first notes"))),
+        (
+            0.1,
+            Until(
+                "the second session answers while another is open",
+                |d, _| {
+                    d.sessions
+                        .iter()
+                        .any(|s| s.title.contains("second notes") && s.status == Status::Done)
+                },
+                20.,
+            ),
+        ),
+        (0.8, Shot("sidebar")),
+        // ⌘-click two more rows: three picked, to close or pin together.
+        (
+            0.2,
+            Call(|d, _, cx| {
+                for words in ["second notes", "landing page"] {
+                    if let Some(id) = d
+                        .sessions
+                        .iter()
+                        .find(|s| s.title.contains(words))
+                        .map(|s| s.id.clone())
+                    {
+                        d.pick(&id, false, cx);
+                    }
+                }
+            }),
+        ),
+        (
+            0.1,
+            Until("three rows are picked", |d, _| d.picked.len() == 3, 2.),
+        ),
+        (0.6, Shot("picked")),
+        (0.2, Key("escape")),
+        (
+            0.1,
+            Until("Esc lets them go", |d, _| d.picked.is_empty(), 2.),
+        ),
+    ]);
+    v
+}
+
+fn pictures() -> Vec<(f32, Act)> {
+    let mut v = new_session("screenshot the page at every size");
+    v.extend([
+        (
+            0.1,
+            Until("the screenshots turn ends", |d, _| answered(d), 30.),
+        ),
+        (
+            0.1,
+            Until(
+                "the group holds all six pictures",
+                |d, _| tool_picture_count(d) == 6,
+                3.,
+            ),
+        ),
+        (0.2, Call(to_tools)),
+        (0.6, Shot("pictures")),
+        (0.2, Call(open_every_group)),
+        (0.2, Call(to_tools)),
+        (0.6, Shot("pictures-open")),
+        (0.2, Call(|d, _, cx| open_tool_picture(d, 2, cx))),
+        (
+            0.1,
+            Until("a tile opens large", |d, _| d.lightbox.is_some(), 3.),
+        ),
+        (0.8, Shot("pictures-viewer")),
+        // Onto a picture the "+3" tile stands for.
+        (0.2, Key("right")),
+        (0.2, Key("right")),
+        (0.2, Key("right")),
+        (0.5, Shot("pictures-viewer-last")),
+        (0.2, Key("escape")),
+        (
+            0.1,
+            Until("Esc puts it back", |d, _| d.lightbox.is_none(), 3.),
+        ),
+    ]);
+    v
+}
+
+/// How many pictures the open session's first tool group brought back.
+fn tool_picture_count(d: &Dent) -> usize {
+    current(d)
+        .and_then(|s| {
+            s.items.iter().find_map(|i| match i {
+                Item::Tools { pictures, .. } => Some(pictures.len()),
+                _ => None,
+            })
+        })
+        .unwrap_or(0)
+}
+
+/// Open the `at`th picture of the first tool group large, as a click does.
+fn open_tool_picture(d: &mut Dent, at: usize, cx: &mut Context<Dent>) {
+    let Some(s) = current(d) else { return };
+    let Some((ix, paths)) = s.items.iter().enumerate().find_map(|(ix, i)| match i {
+        Item::Tools { pictures, .. } => Some((ix, pictures.clone())),
+        _ => None,
+    }) else {
+        return;
+    };
+    let set = std::rc::Rc::new(
+        paths
+            .iter()
+            .enumerate()
+            .map(|(j, p)| crate::lightbox::Shot {
+                key: SharedString::from(format!("tool-pic-{}-{ix}-{j}", s.id)),
+                path: std::path::PathBuf::from(p),
+            })
+            .collect(),
+    );
+    crate::lightbox::ask(set, at);
+    cx.notify();
+}
+
+/// Scroll the conversation so its first tool group starts at the top.
+fn to_tools(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
+    let at = current(d).and_then(|s| s.items.iter().position(|i| matches!(i, Item::Tools { .. })));
+    if let Some(ix) = at {
+        d.transcript.scroll_to(ListOffset {
+            item_ix: ix.saturating_sub(1),
+            offset_in_item: px(0.),
+        });
+        cx.notify();
+    }
+}
+
+/// The rest of the chat backlog, for stills: the latest thought while it
+/// thinks, background work, a used-up limit, a crash, MCP servers in
+/// trouble, a nearly full context, emoji, versions of a message, your
+/// messages, `@` a session, a long table. Old builds walk it too (what they
+/// lack fails its check), for before-and-after stills.
+fn finish() -> Vec<(f32, Act)> {
+    let mut v = new_session("first notes");
+    v.push((
+        0.1,
+        Until("the first session answers", |d, _| answered(d), 20.),
+    ));
+    v.extend(new_session("take a screenshot of the page please"));
+    v.extend([
+        (2.0, Shot("thinking")),
+        (
+            0.1,
+            Until("the screenshot turn ends", |d, _| answered(d), 30.),
+        ),
+    ]);
+    v.extend(new_session("keep watching the app and the tests"));
+    v.extend([
+        (
+            0.1,
+            Until(
+                "it starts work in the background",
+                |d, _| says(d, "running in the background"),
+                20.,
+            ),
+        ),
+        (0.8, Shot("background")),
+    ]);
+    v.extend(new_session("hit the limit now"));
+    v.extend([
+        (
+            0.1,
+            Until(
+                "a used-up limit ends the turn",
+                |d, _| {
+                    has(d, |i| {
+                        matches!(
+                            i,
+                            Item::Note {
+                                kind: crate::data::NoteKind::Error,
+                                ..
+                            }
+                        )
+                    })
+                },
+                10.,
+            ),
+        ),
+        (0.6, Shot("limit")),
+    ]);
+    v.extend(new_session("crash halfway please"));
+    v.extend([
+        (
+            0.1,
+            Until(
+                "a crash ends the turn",
+                |d, _| {
+                    has(d, |i| matches!(i, Item::Note { text, .. } if text.contains("stopped unexpectedly")))
+                },
+                15.,
+            ),
+        ),
+        (0.6, Shot("crash")),
+    ]);
+    v.extend(new_session("mcp trouble, please check"));
+    v.extend([
+        (
+            0.1,
+            Until(
+                "it answers with MCP servers listed",
+                |d, _| answered(d),
+                20.,
+            ),
+        ),
+        (0.6, Shot("mcp")),
+    ]);
+    v.extend(new_session("the context is nearly full now"));
+    v.extend([
+        (0.1, Until("it answers", |d, _| answered(d), 20.)),
+        (0.3, Type(Field::Composer, "🎉🚀")),
+        (0.3, Key("enter")),
+        (
+            0.1,
+            Until(
+                "the emoji are answered",
+                |d, _| {
+                    answered(d)
+                        && current(d).is_some_and(|s| {
+                            s.items
+                                .iter()
+                                .filter(|i| matches!(i, Item::User { .. }))
+                                .count()
+                                == 2
+                        })
+                },
+                20.,
+            ),
+        ),
+        (0.6, Shot("emoji")),
+        // Edit from here: back to before the emoji, and a new message.
+        (
+            0.2,
+            Call(|d, _, cx| {
+                if let (Some(s), Some(to)) = (current(d).map(|s| s.id.clone()), last_sent(d)) {
+                    d.live.send(dent_protocol::Request::Rewind {
+                        session: s,
+                        to,
+                        files: false,
+                    });
+                }
+                cx.notify();
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "it goes back to before the emoji",
+                |d, _| {
+                    current(d).is_some_and(|s| {
+                        s.items
+                            .iter()
+                            .filter(|i| matches!(i, Item::User { .. }))
+                            .count()
+                            == 1
+                    })
+                },
+                10.,
+            ),
+        ),
+        (0.3, Type(Field::Composer, "Ship it 🚀")),
+        (0.3, Key("enter")),
+        (
+            0.1,
+            Until(
+                "the new version is answered",
+                |d, _| {
+                    answered(d)
+                        && current(d).is_some_and(|s| {
+                            s.items
+                                .iter()
+                                .filter(|i| matches!(i, Item::User { .. }))
+                                .count()
+                                == 2
+                        })
+                },
+                20.,
+            ),
+        ),
+        (0.6, Shot("versions")),
+        (0.2, Click("version-older")),
+        (0.8, Shot("old-version")),
+        (0.2, Click("latest-version")),
+        (0.4, Key("shift-cmd-k")),
+        (0.8, Shot("messages")),
+        (0.2, Key("escape")),
+        (0.3, Keys("compare it with @first")),
+        (0.8, Shot("at-session")),
+        (0.2, Key("escape")),
+        (0.2, Type(Field::Composer, "")),
+    ]);
+    v.extend(new_session("a long table of the routes, please"));
+    v.extend([
+        (0.1, Until("the table arrives", |d, _| answered(d), 20.)),
+        (0.3, Call(to_reply)),
+        (0.8, Shot("table")),
+        (0.2, Key("cmd-f")),
+        (0.3, Keys("needle")),
+        (1.0, Shot("find-row")),
+        (0.2, Key("escape")),
+        (0.3, Call(to_reply)),
+        (0.4, Click("md-open-table")),
+        (1.2, Shot("table-open")),
+    ]);
+    v
+}
+
+/// Open every tool group and lone call in the open session.
+fn open_every_group(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
+    let Some(s) = d.current() else { return };
+    let mut groups = Vec::new();
+    let mut calls = Vec::new();
+    for i in s.items.iter() {
+        if let Item::Tools { lines, .. } = i {
+            if let Some(l) = lines.first() {
+                groups.push(l.id.clone());
+            }
+            calls.extend(lines.iter().map(|l| l.id.clone()));
+        }
+    }
+    d.open_tools.extend(groups);
+    d.open_calls.extend(calls);
+    cx.notify();
+}
+
+/// Open the session whose title holds `words`.
+fn select_titled(d: &mut Dent, w: &mut Window, cx: &mut Context<Dent>, words: &str) {
+    let id = d
+        .sessions
+        .iter()
+        .find(|s| s.title.contains(words))
+        .map(|s| s.id.clone());
+    if id.is_some() {
+        d.select(id, w, cx);
+    }
 }
 
 /// Still frames in the current theme and size, after the checks' sessions.

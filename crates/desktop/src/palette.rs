@@ -21,6 +21,9 @@ impl Dent {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if self.palette_mine {
+            return self.messages_view(at, window, cx);
+        }
         let t = self.t;
         let results = self.palette_results(cx);
         let files = self.palette_files(cx);
@@ -92,15 +95,15 @@ impl Dent {
                                                 let q = self.search.read(cx).value().to_lowercase();
                                                 let w =
                                                     q.split_whitespace().next().unwrap_or_default();
-                                                let lower = line.to_lowercase();
-                                                let start = s.project.len() + 3;
-                                                match lower[start..].find(w).map(|i| i + start) {
-                                                    Some(at)
-                                                        if !w.is_empty()
-                                                            && line.is_char_boundary(at)
-                                                            && line
-                                                                .is_char_boundary(at + w.len()) =>
-                                                    {
+                                                // Found in the message part, by
+                                                // chars: lowercasing can change a
+                                                // name's length in bytes.
+                                                let lead = line.len() - found.len();
+                                                match crate::select::matches(&found, w)
+                                                    .first()
+                                                    .map(|r| (r.start + lead, r.len()))
+                                                {
+                                                    Some((at, wl)) if !w.is_empty() => {
                                                         let base = font(crate::theme::sans());
                                                         let mut hit = base.clone();
                                                         hit.weight = FontWeight::MEDIUM;
@@ -115,9 +118,9 @@ impl Dent {
                                                         StyledText::new(line.clone())
                                                             .with_runs(vec![
                                                                 run(at, base.clone(), t.quiet),
-                                                                run(w.len(), hit, t.ink),
+                                                                run(wl, hit, t.ink),
                                                                 run(
-                                                                    line.len() - at - w.len(),
+                                                                    line.len() - at - wl,
                                                                     base,
                                                                     t.quiet,
                                                                 ),
@@ -327,6 +330,155 @@ impl Dent {
                 Animation::new(Duration::from_millis(motion::FAST as u64))
                     .with_easing(crate::anim::ease_out),
                 |d, p| d.opacity(p),
+            )
+            .into_any_element()
+    }
+
+    /// ⇧⌘K: your messages in the open session, newest first; typing
+    /// narrows them, and one picked scrolls the chat to it.
+    fn messages_view(
+        &mut self,
+        at: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.t;
+        let found = self.palette_messages(cx);
+        let at = at.min(found.len().saturating_sub(1));
+        let vw = window.viewport_size();
+        let width = (vw.width.as_f32() - 2. * space::S8).min(560.);
+        let top = (vw.height.as_f32() * 0.12).clamp(space::S4, 96.);
+        let max_h = (vw.height.as_f32() - top - space::S8).min(480.);
+        if self.palette_shown != Some(at) {
+            self.palette_shown = Some(at);
+            self.palette_scroll.scroll_to_item(at);
+        }
+        let rows: Vec<AnyElement> = found
+            .iter()
+            .enumerate()
+            .map(|(i, (_, text, sent))| {
+                let on = i == at;
+                let first = text
+                    .lines()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("")
+                    .to_string();
+                div()
+                    .id(SharedString::from(format!("mine-{i}")))
+                    .mx(px(space::S1))
+                    .px(px(space::S3))
+                    .py(px(space::S2))
+                    .rounded(px(radius::MD))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S3))
+                    .cursor_pointer()
+                    .when(on, |d| d.bg(t.selected()))
+                    .when(!on, |d| {
+                        d.hover(|d| d.bg(t.hover())).active(|d| d.bg(t.press()))
+                    })
+                    .on_press(cx.listener(move |this, _, window, cx| {
+                        this.palette = Some(i);
+                        this.palette_open_selected(window, cx);
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .ty(UI)
+                            .text_color(t.ink)
+                            .child(first),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .ty(LABEL)
+                            .text_color(t.faint)
+                            .child(crate::data::clock(*sent)),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        let empty = rows.is_empty();
+        div()
+            .id("palette-scrim")
+            .occlude()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .bg(if t.dark {
+                gpui_kit::black().opacity(0.45)
+            } else {
+                t.ink.opacity(0.08)
+            })
+            .flex()
+            .justify_center()
+            .items_start()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
+            )
+            .child(
+                floating(&t)
+                    .id("palette")
+                    .mt(px(top))
+                    .w(px(width))
+                    .max_h(px(max_h))
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        div()
+                            .px(px(space::S4))
+                            .py(px(space::S3))
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S3))
+                            .border_b_1()
+                            .border_color(t.hairline)
+                            .child(icon("list", 15., t.quiet))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .ty(DISPLAY_COMPACT)
+                                    .font_family(crate::theme::serif())
+                                    .text_color(t.ink)
+                                    .child(Textarea::new(&self.search)),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .ty(LABEL)
+                                    .text_color(t.faint)
+                                    .child("Your messages"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("results")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.palette_scroll)
+                            .py(px(space::S1))
+                            .children(rows)
+                            .when(empty, |d| {
+                                d.child(
+                                    div()
+                                        .px(px(space::S4))
+                                        .py(px(space::S3))
+                                        .ty(UI)
+                                        .text_color(t.quiet)
+                                        .child("None of your messages here say that"),
+                                )
+                            }),
+                    )
+                    .child(probe(&self.probes, "messages-palette"))
+                    .arrive("palette-arrive", From::Above, motion::FAST),
             )
             .into_any_element()
     }

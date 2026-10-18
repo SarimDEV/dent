@@ -114,8 +114,9 @@ pub enum Item {
     },
     /// A reply, in Markdown.
     Text(String),
-    /// What the agent thought before acting, folded to one line.
-    Thinking(String),
+    /// What the agent thought before acting, folded to one line, and how
+    /// long it thought in milliseconds (0 if unknown).
+    Thinking(String, u64),
     /// Tool calls folded to one line, expandable.
     Tools {
         summary: String,
@@ -123,6 +124,9 @@ pub enum Item {
         /// The summary counts several calls ("Read 3 files") rather than
         /// being one call's own line.
         counted: bool,
+        /// Pictures the calls brought back (screenshots, images read), by
+        /// path: shown under the line, folded or not.
+        pictures: Vec<String>,
     },
     /// The agent wrote a viewable file: a card that opens it.
     Made {
@@ -420,9 +424,28 @@ pub struct Session {
     pub activity: Option<dent_protocol::Activity>,
     /// Side questions and their answers, kept out of the conversation.
     pub asides: Vec<dent_client_core::Aside>,
+    /// The last event that finished a turn or asked something, and the
+    /// event up to which it has been looked at.
+    pub news: u64,
+    pub seen: u64,
+    /// Your messages that have earlier versions: (message, where in the
+    /// timeline it sits, which version shows, how many there are).
+    pub versions: Vec<(String, usize, usize, usize)>,
+    /// Showing an earlier version: the rewind that left it behind.
+    pub old: Option<u64>,
+    /// Work the agent left running in the background, now.
+    pub background: Vec<dent_protocol::Task>,
+    /// When it carries on by itself as a used-up limit resets (Unix
+    /// seconds).
+    pub resume_at: Option<u64>,
 }
 
 impl Session {
+    /// It finished or asked something since it was last looked at.
+    pub fn unread(&self) -> bool {
+        self.news > self.seen
+    }
+
     /// The command that carries this conversation on in a terminal, in its
     /// folder, once the agent has said its id.
     pub fn resume_command(&self) -> Option<String> {
@@ -470,6 +493,12 @@ impl Session {
             made_sig: 0,
             todos: Vec::new(),
             agent_session: None,
+            news: 0,
+            seen: 0,
+            background: Vec::new(),
+            resume_at: None,
+            versions: Vec::new(),
+            old: None,
         }
     }
 }

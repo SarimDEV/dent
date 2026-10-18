@@ -184,9 +184,13 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
         Request::Fork {
             session,
             before,
+            until,
             id,
         } => Reply::Created {
-            session: d.fork(&session, before.as_deref(), id.as_deref()).await?,
+            session: match until {
+                Some(seq) => d.fork_until(&session, seq, id.as_deref()).await?,
+                None => d.fork(&session, before.as_deref(), id.as_deref()).await?,
+            },
         },
         Request::Aside { session, id, text } => {
             d.aside(&session, &id, &text).await?;
@@ -256,6 +260,31 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
         }
         Request::Reopen { session } => {
             d.command(&session, Op::Reopen).await?;
+            Reply::Ok
+        }
+        Request::Retitle { session } => {
+            let d = d.clone();
+            tokio::spawn(async move {
+                if let Err(e) = d.title_session(&session, true).await {
+                    eprintln!("dent-daemon: {session}: couldn't title it: {e:#}");
+                }
+            });
+            Reply::Ok
+        }
+        Request::Resume { session, at } => {
+            d.command(&session, Op::Resume(at)).await?;
+            Reply::Ok
+        }
+        Request::StopTask { session, task } => {
+            d.command(&session, Op::StopTask(task)).await?;
+            Reply::Ok
+        }
+        Request::KeepAwake { on } => {
+            d.keep_awake(on);
+            Reply::Ok
+        }
+        Request::Seen { session, upto } => {
+            d.command(&session, Op::Seen(upto)).await?;
             Reply::Ok
         }
         Request::Projects => Reply::Projects {

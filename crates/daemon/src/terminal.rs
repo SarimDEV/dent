@@ -393,7 +393,12 @@ pub fn import(path: &Path, media: &Path) -> Option<Imported> {
                 ));
             }
             Ok(wire::Inbound::ToolResults { results, .. }) => {
-                bodies.extend(claude::result_bodies(None, results, &mut reports));
+                bodies.extend(claude::result_bodies(
+                    None,
+                    results,
+                    &mut reports,
+                    Some(media),
+                ));
             }
             _ => {}
         }
@@ -434,7 +439,11 @@ fn said(v: &Value, media: &Path, pictures: &mut usize) -> Said {
                 match p["type"].as_str() {
                     Some("text") => texts.push(s(p, "text")),
                     Some("image") => {
-                        if let Some(path) = save_picture(&p["source"], media, *pictures) {
+                        if let Some(path) = claude::save_picture(
+                            &p["source"],
+                            media,
+                            &format!("picture-{}", *pictures + 1),
+                        ) {
                             *pictures += 1;
                             attachments.push(path);
                         }
@@ -538,22 +547,6 @@ fn between<'a>(t: &'a str, open: &str, close: &str) -> Option<&'a str> {
 
 fn s(v: &Value, k: &str) -> String {
     v[k].as_str().unwrap_or_default().to_string()
-}
-
-fn save_picture(source: &Value, media: &Path, n: usize) -> Option<String> {
-    let data = source["data"].as_str()?;
-    let ext = match source["media_type"].as_str()? {
-        "image/png" => "png",
-        "image/jpeg" => "jpg",
-        "image/gif" => "gif",
-        "image/webp" => "webp",
-        _ => return None,
-    };
-    let bytes = dent_protocol::b64::decode(data)?;
-    std::fs::create_dir_all(media).ok()?;
-    let path = media.join(format!("picture-{}.{ext}", n + 1));
-    std::fs::write(&path, bytes).ok()?;
-    Some(path.display().to_string())
 }
 
 #[cfg(test)]

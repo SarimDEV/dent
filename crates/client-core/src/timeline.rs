@@ -58,6 +58,19 @@ pub struct SessionView {
     /// The agent's own id for the conversation, as it last said: what
     /// `claude --resume` takes to carry on in a terminal.
     pub agent_session: Option<String>,
+    /// The last event that finished a turn or asked something, and the
+    /// event up to which someone has looked: news past it is unread.
+    pub news: u64,
+    pub seen: u64,
+    /// When it carries on by itself as a used-up limit resets (Unix
+    /// seconds).
+    pub resume_at: Option<u64>,
+    /// Earlier versions, left behind by going back (Edit from here, Try
+    /// again), oldest first.
+    pub branches: Vec<Branch>,
+    /// When the agent last began something new (the turn starting, a
+    /// message or a tool's result): what a thought's time counts from.
+    mark_at: u64,
     /// Where the current turn's entries begin.
     turn_from: usize,
     /// The first entry that changed since [`SessionView::take_changes`].
@@ -67,6 +80,16 @@ pub struct SessionView {
     /// Subagents working in the background: the agent's id, and the call
     /// that started it, which finishes when the agent leaves `background`.
     agents: HashMap<String, String>,
+}
+
+/// A version of the conversation left behind by going back: from entry
+/// `at` (your message there) on, as it was, until the rewind (event
+/// `seq`) that left it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Branch {
+    pub at: usize,
+    pub seq: u64,
+    pub entries: Vec<Entry>,
 }
 
 /// A side question and, once it's in, its answer.
@@ -97,6 +120,9 @@ pub enum Entry {
     },
     Thinking {
         text: String,
+        /// How long it thought, in milliseconds: from what came before it
+        /// (the turn starting, a tool's result) to the thought. 0 if unknown.
+        took: u64,
     },
     /// Tool calls in a row, with what subagents did nested by `parent`.
     Tools {
@@ -163,6 +189,13 @@ pub struct Call {
     pub result: Option<(bool, String)>,
     /// For a subagent: the last thing it said while working.
     pub said: Option<String>,
+    /// Pictures that came back with the result, by path on the session's
+    /// machine.
+    pub images: Vec<String>,
+    /// When the call was made, and how long it took once it finished, in
+    /// milliseconds.
+    pub started: u64,
+    pub took: Option<u64>,
 }
 
 impl Call {
@@ -234,6 +267,23 @@ impl Call {
             "TodoWrite" => "Updated",
             other => other,
         };
+        // An MCP tool (`mcp__server__take_screenshot`) reads as its words,
+        // in the tense of the moment, then its server: "Took screenshot ·
+        // browser".
+        if let Some(rest) = self.name.strip_prefix("mcp__")
+            && let Some((server, tool)) = rest.split_once("__")
+        {
+            let words = tool.replace(['_', '-'], " ");
+            let mut words = words.trim().to_string();
+            if let Some(first) = words.get(..1) {
+                words = format!("{}{}", first.to_uppercase(), &words[1..]);
+            }
+            let server = server.replace(['_', '-'], " ");
+            return match &self.result {
+                Some((true, _)) => format!("Failed to {} · {server}", lower_first(&words)),
+                _ => format!("{} · {server}", tensed(&words, running)),
+            };
+        }
         if self.name == "Bash" {
             return match (&self.result, what) {
                 (Some((true, _)), Some(w)) => format!("Failed to {}", lower_first(&w)),
@@ -349,6 +399,21 @@ const TENSES: &[(&str, &str, &str)] = &[
     ("Set", "Setting", "Set"),
     ("Show", "Showing", "Showed"),
     ("Stage", "Staging", "Staged"),
+    ("Take", "Taking", "Took"),
+    ("Click", "Clicking", "Clicked"),
+    ("Navigate", "Navigating", "Navigated"),
+    ("Fill", "Filling", "Filled"),
+    ("Type", "Typing", "Typed"),
+    ("Press", "Pressing", "Pressed"),
+    ("Hover", "Hovering", "Hovered"),
+    ("Scroll", "Scrolling", "Scrolled"),
+    ("Select", "Selecting", "Selected"),
+    ("Close", "Closing", "Closed"),
+    ("Wait", "Waiting", "Waited"),
+    ("Upload", "Uploading", "Uploaded"),
+    ("Query", "Querying", "Queried"),
+    ("Send", "Sending", "Sent"),
+    ("Evaluate", "Evaluating", "Evaluated"),
     ("Start", "Starting", "Started"),
     ("Stash", "Stashing", "Stashed"),
     ("Stop", "Stopping", "Stopped"),
@@ -535,7 +600,10 @@ impl Sessions {
                 created: e.at,
                 ..SessionView::default()
             });
-        s.updated = e.at;
+        // Looking at a session isn't something it did.
+        if !matches!(e.body, Body::Seen { .. }) {
+            s.updated = e.at;
+        }
         s.event(e);
     }
 }
@@ -543,6 +611,19 @@ impl Sessions {
 impl SessionView {
     /// The first entry that changed since the last call, and forget it.
     /// `None` when no entry changed.
+    /// The conversation as it was in earlier version `b`: what came before
+    /// it, then that version.
+    pub fn with_branch(&self, b: usize) -> Option<SessionView> {
+        let branch = self.branches.get(b)?;
+        let mut v = self.clone();
+        v.entries.truncate(branch.at);
+        v.entries.extend(branch.entries.iter().cloned());
+        v.partial.clear();
+        v.working_since = None;
+        v.changed_from = Some(0);
+        Some(v)
+    }
+
     pub fn take_changes(&mut self) -> Option<usize> {
         self.changed_from.take()
     }
@@ -671,7 +752,15 @@ impl SessionView {
                             self.push(Entry::Text { text: text.clone() })
                         }
                         (Block::Thinking { text }, None) if !text.trim().is_empty() => {
-                            self.push(Entry::Thinking { text: text.clone() })
+                            let took = if self.mark_at > 0 {
+                                e.at.saturating_sub(self.mark_at)
+                            } else {
+                                0
+                            };
+                            self.push(Entry::Thinking {
+                                text: text.clone(),
+                                took,
+                            })
                         }
                         // A subagent's words belong to the call that started it.
                         (Block::Text { text }, Some(p)) if !text.trim().is_empty() => {
@@ -692,18 +781,28 @@ impl SessionView {
                                 parent: parent.clone(),
                                 result: None,
                                 said: None,
+                                images: Vec::new(),
+                                started: e.at,
+                                took: None,
                             });
                         }
                         _ => {}
                     }
+                }
+                if parent.is_none() {
+                    self.mark_at = e.at;
                 }
             }
             Body::ToolResult {
                 tool,
                 error,
                 output,
-                ..
+                parent,
+                images,
             } => {
+                if parent.is_none() {
+                    self.mark_at = e.at;
+                }
                 // A subagent sent to the background: its call goes on until
                 // the agent finishes, and the receipt isn't its report.
                 if let Some(agent) = launched(output)
@@ -719,6 +818,8 @@ impl SessionView {
                         && let Some(c) = calls.get_mut(at)
                     {
                         c.result = Some((*error, output.clone()));
+                        c.images = images.clone();
+                        c.took = Some(e.at.saturating_sub(c.started));
                         if !error {
                             made = Some(c.clone());
                         }
@@ -736,15 +837,20 @@ impl SessionView {
                 description,
                 keeps,
                 ..
-            } => self.push(Entry::Ask {
-                id: id.clone(),
-                tool: tool.clone(),
-                input: input.clone(),
-                description: description.clone(),
-                keeps: *keeps,
-                answer: None,
-            }),
+            } => {
+                self.news = e.seq;
+                self.push(Entry::Ask {
+                    id: id.clone(),
+                    tool: tool.clone(),
+                    input: input.clone(),
+                    description: description.clone(),
+                    keeps: *keeps,
+                    answer: None,
+                })
+            }
             Body::Answered { id, answer } => {
+                // Time waiting on you isn't thinking.
+                self.mark_at = e.at;
                 if let Some(ix) = self
                     .entries
                     .iter()
@@ -757,12 +863,14 @@ impl SessionView {
                 }
             }
             Body::TurnStarted => {
+                self.mark_at = e.at;
                 if self.working_since.is_none() {
                     self.working_since = Some(e.at);
                 }
                 self.turn_from = self.entries.len();
             }
             Body::TurnEnded { outcome } => {
+                self.news = e.seq;
                 self.activity = None;
                 let took = self.working_since.map_or(0, |s| e.at.saturating_sub(s));
                 self.working_since = None;
@@ -878,7 +986,21 @@ impl SessionView {
             // Everything from that message on leaves the conversation.
             Body::Rewound { to, .. } => {
                 if let Some(ix) = self.user_ix(to) {
-                    self.entries.truncate(ix);
+                    // What was there stays reachable as an earlier version.
+                    let gone = self.entries.split_off(ix);
+                    // Versions further on were inside what's going: only
+                    // versions from here back keep their place.
+                    self.branches.retain(|b| b.at <= ix);
+                    if gone
+                        .iter()
+                        .any(|e| matches!(e, Entry::User { queued: false, .. }))
+                    {
+                        self.branches.push(Branch {
+                            at: ix,
+                            seq: e.seq,
+                            entries: gone,
+                        });
+                    }
                     self.reindex(ix);
                     // A file keeps only the versions written before that
                     // message, so its stepper forgets the abandoned ones.
@@ -899,6 +1021,8 @@ impl SessionView {
                 self.partial.clear();
                 self.working_since = None;
             }
+            Body::Seen { upto } => self.seen = self.seen.max(*upto),
+            Body::Resume { at } => self.resume_at = *at,
             Body::Closed => self.closed = true,
             Body::Reopened => self.closed = false,
             Body::Aside { id, question } => self.asides.push(Aside {
@@ -1139,6 +1263,7 @@ mod tests {
             error: false,
             output: "ok".into(),
             parent: None,
+            images: Vec::new(),
         }
     }
 
@@ -1270,12 +1395,15 @@ mod tests {
         let task = |id: &str| dent_protocol::Task {
             id: id.into(),
             description: "Research".into(),
+            kind: String::new(),
+            call: None,
         };
         let receipt = Body::ToolResult {
             tool: "t".into(),
             error: false,
             output: "Async agent launched successfully. (internal)\nagentId: a6094 (internal ID)\nThe agent is working in the background.".into(),
             parent: None,
+            images: Vec::new(),
         };
         let mut s = feed(vec![
             tool("t", "Agent", r#"{"description":"Research"}"#, None),
@@ -1568,5 +1696,79 @@ mod tests {
             })
             .is_empty()
         );
+    }
+
+    #[test]
+    fn calls_keep_their_pictures_and_times_and_thinking_its_time() {
+        let at = |seq: u64, at: u64, body: Body| Event {
+            seq,
+            session: "s".into(),
+            at,
+            body,
+        };
+        let mut s = Sessions::default();
+        let events = vec![
+            at(1, 1_000, Body::TurnStarted),
+            at(
+                2,
+                13_000,
+                Body::Assistant {
+                    parent: None,
+                    uuid: None,
+                    blocks: vec![Block::Thinking { text: "hmm".into() }],
+                },
+            ),
+            at(
+                3,
+                13_500,
+                tool("t", "mcp__browser__take_screenshot", "{}", None),
+            ),
+            at(
+                4,
+                16_500,
+                Body::ToolResult {
+                    tool: "t".into(),
+                    error: false,
+                    output: String::new(),
+                    parent: None,
+                    images: vec!["/a/shot.png".into()],
+                },
+            ),
+        ];
+        s.apply(&Out::Events { events });
+        let v = &s.list["s"];
+        assert!(matches!(
+            &v.entries[0],
+            Entry::Thinking { took: 12_000, .. }
+        ));
+        let Entry::Tools { calls } = &v.entries[1] else {
+            panic!("{:?}", v.entries)
+        };
+        assert_eq!(calls[0].images, ["/a/shot.png"]);
+        assert_eq!(calls[0].took, Some(3_000));
+        assert_eq!(calls[0].line(), "Took screenshot · browser");
+    }
+
+    #[test]
+    fn what_finished_since_it_was_seen_is_unread() {
+        let s = feed(vec![
+            Body::TurnStarted,
+            Body::TurnEnded {
+                outcome: Outcome::Done,
+            },
+        ]);
+        let v = &s.list["s"];
+        assert!(v.news > v.seen);
+        let s = feed(vec![
+            Body::TurnStarted,
+            Body::TurnEnded {
+                outcome: Outcome::Done,
+            },
+            Body::Seen { upto: 2 },
+        ]);
+        let v = &s.list["s"];
+        assert_eq!(v.news, v.seen);
+        // Looking isn't activity: the session's time stays its last event's.
+        assert_eq!(v.updated, 2);
     }
 }

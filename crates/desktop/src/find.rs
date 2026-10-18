@@ -508,6 +508,8 @@ impl Dent {
             Scope::Chat => {
                 self.transcript.scroll_to_reveal_item(ix);
                 f.reveal = REVEAL_FRAMES;
+                // In a long table's rows out of view, the table scrolls too.
+                crate::select::reveal_row();
             }
             Scope::Changes => self.diff_list.scroll_to_reveal_item(ix),
             Scope::Terminal => {
@@ -539,6 +541,10 @@ impl Dent {
         let found = crate::select::reveal(area, ix as u32, k, &needle, window);
         if let Some(f) = self.find.as_mut() {
             f.reveal = if found { 0 } else { f.reveal - 1 };
+        }
+        // Found, or given up: no table scrolls for this match later.
+        if found || self.find.as_ref().is_some_and(|f| f.reveal == 0) {
+            crate::select::take_reveal_row();
         }
         if found {
             window.refresh();
@@ -738,10 +744,10 @@ mod tests {
         assert!(!words(&user, true)[0].contains("Attached"));
     }
 
-    /// A long table scrolls inside the chat and draws only what's in view:
-    /// its rows past those shown at first aren't counted.
+    /// A long table scrolls inside the chat and draws only what's in view,
+    /// but every row counts: ⌘F scrolls the table to a match out of view.
     #[test]
-    fn a_long_table_counts_the_rows_it_shows() {
+    fn a_long_table_counts_every_row() {
         let mut src = String::from("| n | word |\n|---|---|\n");
         for i in 0..30 {
             let w = if i == 2 || i == 25 { "foo" } else { "bar" };
@@ -752,7 +758,10 @@ mod tests {
             .iter()
             .map(|w| crate::select::matches(w, "foo").len())
             .sum();
-        assert_eq!(n, 2, "row 2 and the paragraph; row 25 is out of view");
+        assert_eq!(
+            n, 3,
+            "rows 2 and 25 (out of view, still reached) and the paragraph"
+        );
         // A short table counts every row.
         let short = "| a |\n|---|\n| foo |\n| foo |";
         let n: usize = words(&Item::Text(short.into()), false)

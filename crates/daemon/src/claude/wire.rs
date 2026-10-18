@@ -24,15 +24,28 @@ pub enum Inbound {
         session_id: String,
         version: String,
         permission_mode: String,
+        /// Each MCP server and how it stands: connected, failed,
+        /// needs-auth, pending, disabled.
+        mcp: Vec<(String, String)>,
     },
     /// `system/background_tasks_changed`: the full current set.
     BackgroundTasks(Vec<BackgroundTask>),
+    /// `system/task_started`: a task and the tool call that started it.
+    TaskStarted {
+        task_id: String,
+        tool_use_id: Option<String>,
+    },
     /// A new assistant message is starting to stream.
     MessageStart {
         parent: Option<String>,
     },
     /// Streamed text (needs `--include-partial-messages`).
     TextDelta {
+        parent: Option<String>,
+        text: String,
+    },
+    /// Streamed thinking.
+    ThinkingDelta {
         parent: Option<String>,
         text: String,
     },
@@ -144,6 +157,8 @@ pub struct BackgroundTask {
     pub task_id: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
+    pub task_type: String,
 }
 
 #[derive(Debug)]
@@ -162,6 +177,8 @@ pub struct ToolResult {
     pub tool_use_id: String,
     pub is_error: bool,
     pub output: String,
+    /// Pictures in the result, as their `source` objects.
+    pub images: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -198,6 +215,12 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
             session_id: s(&v, "session_id"),
             version: s(&v, "claude_code_version"),
             permission_mode: s(&v, "permissionMode"),
+            mcp: v["mcp_servers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|m| (s(m, "name"), s(m, "status")))
+                .collect(),
         },
         ("system", "compact_boundary") => {
             let m = &v["compact_metadata"];
@@ -251,6 +274,10 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
             _ => Inbound::Other,
         },
         ("assistant", _) if v.get("local_command_source").is_some() => local_command(&v),
+        ("system", "task_started") => Inbound::TaskStarted {
+            task_id: s(&v, "task_id"),
+            tool_use_id: v["tool_use_id"].as_str().map(str::to_owned),
+        },
         ("system", "background_tasks_changed") => {
             Inbound::BackgroundTasks(serde_json::from_value(v["tasks"].clone()).unwrap_or_default())
         }
@@ -261,6 +288,10 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
                 (Some("content_block_delta"), Some("text_delta")) => Inbound::TextDelta {
                     parent: parent(&v),
                     text: s(&e["delta"], "text"),
+                },
+                (Some("content_block_delta"), Some("thinking_delta")) => Inbound::ThinkingDelta {
+                    parent: parent(&v),
+                    text: s(&e["delta"], "thinking"),
                 },
                 (Some("content_block_start"), _) if e["content_block"]["type"] == "tool_use" => {
                     Inbound::ToolStart {
@@ -310,6 +341,7 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
                                 tool_use_id: s(b, "tool_use_id"),
                                 is_error: is_error || b["is_error"] == true,
                                 output,
+                                images: Vec::new(),
                             }
                         })
                         .collect()
@@ -339,6 +371,7 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
                             tool_use_id: s(b, "tool_use_id"),
                             is_error: b["is_error"].as_bool().unwrap_or(false),
                             output: output(&b["content"]),
+                            images: images(&b["content"]),
                         })
                         .collect()
                 })
@@ -577,14 +610,22 @@ fn output(content: &Value) -> String {
         Value::String(t) => t.clone(),
         Value::Array(parts) => parts
             .iter()
-            .filter_map(|p| match p["type"].as_str() {
-                Some("image") => Some("[image]"),
-                _ => p["text"].as_str(),
-            })
+            .filter_map(|p| p["text"].as_str())
             .collect::<Vec<_>>()
             .join("\n"),
         _ => String::new(),
     }
+}
+
+/// A result's pictures: their `source` objects, kept apart from the text.
+fn images(content: &Value) -> Vec<Value> {
+    content
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["type"] == "image")
+        .map(|p| p["source"].clone())
+        .collect()
 }
 
 /// What a server tool's result says: the search hits, the page fetched,
@@ -770,7 +811,7 @@ fn image_block(path: &str) -> Option<Value> {
 }
 
 /// A picture's media type from its first bytes, for the kinds the model reads.
-fn picture_kind(b: &[u8]) -> Option<&'static str> {
+pub(crate) fn picture_kind(b: &[u8]) -> Option<&'static str> {
     if b.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("image/png")
     } else if b.starts_with(&[0xff, 0xd8, 0xff]) {
@@ -1020,7 +1061,10 @@ mod tests {
         }
         let r = br#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"x"}}]}]}}"#;
         match parse(r).unwrap() {
-            Inbound::ToolResults { results, .. } => assert_eq!(results[0].output, "[image]"),
+            Inbound::ToolResults { results, .. } => {
+                assert_eq!(results[0].output, "");
+                assert_eq!(results[0].images.len(), 1);
+            }
             other => panic!("{other:?}"),
         }
         let m = br#"{"type":"result","subtype":"error_max_turns","is_error":true}"#;

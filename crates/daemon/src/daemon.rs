@@ -70,6 +70,15 @@ pub struct Daemon {
     catalogs: Mutex<HashMap<String, crate::claude::commands::Catalog>>,
     /// What each session's agent is doing besides talking.
     activities: Mutex<HashMap<String, dent_protocol::Activity>>,
+    awake: Mutex<Awake>,
+}
+
+/// Keeping the machine awake while agents work: the sessions working now,
+/// whether it's wanted, and the `caffeinate` holding it.
+struct Awake {
+    busy: std::collections::HashSet<String>,
+    on: bool,
+    hold: Option<std::process::Child>,
 }
 
 /// The replies streaming now, and how many changes they've had.
@@ -121,7 +130,30 @@ impl Daemon {
             catalogs: Mutex::new(HashMap::new()),
             activities: Mutex::new(HashMap::new()),
             usage: tokio::sync::Mutex::new(None),
+            awake: Mutex::new(Awake {
+                busy: Default::default(),
+                on: true,
+                hold: None,
+            }),
         })
+    }
+
+    /// A session started or stopped working (a turn, or background work).
+    pub fn set_busy(&self, session: &str, busy: bool) {
+        let mut a = lock(&self.awake);
+        if busy {
+            a.busy.insert(session.to_string());
+        } else {
+            a.busy.remove(session);
+        }
+        hold_awake(&mut a);
+    }
+
+    /// Whether to keep the machine awake while agents work.
+    pub fn keep_awake(&self, on: bool) {
+        let mut a = lock(&self.awake);
+        a.on = on;
+        hold_awake(&mut a);
     }
 
     pub fn store(&self) -> MutexGuard<'_, Store> {
@@ -618,6 +650,20 @@ impl Daemon {
 
     /// A fork, optionally ending with a side question's (id, question,
     /// answer, agent conversation).
+    /// A new session carrying on from an earlier version of the
+    /// conversation: everything before event `until`, the rewind that left
+    /// that version behind.
+    pub async fn fork_until(
+        self: &Arc<Self>,
+        parent: &str,
+        until: u64,
+        id: Option<&str>,
+    ) -> Result<String> {
+        let key = id.map(|i| format!("fork.{i}"));
+        self.fork_cut(parent, Cut::Until(until), None, key.as_deref())
+            .await
+    }
+
     async fn fork_with(
         self: &Arc<Self>,
         parent: &str,
@@ -625,14 +671,32 @@ impl Daemon {
         aside: Option<(String, String, String, String)>,
         key: Option<&str>,
     ) -> Result<String> {
+        let cut = match before {
+            Some(b) => Cut::Before(b.to_string()),
+            None => Cut::All,
+        };
+        self.fork_cut(parent, cut, aside, key).await
+    }
+
+    async fn fork_cut(
+        self: &Arc<Self>,
+        parent: &str,
+        cut: Cut,
+        aside: Option<(String, String, String, String)>,
+        key: Option<&str>,
+    ) -> Result<String> {
         let row = self.store().session(parent)?.context("no such session")?;
         let events = self.store().session_events(parent)?;
-        let cut = match before {
-            Some(b) => events
+        let cut = match cut {
+            Cut::Before(b) => events
                 .iter()
-                .position(|e| matches!(&e.body, Body::User { id, .. } if id == b))
+                .position(|e| matches!(&e.body, Body::User { id, .. } if *id == b))
                 .context("no such message")?,
-            None => events.len(),
+            Cut::Until(seq) => events
+                .iter()
+                .position(|e| e.seq >= seq)
+                .context("no such version")?,
+            Cut::All => events.len(),
         };
         let kept = &events[..cut];
         let title = events
@@ -858,6 +922,8 @@ impl Daemon {
             },
             None,
         )?;
+        // A terminal session keeps the title it came with.
+        self.store().put(&titled_key(&session), "1")?;
         self.append(
             &session,
             Body::Agent {
@@ -903,11 +969,90 @@ impl Daemon {
         Ok(session)
     }
 
+    /// Title a session from its conversation, with a small model and no
+    /// tools, run in dent's own folder so it leaves nothing in the project's
+    /// history. Without `force`, only once and never after you've named it.
+    pub async fn title_session(self: &Arc<Self>, session: &str, force: bool) -> Result<()> {
+        let key = titled_key(session);
+        if !force && self.store().get(&key)?.is_some() {
+            return Ok(());
+        }
+        self.store().put(&key, "1")?;
+        let events = self.store().session_events(session)?;
+        let clip = |t: &str, n: usize| -> String { t.chars().take(n).collect() };
+        let mut said = Vec::new();
+        for e in &events {
+            match &e.body {
+                Body::User { text, .. } => said.push(format!("Person: {}", clip(text, 1500))),
+                Body::Assistant {
+                    parent: None,
+                    blocks,
+                    ..
+                } => {
+                    for b in blocks {
+                        if let dent_protocol::Block::Text { text } = b {
+                            said.push(format!("Agent: {}", clip(text, 1500)));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if said.is_empty() {
+            return Ok(());
+        }
+        // The start says what it set out to do; the end, where it went.
+        let keep = if said.len() > 8 {
+            let mut k = said[..2].to_vec();
+            k.push("…".into());
+            k.extend_from_slice(&said[said.len() - 6..]);
+            k
+        } else {
+            said
+        };
+        let env = self.env();
+        let argv = crate::claude::title_argv(&env.claude, &env.path, &keep.join("\n\n"));
+        let dir = self.paths.state.join("titles");
+        std::fs::create_dir_all(&dir)?;
+        let dir = dir.display().to_string();
+        let got = tokio::task::spawn_blocking(move || run_aside(&argv, &dir))
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let t = clean_title(&got.0);
+        if !t.is_empty() {
+            self.append(
+                session,
+                Body::Settings {
+                    effort: None,
+                    model: None,
+                    permission: None,
+                    title: Some(t),
+                },
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Bring back every session after a start: reattach running agents and
     /// mark turns that died with the old daemon.
     pub async fn restore(self: &Arc<Self>) -> Result<()> {
         self.forget_old_claims();
         let rows = self.store().sessions()?;
+        // Sessions from before dent kept track of what you'd seen start out
+        // seen, so an upgrade doesn't mark them all as new.
+        if self.store().get(SEEN_MARKS)?.is_none() {
+            let upto = self.store().last_seq()?;
+            for row in &rows {
+                self.append(&row.id, Body::Seen { upto }, None)?;
+            }
+            self.store().put(SEEN_MARKS, "1")?;
+            // Their titles stand: dent doesn't retitle them on its own.
+            for row in &rows {
+                self.store().put(&titled_key(&row.id), "1")?;
+            }
+        }
         let live = if rows.iter().any(|r| r.proc.is_some()) {
             match self.holder().await {
                 Ok(h) => h.list().await.unwrap_or_default(),
@@ -925,6 +1070,76 @@ impl Daemon {
         Ok(())
     }
 }
+
+/// While anything works (and it's wanted), the machine stays awake: idle
+/// sleep, and on power a closed lid, as `caffeinate -is` does. The hold
+/// ends with the daemon (`-w`), and as soon as nothing works.
+fn hold_awake(a: &mut Awake) {
+    let want = a.on && !a.busy.is_empty();
+    if let Some(c) = a.hold.as_mut()
+        && c.try_wait().ok().flatten().is_some()
+    {
+        a.hold = None;
+    }
+    match (want, a.hold.is_some()) {
+        (true, false) if cfg!(target_os = "macos") => {
+            a.hold = std::process::Command::new("/usr/bin/caffeinate")
+                .args(["-i", "-s", "-w", &std::process::id().to_string()])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok();
+        }
+        (false, true) => {
+            if let Some(mut c) = a.hold.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Where a fork stops copying the conversation.
+enum Cut {
+    /// Before your message with this id.
+    Before(String),
+    /// Before the event with this sequence number.
+    Until(u64),
+    All,
+}
+
+/// Set once a session has been titled (by dent or by you), so a session is
+/// titled on its own only once.
+pub fn titled_key(session: &str) -> String {
+    format!("titled:{session}")
+}
+
+/// A model's answer as a title: its first line, without quotes, a heading
+/// mark, a "Title:" label or a closing full stop, at most 60 characters.
+fn clean_title(answer: &str) -> String {
+    let line = answer.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let mut t = line.trim().trim_start_matches('#').trim();
+    for label in ["Title:", "title:"] {
+        t = t.strip_prefix(label).unwrap_or(t).trim();
+    }
+    let t = t
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '*' | '“' | '”'))
+        .trim_end_matches('.')
+        .trim();
+    // A title with a subtitle keeps the title.
+    let t = match t.split_once([':', '—']) {
+        Some((head, _)) if head.split_whitespace().count() >= 2 => head.trim(),
+        _ => t,
+    };
+    // Past eight words it's a sentence, not a title.
+    let words: Vec<&str> = t.split_whitespace().collect();
+    title(&words[..words.len().min(8)].join(" "))
+}
+
+/// Set once every session older than seen marks has one.
+const SEEN_MARKS: &str = "seen-marks";
 
 /// What a new session starts with.
 pub struct NewSession {
@@ -1079,4 +1294,21 @@ fn hostname() -> String {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "this computer".into())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_models_answer_becomes_a_title() {
+        assert_eq!(super::clean_title("\"Fix the footer.\""), "Fix the footer");
+        assert_eq!(
+            super::clean_title("Title: Cache with Redis\nmore"),
+            "Cache with Redis"
+        );
+        assert_eq!(super::clean_title("# Landing page"), "Landing page");
+        assert_eq!(
+            super::clean_title("Checking the hero on mobile: the screenshot and more"),
+            "Checking the hero on mobile"
+        );
+    }
 }

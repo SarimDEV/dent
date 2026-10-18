@@ -43,7 +43,7 @@ fn trim(s: String) -> String {
 /// what it is.
 pub fn activity_line(a: &Activity, now_ms: u64) -> Option<(String, String)> {
     Some(match a {
-        Activity::Preparing { .. } => return None,
+        Activity::Preparing { .. } | Activity::Thinking { .. } => return None,
         Activity::Compacting { since } => {
             let secs = now_ms.saturating_sub(*since) / 1000;
             (
@@ -403,11 +403,31 @@ impl Dent {
                 .with_priority(1),
             )
         });
+        // Nearly full between turns: compacting first keeps the next
+        // message from being the one that runs out of room.
+        let first = (near && !busy && !compacting).then(|| {
+            let sid = s.id.clone();
+            crate::ui::ghost("compact-first", "Compact", &t)
+                .relative()
+                .text_color(t.needs.0)
+                .with_tip(tip_owned(
+                    "The context is nearly full: summarize the conversation before the next message",
+                    t,
+                ))
+                .on_press(cx.listener(move |this, _, window, cx| {
+                    this.run_command(&sid, "/compact", window, cx);
+                }))
+                .child(probe(&self.probes, "compact-first"))
+        });
         div()
             .relative()
             .min_w_0()
             .mr(px(space::S1))
             .flex_shrink(2.)
+            .flex()
+            .items_center()
+            .gap(px(space::S1))
+            .children(first)
             .child(gauge)
             .children(popover)
             .into_any_element()

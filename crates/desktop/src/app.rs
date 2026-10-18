@@ -28,6 +28,9 @@ actions!(
     dent,
     [
         NewSession,
+        FindMine,
+        SendAndNew,
+        StartAside,
         AttachFiles,
         CloseSession,
         UndoClose,
@@ -72,6 +75,10 @@ actions!(
         ChatTop,
         ChatBottom,
         NotifySound,
+        KeepAwake,
+        HotkeyOptShiftSpace,
+        HotkeyCtrlOptCmdN,
+        HotkeyOff,
         FullScreen,
         About,
     ]
@@ -91,6 +98,7 @@ pub fn set_menus(cx: &mut App) {
 pub fn refresh_menus(cx: &mut App) {
     use gpui_kit::base::input;
     let sound = crate::notify::SOUND.load(std::sync::atomic::Ordering::Relaxed);
+    let awake = crate::notify::AWAKE.load(std::sync::atomic::Ordering::Relaxed);
     cx.set_menus([
         gpui_kit::Menu {
             name: "dent".into(),
@@ -98,6 +106,21 @@ pub fn refresh_menus(cx: &mut App) {
                 MenuItem::action("About dent", About),
                 MenuItem::separator(),
                 MenuItem::action("Notification Sound", NotifySound).checked(sound),
+                MenuItem::action("Keep Mac Awake While Working", KeepAwake).checked(awake),
+                MenuItem::submenu(gpui_kit::Menu {
+                    name: "Global Shortcut".into(),
+                    items: {
+                        let now = crate::hotkey::chosen();
+                        vec![
+                            MenuItem::action("⌥⇧Space: New Session", HotkeyOptShiftSpace)
+                                .checked(now == "opt-shift-space"),
+                            MenuItem::action("⌃⌥⌘N: New Session", HotkeyCtrlOptCmdN)
+                                .checked(now == "ctrl-opt-cmd-n"),
+                            MenuItem::action("Off", HotkeyOff).checked(now == "off"),
+                        ]
+                    },
+                    disabled: false,
+                }),
                 MenuItem::separator(),
                 MenuItem::action("Hide dent", Hide),
                 MenuItem::action("Hide Others", HideOthers),
@@ -520,6 +543,10 @@ pub enum Waiting {
     /// A new session; one started from the new-session page carries what
     /// was typed and attached there, to put back if it fails.
     Create(Option<Draft>),
+    /// A new session started from what was typed, without leaving where
+    /// you are: where it was typed (a session, or the new-session page),
+    /// and what, to put back if it fails.
+    CreateAside(Option<String>, Draft),
     /// The folders for a typed path, as typed.
     Folders(String),
     ProjectMade,
@@ -556,6 +583,8 @@ pub struct Dent {
     pub shell_pane: Rc<std::cell::Cell<Option<Size<Pixels>>>>,
     pub inbox_focused: bool,
     pub palette: Option<usize>,
+    /// The palette lists your messages in the open session instead.
+    pub palette_mine: bool,
     pub search: Entity<TextareaState>,
     pub composer: Entity<TextareaState>,
     pub starter: Entity<TextareaState>,
@@ -767,10 +796,23 @@ pub struct Dent {
     pub palette_scroll: ScrollHandle,
     /// Where you were reading each session, and whether you were at the end.
     pub read_at: HashMap<String, (ListOffset, bool)>,
+    /// Seen marks sent and not yet back from the daemon, by session.
+    pub seen_sent: HashMap<String, u64>,
+    /// The earlier version being looked at in a session, if any, by the
+    /// branch's `seq`: a rewind elsewhere renumbers the branches.
+    pub old_version: HashMap<String, u64>,
+    /// Sessions whose finished replies wait to be parsed ahead.
+    pub parse_queue: Vec<String>,
+    /// The count last put on the Dock icon.
+    pub badged: Option<usize>,
     /// Parsed documents by file and version.
     pub md_docs: crate::lru::Lru<(&'static str, usize), Rc<Vec<Block>>>,
     /// Sessions closed while the Undo has been showing, oldest first.
-    pub undo_closes: Vec<String>,
+    pub undo_closes: Vec<Vec<String>>,
+    /// Closing several picked sessions at once: they undo together.
+    pub closing_together: bool,
+    /// Sessions picked in the sidebar with Shift or ⌘, to act on together.
+    pub picked: Vec<String>,
     /// The terminal session being picked up.
     pub adopting: Option<String>,
     /// While the pointer is over the sidebar: each session's section and
@@ -819,7 +861,7 @@ pub struct Dent {
     pub diff_list: ListState,
     /// A text file's lines, and which file and version they're for.
     pub text_list: ListState,
-    pub text_key: Option<(&'static str, usize)>,
+    pub text_key: Option<(&'static str, usize, usize)>,
     /// The line a link pointed at in each text file.
     pub marked_line: HashMap<&'static str, u32>,
     /// Side chat's place.
@@ -888,6 +930,12 @@ pub struct Dent {
     /// The working square's next breath is on its way.
     pub breath_timer: bool,
 }
+
+/// Sessions `@` offers at most.
+const SESSION_ROWS: usize = 4;
+
+/// The most of another session attached as context, in characters.
+const SESSION_CONTEXT: usize = 24_000;
 
 impl Dent {
     pub fn new(forced: Option<bool>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -1069,8 +1117,11 @@ impl Dent {
         .detach();
         cx.observe_window_appearance(window, |this, window, cx| this.apply_theme(window, cx))
             .detach();
-        cx.observe_window_activation(window, |this, window, _| {
+        cx.observe_window_activation(window, |this, window, cx| {
             this.window_active = window.is_window_active();
+            // Coming back to the window is looking at the open session.
+            this.mark_seen();
+            cx.notify();
         })
         .detach();
         cx.observe_window_visibility(window, |this, _, window, cx| {
@@ -1103,6 +1154,22 @@ impl Dent {
                     batch.push(m);
                 }
                 if this.update(cx, |this, cx| this.on_live(batch, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        // The shortcut from any app: dent comes forward on a new session.
+        let mut presses = crate::hotkey::listen();
+        cx.spawn_in(window, async move |this, cx| {
+            use futures::StreamExt;
+            while presses.next().await.is_some() {
+                let gone = this.update_in(cx, |this, window, cx| {
+                    cx.activate(true);
+                    window.activate_window();
+                    this.select(None, window, cx);
+                });
+                if gone.is_err() {
                     break;
                 }
             }
@@ -1158,6 +1225,7 @@ impl Dent {
             shell_pane: Rc::default(),
             inbox_focused: false,
             palette: None,
+            palette_mine: false,
             search,
             composer,
             starter,
@@ -1215,8 +1283,14 @@ impl Dent {
             slash_shown: None,
             palette_scroll: ScrollHandle::new(),
             read_at: HashMap::new(),
+            seen_sent: HashMap::new(),
+            old_version: HashMap::new(),
+            badged: None,
+            parse_queue: Vec::new(),
             md_docs: crate::lru::Lru::new(64),
             undo_closes: Vec::new(),
+            closing_together: false,
+            picked: Vec::new(),
             adopting: None,
             inbox_hold: None,
             sidebar_hovered: false,
@@ -1287,6 +1361,10 @@ impl Dent {
             sidebar_hidden: false,
             sidebar_off: {
                 crate::notify::SOUND.store(!prefs.quiet, std::sync::atomic::Ordering::Relaxed);
+                crate::notify::AWAKE.store(!prefs.sleepy, std::sync::atomic::Ordering::Relaxed);
+                if let Some(h) = &prefs.hotkey {
+                    crate::hotkey::choose(h);
+                }
                 prefs.sidebar_off
             },
             sidebar_forced: false,
@@ -1546,6 +1624,20 @@ impl Dent {
     /// Show a file in the viewer: one the agent made opens its tab; any
     /// other document, page or picture opens as a tab of its own that
     /// follows the file on disk. With no session open, it opens in its app.
+    /// A table's Open, pressed since the last frame: it shows in the
+    /// viewer, as a document of its own.
+    pub fn take_table_request(&mut self, cx: &mut Context<Self>) {
+        let Some(md) = crate::markdown::OPEN_TABLE.with(|o| o.borrow_mut().take()) else {
+            return;
+        };
+        let rows = md.lines().count().saturating_sub(2);
+        let dir = std::env::temp_dir().join("dent-tables");
+        let path = dir.join(format!("Table, {rows} rows.md"));
+        if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&path, md).is_ok() {
+            self.open_file(&path.display().to_string(), cx);
+        }
+    }
+
     pub fn open_file(&mut self, path: &str, cx: &mut Context<Self>) {
         self.open_file_at(path, None, cx);
     }
@@ -1764,6 +1856,11 @@ impl Dent {
         if let Some(id) = &id {
             crate::notify::clear(id);
         }
+        // Going somewhere outside what's picked lets the picks go, so ⌘W
+        // never closes rows you picked a while ago instead of this one.
+        if id.as_ref().is_none_or(|id| !self.picked.contains(id)) {
+            self.picked.clear();
+        }
         // Choosing the session already open only puts you in its reply box:
         // attachments, draft and place stay as they are.
         if id.is_some() && id == self.selected {
@@ -1839,6 +1936,7 @@ impl Dent {
         }
         self.reveal_row = id.clone();
         self.selected = id;
+        self.mark_seen();
         self.menu = None;
         self.end_pick();
         self.commenting = None;
@@ -1847,6 +1945,23 @@ impl Dent {
             None => self.starter.update(cx, |c, cx| c.focus_field(window, cx)),
         }
         cx.notify();
+    }
+
+    /// The open session has been looked at, if the window is in front: what
+    /// it finished or asked is no longer new. Sent once per mark.
+    pub fn mark_seen(&mut self) {
+        if !self.window_active || !self.core.live {
+            return;
+        }
+        let Some(s) = self.current_rc() else { return };
+        if !s.unread() || self.seen_sent.get(&s.id).is_some_and(|&n| n >= s.news) {
+            return;
+        }
+        self.seen_sent.insert(s.id.clone(), s.news);
+        self.live.send(Request::Seen {
+            session: s.id.clone(),
+            upto: s.news,
+        });
     }
 
     /// Closing archives: it can always be reopened. The next thing to clear opens.
@@ -1913,10 +2028,13 @@ impl Dent {
         {
             self.undo_closes.clear();
         }
-        if !self.undo_closes.iter().any(|c| c == id) {
-            self.undo_closes.push(id.to_string());
+        if !self.undo_closes.iter().flatten().any(|c| c == id) {
+            match self.undo_closes.last_mut() {
+                Some(group) if self.closing_together => group.push(id.to_string()),
+                _ => self.undo_closes.push(vec![id.to_string()]),
+            }
         }
-        let n = self.undo_closes.len();
+        let n = self.undo_closes.iter().map(Vec::len).sum::<usize>();
         self.toast = Some(Toast {
             text: if n == 1 {
                 "Session closed".into()
@@ -1933,6 +2051,80 @@ impl Dent {
         }
         cx.notify();
         true
+    }
+
+    /// Shift-click picks every row from the last one picked (or the open
+    /// session) to this one; ⌘-click picks or unpicks this one.
+    pub fn pick(&mut self, id: &str, run: bool, cx: &mut Context<Self>) {
+        if self.picked.is_empty()
+            && let Some(open) = self.selected.clone()
+        {
+            self.picked.push(open);
+        }
+        let order = self.order();
+        match (run, self.picked.last().cloned()) {
+            (true, Some(from)) => {
+                let (a, b) = (
+                    order.iter().position(|x| *x == from),
+                    order.iter().position(|x| x == id),
+                );
+                if let (Some(a), Some(b)) = (a, b) {
+                    for x in &order[a.min(b)..=a.max(b)] {
+                        if !self.picked.contains(x) {
+                            self.picked.push(x.clone());
+                        }
+                    }
+                }
+                // The row clicked is where the next run starts.
+                self.picked.retain(|x| x != id);
+                self.picked.push(id.to_string());
+            }
+            _ => {
+                if let Some(at) = self.picked.iter().position(|x| x == id) {
+                    self.picked.remove(at);
+                } else {
+                    self.picked.push(id.to_string());
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Close every picked session that can be closed, as one Undo; those
+    /// still working stay, and a toast says so.
+    pub fn close_picked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut picked = std::mem::take(&mut self.picked);
+        // Rows closed or gone since they were picked aren't "still working".
+        picked.retain(|id| self.session(id).is_some_and(|s| !s.closed));
+        let (can, busy): (Vec<String>, Vec<String>) = picked.into_iter().partition(|id| {
+            self.session(id)
+                .is_some_and(|s| !s.closed && Self::can_close(s))
+        });
+        // A fresh group for this batch, then every close joins it.
+        let had_undo = self
+            .toast
+            .as_ref()
+            .is_some_and(|t| matches!(t.action, ToastAction::Undo(_)));
+        if !had_undo {
+            self.undo_closes.clear();
+        }
+        self.undo_closes.push(Vec::new());
+        self.closing_together = true;
+        for id in &can {
+            self.close(id, window, cx);
+        }
+        self.closing_together = false;
+        if self.undo_closes.last().is_some_and(Vec::is_empty) {
+            self.undo_closes.pop();
+        }
+        if !busy.is_empty() {
+            let n = busy.len();
+            self.toast(
+                ToastAction::Info,
+                format!("{n} still working, so left open: a session can be closed once it's done"),
+            );
+        }
+        cx.notify();
     }
 
     pub fn reopen(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -1965,12 +2157,17 @@ impl Dent {
         let Some(t) = self.toast.take() else { return };
         match t.action {
             ToastAction::Undo(_) => {
-                if let Some(id) = self.undo_closes.pop() {
-                    self.reopen(&id, cx);
-                    self.select(Some(id), window, cx);
+                // Sessions closed together come back together.
+                if let Some(group) = self.undo_closes.pop() {
+                    for id in &group {
+                        self.reopen(id, cx);
+                    }
+                    if let Some(id) = group.first() {
+                        self.select(Some(id.clone()), window, cx);
+                    }
                 }
-                if let Some(next) = self.undo_closes.last().cloned() {
-                    let n = self.undo_closes.len();
+                if let Some(next) = self.undo_closes.last().and_then(|g| g.last()).cloned() {
+                    let n = self.undo_closes.iter().map(Vec::len).sum::<usize>();
                     self.toast = Some(Toast {
                         text: if n == 1 {
                             "Session closed".into()
@@ -2024,6 +2221,9 @@ impl Dent {
                 Incoming::Up { machine } => {
                     self.machine = machine;
                     self.connection = Ok(());
+                    self.live.send(Request::KeepAwake {
+                        on: crate::notify::AWAKE.load(std::sync::atomic::Ordering::Relaxed),
+                    });
                     self.waiting
                         .insert(self.live.send(Request::Models), Waiting::Models);
                     self.waiting
@@ -2118,7 +2318,53 @@ impl Dent {
         for id in changed {
             self.rebuild(&id);
         }
+        self.parse_ahead(cx);
         cx.notify();
+    }
+
+    /// Replies of turns that just finished, parsed on a background thread,
+    /// so opening their session later parses nothing on the UI thread.
+    fn parse_ahead(&mut self, cx: &mut Context<Self>) {
+        let ids = std::mem::take(&mut self.parse_queue);
+        let mut todo: Vec<(u64, String)> = Vec::new();
+        for id in ids {
+            let Some(s) = self.sessions.iter().find(|s| s.id == id).cloned() else {
+                continue;
+            };
+            // The last turn's replies: back to your last message.
+            let from = s
+                .items
+                .iter()
+                .rposition(|i| matches!(i, Item::User { .. }))
+                .unwrap_or(0);
+            for i in &s.items[from..] {
+                if let Item::Text(src) = i {
+                    let key = crate::mdstream::Cache::key(src);
+                    if !self.md.has(key) && !todo.iter().any(|(k, _)| *k == key) {
+                        todo.push((key, src.clone()));
+                    }
+                }
+            }
+        }
+        if todo.is_empty() {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let parsed = cx
+                .background_executor()
+                .spawn(async move {
+                    todo.into_iter()
+                        .map(|(k, src)| (k, crate::markdown::parse(&src)))
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let _ = this.update(cx, |this, _| {
+                for (k, blocks) in parsed {
+                    this.md.put(k, blocks);
+                }
+            });
+        })
+        .detach();
     }
 
     fn reply(&mut self, req: u64, out: Out, cx: &mut Context<Self>) {
@@ -2244,7 +2490,15 @@ impl Dent {
                     return;
                 }
                 // A file asked for before the changes came: show it now.
-                let want = self.diff_want.remove(&id);
+                // Otherwise the file you were reading stays shown, wherever
+                // it sorts in the new list.
+                let reading = self
+                    .changes
+                    .get(&id)
+                    .zip(self.diff_file.get(&id))
+                    .and_then(|(old, i)| old.get(*i))
+                    .map(|f| f.path.clone());
+                let want = self.diff_want.remove(&id).or(reading);
                 if let Some(i) = want.and_then(|p| diff.iter().position(|f| f.path == p)) {
                     self.diff_file.insert(id.clone(), i);
                 }
@@ -2262,6 +2516,21 @@ impl Dent {
                     self.recent.retain(|r| r.agent_session != agent);
                 }
                 self.pending_select = Some(session);
+            }
+            (
+                Waiting::CreateAside(..),
+                Out::Reply {
+                    reply: Reply::Created { .. },
+                },
+            ) => {
+                self.toast(
+                    ToastAction::Info,
+                    "Started a new session; it's in the sidebar".into(),
+                );
+            }
+            (Waiting::CreateAside(from, typed), Out::Error { message }) => {
+                self.restores.push((from, typed));
+                self.toast(ToastAction::Info, message);
             }
             (Waiting::Create(typed), Out::Error { message }) => {
                 self.creating = false;
@@ -3159,6 +3428,9 @@ impl Dent {
     /// Rows in the ⌘K palette: the matches, then "Start a session" when
     /// something is typed.
     pub fn palette_len(&self, cx: &App) -> usize {
+        if self.palette_mine {
+            return self.palette_messages(cx).len();
+        }
         let typed = !self.search.read(cx).value().trim().is_empty();
         self.palette_results(cx).len() + self.palette_files(cx).len() + usize::from(typed)
     }
@@ -3264,6 +3536,10 @@ impl Dent {
             .map(|w| {
                 let name = if w.name == "five_hour" {
                     "5-hour limit"
+                } else if w.name.contains("opus") {
+                    "weekly Opus limit"
+                } else if w.name.contains("sonnet") {
+                    "weekly Sonnet limit"
                 } else if w.name.starts_with("seven_day") {
                     "weekly limit"
                 } else {
@@ -3355,16 +3631,22 @@ impl Dent {
                     .collect();
                 (rows, agent.is_none())
             }
-            complete::Kind::Mention => match self.mention_files() {
-                Some(files) => (
-                    complete::files(files, &token.query)
-                        .into_iter()
-                        .map(complete::Row::from)
-                        .collect(),
-                    false,
-                ),
-                None => (Vec::new(), true),
-            },
+            complete::Kind::Mention => {
+                // The project's files, then other sessions whose title
+                // matches: one picked goes with the message as context.
+                let sessions = self.session_rows(&token.query);
+                match self.mention_files() {
+                    Some(files) => {
+                        let mut rows: Vec<complete::Row> = complete::files(files, &token.query)
+                            .into_iter()
+                            .map(complete::Row::from)
+                            .collect();
+                        rows.extend(sessions);
+                        (rows, false)
+                    }
+                    None => (sessions, true),
+                }
+            }
             // What the command takes here; words of its own open nothing.
             complete::Kind::Arg => {
                 let cmd = self
@@ -3437,6 +3719,86 @@ impl Dent {
         cx.notify();
     }
 
+    /// Sessions other than the open one whose title holds every word typed
+    /// after `@`, newest first, a few at most; none until something's typed.
+    fn session_rows(&self, query: &str) -> Vec<complete::Row> {
+        let q = query.to_lowercase();
+        if q.trim().is_empty() || q.contains('/') {
+            return Vec::new();
+        }
+        self.sessions
+            .iter()
+            .filter(|s| self.selected.as_deref() != Some(s.id.as_str()))
+            .filter(|s| {
+                let title = s.title.to_lowercase();
+                q.split_whitespace().all(|w| title.contains(w))
+            })
+            .take(SESSION_ROWS)
+            .map(|s| complete::Row {
+                name: format!("session:{}", s.id),
+                label: s.title.clone(),
+                about: format!("Session · {} · {}", s.project, crate::data::ago(s.updated)),
+                session: Some(s.id.clone()),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    /// Attach another session as context: what was said in it, as Markdown,
+    /// with where it ran, so the agent can read it (and look further).
+    pub fn attach_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(s) = self.session(id) else { return };
+        let mut md = format!(
+            "# {}\n\nAnother dent session, attached as context. It worked in `{}`; its id is `{}`{}.\n",
+            s.title,
+            s.cwd,
+            s.id,
+            s.resume_command()
+                .map(|c| format!(", and `{c}` carries it on in a terminal"))
+                .unwrap_or_default(),
+        );
+        for i in s.items.iter() {
+            match i {
+                Item::User { text, .. } => md.push_str(&format!("\n## You\n\n{text}\n")),
+                Item::Text(t) => md.push_str(&format!("\n## Agent\n\n{t}\n")),
+                _ => {}
+            }
+        }
+        // The start and the end say most; a long one keeps both.
+        if md.len() > SESSION_CONTEXT {
+            let head: String = md.chars().take(SESSION_CONTEXT / 4).collect();
+            let tail: String = {
+                let n = md.chars().count();
+                md.chars().skip(n - SESSION_CONTEXT * 3 / 4).collect()
+            };
+            md = format!("{head}\n\n… (the middle is left out) …\n\n{tail}");
+        }
+        let dir = std::env::temp_dir().join("dent-sessions");
+        let name: String = s
+            .title
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == ' ' || c == '-' {
+                    c
+                } else {
+                    ' '
+                }
+            })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let path = dir.join(format!(
+            "{}.md",
+            if name.is_empty() { "Session" } else { &name }
+        ));
+        if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&path, md).is_ok() {
+            self.attach_paths(&[path], window, cx);
+        } else {
+            self.toast(ToastAction::Info, "Couldn't attach that session".into());
+        }
+    }
+
     /// Use the chosen completion: a file or command takes the word's place;
     /// a folder too, leaving the menu open inside it; dent's own commands
     /// do their thing.
@@ -3452,6 +3814,24 @@ impl Dent {
             .find(|r| r.name == name)
             .cloned()
             .unwrap_or_default();
+        // A session goes as an attachment; its `@words` leave the box.
+        if let Some(id) = &row.session {
+            let pastes = self.pastes.clone();
+            field.update(cx, |f, cx| {
+                crate::draft::put_in(
+                    f,
+                    Place::At(c.token.start..c.token.end),
+                    &Draft::default(),
+                    &pastes,
+                    true,
+                    window,
+                    cx,
+                )
+            });
+            self.attach_session(id, window, cx);
+            cx.notify();
+            return;
+        }
         // A value of your own: the menu steps aside while you type it.
         if c.token.kind == complete::Kind::Arg && row.open && !row.name.ends_with('=') {
             self.slash_dismissed = Some((c.token.kind, c.token.start));
@@ -3642,7 +4022,7 @@ impl Dent {
         let first = !self.built.contains_key(id);
         let built = self.built.entry(id.to_string()).or_default();
         let v = &self.core.list[id];
-        let s = crate::bridge::session(
+        let mut s = crate::bridge::session(
             v,
             crate::bridge::Context {
                 machine: &self.machine,
@@ -3653,6 +4033,27 @@ impl Dent {
             built,
             if first { Some(0) } else { from },
         );
+        // An earlier version, being looked at: drawn from that version,
+        // read-only, the session's state otherwise as it is.
+        if let Some(&seq) = self.old_version.get(id)
+            && let Some(b) = v.branches.iter().position(|b| b.seq == seq)
+            && let Some(old) = v.with_branch(b)
+        {
+            let then = crate::bridge::session(
+                &old,
+                crate::bridge::Context {
+                    machine: &self.machine,
+                    models: &self.models,
+                    diff: None,
+                    now_ms,
+                },
+                &mut crate::bridge::Built::default(),
+                Some(0),
+            );
+            s.items = then.items;
+            s.versions = crate::bridge::versions(v, Some(b));
+            s.old = Some(v.branches[b].seq);
+        }
         let made_changed = old.is_none_or(|(_, _, sig)| sig != s.made_sig);
         let partial_len = v.partial.len();
         let partial_now = v.partial.clone();
@@ -3758,6 +4159,10 @@ impl Dent {
             match s.status {
                 Status::Done | Status::Needs if old_status.is_some() => {
                     self.finished_at.insert(id.to_string(), Instant::now());
+                    // Not open: parse its replies ahead, off the UI thread.
+                    if self.selected.as_deref() != Some(id) {
+                        self.parse_queue.push(id.to_string());
+                    }
                 }
                 _ => {}
             }
@@ -3780,6 +4185,15 @@ impl Dent {
         match prev {
             Some(i) => self.sessions[i] = Rc::new(s),
             None => self.sessions.push(Rc::new(s)),
+        }
+        if following {
+            self.mark_seen();
+        }
+        // The Dock says how many need you, as the status bar does.
+        let needs = self.needs().len();
+        if self.badged != Some(needs) {
+            self.badged = Some(needs);
+            crate::notify::badge(needs);
         }
         // Newest first; the inbox groups them by what they need.
         self.sessions.sort_by_key(|s| std::cmp::Reverse(s.updated));
@@ -3917,6 +4331,8 @@ impl Dent {
             sidebar_width: Some(self.sidebar_w),
             sidebar_off: self.sidebar_off,
             quiet: !crate::notify::SOUND.load(std::sync::atomic::Ordering::Relaxed),
+            sleepy: !crate::notify::AWAKE.load(std::sync::atomic::Ordering::Relaxed),
+            hotkey: Some(crate::hotkey::chosen()).filter(|h| h != crate::hotkey::DEFAULT),
             appearance: self.appearance,
             pinned: self.pinned.clone(),
             open_with: crate::open::chosen(),
@@ -4132,6 +4548,143 @@ impl Dent {
         self.creating = true;
         self.creating_at = Instant::now();
         self.starter.update(cx, |c, cx| put(c, "", window, cx));
+        cx.notify();
+    }
+
+    /// Keep a message as a Claude Code skill, named from its first words:
+    /// in `project`'s `.claude/skills`, or your own (`~/.claude/skills`) for
+    /// every project. It's in the `/` menu from the next look.
+    pub fn save_skill(&mut self, words: &str, project: Option<&str>, cx: &mut Context<Self>) {
+        let root = match project {
+            Some(p) => std::path::PathBuf::from(p),
+            None => std::path::PathBuf::from(home()),
+        };
+        match crate::skills::save(&root.join(".claude").join("skills"), words) {
+            Ok(name) => {
+                self.toast(
+                    ToastAction::Info,
+                    format!("Saved as /{name}; it's in the / menu"),
+                );
+                self.commands.clear();
+                if let Some(id) = self.selected.clone() {
+                    self.fetch_commands(&id);
+                }
+                self.fetch_commands(EVERY);
+            }
+            Err(e) => self.toast(ToastAction::Info, format!("Couldn't save the skill: {e}")),
+        }
+        cx.notify();
+    }
+
+    /// Step to the version before (`older`) or after the one showing of
+    /// your message at timeline place `at`; past the last, the latest.
+    pub fn step_version(&mut self, id: &str, at: usize, older: bool, cx: &mut Context<Self>) {
+        let Some(v) = self.core.list.get(id) else {
+            return;
+        };
+        let group: Vec<usize> = (0..v.branches.len())
+            .filter(|&i| v.branches[i].at == at)
+            .collect();
+        let now = match self.old_version.get(id) {
+            Some(&seq) => group
+                .iter()
+                .position(|&i| v.branches[i].seq == seq)
+                .unwrap_or(group.len()),
+            None => group.len(),
+        };
+        let next = if older {
+            now.checked_sub(1)
+        } else {
+            Some(now + 1)
+        };
+        match next {
+            Some(n) if n < group.len() => {
+                self.old_version
+                    .insert(id.to_string(), v.branches[group[n]].seq);
+            }
+            Some(_) => {
+                self.old_version.remove(id);
+            }
+            None => return,
+        }
+        self.read_at.remove(id);
+        self.rebuild(id);
+        cx.notify();
+    }
+
+    /// Back to the latest version from an earlier one.
+    pub fn latest_version(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.old_version.remove(id).is_some() {
+            self.rebuild(id);
+            cx.notify();
+        }
+    }
+
+    /// Carry on from the earlier version showing, as a new session.
+    pub fn fork_version(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(seq) = self.session(id).and_then(|s| s.old) else {
+            return;
+        };
+        if self.creating() {
+            return;
+        }
+        self.creating = true;
+        self.creating_at = Instant::now();
+        let n = self.live.send(Request::Fork {
+            session: id.to_string(),
+            before: None,
+            until: Some(seq),
+            id: Some(crate::message_id()),
+        });
+        self.waiting.insert(n, Waiting::Create(None));
+        self.old_version.remove(id);
+        self.rebuild(id);
+        cx.notify();
+    }
+
+    /// ⇧⌘↩ in a session: send, then straight to a new session's field.
+    pub fn send_and_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected.is_none() {
+            return self.start_aside(window, cx);
+        }
+        self.send_with(false, window, cx);
+        self.select(None, window, cx);
+    }
+
+    /// ⌥⌘↩: what's typed starts a new session in the same project, and you
+    /// stay where you are (in a session, or on the new-session page, ready
+    /// for the next).
+    pub fn start_aside(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = self.box_draft(cx);
+        if typed.words_out(&self.pastes).is_empty() && typed.atts.is_empty() {
+            return;
+        }
+        let from = self.selected.clone();
+        let d = self.defaults.clone();
+        let cwd = match from.as_deref().and_then(|id| self.session(id)) {
+            Some(s) => s.cwd.clone(),
+            None => match d.project.clone() {
+                Some(p) => p,
+                None => {
+                    let scratch = crate::scratch_dir();
+                    let _ = std::fs::create_dir_all(&scratch);
+                    scratch.display().to_string()
+                }
+            },
+        };
+        self.attachments.clear();
+        let n = self.live.send(Request::Create {
+            cwd,
+            model: d.model,
+            permission: d.permission,
+            effort: d.effort,
+            id: crate::message_id(),
+            text: typed.message(&self.pastes),
+            attachments: typed.files(),
+        });
+        self.waiting.insert(n, Waiting::CreateAside(from, typed));
+        let field = self.prompt().clone();
+        field.update(cx, |c, cx| put(c, "", window, cx));
         cx.notify();
     }
 
@@ -4816,11 +5369,50 @@ impl Dent {
         self.creating = true;
         self.creating_at = Instant::now();
         let n = self.live.send(Request::Fork {
+            until: None,
             session: session.to_string(),
             before,
             id: Some(crate::message_id()),
         });
         self.waiting.insert(n, Waiting::Create(None));
+        cx.notify();
+    }
+
+    /// Carry on after a turn that went wrong: a message asking the agent to
+    /// pick up where it was cut off, naming any background work that
+    /// stopped with it.
+    pub fn carry_on(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.pressed_again(format!("carry-on/{id}")) {
+            return;
+        }
+        let Some(s) = self.session(id) else { return };
+        let lost = s
+            .items
+            .iter()
+            .rev()
+            .take_while(|i| !matches!(i, Item::User { .. }))
+            .find_map(|i| match i {
+                Item::Note { text, .. } => text
+                    .strip_prefix("Background work stopped with the agent: ")
+                    .map(|w| w.trim_end_matches('.').to_string()),
+                _ => None,
+            });
+        let mut text = "You were cut off before the turn finished. Carry on from where you stopped, without redoing finished work.".to_string();
+        if let Some(lost) = lost {
+            text.push_str(&format!(
+                " This background work stopped with you and isn't running now: {lost}. Start it again if it's still needed."
+            ));
+        }
+        self.send_again(id, &text, &[], cx);
+    }
+
+    /// Have the session carry on by itself when the used-up limit resets
+    /// (`at`, Unix seconds), or not (`None`).
+    pub fn resume_at(&mut self, id: &str, at: Option<u64>, cx: &mut Context<Self>) {
+        self.live.send(Request::Resume {
+            session: id.to_string(),
+            at,
+        });
         cx.notify();
     }
 
@@ -5499,7 +6091,7 @@ impl Dent {
             .iter()
             .enumerate()
             .map(|(ix, i)| {
-                let thought = matches!(i, Item::Thinking(_)).then(|| {
+                let thought = matches!(i, Item::Thinking(..)).then(|| {
                     thoughts += 1;
                     thought_key(&s.id, thoughts - 1)
                 });
@@ -5589,7 +6181,7 @@ impl Dent {
                 fp(text, &mut h);
                 attachments.hash(&mut h);
             }
-            Item::Thinking(t) => {
+            Item::Thinking(t, _) => {
                 fp(t, &mut h);
                 thought
                     .is_some_and(|k| self.open_calls.contains(k))
@@ -5853,8 +6445,61 @@ impl Dent {
         }
     }
 
+    /// ⇧⌘K or the header's list: your messages in the open session, to
+    /// search and jump to.
+    pub fn open_messages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.current().is_none() {
+            return;
+        }
+        self.open_palette(window, cx);
+        self.palette_mine = true;
+        self.search.update(cx, |s, cx| {
+            s.set_placeholder("Find your messages here", window, cx)
+        });
+    }
+
+    /// Your messages in the open session, newest first, matching every word
+    /// typed: where each is in the conversation, its words and when.
+    pub fn palette_messages(&self, cx: &App) -> Vec<(usize, String, u64)> {
+        let q = self.search.read(cx).value().to_lowercase();
+        let words: Vec<&str> = q.split_whitespace().collect();
+        let Some(s) = self.current() else {
+            return Vec::new();
+        };
+        s.items
+            .iter()
+            .enumerate()
+            .rev()
+            .filter_map(|(ix, i)| match i {
+                Item::User { text, at, .. } => {
+                    let lower = text.to_lowercase();
+                    words
+                        .iter()
+                        .all(|w| lower.contains(w))
+                        .then(|| (ix, text.clone(), *at))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Scroll to the message at `ix`, reading back from there.
+    pub fn scroll_to_item(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.transcript.set_follow_mode(FollowMode::Tail);
+        self.transcript.pause_following_tail();
+        self.transcript.scroll_to(ListOffset {
+            item_ix: ix,
+            offset_in_item: px(0.),
+        });
+        cx.notify();
+    }
+
     pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
+        self.palette_mine = false;
+        self.search.update(cx, |s, cx| {
+            s.set_placeholder("Search sessions, or type a task to start one", window, cx)
+        });
         self.palette = Some(0);
         self.search.update(cx, |s, cx| {
             put(s, "", window, cx);
@@ -5865,6 +6510,7 @@ impl Dent {
 
     pub fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.palette = None;
+        self.palette_mine = false;
         match &self.selected {
             Some(_) => self.composer.update(cx, |c, cx| c.focus_field(window, cx)),
             None => self.starter.update(cx, |c, cx| c.focus_field(window, cx)),
@@ -5947,8 +6593,8 @@ impl Dent {
             let (Item::User { text, .. } | Item::Text(text)) = i else {
                 continue;
             };
-            let lower = text.to_lowercase();
-            if let Some(at) = lower.find(w) {
+            // By chars: lowercasing can change the text's length in bytes.
+            if let Some(at) = crate::select::matches(text, w).first().map(|r| r.start) {
                 // A few words either side, on a char boundary.
                 let mut start = at.saturating_sub(40);
                 while !text.is_char_boundary(start) {
@@ -6003,6 +6649,15 @@ impl Dent {
 
     pub fn palette_open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_none() {
+            return;
+        }
+        if self.palette_mine {
+            let at = self.palette.unwrap_or(0);
+            let picked = self.palette_messages(cx).get(at).map(|m| m.0);
+            self.close_palette(window, cx);
+            if let Some(ix) = picked {
+                self.scroll_to_item(ix, cx);
+            }
             return;
         }
         let results = self.palette_results(cx);

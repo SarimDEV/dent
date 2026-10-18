@@ -100,6 +100,88 @@ const PLAN_NUDGE: &str = "Before you start any task with three or more steps, ca
 
 /// A one-off side question: the conversation `agent_session` so far, forked
 /// so the original never sees it, answered without changing anything.
+/// The last finished sentence of thinking still streaming (or its last
+/// line), at most 140 characters, for the working line. None until one
+/// has finished.
+pub fn latest_sentence(thinking: &str) -> Option<String> {
+    // Where sentences end: a full stop, ! or ? with a space after it (so
+    // "file.rs" and "e.g." mid-word don't count), or a line's end.
+    let b = thinking.as_bytes();
+    let ends: Vec<usize> = (0..b.len())
+        .filter(|&i| {
+            b[i] == b'\n'
+                || matches!(b[i], b'.' | b'!' | b'?')
+                    && b.get(i + 1).is_some_and(u8::is_ascii_whitespace)
+        })
+        .collect();
+    let end = *ends.last()?;
+    let start = ends.iter().rev().nth(1).map_or(0, |i| i + 1);
+    let s = thinking[start..=end].trim();
+    if s.chars().count() < 4 {
+        return None;
+    }
+    let mut out: String = s.chars().take(140).collect();
+    if s.chars().count() > 140 {
+        out.push('…');
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+#[test]
+fn the_working_line_shows_the_last_finished_thought() {
+    assert_eq!(latest_sentence("Looking at main.rs now"), None);
+    assert_eq!(
+        latest_sentence("Looking at main.rs now. The parser drops a toke"),
+        Some("Looking at main.rs now.".into())
+    );
+    assert_eq!(
+        latest_sentence("First. Then the second one! And"),
+        Some("Then the second one!".into())
+    );
+}
+
+/// Claude Code asked for a short title for a conversation: a small model,
+/// one turn, no tools, nothing of the person's settings that could act.
+pub fn title_argv(claude: &str, path: &str, conversation: &str) -> Vec<String> {
+    let mut v: Vec<String> = [
+        "/usr/bin/env",
+        "-u",
+        "CLAUDECODE",
+        "-u",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "-u",
+        "CLAUDE_CODE_SSE_PORT",
+    ]
+    .map(String::from)
+    .into();
+    v.push(format!("PATH={path}"));
+    v.push(claude.into());
+    v.extend(
+        [
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--model",
+            "haiku",
+            "--max-turns",
+            "1",
+            "--disallowedTools",
+            "Bash,Write,Edit,MultiEdit,NotebookEdit,Read,Glob,Grep,WebFetch,WebSearch,Task,Agent",
+        ]
+        .map(String::from),
+    );
+    v.extend([
+        "-p".into(),
+        format!(
+            "Title this conversation between a person and a coding agent. The title is at most \
+             5 words, like a short task name (\"Fix the footer on mobile\"), sentence case, with no \
+             colon, quotes or full stop. Reply with the title only.\n\n{conversation}"
+        ),
+    ]);
+    v
+}
+
 pub fn aside_argv(
     claude: &str,
     path: &str,
@@ -289,28 +371,75 @@ pub fn assistant_bodies(
             uuid,
         });
     }
-    out.extend(result_bodies(parent, results, reports));
+    out.extend(result_bodies(parent, results, reports, None));
     out
 }
 
 /// What tool results become in the log, a subagent's report keeping more.
+/// Pictures in a result are saved under `media` (the session's
+/// attachments), so the chat can show them; without it, or if one can't be
+/// saved, the output says a picture was there.
 pub fn result_bodies(
     parent: Option<String>,
     results: Vec<wire::ToolResult>,
     reports: &mut Reports,
+    media: Option<&std::path::Path>,
 ) -> Vec<Body> {
     results
         .into_iter()
         .map(|r| {
             let report = reports.answered(&r.tool_use_id);
+            let mut output = r.output;
+            let mut images = Vec::new();
+            for (n, source) in r.images.iter().enumerate() {
+                let name = format!("tool-{}-{}", safe_name(&r.tool_use_id), n + 1);
+                match media.and_then(|m| save_picture(source, m, &name)) {
+                    Some(path) => images.push(path),
+                    None => {
+                        if !output.is_empty() {
+                            output.push('\n');
+                        }
+                        output.push_str("[image]");
+                    }
+                }
+            }
             Body::ToolResult {
                 tool: r.tool_use_id,
                 error: r.is_error,
-                output: wire::keep(r.output, report),
+                output: wire::keep(output, report),
                 parent: parent.clone(),
+                images,
             }
         })
         .collect()
+}
+
+/// Letters, digits, `-` and `_` only: an id made safe for a file name.
+fn safe_name(id: &str) -> String {
+    id.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect()
+}
+
+/// A base64 picture (an image block's `source`) written to `media` as
+/// `name` and its kind's extension. Its path, or None if it isn't a kind
+/// that shows or can't be written.
+pub fn save_picture(source: &Value, media: &std::path::Path, name: &str) -> Option<String> {
+    let data = source["data"].as_str()?;
+    let bytes = dent_protocol::b64::decode(data)?;
+    // By what the bytes are, not what they're labelled: an empty or broken
+    // picture would show as a blank frame, and a mislabelled one wouldn't
+    // open in Preview.
+    let ext = match wire::picture_kind(&bytes)? {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        _ => "webp",
+    };
+    std::fs::create_dir_all(media).ok()?;
+    let path = media.join(format!("{name}.{ext}"));
+    std::fs::write(&path, bytes).ok()?;
+    Some(path.display().to_string())
 }
 
 /// What a call being written out works on, once its input has streamed
@@ -369,12 +498,19 @@ pub fn limits(info: &wire::RateLimitInfo) -> Body {
     }
 }
 
-pub fn tasks(tasks: &[wire::BackgroundTask]) -> Vec<Task> {
+/// The agent's background tasks as dent's, each with the call that started
+/// it when `calls` knows it.
+pub fn tasks(
+    tasks: &[wire::BackgroundTask],
+    calls: &std::collections::HashMap<String, String>,
+) -> Vec<Task> {
     tasks
         .iter()
         .map(|t| Task {
             id: t.task_id.clone(),
             description: t.description.clone(),
+            kind: t.task_type.clone(),
+            call: calls.get(&t.task_id).cloned(),
         })
         .collect()
 }

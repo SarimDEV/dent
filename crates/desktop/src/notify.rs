@@ -5,6 +5,10 @@
 /// Whether notifications play their sound (dent › Notification Sound).
 pub static SOUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
+/// Whether the machine stays awake while agents work (dent › Keep Mac
+/// Awake While Working).
+pub static AWAKE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 /// Take a session's notifications out of Notification Center: you've
 /// opened it, so they've done their job.
 pub fn clear(thread: &str) {
@@ -39,6 +43,14 @@ mod tests {
 pub fn about() {
     #[cfg(target_os = "macos")]
     mac::about();
+}
+
+/// The Dock icon's badge: how many sessions need you, none at zero.
+pub fn badge(needs: usize) {
+    #[cfg(target_os = "macos")]
+    mac::badge(needs);
+    #[cfg(not(target_os = "macos"))]
+    let _ = needs;
 }
 
 /// Ask once, at start, whether dent may notify.
@@ -180,6 +192,20 @@ mod mac {
         if let Some(mtm) = objc2::MainThreadMarker::new() {
             let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
             app.orderFrontStandardAboutPanel(None);
+        }
+    }
+
+    pub fn badge(needs: usize) {
+        let Some(mtm) = objc2::MainThreadMarker::new() else {
+            return;
+        };
+        let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+        let label = (needs > 0).then(|| NSString::from_str(&needs.to_string()));
+        // SAFETY: `dockTile` returns the app's NSDockTile, which takes an
+        // optional NSString badge label; both are called on the main thread.
+        unsafe {
+            let tile: Retained<NSObject> = msg_send![&*app, dockTile];
+            let _: () = msg_send![&*tile, setBadgeLabel: label.as_deref()];
         }
     }
 }

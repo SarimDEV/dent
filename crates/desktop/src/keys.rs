@@ -136,10 +136,11 @@ macro_rules! to {
 
 use crate::app::{
     AttachFiles, ChatBottom, ChatPageDown, ChatPageUp, ChatTop, ClearTerminal, CloseSession,
-    Escape, FindInSession, FindNext, FindPrev, FullScreen, Hide, HideOthers, InboxDown, InboxOpen,
-    InboxUp, Minimize, NewSession, NextNeedsYou, Quit, Search, SelectNext, SelectPrev, ShowChanges,
-    ShowFirst, ShowKeys, ShowTerminal, SideChat, SteerSend, StopSession, SwitchNext, SwitchPrev,
-    TextActual, TextBigger, TextSmaller, TogglePanel, ToggleSidebar, UndoClose,
+    Escape, FindInSession, FindMine, FindNext, FindPrev, FullScreen, Hide, HideOthers, InboxDown,
+    InboxOpen, InboxUp, Minimize, NewSession, NextNeedsYou, Quit, Search, SelectNext, SelectPrev,
+    SendAndNew, ShowChanges, ShowFirst, ShowKeys, ShowTerminal, SideChat, StartAside, SteerSend,
+    StopSession, SwitchNext, SwitchPrev, TextActual, TextBigger, TextSmaller, TogglePanel,
+    ToggleSidebar, UndoClose,
 };
 use Section::*;
 use When::*;
@@ -158,6 +159,10 @@ pub const KEYS: &[Key] = &[
         .bound(to!(Search))
         .sheet(Sessions, "Search sessions", "⌘ K")
         .doc("Command palette", "Cmd/Ctrl+K"),
+    key("shift-cmd-k", Anywhere, "your messages in this session")
+        .bound(to!(FindMine))
+        .sheet(Sessions, "Find your messages in this session", "⇧ ⌘ K")
+        .doc("Find your messages in this session", "Shift+Cmd+K"),
     key("ctrl-tab", Anywhere, "back to the last session")
         .bound(to!(SwitchNext))
         .sheet(Sessions, "Back to the last session", "⌃ Tab")
@@ -223,6 +228,21 @@ pub const KEYS: &[Key] = &[
         .bound(to!(SteerSend))
         .sheet(Writing, "Send now, into the running turn", "⌘ ↩")
         .doc("Send now, into the running turn (steer)", "Cmd/Ctrl+Return"),
+    key("shift-cmd-enter", Prompt, "send, then a new session")
+        .bound(to!(SendAndNew))
+        .sheet(Writing, "Send, then start another", "⇧ ⌘ ↩")
+        .doc("Send, then open a new session", "Shift+Cmd+Return"),
+    key(
+        "alt-cmd-enter",
+        Prompt,
+        "start a new session from what's typed, staying here",
+    )
+    .bound(to!(StartAside))
+    .sheet(Writing, "Start it as a new session, staying here", "⌥ ⌘ ↩")
+    .doc(
+        "Start what's typed as a new session in this project, staying here",
+        "Alt+Cmd+Return",
+    ),
     key("cmd-.", Anywhere, "stop")
         .bound(to!(StopSession))
         .sheet(Writing, "Stop", "⌘ .  Esc")

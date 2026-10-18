@@ -28,11 +28,17 @@ pub enum Do {
     CopyPath(String),
     Reveal(String),
     Rename(String),
+    /// Ask for a new title from what the session is about now.
+    Retitle(String),
     Fork(String),
     CloseSession(String),
     Reopen(String),
     /// Pin to the top of the sidebar, or unpin.
     Pin(String),
+    /// The sessions picked with Shift or ⌘: close them, or pin or unpin
+    /// them, together.
+    ClosePicked,
+    PinPicked,
     /// Open a file with this app from now on (`None`: the Mac's default).
     OpenWith(String, Option<String>),
     /// Put text on the clipboard: a link, a command, what's selected.
@@ -45,6 +51,8 @@ pub enum Do {
     RunInTerminal(String),
     /// Put words into the reply box as a quote, under what's there.
     Quote(String),
+    /// Keep a message as a skill: in this project's folder, or everywhere.
+    SaveSkill(String, Option<String>),
 }
 
 const WIDTH: f32 = 200.;
@@ -80,12 +88,29 @@ impl Dent {
                     .unwrap_or_default();
                 self.start_rename(&id, &title, window, cx);
             }
+            Do::Retitle(id) => {
+                self.live
+                    .send(dent_protocol::Request::Retitle { session: id });
+                self.toast(crate::ToastAction::Info, "Finding a new title…".into());
+                cx.notify();
+            }
             Do::Fork(id) => self.fork(&id, None, cx),
             Do::CloseSession(id) => {
                 self.close(&id, window, cx);
             }
             Do::Reopen(id) => self.reopen(&id, cx),
             Do::Pin(id) => self.toggle_pin(&id, cx),
+            Do::ClosePicked => self.close_picked(window, cx),
+            Do::PinPicked => {
+                // All pinned already: unpin them; otherwise pin the rest.
+                let picked = std::mem::take(&mut self.picked);
+                let all = picked.iter().all(|id| self.pinned.contains(id));
+                for id in &picked {
+                    if all == self.pinned.contains(id) {
+                        self.toggle_pin(id, cx);
+                    }
+                }
+            }
             Do::OpenWith(path, app) => {
                 crate::open::open_with(&path, app, cx);
                 self.prefs_changed();
@@ -94,6 +119,7 @@ impl Dent {
             Do::OpenLink(url) => crate::select::open_link(&url, window, cx),
             Do::OpenInApp(path) => crate::open::open(&path, cx),
             Do::Quote(words) => self.quote(&words, window, cx),
+            Do::SaveSkill(words, project) => self.save_skill(&words, project.as_deref(), cx),
             Do::RunInTerminal(command) => {
                 self.open_shell(window, cx);
                 if let Some(sh) = self.current().and_then(|s| self.shells.get(&s.id)) {

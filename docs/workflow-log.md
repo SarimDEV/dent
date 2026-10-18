@@ -28,6 +28,12 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 
 ## Open
 
+### A daemon test raced its own fake agent
+- Seen: 2026-10-18. `a_stop_or_a_stuck_start_is_seen_through_across_a_daemon_restart` failed every run, on this branch and on the commit before it, after passing the day before: the fake's long answer takes 2.0 s at the test's speed, the same as the stop's grace after a restart, so which ended the turn was luck. `clients_joining_mid_reply_see_it_once_and_events_never_skip` failed once in a full run and passed alone.
+- Cost: about 15 min to find it was the test, not the change.
+- Fix: the restart test asks for the answer slowly (ten times longer than the grace). The other is left as is, and logged if it fails again.
+- Check: `just verify` passes three runs in a row.
+
 ### Real walkthroughs used for every visual check
 - Seen: 2026-10-15. Each UI tweak in the chat-polish round was checked with a full real-agent `walk.sh compare` run (Haiku, ~40 tool calls): six runs at ~3 min plus build each, and the owner waited on every one ("the walk is so annoying… it takes forever").
 - Cost: ~25 min of waiting in one session, plus real usage limits.
@@ -55,6 +61,7 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 ### Verify and walkthroughs aren't scoped to the change
 - Seen: 2026-10-15. `just verify` always runs every test in every crate, and the full walkthrough suite (~272 checks) runs once per batch, besides each feature's own scene. `docs/building-with-agents.md` promises "replays and UI checks for the areas the change touched".
 - Cost: unmeasured. A small change still pays for the whole workspace. Measured once: a one-step Esc fix ran the full `walk.sh checks` (310 checks, 3 min 43 s) to see a single new check, with no way to run just the Stop scene.
+- Seen again: 2026-10-17, the chat-polish batch: the full `walk.sh checks` (433 checks) took 6 min 13 s, run once for the batch after its own `polish` scene (about 1 min a run, three runs for stills); `just verify` 47 s.
 - Fix: `just verify` picks crates from `git diff` against `origin/main` (full run only when shared crates change or before pushing to main). The full walkthrough suite runs in the background while the next item starts, not as a blocking step.
 - Check: wall-clock time from "change done" to "landed" on a typical batch item.
 
@@ -156,3 +163,8 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 - Seen: 2026-10-15, new Mac. Without Screen Recording permission every shot printed "could not create image from window" and the run still said "13 checks, 0 failed". Stills were also taken on a background thread while the scene moved on, so the narrow `drop-hint` still showed the state after the drop.
 - Fix: a `Shot` step now waits until its picture is saved, and an unsaved still is a failed check ("the still was saved").
 - Result: with no capture tool the attach scene now reports 3 failures instead of 0; the narrow `drop-hint` still shows the hint. Each scene run costs about 1 s more (attach: 14 s → 15 s).
+
+### The plan check raced its own fake turn
+- Seen: 2026-10-18, review fixes. "The plan moves along and the turn ends" failed twice in a row on the full walk (433 checks, 1 failed, about 9 min each). The fake's `make a plan slowly` holds each of two steps 12 s, so the turn runs about 24 s, but the check allowed 20 s from a point a second or two in. It passed earlier only when the steps before it happened to take longer.
+- Fix: the check allows 30 s.
+- Result: see the next full run in this batch's PR.
