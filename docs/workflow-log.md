@@ -163,3 +163,8 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 - Seen: 2026-10-15, new Mac. Without Screen Recording permission every shot printed "could not create image from window" and the run still said "13 checks, 0 failed". Stills were also taken on a background thread while the scene moved on, so the narrow `drop-hint` still showed the state after the drop.
 - Fix: a `Shot` step now waits until its picture is saved, and an unsaved still is a failed check ("the still was saved").
 - Result: with no capture tool the attach scene now reports 3 failures instead of 0; the narrow `drop-hint` still shows the hint. Each scene run costs about 1 s more (attach: 14 s → 15 s).
+
+### The plan check raced its own fake turn
+- Seen: 2026-10-18, review fixes. "The plan moves along and the turn ends" failed twice in a row on the full walk (433 checks, 1 failed, about 9 min each). The fake's `make a plan slowly` holds each of two steps 12 s, so the turn runs about 24 s, but the check allowed 20 s from a point a second or two in. It passed earlier only when the steps before it happened to take longer.
+- Fix: the check allows 30 s.
+- Result: see the next full run in this batch's PR.

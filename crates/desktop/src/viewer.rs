@@ -1831,8 +1831,10 @@ impl Dent {
                 .collect()
         });
         let marked = self.marked_line.get(id).copied();
-        if self.text_key != Some((id, v)) {
-            self.text_key = Some((id, v));
+        // The line count is part of it: an edited file is read again from
+        // disk, and may have changed there under the same version.
+        if self.text_key != Some((id, v, lines.len())) {
+            self.text_key = Some((id, v, lines.len()));
             self.text_list.reset(lines.len());
             // A few lines above the marked one, so it reads in context.
             if let Some(l) = marked {

@@ -95,15 +95,15 @@ impl Dent {
                                                 let q = self.search.read(cx).value().to_lowercase();
                                                 let w =
                                                     q.split_whitespace().next().unwrap_or_default();
-                                                let lower = line.to_lowercase();
-                                                let start = s.project.len() + 3;
-                                                match lower[start..].find(w).map(|i| i + start) {
-                                                    Some(at)
-                                                        if !w.is_empty()
-                                                            && line.is_char_boundary(at)
-                                                            && line
-                                                                .is_char_boundary(at + w.len()) =>
-                                                    {
+                                                // Found in the message part, by
+                                                // chars: lowercasing can change a
+                                                // name's length in bytes.
+                                                let lead = line.len() - found.len();
+                                                match crate::select::matches(&found, w)
+                                                    .first()
+                                                    .map(|r| (r.start + lead, r.len()))
+                                                {
+                                                    Some((at, wl)) if !w.is_empty() => {
                                                         let base = font(crate::theme::sans());
                                                         let mut hit = base.clone();
                                                         hit.weight = FontWeight::MEDIUM;
@@ -118,9 +118,9 @@ impl Dent {
                                                         StyledText::new(line.clone())
                                                             .with_runs(vec![
                                                                 run(at, base.clone(), t.quiet),
-                                                                run(w.len(), hit, t.ink),
+                                                                run(wl, hit, t.ink),
                                                                 run(
-                                                                    line.len() - at - w.len(),
+                                                                    line.len() - at - wl,
                                                                     base,
                                                                     t.quiet,
                                                                 ),

@@ -798,8 +798,9 @@ pub struct Dent {
     pub read_at: HashMap<String, (ListOffset, bool)>,
     /// Seen marks sent and not yet back from the daemon, by session.
     pub seen_sent: HashMap<String, u64>,
-    /// The earlier version being looked at in a session, if any.
-    pub old_version: HashMap<String, usize>,
+    /// The earlier version being looked at in a session, if any, by the
+    /// branch's `seq`: a rewind elsewhere renumbers the branches.
+    pub old_version: HashMap<String, u64>,
     /// Sessions whose finished replies wait to be parsed ahead.
     pub parse_queue: Vec<String>,
     /// The count last put on the Dock icon.
@@ -860,7 +861,7 @@ pub struct Dent {
     pub diff_list: ListState,
     /// A text file's lines, and which file and version they're for.
     pub text_list: ListState,
-    pub text_key: Option<(&'static str, usize)>,
+    pub text_key: Option<(&'static str, usize, usize)>,
     /// The line a link pointed at in each text file.
     pub marked_line: HashMap<&'static str, u32>,
     /// Side chat's place.
@@ -1855,6 +1856,11 @@ impl Dent {
         if let Some(id) = &id {
             crate::notify::clear(id);
         }
+        // Going somewhere outside what's picked lets the picks go, so ⌘W
+        // never closes rows you picked a while ago instead of this one.
+        if id.as_ref().is_none_or(|id| !self.picked.contains(id)) {
+            self.picked.clear();
+        }
         // Choosing the session already open only puts you in its reply box:
         // attachments, draft and place stay as they are.
         if id.is_some() && id == self.selected {
@@ -2087,7 +2093,9 @@ impl Dent {
     /// Close every picked session that can be closed, as one Undo; those
     /// still working stay, and a toast says so.
     pub fn close_picked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let picked = std::mem::take(&mut self.picked);
+        let mut picked = std::mem::take(&mut self.picked);
+        // Rows closed or gone since they were picked aren't "still working".
+        picked.retain(|id| self.session(id).is_some_and(|s| !s.closed));
         let (can, busy): (Vec<String>, Vec<String>) = picked.into_iter().partition(|id| {
             self.session(id)
                 .is_some_and(|s| !s.closed && Self::can_close(s))
@@ -2482,7 +2490,15 @@ impl Dent {
                     return;
                 }
                 // A file asked for before the changes came: show it now.
-                let want = self.diff_want.remove(&id);
+                // Otherwise the file you were reading stays shown, wherever
+                // it sorts in the new list.
+                let reading = self
+                    .changes
+                    .get(&id)
+                    .zip(self.diff_file.get(&id))
+                    .and_then(|(old, i)| old.get(*i))
+                    .map(|f| f.path.clone());
+                let want = self.diff_want.remove(&id).or(reading);
                 if let Some(i) = want.and_then(|p| diff.iter().position(|f| f.path == p)) {
                     self.diff_file.insert(id.clone(), i);
                 }
@@ -4019,7 +4035,8 @@ impl Dent {
         );
         // An earlier version, being looked at: drawn from that version,
         // read-only, the session's state otherwise as it is.
-        if let Some(&b) = self.old_version.get(id)
+        if let Some(&seq) = self.old_version.get(id)
+            && let Some(b) = v.branches.iter().position(|b| b.seq == seq)
             && let Some(old) = v.with_branch(b)
         {
             let then = crate::bridge::session(
@@ -4569,7 +4586,10 @@ impl Dent {
             .filter(|&i| v.branches[i].at == at)
             .collect();
         let now = match self.old_version.get(id) {
-            Some(b) => group.iter().position(|i| i == b).unwrap_or(group.len()),
+            Some(&seq) => group
+                .iter()
+                .position(|&i| v.branches[i].seq == seq)
+                .unwrap_or(group.len()),
             None => group.len(),
         };
         let next = if older {
@@ -4579,7 +4599,8 @@ impl Dent {
         };
         match next {
             Some(n) if n < group.len() => {
-                self.old_version.insert(id.to_string(), group[n]);
+                self.old_version
+                    .insert(id.to_string(), v.branches[group[n]].seq);
             }
             Some(_) => {
                 self.old_version.remove(id);
@@ -6572,8 +6593,8 @@ impl Dent {
             let (Item::User { text, .. } | Item::Text(text)) = i else {
                 continue;
             };
-            let lower = text.to_lowercase();
-            if let Some(at) = lower.find(w) {
+            // By chars: lowercasing can change the text's length in bytes.
+            if let Some(at) = crate::select::matches(text, w).first().map(|r| r.start) {
                 // A few words either side, on a char boundary.
                 let mut start = at.saturating_sub(40);
                 while !text.is_char_boundary(start) {

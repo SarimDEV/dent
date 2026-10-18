@@ -426,14 +426,16 @@ fn safe_name(id: &str) -> String {
 /// that shows or can't be written.
 pub fn save_picture(source: &Value, media: &std::path::Path, name: &str) -> Option<String> {
     let data = source["data"].as_str()?;
-    let ext = match source["media_type"].as_str()? {
+    let bytes = dent_protocol::b64::decode(data)?;
+    // By what the bytes are, not what they're labelled: an empty or broken
+    // picture would show as a blank frame, and a mislabelled one wouldn't
+    // open in Preview.
+    let ext = match wire::picture_kind(&bytes)? {
         "image/png" => "png",
         "image/jpeg" => "jpg",
         "image/gif" => "gif",
-        "image/webp" => "webp",
-        _ => return None,
+        _ => "webp",
     };
-    let bytes = dent_protocol::b64::decode(data)?;
     std::fs::create_dir_all(media).ok()?;
     let path = media.join(format!("{name}.{ext}"));
     std::fs::write(&path, bytes).ok()?;

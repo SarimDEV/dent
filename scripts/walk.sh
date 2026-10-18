@@ -5,6 +5,7 @@
 #   scripts/walk.sh pickup --shots DIR [--dark] [--size WxH]   (the new-session page with many terminal sessions)
 #   scripts/walk.sh finish [--shots DIR] [--dark] [--size WxH]   (thinking, background work, limits, crashes, MCP, versions, tables)
 #   scripts/walk.sh polish [--shots DIR] [--dark] [--size WxH]   (a tool's picture, thinking and call times, the sidebar's marks)
+#   scripts/walk.sh pictures [--shots DIR] [--dark] [--size WxH]   (six pictures from one group of calls, and the large view)
 #   scripts/walk.sh markdown [--shots DIR] [--dark] [--size WxH]   (only the maths, diagram and table reply)
 #   scripts/walk.sh attaching [--shots DIR] [--dark] [--size WxH]   (files and pictures: chips, the large view)
 #   scripts/walk.sh visuals [--shots DIR] [--dark] [--size WxH]   (coloured output, a folded paste, queued files, half-typed formatting)

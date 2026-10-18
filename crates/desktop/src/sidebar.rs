@@ -348,10 +348,13 @@ impl Dent {
             status_square_at(status, &t, pop).into_any_element()
         };
         let title_ink = if quiet { t.quiet } else { t.ink };
+        // One line each: an error or a thought can run over several, and a
+        // row stays its height.
+        let one_line = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
         let detail = if s.closed {
             format!("Closed · {}", s.project)
         } else {
-            format!("{} · {}", s.project, s.detail)
+            format!("{} · {}", s.project, one_line(&s.detail))
         };
         // What it finished or asked since you last looked: a dot, until you
         // open it. The open row is being looked at.
@@ -571,7 +574,7 @@ impl Dent {
                                     .when(s.title.chars().count() > 30, |d| {
                                         d.with_tip(crate::ui::tip_owned(s.title.clone(), t))
                                     })
-                                    .child(s.title.clone()),
+                                    .child(one_line(&s.title)),
                             )
                             .child(div().h(px(20.)).flex().items_center().child(trailing)),
                     )

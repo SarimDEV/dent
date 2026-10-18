@@ -91,6 +91,10 @@ struct Piece {
 
 impl Piece {
     fn copy(&self, range: Range<usize>) -> String {
+        // The offsets were taken from the text as it was when selected; if
+        // it has changed since, they may fall inside a character.
+        let text = self.text.as_str();
+        let range = text.floor_char_boundary(range.start)..text.floor_char_boundary(range.end);
         if range.is_empty() {
             return String::new();
         }
@@ -103,11 +107,12 @@ impl Piece {
             if r.end <= at || r.start >= range.end {
                 continue;
             }
-            out.push_str(&self.text[at..r.start.max(at)]);
+            let upto = text.floor_char_boundary(r.start.max(at));
+            out.push_str(&text[at.min(upto)..upto]);
             out.push_str(with);
-            at = r.end.min(range.end).max(at);
+            at = text.floor_char_boundary(r.end.min(range.end).max(at));
         }
-        out.push_str(&self.text[at..range.end]);
+        out.push_str(&text[at.min(range.end)..range.end]);
         out
     }
 }
@@ -1552,6 +1557,17 @@ fn paint_range(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn copy_never_cuts_a_character_after_the_text_changed() {
+        // Offsets taken from "abcdef", the text since rewritten.
+        let p = super::Piece {
+            text: "日本語のテキスト".into(),
+            ..Default::default()
+        };
+        assert_eq!(p.copy(1..5), "日");
+        assert_eq!(p.copy(4..5), "");
+    }
+
     #[test]
     fn a_link_names_a_line() {
         use super::at_line;

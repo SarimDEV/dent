@@ -1202,7 +1202,8 @@ pub mod b64 {
     pub fn decode(s: &str) -> Option<Vec<u8>> {
         let mut out = Vec::with_capacity(s.len() / 4 * 3);
         let (mut acc, mut bits) = (0u32, 0);
-        for b in s.bytes().filter(|b| *b != b'=') {
+        // Padding and line breaks (some encoders wrap at 76) carry nothing.
+        for b in s.bytes().filter(|b| *b != b'=' && !b.is_ascii_whitespace()) {
             let v = ABC.iter().position(|c| *c == b)? as u32;
             acc = (acc << 6) | v;
             bits += 6;
@@ -1224,6 +1225,7 @@ pub mod b64 {
             }
             assert_eq!(super::encode(b"foobar"), "Zm9vYmFy");
             assert_eq!(super::encode(b"fo"), "Zm8=");
+            assert_eq!(super::decode("Zm9v\nYmFy\r\n").unwrap(), b"foobar");
         }
     }
 }

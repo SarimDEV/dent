@@ -63,7 +63,7 @@ Two small things live in the log beside the conversation ([0050](decisions/0050-
 - **Versions:** a fork can stop before a given event (`until`): carrying on an earlier version is a fork up to the rewind that left it.
 - **Awake:** see [0051](decisions/0051-global-shortcut-and-keep-awake.md).
 
-Pictures in a tool's result (`image` blocks) are written to the session's attachments folder as `tool-<call>-<n>.<ext>` and named in the `tool_result` event's `images`; one that can't be written reads `[image]` in the output.
+Pictures in a tool's result (`image` blocks) are written to the session's attachments folder as `tool-<call>-<n>.<ext>` and named in the `tool_result` event's `images`; its kind comes from its bytes, not its label, and base64 broken across lines is read whole. One that can't be written, or whose bytes aren't a PNG, JPEG, GIF or WebP, reads `[image]` in the output.
 
 ## Persistence
 

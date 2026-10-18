@@ -23,6 +23,8 @@
 //!   two wanting sign-in)
 //! - `screenshot`: thinks, runs a slow build, then a browser tool returns
 //!   a picture of a page
+//! - `every size`: screenshots the page at four widths in a row, the last
+//!   call bringing back three pictures (six in the group)
 //! - `colour output`: a Bash call whose output is coloured, with a
 //!   progress line and one very long line
 //! - `half-typed`: a reply that stops for a while each time bold, a link,
@@ -1006,6 +1008,46 @@ impl Agent {
             };
             self.say(said, None)?;
             self.end(said, false);
+            return Ok(());
+        }
+        if lower.contains("every size") {
+            // Screenshots one after another, as a check across widths does;
+            // the last call brings back more than one picture.
+            let page = base64(include_bytes!("../assets/page.png"));
+            let tablet = base64(include_bytes!("../assets/page-tablet.png"));
+            let phone = base64(include_bytes!("../assets/page-phone.png"));
+            let hero = base64(include_bytes!("../assets/page-hero.png"));
+            let shots: [(&str, Vec<&str>); 4] = [
+                ("1280", vec![&page]),
+                ("768", vec![&tablet]),
+                ("390", vec![&phone]),
+                ("390, scrolled", vec![&hero, &tablet, &page]),
+            ];
+            for (width, pictures) in shots {
+                let id = self.tool(
+                    "mcp__browser__take_screenshot",
+                    json!({"url": "http://localhost:5173/", "width": width}),
+                    None,
+                );
+                self.pause(300)?;
+                let mut content =
+                    vec![json!({"type": "text", "text": format!("Took a screenshot at {width}")})];
+                content.extend(pictures.iter().map(|data| {
+                    json!({"type": "image", "source": {"type": "base64",
+                        "media_type": "image/png", "data": data}})
+                }));
+                out(self.envelope(
+                    json!({"type": "user", "message": {"role": "user", "content": [
+                        {"tool_use_id": id, "type": "tool_result", "is_error": false,
+                            "content": content}]}}),
+                    None,
+                ));
+            }
+            self.say(
+                "It holds up at every width; on a phone the cards stack.",
+                None,
+            )?;
+            self.end("done", false);
             return Ok(());
         }
         if lower.contains("screenshot") {

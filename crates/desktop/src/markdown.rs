@@ -570,9 +570,11 @@ fn push_linking(cur: &mut Inline, s: &str, st: Style) {
 fn url_spans(s: &str) -> Vec<std::ops::Range<usize>> {
     let mut out = Vec::new();
     let mut from = 0;
-    while let Some(at) = s[from..]
-        .find("https://")
-        .or_else(|| s[from..].find("http://"))
+    // Whichever comes first: an http:// address before an https:// one.
+    while let Some(at) = [s[from..].find("https://"), s[from..].find("http://")]
+        .into_iter()
+        .flatten()
+        .min()
     {
         let start = from + at;
         let tail = &s[start..];
@@ -2558,6 +2560,13 @@ fn checkbox(done: bool, t: &Theme) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{Block, Callout, is_price, parse, resolve};
+
+    #[test]
+    fn an_http_address_before_an_https_one_is_a_link_too() {
+        let s = "open http://localhost:3000 then see https://docs.example";
+        let spans: Vec<&str> = super::url_spans(s).into_iter().map(|r| &s[r]).collect();
+        assert_eq!(spans, ["http://localhost:3000", "https://docs.example"]);
+    }
 
     #[test]
     fn your_own_words_link_addresses_and_files() {

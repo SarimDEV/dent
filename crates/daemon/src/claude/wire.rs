@@ -811,7 +811,7 @@ fn image_block(path: &str) -> Option<Value> {
 }
 
 /// A picture's media type from its first bytes, for the kinds the model reads.
-fn picture_kind(b: &[u8]) -> Option<&'static str> {
+pub(crate) fn picture_kind(b: &[u8]) -> Option<&'static str> {
     if b.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("image/png")
     } else if b.starts_with(&[0xff, 0xd8, 0xff]) {

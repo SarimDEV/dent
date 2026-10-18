@@ -143,7 +143,8 @@ impl Dent {
             .gap_x(px(space::S1H))
             .ty(LABEL)
             .text_color(t.quiet)
-            .child(div().flex_none().child(s.project.clone()))
+            // A name too long for the row ends in an ellipsis, not mid-glyph.
+            .child(div().max_w_full().truncate().child(s.project.clone()))
             // The separator travels with the machine, so it never dangles.
             .child(
                 div()
@@ -1670,9 +1671,12 @@ impl Dent {
                                         d.border_t_1().border_color(t.hairline)
                                     });
                                 let rail = t.quiet.opacity(0.35);
-                                for k in 1..=l.depth {
+                                // Past a few levels deep, rails stop
+                                // stepping in, so the step keeps its room.
+                                let deep = l.depth.min(MOST_RAILS);
+                                for k in 1..=deep {
                                     let more = continues(&depths, i, k);
-                                    let own = k == l.depth;
+                                    let own = k == deep;
                                     row = row.child(
                                         div()
                                             .w(px(space::S4))
@@ -4776,7 +4780,9 @@ fn needs_title(text: &str, t: &theme::Theme) -> Div {
         )
 }
 
-/// What rode along with a message, shown above its text.
+/// The most subagent rails drawn side by side.
+const MOST_RAILS: usize = 6;
+
 /// Whether level `k` of the tree carries on below row `i`: another row at
 /// that level comes before the tree steps out past it.
 fn continues(depths: &[usize], i: usize, k: usize) -> bool {
@@ -4917,11 +4923,10 @@ fn picture_path(shown: &str, cwd: &str) -> Option<std::path::PathBuf> {
     crate::data::is_file(&path).then_some(path)
 }
 
-/// A file that went with a message you sent (`what`, as the session's
-/// folder names it): a picture shows as itself, anything else as the chip
-/// it was in the box.
-/// Pictures a group of tool calls brought back, side by side, each opening
-/// large; they step together in the large view.
+/// Pictures a group of tool calls brought back, each opening large; they
+/// step together in the large view. One shows at a readable size; more
+/// sit in one row of small tiles, and past [`TOOL_TILES`] the last tile
+/// counts the rest.
 fn tool_pictures(session: &str, ix: usize, paths: &[String], t: &theme::Theme) -> Div {
     let set: crate::lightbox::Set = std::rc::Rc::new(
         paths
@@ -4933,37 +4938,91 @@ fn tool_pictures(session: &str, ix: usize, paths: &[String], t: &theme::Theme) -
             })
             .collect(),
     );
+    let frame = || {
+        div()
+            .rounded(px(radius::MD))
+            .border_1()
+            .border_color(t.hairline)
+            .overflow_hidden()
+    };
+    if set.len() == 1 {
+        // As wide as it is, up to the cap, and narrower with the column.
+        return div().mt(px(space::S2)).flex().child(
+            crate::lightbox::picture(
+                &set,
+                0,
+                frame().max_w_full().max_h(px(TOOL_PICTURE_H)).child(
+                    img(set[0].path.clone())
+                        .max_w_full()
+                        .max_h(px(TOOL_PICTURE_H))
+                        .object_fit(ObjectFit::Contain),
+                ),
+            )
+            .min_w_0()
+            .max_w(px(TOOL_PICTURE_W)),
+        );
+    }
+    let shown = set.len().min(TOOL_TILES);
+    // The rest past the last tile, which then counts them over itself.
+    let more = set.len() - shown;
     div()
         .mt(px(space::S2))
         .flex()
-        .flex_wrap()
-        .gap(px(space::S2))
-        .children((0..set.len()).map(|j| {
-            let path = set[j].path.clone();
-            crate::lightbox::picture(
+        .gap(px(space::S1H))
+        .children((0..shown).map(|j| {
+            let last = j + 1 == shown && more > 0;
+            // A tile gives way evenly when the column narrows, rather than
+            // wrapping or being cut off at the edge.
+            // The last tile stands for itself and every picture after it.
+            let upto = if last { set.len() } else { j + 1 };
+            crate::lightbox::pictures(
                 &set,
                 j,
-                div()
-                    .max_w(px(TOOL_PICTURE_W))
-                    .max_h(px(TOOL_PICTURE_H))
-                    .rounded(px(radius::MD))
-                    .border_1()
-                    .border_color(t.hairline)
-                    .overflow_hidden()
+                upto,
+                frame()
+                    .relative()
+                    .size_full()
+                    .bg(t.panel)
                     .child(
-                        img(path)
-                            .max_w(px(TOOL_PICTURE_W))
-                            .max_h(px(TOOL_PICTURE_H))
-                            .object_fit(ObjectFit::Contain),
-                    ),
+                        img(set[j].path.clone())
+                            .size_full()
+                            .object_fit(ObjectFit::Cover),
+                    )
+                    .when(last, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full()
+                                .bg(gpui_kit::black().opacity(0.55))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .ty(LABEL)
+                                .text_color(gpui_kit::white())
+                                .child(format!("+{}", more + 1)),
+                        )
+                    }),
             )
+            .w(px(TOOL_TILE_W))
+            .h(px(TOOL_TILE_H))
+            .min_w_0()
+            .flex_shrink(1.)
         }))
 }
 
 /// The most a tool's picture takes in the chat; it opens large on a click.
 const TOOL_PICTURE_W: f32 = 420.;
 const TOOL_PICTURE_H: f32 = 280.;
+/// Several pictures: how many tiles show, and each tile's size.
+const TOOL_TILES: usize = 5;
+const TOOL_TILE_W: f32 = 120.;
+const TOOL_TILE_H: f32 = 76.;
 
+/// A file that went with a message you sent (`what`, as the session's
+/// folder names it): a picture shows as itself, anything else as the chip
+/// it was in the box.
 fn sent_file(what: &str, shot: Option<(&crate::lightbox::Set, usize)>, t: &theme::Theme) -> Div {
     // A picture shows as itself, with its name under it.
     if let Some((pictures, at)) = shot {
@@ -4994,7 +5053,14 @@ fn sent_file(what: &str, shot: Option<(&crate::lightbox::Set, usize)>, t: &theme
                             .object_fit(ObjectFit::Contain),
                     ),
             ))
-            .child(div().ty(LABEL).text_color(t.quiet).child(name));
+            .child(
+                div()
+                    .max_w(px(320.))
+                    .truncate()
+                    .ty(LABEL)
+                    .text_color(t.quiet)
+                    .child(name),
+            );
     }
     let name = what.rsplit('/').next().unwrap_or(what).to_string();
     // Not found as a picture (that would show above), so by its kind.

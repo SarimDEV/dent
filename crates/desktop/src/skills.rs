@@ -6,6 +6,8 @@ use std::path::Path;
 
 /// Words in a skill's name at most.
 const NAME_WORDS: usize = 4;
+/// The longest name made; Claude Code allows 64, and "-12" may be added.
+const NAME_MOST: usize = 60;
 
 /// Write `words` as a new skill under `skills`; its name, made unique.
 pub fn save(skills: &Path, words: &str) -> std::io::Result<String> {
@@ -23,7 +25,8 @@ pub fn save(skills: &Path, words: &str) -> std::io::Result<String> {
     if first.trim().chars().count() > 120 {
         about.push('…');
     }
-    let about = about.replace('"', "'");
+    // Inside YAML double quotes a backslash starts an escape, so it's doubled.
+    let about = about.replace('\\', "\\\\").replace('"', "'");
     std::fs::write(
         dir.join("SKILL.md"),
         format!(
@@ -49,10 +52,14 @@ pub fn name(words: &str) -> String {
         .take(NAME_WORDS)
         .collect();
     if n.is_empty() {
-        "saved-prompt".into()
-    } else {
-        n.join("-")
+        return "saved-prompt".into();
     }
+    // Claude Code takes names up to 64 characters; room is left for a "-2".
+    let mut name: String = n.join("-").chars().take(NAME_MOST).collect();
+    while name.ends_with('-') {
+        name.pop();
+    }
+    name
 }
 
 #[cfg(test)]
@@ -64,6 +71,7 @@ mod tests {
             "review-this-branch-tests"
         );
         assert_eq!(super::name("  ✨  "), "saved-prompt");
+        assert_eq!(super::name(&"x".repeat(300)).len(), super::NAME_MOST);
         let dir = std::env::temp_dir().join(format!("dent-skill-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let a = super::save(&dir, "Write the PR description").unwrap();

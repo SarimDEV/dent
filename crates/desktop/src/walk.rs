@@ -166,6 +166,16 @@ impl Walk {
                 v.extend(finish());
                 v
             }
+            // Several pictures from one group of calls, and the large view
+            // stepping through them.
+            "pictures" => {
+                let mut v = vec![(
+                    0.,
+                    Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+                )];
+                v.extend(pictures());
+                v
+            }
             "polish" => {
                 let mut v = vec![(
                     0.,
@@ -2050,7 +2060,8 @@ fn checks() -> Vec<(f32, Act)> {
                             s.todos.iter().filter(|(st, ..)| st == "completed").count() == 1
                         })
                 },
-                20.,
+                // Two steps held 12 s each: the turn runs about 24 s.
+                30.,
             ),
         ),
         (
@@ -6479,6 +6490,81 @@ fn polish() -> Vec<(f32, Act)> {
         ),
     ]);
     v
+}
+
+fn pictures() -> Vec<(f32, Act)> {
+    let mut v = new_session("screenshot the page at every size");
+    v.extend([
+        (
+            0.1,
+            Until("the screenshots turn ends", |d, _| answered(d), 30.),
+        ),
+        (
+            0.1,
+            Until(
+                "the group holds all six pictures",
+                |d, _| tool_picture_count(d) == 6,
+                3.,
+            ),
+        ),
+        (0.2, Call(to_tools)),
+        (0.6, Shot("pictures")),
+        (0.2, Call(open_every_group)),
+        (0.2, Call(to_tools)),
+        (0.6, Shot("pictures-open")),
+        (0.2, Call(|d, _, cx| open_tool_picture(d, 2, cx))),
+        (
+            0.1,
+            Until("a tile opens large", |d, _| d.lightbox.is_some(), 3.),
+        ),
+        (0.8, Shot("pictures-viewer")),
+        // Onto a picture the "+3" tile stands for.
+        (0.2, Key("right")),
+        (0.2, Key("right")),
+        (0.2, Key("right")),
+        (0.5, Shot("pictures-viewer-last")),
+        (0.2, Key("escape")),
+        (
+            0.1,
+            Until("Esc puts it back", |d, _| d.lightbox.is_none(), 3.),
+        ),
+    ]);
+    v
+}
+
+/// How many pictures the open session's first tool group brought back.
+fn tool_picture_count(d: &Dent) -> usize {
+    current(d)
+        .and_then(|s| {
+            s.items.iter().find_map(|i| match i {
+                Item::Tools { pictures, .. } => Some(pictures.len()),
+                _ => None,
+            })
+        })
+        .unwrap_or(0)
+}
+
+/// Open the `at`th picture of the first tool group large, as a click does.
+fn open_tool_picture(d: &mut Dent, at: usize, cx: &mut Context<Dent>) {
+    let Some(s) = current(d) else { return };
+    let Some((ix, paths)) = s.items.iter().enumerate().find_map(|(ix, i)| match i {
+        Item::Tools { pictures, .. } => Some((ix, pictures.clone())),
+        _ => None,
+    }) else {
+        return;
+    };
+    let set = std::rc::Rc::new(
+        paths
+            .iter()
+            .enumerate()
+            .map(|(j, p)| crate::lightbox::Shot {
+                key: SharedString::from(format!("tool-pic-{}-{ix}-{j}", s.id)),
+                path: std::path::PathBuf::from(p),
+            })
+            .collect(),
+    );
+    crate::lightbox::ask(set, at);
+    cx.notify();
 }
 
 /// Scroll the conversation so its first tool group starts at the top.
