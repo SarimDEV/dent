@@ -26,4 +26,5 @@ Also:
 
 - [decisions/](decisions/) — one short record per settled choice. Don't relitigate these without a new record.
 - [spikes/](spikes/) — findings from Phase 1 spikes.
+- [chat-backlog.md](chat-backlog.md) — what's left to make the single-agent chat as good as it can be.
 - [design/](design/) — architecture diagram and the Field Notes HTML/CSS mockups.
