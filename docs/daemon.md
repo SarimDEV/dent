@@ -56,6 +56,13 @@ Two small things live in the log beside the conversation ([0050](decisions/0050-
 - **Seen marks:** `seen { upto }` when someone looks at the session; it is unread while a turn's end or a question is past the mark. Looking doesn't change the session's last-activity time.
 - **Titles:** after the first turn, a one-turn `claude -p` on `haiku`, with no tools, run in the state folder's `titles/`, proposes a title, logged as `settings`. Never on its own after a rename; `retitle` asks again.
 
+- **Carrying on at a reset:** `resume { at }` (Unix seconds) holds a session's resume; the session's own timer sends "Carry on from where you stopped…" when it comes, and `resume {}` takes it back. Anything sent meanwhile takes it back too. It survives restarts (it's in the log).
+- **Background work:** `system/task_started` names the call that started each task, so a task carries its kind and call; `stop_task` stops one through Claude Code's own control request. Work that dies with the agent is named in the notice.
+- **Thinking:** thinking deltas set the `thinking { latest }` activity to the last finished sentence; it clears with the answer, a call, or the turn's end.
+- **MCP servers:** `init`'s `mcp_servers` that failed, or want sign-in (claude.ai's own connectors aside), log one notice per server and status.
+- **Versions:** a fork can stop before a given event (`until`): carrying on an earlier version is a fork up to the rewind that left it.
+- **Awake:** see [0051](decisions/0051-global-shortcut-and-keep-awake.md).
+
 Pictures in a tool's result (`image` blocks) are written to the session's attachments folder as `tool-<call>-<n>.<ext>` and named in the `tool_result` event's `images`; one that can't be written reads `[image]` in the output.
 
 ## Persistence

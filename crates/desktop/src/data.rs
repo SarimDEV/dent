@@ -428,6 +428,16 @@ pub struct Session {
     /// event up to which it has been looked at.
     pub news: u64,
     pub seen: u64,
+    /// Your messages that have earlier versions: (message, where in the
+    /// timeline it sits, which version shows, how many there are).
+    pub versions: Vec<(String, usize, usize, usize)>,
+    /// Showing an earlier version: the rewind that left it behind.
+    pub old: Option<u64>,
+    /// Work the agent left running in the background, now.
+    pub background: Vec<dent_protocol::Task>,
+    /// When it carries on by itself as a used-up limit resets (Unix
+    /// seconds).
+    pub resume_at: Option<u64>,
 }
 
 impl Session {
@@ -485,6 +495,10 @@ impl Session {
             agent_session: None,
             news: 0,
             seen: 0,
+            background: Vec::new(),
+            resume_at: None,
+            versions: Vec::new(),
+            old: None,
         }
     }
 }

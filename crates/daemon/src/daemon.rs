@@ -70,6 +70,15 @@ pub struct Daemon {
     catalogs: Mutex<HashMap<String, crate::claude::commands::Catalog>>,
     /// What each session's agent is doing besides talking.
     activities: Mutex<HashMap<String, dent_protocol::Activity>>,
+    awake: Mutex<Awake>,
+}
+
+/// Keeping the machine awake while agents work: the sessions working now,
+/// whether it's wanted, and the `caffeinate` holding it.
+struct Awake {
+    busy: std::collections::HashSet<String>,
+    on: bool,
+    hold: Option<std::process::Child>,
 }
 
 /// The replies streaming now, and how many changes they've had.
@@ -121,7 +130,30 @@ impl Daemon {
             catalogs: Mutex::new(HashMap::new()),
             activities: Mutex::new(HashMap::new()),
             usage: tokio::sync::Mutex::new(None),
+            awake: Mutex::new(Awake {
+                busy: Default::default(),
+                on: true,
+                hold: None,
+            }),
         })
+    }
+
+    /// A session started or stopped working (a turn, or background work).
+    pub fn set_busy(&self, session: &str, busy: bool) {
+        let mut a = lock(&self.awake);
+        if busy {
+            a.busy.insert(session.to_string());
+        } else {
+            a.busy.remove(session);
+        }
+        hold_awake(&mut a);
+    }
+
+    /// Whether to keep the machine awake while agents work.
+    pub fn keep_awake(&self, on: bool) {
+        let mut a = lock(&self.awake);
+        a.on = on;
+        hold_awake(&mut a);
     }
 
     pub fn store(&self) -> MutexGuard<'_, Store> {
@@ -618,6 +650,20 @@ impl Daemon {
 
     /// A fork, optionally ending with a side question's (id, question,
     /// answer, agent conversation).
+    /// A new session carrying on from an earlier version of the
+    /// conversation: everything before event `until`, the rewind that left
+    /// that version behind.
+    pub async fn fork_until(
+        self: &Arc<Self>,
+        parent: &str,
+        until: u64,
+        id: Option<&str>,
+    ) -> Result<String> {
+        let key = id.map(|i| format!("fork.{i}"));
+        self.fork_cut(parent, Cut::Until(until), None, key.as_deref())
+            .await
+    }
+
     async fn fork_with(
         self: &Arc<Self>,
         parent: &str,
@@ -625,14 +671,32 @@ impl Daemon {
         aside: Option<(String, String, String, String)>,
         key: Option<&str>,
     ) -> Result<String> {
+        let cut = match before {
+            Some(b) => Cut::Before(b.to_string()),
+            None => Cut::All,
+        };
+        self.fork_cut(parent, cut, aside, key).await
+    }
+
+    async fn fork_cut(
+        self: &Arc<Self>,
+        parent: &str,
+        cut: Cut,
+        aside: Option<(String, String, String, String)>,
+        key: Option<&str>,
+    ) -> Result<String> {
         let row = self.store().session(parent)?.context("no such session")?;
         let events = self.store().session_events(parent)?;
-        let cut = match before {
-            Some(b) => events
+        let cut = match cut {
+            Cut::Before(b) => events
                 .iter()
-                .position(|e| matches!(&e.body, Body::User { id, .. } if id == b))
+                .position(|e| matches!(&e.body, Body::User { id, .. } if *id == b))
                 .context("no such message")?,
-            None => events.len(),
+            Cut::Until(seq) => events
+                .iter()
+                .position(|e| e.seq >= seq)
+                .context("no such version")?,
+            Cut::All => events.len(),
         };
         let kept = &events[..cut];
         let title = events
@@ -1005,6 +1069,45 @@ impl Daemon {
         }
         Ok(())
     }
+}
+
+/// While anything works (and it's wanted), the machine stays awake: idle
+/// sleep, and on power a closed lid, as `caffeinate -is` does. The hold
+/// ends with the daemon (`-w`), and as soon as nothing works.
+fn hold_awake(a: &mut Awake) {
+    let want = a.on && !a.busy.is_empty();
+    if let Some(c) = a.hold.as_mut()
+        && c.try_wait().ok().flatten().is_some()
+    {
+        a.hold = None;
+    }
+    match (want, a.hold.is_some()) {
+        (true, false) if cfg!(target_os = "macos") => {
+            a.hold = std::process::Command::new("/usr/bin/caffeinate")
+                .args(["-i", "-s", "-w", &std::process::id().to_string()])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok();
+        }
+        (false, true) => {
+            if let Some(mut c) = a.hold.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Where a fork stops copying the conversation.
+enum Cut {
+    /// Before your message with this id.
+    Before(String),
+    /// Before the event with this sequence number.
+    Until(u64),
+    All,
 }
 
 /// Set once a session has been titled (by dent or by you), so a session is

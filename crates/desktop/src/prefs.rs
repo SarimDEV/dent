@@ -26,6 +26,13 @@ pub struct Prefs {
     pub sidebar_off: bool,
     /// Notifications come without their sound.
     pub quiet: bool,
+    /// The Mac may sleep while agents work.
+    #[serde(default)]
+    pub sleepy: bool,
+    /// The shortcut that brings dent forward from any app (a name from
+    /// `hotkey`'s choices); none kept means the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hotkey: Option<String>,
     /// Light, dark, or as the Mac is.
     pub appearance: Appearance,
     /// The text size you chose with ⌘+ and ⌘−, as a factor.

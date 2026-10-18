@@ -96,6 +96,8 @@ pub enum Op {
     Close,
     Reopen,
     Seen(u64),
+    Resume(Option<u64>),
+    StopTask(String),
     Output {
         proc: String,
         err: bool,
@@ -160,6 +162,7 @@ enum Ctl {
     /// A model or permission mode, kept once Claude Code takes it.
     Model(String),
     Permission(Permission),
+    StopTask,
 }
 
 struct Session {
@@ -194,6 +197,16 @@ struct Session {
     /// until its target shows (`None` after).
     preparing: Option<(String, Option<String>)>,
     background: Vec<Task>,
+    /// Which tool call started each background task.
+    task_calls: HashMap<String, String>,
+    /// The thinking streaming now, and the sentence of it on the working
+    /// line.
+    thinking: String,
+    thought: Option<String>,
+    /// MCP servers already said to be in trouble, as name/status.
+    mcp_told: HashSet<String>,
+    /// When to carry on by itself (Unix seconds): a used-up limit resets.
+    wake: Option<u64>,
     asked: HashMap<String, Pending>,
     /// Client message ids already logged, so a resend never runs twice.
     seen: HashSet<String>,
@@ -262,6 +275,11 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
         said: false,
         preparing: None,
         background: Vec::new(),
+        task_calls: HashMap::new(),
+        mcp_told: HashSet::new(),
+        thinking: String::new(),
+        thought: None,
+        wake: None,
         asked: HashMap::new(),
         seen: HashSet::new(),
         proc: None,
@@ -409,6 +427,7 @@ impl Session {
                     self.settled = settled(&outcome);
                 }
                 Body::Background { tasks } => self.background = tasks,
+                Body::Resume { at } => self.wake = at,
                 Body::Settings {
                     effort: Some(e), ..
                 } => self.effort = (!e.is_empty()).then_some(e),
@@ -507,7 +526,12 @@ impl Session {
 
     async fn run(mut self, mut rx: mpsc::UnboundedReceiver<Cmd>) {
         loop {
+            let wake = self.wake.map(|at| {
+                let now = crate::daemon::now_ms() / 1000;
+                Instant::now() + Duration::from_secs(at.saturating_sub(now))
+            });
             let deadline = [
+                wake,
                 self.idle_at,
                 self.release_at,
                 self.stop_at,
@@ -630,6 +654,20 @@ impl Session {
                     title: Some(title),
                 });
                 Ok(())
+            }
+            Op::Resume(at) => {
+                if self.wake != at {
+                    self.wake = at;
+                    self.log(Body::Resume { at });
+                }
+                Ok(())
+            }
+            Op::StopTask(task) => {
+                if self.proc.is_none() || !self.background.iter().any(|t| t.id == task) {
+                    bail!("that work has already stopped");
+                }
+                self.control("stop_task", json!({ "task_id": task }), Ctl::StopTask)
+                    .await
             }
             Op::Seen(upto) => {
                 self.log(Body::Seen { upto });
@@ -761,6 +799,8 @@ impl Session {
             self.status = s;
             self.log(Body::Status { status: s });
         }
+        self.d
+            .set_busy(&self.id, matches!(s, Status::Working | Status::Background));
     }
 
     async fn send(
@@ -772,6 +812,10 @@ impl Session {
     ) -> Result<()> {
         if !self.seen.insert(id.clone()) {
             return Ok(());
+        }
+        // Anything sent takes the place of carrying on by itself.
+        if self.wake.take().is_some() && text != RESUME_TEXT {
+            self.log(Body::Resume { at: None });
         }
         let working = self.in_turn && self.proc.is_some();
         // Nothing can be steered into an agent that's being stopped: it
@@ -981,10 +1025,22 @@ impl Session {
         if self.background.is_empty() {
             return;
         }
-        self.background.clear();
+        let what: Vec<String> = self
+            .background
+            .drain(..)
+            .map(|t| t.description)
+            .filter(|d| !d.trim().is_empty())
+            .collect();
         self.log(Body::Background { tasks: Vec::new() });
         self.log(Body::Notice {
-            text: "Background work stopped with the agent.".into(),
+            text: if what.is_empty() {
+                "Background work stopped with the agent.".into()
+            } else {
+                format!(
+                    "Background work stopped with the agent: {}.",
+                    what.join(", ")
+                )
+            },
         });
     }
 
@@ -1237,6 +1293,22 @@ impl Session {
                     .await;
             }
         }
+        // A used-up limit has reset: carry on where the turn stopped.
+        if self
+            .wake
+            .is_some_and(|at| at <= crate::daemon::now_ms() / 1000)
+        {
+            self.wake = None;
+            self.log(Body::Resume { at: None });
+            let _ = self
+                .send(
+                    crate::daemon::new_id(),
+                    RESUME_TEXT.into(),
+                    false,
+                    Vec::new(),
+                )
+                .await;
+        }
         if self.idle_at.is_some_and(|t| t <= now) {
             self.idle_at = None;
             let quiet = !self.in_turn && self.asked.is_empty() && self.background.is_empty();
@@ -1295,8 +1367,23 @@ impl Session {
                 session_id,
                 version,
                 permission_mode,
-                ..
+                mcp,
             } => {
+                // An MCP server that won't connect, or wants you to sign
+                // in, says so once in the chat (claude.ai's connectors
+                // you haven't set up are left out: they're yours to add).
+                for (name, status) in mcp {
+                    let said = match status.as_str() {
+                        "failed" => format!("The MCP server {name} couldn't connect."),
+                        "needs-auth" if !name.starts_with("claude.ai ") => {
+                            format!("The MCP server {name} needs you to sign in.")
+                        }
+                        _ => continue,
+                    };
+                    if self.mcp_told.insert(format!("{name}/{status}")) {
+                        self.log_from(Body::Notice { text: said }, end);
+                    }
+                }
                 // A steer has been taken in by the time a turn starts: an
                 // abort from here on is a real one.
                 self.steered = false;
@@ -1338,9 +1425,25 @@ impl Session {
                 self.d.set_activity(&self.id, None);
                 self.d.clear_partial(&self.id);
             }
-            Inbound::TextDelta { parent: None, text } => self.d.delta(&self.id, &text, false),
+            Inbound::TextDelta { parent: None, text } => {
+                self.thought_ends();
+                self.d.delta(&self.id, &text, false)
+            }
+            // What it's thinking shows on the working line, a finished
+            // sentence at a time.
+            Inbound::ThinkingDelta { parent: None, text } => {
+                self.thinking.push_str(&text);
+                if let Some(latest) = claude::latest_sentence(&self.thinking)
+                    && self.thought.as_deref() != Some(latest.as_str())
+                {
+                    self.thought = Some(latest.clone());
+                    self.d
+                        .set_activity(&self.id, Some(Activity::Thinking { latest }));
+                }
+            }
             // Writing a long file streams nothing else for minutes: say so.
             Inbound::ToolStart { parent: None, name } => {
+                self.thought_ends();
                 self.d.set_activity(
                     &self.id,
                     Some(Activity::Preparing {
@@ -1391,6 +1494,7 @@ impl Session {
                 }
                 if parent.is_none() {
                     self.said = true;
+                    self.thought_ends();
                     if self.preparing.take().is_some() {
                         self.d.set_activity(&self.id, None);
                     }
@@ -1408,8 +1512,16 @@ impl Session {
                 }
             }
             Inbound::RateLimit(info) => self.log_from(claude::limits(&info), end),
+            Inbound::TaskStarted {
+                task_id,
+                tool_use_id,
+            } => {
+                if let Some(call) = tool_use_id {
+                    self.task_calls.insert(task_id, call);
+                }
+            }
             Inbound::BackgroundTasks(tasks) => {
-                self.background = claude::tasks(&tasks);
+                self.background = claude::tasks(&tasks, &self.task_calls);
                 self.log_from(
                     Body::Background {
                         tasks: self.background.clone(),
@@ -1588,7 +1700,13 @@ impl Session {
                     }
                 }
                 (
-                    Some(Ctl::Interrupt | Ctl::ContextUsage | Ctl::Settings | Ctl::Refresh { .. }),
+                    Some(
+                        Ctl::Interrupt
+                        | Ctl::ContextUsage
+                        | Ctl::Settings
+                        | Ctl::Refresh { .. }
+                        | Ctl::StopTask,
+                    ),
                     _,
                 )
                 | (None, _) => {}
@@ -1831,9 +1949,19 @@ impl Session {
             }
             Inbound::MessageStart { .. }
             | Inbound::TextDelta { .. }
+            | Inbound::ThinkingDelta { .. }
             | Inbound::ToolStart { .. }
             | Inbound::InputDelta { .. }
             | Inbound::Other => {}
+        }
+    }
+
+    /// Thinking is over (an answer, a call, the whole message): its line
+    /// goes from the working line.
+    fn thought_ends(&mut self) {
+        self.thinking.clear();
+        if self.thought.take().is_some() {
+            self.d.set_activity(&self.id, None);
         }
     }
 
@@ -1842,6 +1970,7 @@ impl Session {
     }
 
     fn end_turn_at(&mut self, outcome: Outcome, end: Option<u64>) {
+        self.thought_ends();
         if self.preparing.take().is_some() {
             self.d.set_activity(&self.id, None);
         }
@@ -2007,6 +2136,10 @@ fn settled(outcome: &Outcome) -> Status {
         Outcome::Error { .. } => Status::Error,
     }
 }
+
+/// What a session sends itself when its used-up limit resets.
+pub const RESUME_TEXT: &str =
+    "Your usage limit has reset. Carry on from where you stopped, without redoing finished work.";
 
 #[cfg(test)]
 mod requeue_tests {

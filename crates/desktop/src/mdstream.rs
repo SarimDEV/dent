@@ -39,10 +39,7 @@ const LIVE: usize = 4;
 impl Cache {
     /// Finished Markdown, parsed once.
     pub fn get(&mut self, src: &str) -> Rc<Vec<Block>> {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        src.hash(&mut h);
-        let key = h.finish();
+        let key = Self::key(src);
         if let Some(b) = self.done.get(&key) {
             return b;
         }
@@ -67,6 +64,24 @@ impl Cache {
         self.live[ix].1.update(src)
     }
 
+    /// The key finished Markdown is kept under.
+    pub fn key(src: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        src.hash(&mut h);
+        h.finish()
+    }
+
+    /// Whether this finished Markdown is parsed already.
+    pub fn has(&mut self, key: u64) -> bool {
+        self.done.get(&key).is_some()
+    }
+
+    /// Keep Markdown parsed elsewhere (off the UI thread).
+    pub fn put(&mut self, key: u64, blocks: Vec<Block>) {
+        self.done.insert(key, Rc::new(blocks));
+    }
+
     pub fn clear(&mut self) {
         self.done.clear();
         self.live.clear();
@@ -87,6 +102,10 @@ pub struct Stream {
     /// How many of `committed` `out` starts with: each chunk changes only
     /// what follows, so the finished blocks aren't copied every time.
     shared: usize,
+    /// A table at the end, read a row at a time: where it starts in `src`,
+    /// how far into it is read (bytes), its header and delimiter lines, and
+    /// the table so far.
+    table: Option<(usize, usize, String, std::sync::Arc<crate::markdown::Table>)>,
 }
 
 impl Stream {
@@ -99,7 +118,19 @@ impl Stream {
             *self = Stream::default();
         }
         let tail = &src[self.done..];
-        if let Some(cut) = commit_point(tail) {
+        // While a table at the end only gains rows, nothing new can start:
+        // the search for a finished block (a parse of the whole table) is
+        // skipped.
+        let rows_only = matches!(&self.table, Some((at, ..)) if *at == self.done) && {
+            // From the start of the line the last chunk ended in.
+            let was = self.src.len().min(src.len());
+            let from = src[..was].rfind('\n').map_or(0, |n| n + 1).max(self.done);
+            src[from..]
+                .split_inclusive('\n')
+                .all(|l| !l.ends_with('\n') || row_line(l))
+        };
+        if rows_only {
+        } else if let Some(cut) = commit_point(tail) {
             let chunk = &tail[..cut];
             let found = definitions(chunk);
             if found.is_empty() {
@@ -114,6 +145,20 @@ impl Stream {
             }
             self.done += cut;
         }
+        // A table at the end grows a row at a time: each finished row is
+        // read once, so a long table costs no more per chunk than a short one.
+        if self.defs.is_empty()
+            && let Some(table) = self.table_tail(src)
+        {
+            let out = Rc::make_mut(&mut self.out);
+            out.truncate(self.shared);
+            out.extend(self.committed[self.shared..].iter().cloned());
+            out.push(Block::Table(table));
+            self.shared = self.committed.len();
+            self.src = src.to_string();
+            return self.out.clone();
+        }
+        self.table = None;
         let tail = terminate(&src[self.done..]);
         if self.done > 0 && !definitions(&tail).is_empty() {
             // A definition still in the unfinished part (a footnote's runs
@@ -131,6 +176,66 @@ impl Stream {
         self.src = src.to_string();
         self.out.clone()
     }
+}
+
+impl Stream {
+    /// The table the unfinished part is, when it's nothing but a table (a
+    /// header, its delimiter, rows): its new finished rows read and added
+    /// to what was read before. `None` for anything else, read whole.
+    fn table_tail(&mut self, src: &str) -> Option<std::sync::Arc<crate::markdown::Table>> {
+        let tail = &src[self.done..];
+        let known =
+            matches!(&self.table, Some((at, read, ..)) if *at == self.done && *read <= tail.len());
+        if !known {
+            // The header and delimiter, finished, then rows.
+            let mut lines = tail.split_inclusive('\n');
+            let (h, d) = (lines.next()?, lines.next()?);
+            if !h.ends_with('\n') || !d.ends_with('\n') || !row_line(h) || !delimiter(d) {
+                return None;
+            }
+            let head = format!("{h}{d}");
+            let Some(Block::Table(t)) = parse(&head).into_iter().next() else {
+                return None;
+            };
+            self.table = Some((self.done, head.len(), head, t));
+        }
+        // The last result lets go of the table, so rows are added in place.
+        Rc::make_mut(&mut self.out).truncate(self.shared);
+        let (_, read, head, table) = self.table.as_mut()?;
+        let new = &tail[*read..];
+        // Finished lines only; the one being typed waits.
+        let done = new.rfind('\n').map_or(0, |n| n + 1);
+        for l in new[..done].split_inclusive('\n') {
+            if !row_line(l) {
+                self.table = None;
+                return None;
+            }
+            // A row read alone, under the header that shapes it.
+            match parse(&format!("{head}{l}")).into_iter().next() {
+                Some(Block::Table(one)) if one.rows.len() == 1 => std::sync::Arc::make_mut(table)
+                    .rows
+                    .push(one.rows[0].clone()),
+                _ => {
+                    self.table = None;
+                    return None;
+                }
+            }
+        }
+        *read += done;
+        Some(table.clone())
+    }
+}
+
+/// A table line: it starts and ends with a pipe.
+fn row_line(line: &str) -> bool {
+    let l = line.trim();
+    l.len() >= 2 && l.starts_with('|') && l.ends_with('|')
+}
+
+/// A table's delimiter row: pipes, dashes, colons and spaces.
+fn delimiter(line: &str) -> bool {
+    let l = line.trim();
+    l.contains('-') && l.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
 }
 
 /// `src` with the definitions after it, which add no blocks of their own.
@@ -861,6 +966,38 @@ mod tests {
         assert_eq!(new_words("", "a b"), Some(1));
         // A line break inside a paragraph is a word's end, as drawn.
         assert_eq!(new_words("one", "one\ntwo three"), Some(2));
+    }
+
+    /// A table at the end of a reply grows a row at a time, and ends up as
+    /// reading it whole would.
+    #[test]
+    fn a_streaming_table_is_read_a_row_at_a_time() {
+        let mut doc = String::from("Here it is:\n\n| n | square |\n| --- | ---: |\n");
+        for i in 0..2000 {
+            doc.push_str(&format!("| {i} | **{}** |\n", i * i));
+        }
+        let mut s = Stream::default();
+        let mut at = 0;
+        let mut slowest = std::time::Duration::ZERO;
+        while at < doc.len() {
+            at = (at + 23).min(doc.len());
+            let t = std::time::Instant::now();
+            let out = s.update(&doc[..at]);
+            if at > doc.len() / 2 {
+                slowest = slowest.max(t.elapsed());
+            }
+            std::hint::black_box(out);
+        }
+        // The same table as reading it whole.
+        let whole = parse(&doc);
+        let (Some(Block::Table(a)), Some(Block::Table(b))) = (s.out.last(), whole.last()) else {
+            panic!("no table");
+        };
+        assert_eq!(a.rows.len(), 2000);
+        assert_eq!(a.markdown(), b.markdown());
+        eprintln!(
+            "a 2,000-row table streaming: the slowest chunk in its second half took {slowest:?}"
+        );
     }
 
     /// What one chunk of a long reply costs, near its end: run with

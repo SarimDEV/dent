@@ -220,6 +220,12 @@ pub enum Body {
     },
     Closed,
     Reopened,
+    /// The session will carry on by itself at `at` (Unix seconds), when a
+    /// used-up limit resets; `None` takes that back.
+    Resume {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<u64>,
+    },
     /// Someone looked at the session after event `upto`: what finished or
     /// asked before then is no longer new to them.
     Seen {
@@ -405,6 +411,8 @@ pub enum Activity {
         #[serde(default)]
         what: Option<String>,
     },
+    /// Thinking, and the last thing it thought, a sentence at most.
+    Thinking { latest: String },
 }
 
 /// The command a one-line message runs (`/compact`,
@@ -541,6 +549,13 @@ pub struct Window {
 pub struct Task {
     pub id: String,
     pub description: String,
+    /// What kind of work: `local_bash` for a shell, `local_agent` for a
+    /// subagent, and so on.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    /// The tool call that started it, when the agent said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<String>,
 }
 
 /// A model the agent offers.
@@ -738,6 +753,10 @@ pub enum Request {
         session: SessionId,
         #[serde(default)]
         before: Option<String>,
+        /// Fork from an earlier version: everything before event `until`
+        /// (the rewind that left it behind).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        until: Option<u64>,
         /// The client's id for this fork, so a resend after a reconnect
         /// gets the same session rather than a second one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -791,6 +810,22 @@ pub enum Request {
     },
     Reopen {
         session: SessionId,
+    },
+    /// Carry on by itself at `at` (Unix seconds), as a limit resets, or
+    /// not (`None`).
+    Resume {
+        session: SessionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<u64>,
+    },
+    /// Stop one piece of background work.
+    StopTask {
+        session: SessionId,
+        task: String,
+    },
+    /// Keep the machine awake while any agent works (on by default).
+    KeepAwake {
+        on: bool,
     },
     /// The session was looked at, up to event `upto`.
     Seen {

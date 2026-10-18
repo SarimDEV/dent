@@ -21,6 +21,7 @@ mod draft;
 mod ds;
 mod find;
 mod highlight;
+mod hotkey;
 mod keys;
 mod lightbox;
 mod live;
@@ -37,6 +38,7 @@ mod prefs;
 mod select;
 mod shell;
 mod sidebar;
+mod skills;
 mod switcher;
 mod theme;
 mod ui;
@@ -337,6 +339,7 @@ impl Render for Dent {
         self.chat_w = w - side - if wants_panel { self.panel_w } else { 0. };
         self.sidebar_hovered = self.over_sidebar(window.mouse_position(), window);
         self.take_lightbox_request(window);
+        self.take_table_request(cx);
         // A card had the keyboard and its ask went: back to the reply box,
         // so typing carries on.
         if self.ask_focus.is_focused(window)
@@ -531,6 +534,15 @@ impl Render for Dent {
                 cx.listener(|this, _: &ShowTerminal, window, cx| this.open_shell(window, cx)),
             )
             // ⌘↩ steers from the reply box only; other boxes submit themselves.
+            .on_action(
+                cx.listener(|this, _: &app::FindMine, window, cx| this.open_messages(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &app::SendAndNew, window, cx| this.send_and_new(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &app::StartAside, window, cx| this.start_aside(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &SteerSend, window, cx| {
                 if this.field_focused(window, cx) == Some(app::Field::Composer) {
                     this.send_with(true, window, cx)
@@ -716,6 +728,29 @@ impl Render for Dent {
                 use std::sync::atomic::Ordering::Relaxed;
                 let on = notify::SOUND.load(Relaxed);
                 notify::SOUND.store(!on, Relaxed);
+                this.prefs_changed();
+                app::refresh_menus(cx);
+            }))
+            .on_action(cx.listener(|this, _: &app::KeepAwake, _, cx| {
+                use std::sync::atomic::Ordering::Relaxed;
+                let on = !notify::AWAKE.load(Relaxed);
+                notify::AWAKE.store(on, Relaxed);
+                this.live.send(dent_protocol::Request::KeepAwake { on });
+                this.prefs_changed();
+                app::refresh_menus(cx);
+            }))
+            .on_action(cx.listener(|this, _: &app::HotkeyOptShiftSpace, _, cx| {
+                hotkey::set("opt-shift-space");
+                this.prefs_changed();
+                app::refresh_menus(cx);
+            }))
+            .on_action(cx.listener(|this, _: &app::HotkeyCtrlOptCmdN, _, cx| {
+                hotkey::set("ctrl-opt-cmd-n");
+                this.prefs_changed();
+                app::refresh_menus(cx);
+            }))
+            .on_action(cx.listener(|this, _: &app::HotkeyOff, _, cx| {
+                hotkey::set("off");
                 this.prefs_changed();
                 app::refresh_menus(cx);
             }))
@@ -1002,6 +1037,10 @@ fn main() {
                 })
                 .detach();
                 let mut d = Dent::new(dark, window, cx);
+                // A walk never takes a shortcut from the apps you're using.
+                if walk.is_none() {
+                    hotkey::set(&hotkey::chosen());
+                }
                 d.walk = walk;
                 d
             });

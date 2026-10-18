@@ -87,8 +87,6 @@ struct Piece {
     text: SharedString,
     lead: SharedString,
     swaps: Rc<Vec<(Range<usize>, String)>>,
-    /// ⌘F looks in it (see [`unsearched`]).
-    searched: bool,
 }
 
 impl Piece {
@@ -254,24 +252,6 @@ thread_local! {
     /// What the next text made copies with before it, set by the block
     /// laying it out (a list marker, a quote's `> `).
     static LEAD: RefCell<Option<SharedString>> = const { RefCell::new(None) };
-    /// Text made now isn't searched by ⌘F (see [`unsearched`]).
-    static UNSEARCHED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Text made while this lives copies and selects but isn't searched or
-/// tinted by ⌘F: what's drawn only once scrolled to inside something
-/// (a long table's later rows), which find doesn't count either.
-#[must_use]
-pub struct Unsearched(bool);
-
-pub fn unsearched() -> Unsearched {
-    Unsearched(UNSEARCHED.with(|u| u.replace(true)))
-}
-
-impl Drop for Unsearched {
-    fn drop(&mut self) {
-        UNSEARCHED.with(|u| u.set(self.0));
-    }
 }
 
 /// Where the link under `p` points, if one is.
@@ -358,6 +338,121 @@ pub fn item(area: Area, ix: usize) -> Scope {
         })
     });
     Scope(())
+}
+
+/// The chat item and area text made now belongs to (at layout).
+pub fn here_item() -> Option<(Area, u32)> {
+    with(|s| {
+        let h = s.here.last()?;
+        Some((h.area, *h.path.first()?))
+    })
+}
+
+/// What ⌘F looks for in `area`, while it looks there.
+pub fn find_needle(area: Area) -> Option<String> {
+    with(|s| {
+        s.find
+            .as_ref()
+            .filter(|f| f.area == area)
+            .map(|f| f.needle.clone())
+    })
+}
+
+/// The current ⌘F match in `area`: its item, and which match in it.
+pub fn find_current(area: Area) -> Option<(u32, usize)> {
+    with(|s| s.find.as_ref().filter(|f| f.area == area)?.current)
+}
+
+/// How many matches `item` has painted so far this frame, and setting it:
+/// a long table's rows out of view count as if painted, so numbering stays
+/// true (see `markdown::table_block`).
+pub fn found_so_far(item: u32) -> usize {
+    with(|s| s.found.get(&item).copied().unwrap_or(0))
+}
+
+pub fn set_found(item: u32, n: usize) {
+    with(|s| {
+        s.found.insert(item, n);
+    })
+}
+
+thread_local! {
+    /// ⌘F stepped to a match: a long table holding it out of view scrolls
+    /// to it, once.
+    static REVEAL_ROW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Ask a long table holding the current match out of view to bring it in.
+pub fn reveal_row() {
+    REVEAL_ROW.with(|r| r.set(true));
+}
+
+/// Take that request (a table holding the match does, once).
+pub fn take_reveal_row() -> bool {
+    REVEAL_ROW.with(|r| r.replace(false))
+}
+
+/// Runs `f` as it's painted, in paint order among the text around it;
+/// takes no room.
+pub fn at_paint(f: impl Fn(&mut Window) + 'static) -> AtPaint {
+    AtPaint(Box::new(f))
+}
+
+pub struct AtPaint(Box<dyn Fn(&mut Window)>);
+
+impl IntoElement for AtPaint {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for AtPaint {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (window.request_layout(Style::default(), [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut Window,
+        _: &mut App,
+    ) {
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        _: &mut App,
+    ) {
+        (self.0)(window)
+    }
 }
 
 /// A place kept in the reading order for text made later: a list inside an
@@ -976,7 +1071,7 @@ fn texts(s: &State, area: Area) -> Vec<(Vec<u32>, SharedString)> {
         .get(&area)
         .into_iter()
         .flatten()
-        .filter(|(path, p)| p.searched && live(s, area, path))
+        .filter(|(path, _)| live(s, area, path))
         .map(|(path, p)| (path.clone(), p.text.clone()))
         .collect()
 }
@@ -1151,7 +1246,6 @@ pub struct Text {
     color: Hsla,
     lead: SharedString,
     swaps: Rc<Vec<(Range<usize>, String)>>,
-    searched: bool,
 }
 
 /// Plain text in the surrounding style.
@@ -1167,7 +1261,6 @@ pub fn text(id: impl Into<ElementId>, text: impl Into<SharedString>, t: &Theme) 
         color: t.selection(),
         lead: take_lead(),
         swaps: Rc::default(),
-        searched: !UNSEARCHED.with(|u| u.get()),
     }
 }
 
@@ -1189,7 +1282,6 @@ pub fn styled(
         color: t.selection(),
         lead: take_lead(),
         swaps: Rc::default(),
-        searched: !UNSEARCHED.with(|u| u.get()),
     }
 }
 
@@ -1277,7 +1369,6 @@ impl Element for Text {
                     text: self.text.clone(),
                     lead: self.lead.clone(),
                     swaps: self.swaps.clone(),
-                    searched: self.searched,
                 },
             );
         });
@@ -1323,10 +1414,7 @@ impl Element for Text {
         let layout = self.styled.layout().clone();
         // What ⌘F found here: every match tinted, the current one strong.
         let marks = with(|s| {
-            let f = s
-                .find
-                .as_ref()
-                .filter(|f| f.area == self.key.area && self.searched)?;
+            let f = s.find.as_ref().filter(|f| f.area == self.key.area)?;
             let item = *self.key.path.first()?;
             let limit = f
                 .limits
@@ -1488,7 +1576,6 @@ mod tests {
             text: text.to_string().into(),
             lead: lead.to_string().into(),
             swaps: Rc::default(),
-            searched: true,
         }
         .copy(range)
     }
@@ -1530,7 +1617,6 @@ mod tests {
             text: "a mmmm b".into(),
             lead: "".into(),
             swaps: Rc::new(vec![(2..6, "$x^2$".into())]),
-            searched: true,
         };
         assert_eq!(c.copy(0..8), "a $x^2$ b");
         // Part of a formula selected copies all of it.

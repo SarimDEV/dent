@@ -38,7 +38,9 @@ Every message is parsed into a tree of typed blocks, and each block type has one
 - Inline maths, display maths (`$$…$$` and ` ```math ` fences), Mermaid fences and tables all behave as described on this page, in chat replies, plans and the doc viewer.
 - Size glyphs come from outlines through ttf-parser ([0040](decisions/0040-glyph-outlines-ttf-parser.md)).
 - Streaming (`mdstream.rs`): a reply still arriving keeps its finished top-level blocks and re-parses only the rest, after the terminator described under Streaming. A code block whose fence is still open is highlighted to its last full line, the line being written plain; only the reply still streaming can have one, so a finished reply whose agent never closed a fence is highlighted (and its maths typeset, its diagram drawn) in full. Finished text is parsed once and kept in a bounded cache that forgets what was used longest ago; a reply's prefixes never enter it. HTML blocks are one block, and fences inside quotes know when they close.
-- Not built yet: the table side panel (Open), in-app search reaching rows that a capped table keeps out of view, parsing off the UI thread, and the row-at-a-time table parse.
+- A capped table's footer has **Open**: the table shows in the viewer as a document, where a table runs 40 rows before scrolling. ⌘F in the chat counts every row of a capped table, those out of view too, and stepping to one scrolls the table to it (a few rows down from its top) and then the chat.
+- A session's finished replies are parsed on a background thread as its turn ends, when it isn't open, so opening it later parses nothing on the UI thread. A reply still streaming is parsed on the UI thread, a chunk at a time.
+- A table at the end of a streaming reply is read a row at a time: each finished row is parsed once, under the header, and the search for a finished block is skipped while only rows arrive. For a 2,000-row table the slowest chunk in its second half went from 1.6 ms to 11 µs (`mdstream::tests::a_streaming_table_is_read_a_row_at_a_time`, release).
 - The walkthrough's `markdown` scene checks it: `scripts/walk.sh markdown`, also part of `checks`.
 
 ## Sizes and overflow

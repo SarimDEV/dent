@@ -24,15 +24,28 @@ pub enum Inbound {
         session_id: String,
         version: String,
         permission_mode: String,
+        /// Each MCP server and how it stands: connected, failed,
+        /// needs-auth, pending, disabled.
+        mcp: Vec<(String, String)>,
     },
     /// `system/background_tasks_changed`: the full current set.
     BackgroundTasks(Vec<BackgroundTask>),
+    /// `system/task_started`: a task and the tool call that started it.
+    TaskStarted {
+        task_id: String,
+        tool_use_id: Option<String>,
+    },
     /// A new assistant message is starting to stream.
     MessageStart {
         parent: Option<String>,
     },
     /// Streamed text (needs `--include-partial-messages`).
     TextDelta {
+        parent: Option<String>,
+        text: String,
+    },
+    /// Streamed thinking.
+    ThinkingDelta {
         parent: Option<String>,
         text: String,
     },
@@ -144,6 +157,8 @@ pub struct BackgroundTask {
     pub task_id: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
+    pub task_type: String,
 }
 
 #[derive(Debug)]
@@ -200,6 +215,12 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
             session_id: s(&v, "session_id"),
             version: s(&v, "claude_code_version"),
             permission_mode: s(&v, "permissionMode"),
+            mcp: v["mcp_servers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|m| (s(m, "name"), s(m, "status")))
+                .collect(),
         },
         ("system", "compact_boundary") => {
             let m = &v["compact_metadata"];
@@ -253,6 +274,10 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
             _ => Inbound::Other,
         },
         ("assistant", _) if v.get("local_command_source").is_some() => local_command(&v),
+        ("system", "task_started") => Inbound::TaskStarted {
+            task_id: s(&v, "task_id"),
+            tool_use_id: v["tool_use_id"].as_str().map(str::to_owned),
+        },
         ("system", "background_tasks_changed") => {
             Inbound::BackgroundTasks(serde_json::from_value(v["tasks"].clone()).unwrap_or_default())
         }
@@ -263,6 +288,10 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
                 (Some("content_block_delta"), Some("text_delta")) => Inbound::TextDelta {
                     parent: parent(&v),
                     text: s(&e["delta"], "text"),
+                },
+                (Some("content_block_delta"), Some("thinking_delta")) => Inbound::ThinkingDelta {
+                    parent: parent(&v),
+                    text: s(&e["delta"], "thinking"),
                 },
                 (Some("content_block_start"), _) if e["content_block"]["type"] == "tool_use" => {
                     Inbound::ToolStart {

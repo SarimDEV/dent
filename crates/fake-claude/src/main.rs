@@ -15,6 +15,12 @@
 //! - `dev server`: serves a page on a free port and prints its address
 //! - `long`: a long reply, for stopping halfway (`slowly`: ten times slower;
 //!   with `make a plan`, each step holds ten times longer)
+//! - `keep watching`: two pieces of background work (a dev server, a test
+//!   watcher) writing output files, running until stopped or 20 s pass
+//! - `long table`: a reply with a 60-row table (`/api/needle` in row 48)
+//! - `nearly full`: the context reads nearly full from then on
+//! - `mcp trouble`: from then on, init lists the MCP servers (one failed,
+//!   two wanting sign-in)
 //! - `screenshot`: thinks, runs a slow build, then a browser tool returns
 //!   a picture of a page
 //! - `colour output`: a Bash call whose output is coloured, with a
@@ -65,6 +71,10 @@ struct Agent {
     steer: bool,
     /// MCP servers: name, status, scope.
     mcp: Vec<(String, String, String)>,
+    /// Init lists the MCP servers (a message said `mcp trouble`).
+    show_mcp: bool,
+    /// Background work running now: id and description.
+    bg: Vec<(String, String)>,
     /// How long `say` waits between chunks, unscaled.
     chunk_ms: u64,
 }
@@ -106,6 +116,8 @@ fn main() {
                 .or_else(|| arg("--session-id"))
                 .unwrap_or_else(new_id)
         },
+        show_mcp: false,
+        bg: Vec::new(),
         mcp: [
             ("docs", "connected", "user"),
             ("tickets", "needs-auth", "project"),
@@ -332,6 +344,24 @@ impl Agent {
                         json!({})
                     }
                     "interrupt" => json!({ "still_queued": [] }),
+                    // Background work stops: the set goes out without it.
+                    "stop_task" => {
+                        let task = v["request"]["task_id"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string();
+                        self.bg.retain(|(id, _)| *id != task);
+                        let tasks: Vec<Value> = self
+                            .bg
+                            .iter()
+                            .map(|(id, d)| json!({"task_id": id, "description": d, "task_type": "local_bash"}))
+                            .collect();
+                        out(self.envelope(
+                            json!({"type": "system", "subtype": "background_tasks_changed", "tasks": tasks}),
+                            None,
+                        ));
+                        json!({})
+                    }
                     "get_usage" => json!({"rate_limits": {
                         "five_hour": {"utilization": 18, "resets_at": "2030-01-01T00:00:00+00:00"},
                         "seven_day": {"utilization": 41, "resets_at": "2030-01-05T00:00:00+00:00"}}}),
@@ -662,6 +692,20 @@ impl Agent {
         Ok(id)
     }
 
+    /// Thinking streamed a piece at a time (800 ms apart), then whole.
+    fn think_streamed(&mut self, parts: &[&str]) -> Result<(), Cut> {
+        for p in parts {
+            out(self.envelope(
+                json!({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+                    "delta": {"type": "thinking_delta", "thinking": p}}}),
+                None,
+            ));
+            self.pause(800)?;
+        }
+        self.think(&parts.concat());
+        Ok(())
+    }
+
     /// A thinking block, whole, as the agent sends one before acting.
     fn think(&mut self, text: &str) {
         out(self.envelope(
@@ -758,12 +802,17 @@ impl Agent {
     }
 
     fn init(&self) {
-        out(self.envelope(
-            json!({"type": "system", "subtype": "init", "cwd": std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(),
-                "tools": ["Bash", "Read", "Write", "Edit", "Task", "AskUserQuestion"], "model": self.model,
-                "permissionMode": self.mode, "claude_code_version": "0.0.0-fake"}),
-            None,
-        ));
+        let mut v = json!({"type": "system", "subtype": "init", "cwd": std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(),
+            "tools": ["Bash", "Read", "Write", "Edit", "Task", "AskUserQuestion"], "model": self.model,
+            "permissionMode": self.mode, "claude_code_version": "0.0.0-fake"});
+        if self.show_mcp {
+            v["mcp_servers"] = self
+                .mcp
+                .iter()
+                .map(|(n, st, _)| json!({"name": n, "status": st}))
+                .collect();
+        }
+        out(self.envelope(v, None));
     }
 
     fn end(&self, text: &str, error: bool) {
@@ -776,6 +825,7 @@ impl Agent {
     }
 
     fn turn(&mut self, text: &str) -> Result<(), ()> {
+        self.show_mcp |= text.to_lowercase().contains("mcp trouble");
         self.init();
         if !self.sent_limits {
             self.sent_limits = true;
@@ -961,8 +1011,11 @@ impl Agent {
         if lower.contains("screenshot") {
             // Thinks a while, runs something slow, then a browser tool
             // answers with a picture, as screenshot tools do.
-            self.pause(2400)?;
-            self.think("The page should be up on the dev server. I'll build it, then look at it.");
+            self.think_streamed(&[
+                "The page should be up on the dev server. ",
+                "A fresh build first, so the screenshot shows the latest hero. ",
+                "Then I'll look at it.",
+            ])?;
             let id = self.tool(
                 "Bash",
                 json!({"command": "npm run build", "description": "Build the site"}),
@@ -1303,6 +1356,87 @@ impl Agent {
             self.say("The research is in.", None)?;
             self.end("done", false);
             return Ok(());
+        }
+        if lower.contains("keep watching") {
+            // Two pieces of background work that run on (each writing its
+            // output to a file) until stopped or a while has passed.
+            let dir = std::env::temp_dir().join(format!("fake-claude-{}", self.session));
+            let _ = std::fs::create_dir_all(&dir);
+            for (task, cmd, desc, text) in [
+                (
+                    "bdev",
+                    "npm run dev",
+                    "Start the dev server",
+                    "  VITE ready in 312 ms\n  ➜  Local:   http://localhost:5173/\n",
+                ),
+                (
+                    "btest",
+                    "cargo watch -x test",
+                    "Watch the tests",
+                    "[Running 'cargo test']\ntest result: ok. 42 passed\n",
+                ),
+            ] {
+                let path = dir.join(format!("{task}.output"));
+                let _ = std::fs::write(&path, text);
+                let id = self.tool(
+                    "Bash",
+                    json!({"command": cmd, "description": desc, "run_in_background": true}),
+                    None,
+                );
+                out(self.envelope(
+                    json!({"type": "system", "subtype": "task_started", "task_id": task, "tool_use_id": id,
+                        "description": desc, "is_backgrounded": true}),
+                    None,
+                ));
+                self.result(
+                    &id,
+                    &format!("Command running in background with ID: {task}. Output is being written to: {}", path.display()),
+                    false,
+                    None,
+                );
+                self.bg.push((task.to_string(), desc.to_string()));
+            }
+            let tasks: Vec<Value> = self
+                .bg
+                .iter()
+                .map(|(id, d)| json!({"task_id": id, "description": d, "task_type": "local_bash"}))
+                .collect();
+            out(self.envelope(
+                json!({"type": "system", "subtype": "background_tasks_changed", "tasks": tasks}),
+                None,
+            ));
+            self.say(
+                "The dev server and the test watcher are running in the background.",
+                None,
+            )?;
+            self.end("done", false);
+            let _ = self.pause(20_000);
+            self.bg.clear();
+            out(self.envelope(
+                json!({"type": "system", "subtype": "background_tasks_changed", "tasks": []}),
+                None,
+            ));
+            return Ok(());
+        }
+        if lower.contains("long table") {
+            let mut t = String::from(
+                "Here are the 60 routes, slowest first:\n\n| # | Route | p95 |\n| --- | --- | ---: |\n",
+            );
+            for i in 1..=60 {
+                let route = if i == 48 {
+                    "/api/needle".to_string()
+                } else {
+                    format!("/api/route-{i}")
+                };
+                t.push_str(&format!("| {i} | `{route}` | {} ms |\n", 900 - i * 13));
+            }
+            t.push_str("\nThe slowest ones share the same query.");
+            self.say(&t, None)?;
+            self.end("done", false);
+            return Ok(());
+        }
+        if lower.contains("nearly full") {
+            self.context = 186_000;
         }
         if lower.contains("background") {
             let id = self.tool(

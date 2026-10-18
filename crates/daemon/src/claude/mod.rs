@@ -100,6 +100,47 @@ const PLAN_NUDGE: &str = "Before you start any task with three or more steps, ca
 
 /// A one-off side question: the conversation `agent_session` so far, forked
 /// so the original never sees it, answered without changing anything.
+/// The last finished sentence of thinking still streaming (or its last
+/// line), at most 140 characters, for the working line. None until one
+/// has finished.
+pub fn latest_sentence(thinking: &str) -> Option<String> {
+    // Where sentences end: a full stop, ! or ? with a space after it (so
+    // "file.rs" and "e.g." mid-word don't count), or a line's end.
+    let b = thinking.as_bytes();
+    let ends: Vec<usize> = (0..b.len())
+        .filter(|&i| {
+            b[i] == b'\n'
+                || matches!(b[i], b'.' | b'!' | b'?')
+                    && b.get(i + 1).is_some_and(u8::is_ascii_whitespace)
+        })
+        .collect();
+    let end = *ends.last()?;
+    let start = ends.iter().rev().nth(1).map_or(0, |i| i + 1);
+    let s = thinking[start..=end].trim();
+    if s.chars().count() < 4 {
+        return None;
+    }
+    let mut out: String = s.chars().take(140).collect();
+    if s.chars().count() > 140 {
+        out.push('…');
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+#[test]
+fn the_working_line_shows_the_last_finished_thought() {
+    assert_eq!(latest_sentence("Looking at main.rs now"), None);
+    assert_eq!(
+        latest_sentence("Looking at main.rs now. The parser drops a toke"),
+        Some("Looking at main.rs now.".into())
+    );
+    assert_eq!(
+        latest_sentence("First. Then the second one! And"),
+        Some("Then the second one!".into())
+    );
+}
+
 /// Claude Code asked for a short title for a conversation: a small model,
 /// one turn, no tools, nothing of the person's settings that could act.
 pub fn title_argv(claude: &str, path: &str, conversation: &str) -> Vec<String> {
@@ -455,12 +496,19 @@ pub fn limits(info: &wire::RateLimitInfo) -> Body {
     }
 }
 
-pub fn tasks(tasks: &[wire::BackgroundTask]) -> Vec<Task> {
+/// The agent's background tasks as dent's, each with the call that started
+/// it when `calls` knows it.
+pub fn tasks(
+    tasks: &[wire::BackgroundTask],
+    calls: &std::collections::HashMap<String, String>,
+) -> Vec<Task> {
     tasks
         .iter()
         .map(|t| Task {
             id: t.task_id.clone(),
             description: t.description.clone(),
+            kind: t.task_type.clone(),
+            call: calls.get(&t.task_id).cloned(),
         })
         .collect()
 }

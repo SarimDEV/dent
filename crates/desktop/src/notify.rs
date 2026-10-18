@@ -5,6 +5,10 @@
 /// Whether notifications play their sound (dent › Notification Sound).
 pub static SOUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
+/// Whether the machine stays awake while agents work (dent › Keep Mac
+/// Awake While Working).
+pub static AWAKE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 /// Take a session's notifications out of Notification Center: you've
 /// opened it, so they've done their job.
 pub fn clear(thread: &str) {

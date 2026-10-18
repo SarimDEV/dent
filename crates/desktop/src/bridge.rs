@@ -503,7 +503,47 @@ pub fn session(
         agent_session: v.agent_session.clone(),
         news: v.news,
         seen: v.seen,
+        background: v.background.clone(),
+        resume_at: v.resume_at,
+        versions: versions(v, None),
+        old: None,
     }
+}
+
+/// Your messages with earlier versions, as `Session::versions` has them,
+/// when earlier version `viewing` (or the latest) shows.
+pub fn versions(v: &SessionView, viewing: Option<usize>) -> Vec<(String, usize, usize, usize)> {
+    let mut ats: Vec<usize> = v.branches.iter().map(|b| b.at).collect();
+    ats.dedup();
+    ats.sort();
+    ats.dedup();
+    let first_user = |es: &[Entry]| {
+        es.iter().find_map(|e| match e {
+            Entry::User {
+                id, queued: false, ..
+            } => Some(id.clone()),
+            _ => None,
+        })
+    };
+    ats.into_iter()
+        .filter_map(|at| {
+            let group: Vec<usize> = (0..v.branches.len())
+                .filter(|&i| v.branches[i].at == at)
+                .collect();
+            let total = group.len() + 1;
+            match viewing.filter(|b| v.branches[*b].at == at) {
+                Some(b) => {
+                    let id = first_user(&v.branches[b].entries)?;
+                    let cur = group.iter().position(|&i| i == b)? + 1;
+                    Some((id, at, cur, total))
+                }
+                None => {
+                    let id = first_user(v.entries.get(at..)?)?;
+                    Some((id, at, total, total))
+                }
+            }
+        })
+        .collect()
 }
 
 /// Local dev-server addresses in an entry: command output and replies.
@@ -644,6 +684,10 @@ fn preparing(tool: &str, what: Option<&str>) -> String {
 
 /// What it's doing or wants, for the inbox row and the working line.
 fn detail(v: &SessionView) -> String {
+    // Waiting for a used-up limit to reset, to carry on by itself.
+    if let Some(at) = v.resume_at {
+        return format!("Carries on at {}", crate::data::clock(at * 1000));
+    }
     match v.status {
         Wire::NeedsYou => match v.open_ask() {
             Some(Entry::Ask { tool, input, .. }) => match tool.as_str() {
@@ -668,6 +712,8 @@ fn detail(v: &SessionView) -> String {
                 Some(dent_protocol::Activity::Preparing { tool, what }) => {
                     return preparing(tool, what.as_deref());
                 }
+                // Its latest thought, as it thinks.
+                Some(dent_protocol::Activity::Thinking { latest }) => return latest.clone(),
                 None => {}
             }
             if !v.partial.is_empty() {

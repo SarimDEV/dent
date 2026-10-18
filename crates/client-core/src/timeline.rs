@@ -62,6 +62,12 @@ pub struct SessionView {
     /// event up to which someone has looked: news past it is unread.
     pub news: u64,
     pub seen: u64,
+    /// When it carries on by itself as a used-up limit resets (Unix
+    /// seconds).
+    pub resume_at: Option<u64>,
+    /// Earlier versions, left behind by going back (Edit from here, Try
+    /// again), oldest first.
+    pub branches: Vec<Branch>,
     /// When the agent last began something new (the turn starting, a
     /// message or a tool's result): what a thought's time counts from.
     mark_at: u64,
@@ -74,6 +80,16 @@ pub struct SessionView {
     /// Subagents working in the background: the agent's id, and the call
     /// that started it, which finishes when the agent leaves `background`.
     agents: HashMap<String, String>,
+}
+
+/// A version of the conversation left behind by going back: from entry
+/// `at` (your message there) on, as it was, until the rewind (event
+/// `seq`) that left it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Branch {
+    pub at: usize,
+    pub seq: u64,
+    pub entries: Vec<Entry>,
 }
 
 /// A side question and, once it's in, its answer.
@@ -595,6 +611,19 @@ impl Sessions {
 impl SessionView {
     /// The first entry that changed since the last call, and forget it.
     /// `None` when no entry changed.
+    /// The conversation as it was in earlier version `b`: what came before
+    /// it, then that version.
+    pub fn with_branch(&self, b: usize) -> Option<SessionView> {
+        let branch = self.branches.get(b)?;
+        let mut v = self.clone();
+        v.entries.truncate(branch.at);
+        v.entries.extend(branch.entries.iter().cloned());
+        v.partial.clear();
+        v.working_since = None;
+        v.changed_from = Some(0);
+        Some(v)
+    }
+
     pub fn take_changes(&mut self) -> Option<usize> {
         self.changed_from.take()
     }
@@ -957,7 +986,21 @@ impl SessionView {
             // Everything from that message on leaves the conversation.
             Body::Rewound { to, .. } => {
                 if let Some(ix) = self.user_ix(to) {
-                    self.entries.truncate(ix);
+                    // What was there stays reachable as an earlier version.
+                    let gone = self.entries.split_off(ix);
+                    // Versions further on were inside what's going: only
+                    // versions from here back keep their place.
+                    self.branches.retain(|b| b.at <= ix);
+                    if gone
+                        .iter()
+                        .any(|e| matches!(e, Entry::User { queued: false, .. }))
+                    {
+                        self.branches.push(Branch {
+                            at: ix,
+                            seq: e.seq,
+                            entries: gone,
+                        });
+                    }
                     self.reindex(ix);
                     // A file keeps only the versions written before that
                     // message, so its stepper forgets the abandoned ones.
@@ -979,6 +1022,7 @@ impl SessionView {
                 self.working_since = None;
             }
             Body::Seen { upto } => self.seen = self.seen.max(*upto),
+            Body::Resume { at } => self.resume_at = *at,
             Body::Closed => self.closed = true,
             Body::Reopened => self.closed = false,
             Body::Aside { id, question } => self.asides.push(Aside {
@@ -1351,6 +1395,8 @@ mod tests {
         let task = |id: &str| dent_protocol::Task {
             id: id.into(),
             description: "Research".into(),
+            kind: String::new(),
+            call: None,
         };
         let receipt = Body::ToolResult {
             tool: "t".into(),

@@ -42,6 +42,8 @@ pub struct Row {
     pub more: bool,
     /// Words of your own may follow it.
     pub then_text: bool,
+    /// Another session, picked to go with the message as context.
+    pub session: Option<String>,
 }
 
 impl From<Command> for Row {
@@ -157,6 +159,7 @@ pub fn arg_rows(args: &Args, before: &[String], query: &str) -> Option<Vec<Row>>
                 open: o.value.is_empty(),
                 more: matches!(o.then, Args::Choice { .. }),
                 then_text: matches!(o.then, Args::Text { .. }),
+                session: None,
             })
             .collect(),
         Args::Settings { settings } => match query.split_once('=') {

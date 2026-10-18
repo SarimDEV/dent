@@ -51,6 +51,8 @@ pub enum Do {
     RunInTerminal(String),
     /// Put words into the reply box as a quote, under what's there.
     Quote(String),
+    /// Keep a message as a skill: in this project's folder, or everywhere.
+    SaveSkill(String, Option<String>),
 }
 
 const WIDTH: f32 = 200.;
@@ -117,6 +119,7 @@ impl Dent {
             Do::OpenLink(url) => crate::select::open_link(&url, window, cx),
             Do::OpenInApp(path) => crate::open::open(&path, cx),
             Do::Quote(words) => self.quote(&words, window, cx),
+            Do::SaveSkill(words, project) => self.save_skill(&words, project.as_deref(), cx),
             Do::RunInTerminal(command) => {
                 self.open_shell(window, cx);
                 if let Some(sh) = self.current().and_then(|s| self.shells.get(&s.id)) {

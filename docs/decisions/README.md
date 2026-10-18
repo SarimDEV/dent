@@ -50,3 +50,4 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0046. Commands, statuses and the agent's questions are handled by kind](0046-commands-by-type.md)
 - [0049. Ambient backgrounds on the new-session page](0049-ambient-backgrounds.md)
 - [0050. Sessions title themselves; what you've seen is kept by the daemon](0050-titles-and-seen-marks.md)
+- [0051. A global shortcut through Carbon; the daemon keeps the Mac awake with caffeinate](0051-global-shortcut-and-keep-awake.md)
