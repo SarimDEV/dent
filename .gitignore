@@ -25,3 +25,5 @@ node_modules
 # Agents' working copies
 /.claude/worktrees
 /.claude/*.lock
+# The fake agent's recorded turn: scrubbed of paths and names.
+!crates/fake-claude/assets/real-turn.jsonl
