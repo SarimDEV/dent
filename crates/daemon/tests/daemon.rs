@@ -1156,6 +1156,7 @@ fn a_fork_copies_the_conversation_and_resumes_it_as_a_new_agent_session() {
 
     // Everything so far.
     let f = match c.call(Request::Fork {
+        until: None,
         id: None,
         session: s.clone(),
         before: None,
@@ -1181,6 +1182,7 @@ fn a_fork_copies_the_conversation_and_resumes_it_as_a_new_agent_session() {
 
     // Up to just before the second message.
     let g = match c.call(Request::Fork {
+        until: None,
         id: None,
         session: s.clone(),
         before: Some("two".into()),
@@ -1687,7 +1689,9 @@ fn a_stop_or_a_stuck_start_is_seen_through_across_a_daemon_restart() {
     let s = {
         let mut c = w.client();
         c.subscribe(0);
-        let s = c.create(&w.cwd(), Permission::Ask, "a long answer please");
+        // Slowly: the answer outlasts the stop's grace after the restart
+        // (at full length it takes about as long, and the two raced).
+        let s = c.create(&w.cwd(), Permission::Ask, "a long answer, slowly please");
         c.wait(&s, "the turn to start", |b| matches!(b, Body::TurnStarted));
         c.call(Request::Interrupt {
             session: s.clone(),
@@ -1753,6 +1757,7 @@ fn resent_creates_forks_and_rewinds_happen_once() {
     c.say(&s, "second", "write notes.md please", false);
     c.wait_turns(&s, 2);
     let fork = Request::Fork {
+        until: None,
         session: s.clone(),
         before: None,
         id: Some("f1".into()),

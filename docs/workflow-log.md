@@ -28,6 +28,12 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 
 ## Open
 
+### A daemon test raced its own fake agent
+- Seen: 2026-10-18. `a_stop_or_a_stuck_start_is_seen_through_across_a_daemon_restart` failed every run, on this branch and on the commit before it, after passing the day before: the fake's long answer takes 2.0 s at the test's speed, the same as the stop's grace after a restart, so which ended the turn was luck. `clients_joining_mid_reply_see_it_once_and_events_never_skip` failed once in a full run and passed alone.
+- Cost: about 15 min to find it was the test, not the change.
+- Fix: the restart test asks for the answer slowly (ten times longer than the grace). The other is left as is, and logged if it fails again.
+- Check: `just verify` passes three runs in a row.
+
 ### Real walkthroughs used for every visual check
 - Seen: 2026-10-15. Each UI tweak in the chat-polish round was checked with a full real-agent `walk.sh compare` run (Haiku, ~40 tool calls): six runs at ~3 min plus build each, and the owner waited on every one ("the walk is so annoying… it takes forever").
 - Cost: ~25 min of waiting in one session, plus real usage limits.
