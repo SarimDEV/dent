@@ -33,6 +33,7 @@ mod mdstream;
 mod notify;
 mod open;
 mod palette;
+mod pan_zoom;
 mod picker;
 mod popout;
 mod prefs;
