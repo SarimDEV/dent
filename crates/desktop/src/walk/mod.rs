@@ -111,6 +111,12 @@ pub enum Act {
     HoverLink(&'static str),
     /// Double-click a probe at a point given as fractions of its size.
     DoubleClick(&'static str, f32, f32),
+    /// Pinch over a probe's middle until it's scaled by this much, in a
+    /// few movements, then lift the fingers.
+    Pinch(&'static str, f32),
+    /// ⌘-scroll a trackpad over a probe's middle by this many points, in
+    /// a few movements, then lift the fingers.
+    ZoomScroll(&'static str, f32),
     /// Files from Finder dragged in and held over a probe, at fractions of
     /// its size: the project's red.png and "my notes.txt".
     DragFiles(&'static str, f32, f32),
@@ -670,6 +676,60 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
                 ),
             }
         }
+        Pinch(name, by) => match center(&me, name, cx) {
+            Some(at) => {
+                // Eight equal movements of the fingers, as ratios.
+                let each = by.powf(1. / 8.) - 1.;
+                let moves = std::iter::once((0., TouchPhase::Started))
+                    .chain(std::iter::repeat_n((each, TouchPhase::Moved), 8))
+                    .chain([(0., TouchPhase::Ended)]);
+                for (delta, phase) in moves {
+                    window.dispatch_event(
+                        PlatformInput::Pinch(PinchEvent {
+                            position: at,
+                            delta,
+                            modifiers: Modifiers::default(),
+                            phase,
+                        }),
+                        cx,
+                    );
+                }
+            }
+            None => note(
+                &me,
+                cx,
+                leak(format!("pinch target “{name}” on screen")),
+                false,
+            ),
+        },
+        ZoomScroll(name, dy) => match center(&me, name, cx) {
+            Some(at) => {
+                let cmd = Modifiers {
+                    platform: true,
+                    ..Modifiers::default()
+                };
+                let moves = std::iter::once((0., TouchPhase::Started))
+                    .chain(std::iter::repeat_n((dy / 8., TouchPhase::Moved), 8))
+                    .chain([(0., TouchPhase::Ended)]);
+                for (d, phase) in moves {
+                    window.dispatch_event(
+                        PlatformInput::ScrollWheel(ScrollWheelEvent {
+                            position: at,
+                            delta: ScrollDelta::Pixels(point(px(0.), px(d))),
+                            modifiers: cmd,
+                            touch_phase: phase,
+                        }),
+                        cx,
+                    );
+                }
+            }
+            None => note(
+                &me,
+                cx,
+                leak(format!("scroll target “{name}” on screen")),
+                false,
+            ),
+        },
         Hover(name, dx, dy) => match center(&me, name, cx) {
             Some(at) => {
                 let at = point(at.x + px(dx), at.y + px(dy));

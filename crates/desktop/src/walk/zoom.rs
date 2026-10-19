@@ -11,6 +11,58 @@ fn pan(d: &Dent) -> (f32, f32) {
 thread_local! {
     /// The text size before ⌘− was pressed over the picture.
     static TEXT: std::cell::Cell<f32> = const { std::cell::Cell::new(0.) };
+    /// The zoom each frame drew, by frame and when, while a move is watched.
+    static SEEN: std::cell::RefCell<Vec<(u64, Instant, f32)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn watch(_: &mut Dent, _: &mut Window, _: &mut Context<Dent>) {
+    SEEN.with(|s| s.borrow_mut().clear());
+}
+
+/// Note this frame's zoom, once a frame.
+fn seen(d: &Dent) -> Vec<(u64, Instant, f32)> {
+    SEEN.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.last().is_none_or(|(f, ..)| *f != d.frames) {
+            s.push((d.frames, Instant::now(), zoom(d)));
+        }
+        s.clone()
+    })
+}
+
+/// An eased move to `to` that ran over many frames, every frame onward
+/// from the last, and none a jump: no frame's step more than twice and a
+/// half its neighbours' (a jump stands out from the frames around it,
+/// where uneven frame times don't).
+fn smooth_to(d: &Dent, to: f32) -> bool {
+    let s = seen(d);
+    if (zoom(d) - to).abs() > 1e-4 || s.len() < 2 {
+        return false;
+    }
+    let sign = (to / s[0].2).ln().signum();
+    let steps: Vec<f32> = s
+        .windows(2)
+        .map(|w| (w[1].2 / w[0].2).ln() * sign)
+        .filter(|x| *x != 0.)
+        .collect();
+    let spike = |i: usize| {
+        let near = [i.checked_sub(1), Some(i + 1)]
+            .into_iter()
+            .flatten()
+            .filter_map(|j| steps.get(j))
+            .fold(0f32, |a, b| a.max(*b));
+        steps[i] > near * 2.5 + 1e-3
+    };
+    let ok = steps.len() >= 5 && steps.iter().all(|x| *x > 0.) && !(0..steps.len()).any(spike);
+    if !ok {
+        let secs = s.last().unwrap().1.duration_since(s[0].1).as_secs_f32();
+        eprintln!(
+            "      zoom by frame ({:.0} fps): {:?}",
+            s.len() as f32 / secs.max(1e-3),
+            s.iter().map(|x| x.2).collect::<Vec<_>>()
+        );
+    }
+    ok
 }
 
 /// Pictures zoom and pan large; `#3` links to the session's repository's
@@ -32,12 +84,13 @@ pub(super) fn zoom_links() -> Vec<(f32, Act)> {
             ),
         ),
         (0.6, Shot("zoom-fit")),
-        (0.1, Key("=")),
+        (0.1, Call(watch)),
+        (0.0, Key("=")),
         (
-            0.1,
+            0.0,
             Until(
-                "= zooms in a step, eased",
-                |d, _| (zoom(d) - 1.5).abs() < 0.01,
+                "= eases in a step over many frames, never jumping or turning back",
+                |d, _| smooth_to(d, 1.5),
                 2.,
             ),
         ),
@@ -67,6 +120,42 @@ pub(super) fn zoom_links() -> Vec<(f32, Act)> {
                 2.,
             ),
         ),
+        // Fingers: a pinch follows them at once; past fitting it stretches,
+        // and settles back once they lift.
+        (0.2, Pinch("lightbox-picture", 3.)),
+        (
+            0.0,
+            Until(
+                "a pinch follows the fingers, with no easing behind them",
+                |d, _| (zoom(d) - 3.).abs() < 0.01,
+                1.,
+            ),
+        ),
+        (0.2, Call(watch)),
+        (0.0, Pinch("lightbox-picture", 0.15)),
+        (
+            0.0,
+            Until(
+                "pinched past fitting it gives, then settles back smoothly",
+                |d, _| {
+                    let s = seen(d);
+                    let least = s.iter().map(|x| x.2).fold(f32::MAX, f32::min);
+                    least < 0.95 && least > 0.5 && smooth_to(d, 1.)
+                },
+                2.,
+            ),
+        ),
+        (0.2, ZoomScroll("lightbox-picture", 200.)),
+        (
+            0.0,
+            Until(
+                "⌘-scrolling a trackpad zooms with the fingers: 200 pt, e×",
+                |d, _| (zoom(d) - std::f32::consts::E).abs() < 0.02,
+                1.,
+            ),
+        ),
+        (0.1, Key("0")),
+        (0.1, Until("fitted again", |d, _| zoom(d) == 1., 2.)),
         (0.2, DoubleClick("lightbox-picture", 0.3, 0.3)),
         (
             0.1,
