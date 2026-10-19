@@ -514,6 +514,32 @@ pub struct Version {
 }
 
 /// Files the viewer can show.
+/// dent's own tool for showing the person a page it made.
+pub const VISUAL_TOOL: &str = "mcp__dent__show_visual";
+
+/// Where a visual's page is kept, by its title: a name inside a folder no
+/// project has, so it never stands for a real file.
+pub const VISUAL_DIR: &str = ".dent-visuals";
+
+pub fn visual_path(title: &str) -> String {
+    let name: String = title
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':') {
+                '-'
+            } else {
+                c
+            }
+        })
+        .take(80)
+        .collect();
+    let name = name.trim();
+    format!(
+        "{VISUAL_DIR}/{}.html",
+        if name.is_empty() { "Visual" } else { name }
+    )
+}
+
 pub fn viewable(path: &str) -> bool {
     let ext = path
         .rsplit('.')
@@ -1157,8 +1183,35 @@ impl SessionView {
         self.touch(ix);
     }
 
-    /// A write to a viewable file adds a version and a card.
+    /// A write to a viewable file adds a version and a card; so does a
+    /// visual shown with dent's own tool, as a page named by its title.
     fn made(&mut self, c: &Call) {
+        if c.name == VISUAL_TOOL {
+            let v = c.input();
+            let (Some(title), Some(html)) = (v["title"].as_str(), v["html"].as_str()) else {
+                return;
+            };
+            let path = visual_path(title);
+            let version = match self.made.iter_mut().find(|m| m.path == path) {
+                Some(m) => {
+                    m.versions.push(Version {
+                        content: Some(html.to_string()),
+                    });
+                    m.versions.len()
+                }
+                None => {
+                    self.made.push(Made {
+                        path: path.clone(),
+                        versions: vec![Version {
+                            content: Some(html.to_string()),
+                        }],
+                    });
+                    1
+                }
+            };
+            self.push(Entry::Made { path, version });
+            return;
+        }
         if !matches!(c.name.as_str(), "Write" | "Edit" | "MultiEdit") {
             return;
         }
@@ -1479,6 +1532,30 @@ mod tests {
             panic!()
         };
         assert!(calls[0].result.is_some());
+    }
+
+    /// A visual shown with dent's tool is a page it made, a version per
+    /// showing of the same title.
+    #[test]
+    fn a_visual_is_a_page_it_made() {
+        let show = |id: &str, html: &str| {
+            tool(
+                id,
+                VISUAL_TOOL,
+                &format!(r#"{{"title":"Sales: by month","html":"{html}"}}"#),
+                None,
+            )
+        };
+        let s = feed(vec![
+            show("v1", "<p>one</p>"),
+            result("v1"),
+            show("v2", "<p>two</p>"),
+            result("v2"),
+        ]);
+        let v = &s.list["s"];
+        assert_eq!(v.made.len(), 1);
+        assert_eq!(v.made[0].path, ".dent-visuals/Sales- by month.html");
+        assert_eq!(v.made[0].versions[1].content.as_deref(), Some("<p>two</p>"));
     }
 
     /// Rewinding forgets the versions written after the message.

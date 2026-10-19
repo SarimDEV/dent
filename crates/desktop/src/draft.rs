@@ -62,6 +62,9 @@ impl Attachment {
             {
                 "image"
             }
+            Attachment::File { path } if crate::data::file_icon(path).is_some() => {
+                crate::data::file_icon(path).unwrap_or("paperclip")
+            }
             Attachment::File { .. } => "paperclip",
         }
     }

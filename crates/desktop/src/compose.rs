@@ -230,8 +230,69 @@ pub fn folded_in(text: &str, pastes: &BTreeMap<u32, String>) -> Vec<(Range<usize
     found
 }
 
+/// A typed answer with the files attached to it named after it, by path,
+/// for the agent to read.
+pub fn with_files(text: &str, files: &[String]) -> String {
+    if files.is_empty() {
+        return text.to_string();
+    }
+    let list = files
+        .iter()
+        .map(|f| format!("`{f}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if text.trim().is_empty() {
+        format!("See the attached files: {list}")
+    } else {
+        format!("{text}\n\nAttached: {list}")
+    }
+}
+
+/// A still of a video's opening or a PDF's first page, as a PNG at most
+/// `POSTER_EDGE` on its long side, made by Quick Look (`qlmanage`) into a
+/// folder kept per file and version, so it's made once.
+pub fn poster(src: &std::path::Path) -> Option<std::path::PathBuf> {
+    use std::hash::{Hash, Hasher};
+    use std::process::Command;
+    let modified = std::fs::metadata(src).and_then(|m| m.modified()).ok()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (src, modified).hash(&mut h);
+    let dir = std::env::temp_dir()
+        .join("dent-posters")
+        .join(format!("{:016x}", h.finish()));
+    let out = dir.join(format!("{}.png", src.file_name()?.to_string_lossy()));
+    if out.is_file() {
+        return Some(out);
+    }
+    std::fs::create_dir_all(&dir).ok()?;
+    Command::new("qlmanage")
+        .args(["-t", "-s", &POSTER_EDGE.to_string(), "-o"])
+        .arg(&dir)
+        .arg(src)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?;
+    out.is_file().then_some(out)
+}
+
+/// A card's still is drawn at 40 pt; this leaves room for a 2× screen and
+/// a larger card later.
+const POSTER_EDGE: u32 = 320;
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn files_go_with_a_typed_answer() {
+        let f = vec!["/a/b.png".to_string()];
+        assert_eq!(super::with_files("yes", &[]), "yes");
+        assert_eq!(super::with_files("yes", &f), "yes\n\nAttached: `/a/b.png`");
+        assert_eq!(
+            super::with_files("", &f),
+            "See the attached files: `/a/b.png`"
+        );
+    }
+
     use super::*;
 
     #[test]

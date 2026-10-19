@@ -97,7 +97,9 @@ pub fn artifacts(v: &SessionView) -> Vec<Artifact> {
                     None => Rc::from(&b""[..]),
                 })
                 .collect();
-            let title = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+            let title = crate::data::visual_title(&rel)
+                .map(str::to_string)
+                .unwrap_or_else(|| rel.rsplit('/').next().unwrap_or(&rel).to_string());
             Some(Artifact {
                 id: art_id(&v.id, &m.path),
                 kind,
@@ -156,6 +158,9 @@ pub struct Built {
     body: usize,
     /// Dev servers found so far, with the entry each first appeared in.
     servers: Vec<(usize, String)>,
+    /// Videos, sounds and PDFs its replies named, by full path, with the
+    /// entry each was first named in.
+    media: Vec<(usize, String)>,
 }
 
 /// Turn a timeline into what the window draws. `from` is the first entry
@@ -204,6 +209,7 @@ pub fn session(
     items.truncate(keep);
     built.starts.truncate(start);
     built.servers.retain(|(at, _)| *at < start);
+    built.media.retain(|(at, _)| *at < start);
     for (k, e) in v.entries[start..].iter().enumerate() {
         built.starts.push(items.len());
         // A dev server it started gets a card where it first shows up.
@@ -250,7 +256,21 @@ pub fn session(
                     });
                 }
             }
-            Entry::Text { text } => items.push(Item::Text(text.clone())),
+            Entry::Text { text } => {
+                items.push(Item::Text(text.clone()));
+                // A video, a sound or a PDF it names gets a card under the
+                // reply, the first time, so it's a click from the chat.
+                for path in media_in(text, cwd) {
+                    if !built.media.iter().any(|(_, p)| *p == path) {
+                        items.push(Item::Made {
+                            art: art_id(&v.id, &path),
+                            version: 1,
+                            review: None,
+                        });
+                        built.media.push((start + k, path));
+                    }
+                }
+            }
             Entry::TurnEnd { at, took } => items.push(Item::TurnEnd {
                 at: *at,
                 took: *took,
@@ -287,9 +307,12 @@ pub fn session(
                 }
                 // Writes that became a card need no line of their own.
                 let carded = calls.iter().all(|c| {
-                    matches!(c.name.as_str(), "Write" | "Edit" | "MultiEdit")
-                        && matches!(c.result, Some((false, _)))
-                        && c.path().is_some_and(|p| Kind::of(&p).is_some())
+                    // A secret's note already says what came of it.
+                    let shown = c.name == dent_client_core::timeline::VISUAL_TOOL
+                        || c.name == "mcp__dent__ask_secret"
+                        || matches!(c.name.as_str(), "Write" | "Edit" | "MultiEdit")
+                            && c.path().is_some_and(|p| Kind::of(&p).is_some());
+                    shown && matches!(c.result, Some((false, _)))
                 });
                 if carded {
                     continue;
@@ -498,6 +521,7 @@ pub fn session(
         asides: v.asides.clone(),
         checkpoints: v.checkpoints.clone(),
         servers: built.servers.iter().map(|(_, u)| u.clone()).collect(),
+        media: built.media.iter().map(|(_, p)| p.clone()).collect(),
         made_sig: v.made.iter().map(|m| m.versions.len()).sum::<usize>() + v.made.len() * 1000,
         todos: todos(v),
         agent_session: v.agent_session.clone(),
@@ -547,6 +571,29 @@ pub fn versions(v: &SessionView, viewing: Option<usize>) -> Vec<(String, usize, 
 }
 
 /// Local dev-server addresses in an entry: command output and replies.
+/// The videos, sounds and PDFs a reply names (`out/demo.mp4`, a link to
+/// one, `~/Movies/take.mov`) that are there on disk, by full path, each once.
+pub fn media_in(text: &str, cwd: &Path) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for word in text.split(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | '*'
+            )
+    }) {
+        let word = word.trim_end_matches(['.', ',', ';', ':', '!', '?']);
+        if word.contains("://") || crate::data::media_kind(word).is_none() {
+            continue;
+        }
+        let path = crate::markdown::resolve(word, Some(cwd));
+        if !out.contains(&path) && Path::new(&path).is_file() {
+            out.push(path);
+        }
+    }
+    out
+}
+
 fn servers_in(e: &Entry) -> Vec<String> {
     let mut texts: Vec<&str> = Vec::new();
     match e {
@@ -1231,6 +1278,11 @@ fn ask(
                 })
                 .unwrap_or_default(),
         },
+        "mcp__dent__ask_secret" => Item::Secret {
+            id: id.into(),
+            name: input["name"].as_str().unwrap_or("SECRET").into(),
+            why: input["why"].as_str().unwrap_or_default().into(),
+        },
         "ExitPlanMode" => Item::Plan {
             id: id.into(),
             plan: input["plan"].as_str().unwrap_or_default().into(),
@@ -1281,6 +1333,10 @@ fn what(tool: &str, input: &Value, cwd: &Path) -> (String, String) {
             "Wants to search the web".into(),
             input["query"].as_str().unwrap_or_default().into(),
         ),
+        "mcp__dent__ask_secret" => (
+            format!("Asks for {}", input["name"].as_str().unwrap_or("a secret")),
+            input["why"].as_str().unwrap_or_default().into(),
+        ),
         t => {
             let name = t
                 .strip_prefix("mcp__")
@@ -1326,6 +1382,27 @@ fn answered(tool: &str, input: &Value, a: &Answer, cwd: &Path) -> Item {
         Answer::Allow { always: false, .. } => ("check", format!("Allowed {short}")),
         Answer::Allow { always: true, .. } => {
             ("check", format!("Allowed {short} for this session"))
+        }
+        Answer::Secret { place, .. } => (
+            "key-round",
+            format!(
+                "Saved {} {}",
+                input["name"].as_str().unwrap_or("the secret"),
+                match place {
+                    dent_protocol::SecretPlace::Project => "in the project's .env",
+                    dent_protocol::SecretPlace::Session => "for this session only",
+                }
+            ),
+        ),
+        Answer::Deny { .. } if tool == "mcp__dent__ask_secret" => (
+            "x",
+            format!(
+                "Didn't give {}",
+                input["name"].as_str().unwrap_or("the secret")
+            ),
+        ),
+        Answer::Deny { .. } if tool == "AskUserQuestion" => {
+            ("corner-down-right", "Skipped the question".to_string())
         }
         Answer::Deny { message } if tool == "ExitPlanMode" => {
             ("corner-down-right", format!("Kept planning: {message}"))
@@ -1403,9 +1480,10 @@ mod tests {
                 Item::Thinking(t, _) => format!("thinking {t}"),
                 Item::Tools { summary, lines, .. } => format!("tools {summary} {}", lines.len()),
                 Item::Note { text, .. } => format!("note {text}"),
-                Item::Approval { id, .. } | Item::Plan { id, .. } | Item::Question { id, .. } => {
-                    format!("ask {id}")
-                }
+                Item::Approval { id, .. }
+                | Item::Plan { id, .. }
+                | Item::Question { id, .. }
+                | Item::Secret { id, .. } => format!("ask {id}"),
                 Item::Queued { text, .. } => format!("queued {text}"),
                 Item::TurnEnd { .. } => "end".into(),
                 _ => "other".into(),

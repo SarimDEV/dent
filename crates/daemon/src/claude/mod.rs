@@ -22,6 +22,7 @@ pub fn argv(
     permission: Permission,
     start: &Start,
     effort: Option<&str>,
+    asks: &std::path::Path,
 ) -> Vec<String> {
     let mut v: Vec<String> = [
         "/usr/bin/env",
@@ -57,17 +58,23 @@ pub fn argv(
         ]
         .map(String::from),
     );
-    // The plan tool, from this same binary, allowed up front: showing the
-    // plan never needs asking.
+    // dent's own tools, from this same binary, allowed up front: showing
+    // the plan or a visual never needs asking, and a secret is asked for by
+    // its own card.
     if let Some(exe) = std::env::current_exe()
         .ok()
         .and_then(|e| e.to_str().map(str::to_owned))
     {
         v.extend([
             "--mcp-config".into(),
-            crate::plan_tool::config(&exe),
+            crate::plan_tool::config(&exe, asks),
             "--allowedTools".into(),
-            crate::plan_tool::TOOL.into(),
+            [
+                crate::plan_tool::TOOL,
+                crate::plan_tool::VISUAL,
+                crate::plan_tool::SECRET,
+            ]
+            .join(","),
         ]);
     }
     if let Some(mode) = mode(permission) {
@@ -96,7 +103,7 @@ pub fn argv(
 }
 
 /// Added to every session's system prompt.
-const PLAN_NUDGE: &str = "Before you start any task with three or more steps, call the update_plan tool (from the dent server) with the whole plan, one short line per step. Call it again whenever a step starts or finishes, marking it in_progress or completed, so the plan always shows where you are, and mark every step completed before your final answer. Give every Bash command a short description of what it is for, starting with a verb.";
+const PLAN_NUDGE: &str = "Before you start any task with three or more steps, call the update_plan tool (from the dent server) with the whole plan, one short line per step. Call it again whenever a step starts or finishes, marking it in_progress or completed, so the plan always shows where you are, and mark every step completed before your final answer. Give every Bash command a short description of what it is for, starting with a verb. When you make a file for the person to look at (a video, a recording, a PDF), name its path in your reply. To show a chart, a diagram or a mock-up, use the show_visual tool rather than writing a file. If you need a secret (an API key, a token, a password), ask with the ask_secret tool, never in chat.";
 
 /// A one-off side question: the conversation `agent_session` so far, forked
 /// so the original never sees it, answered without changing anything.

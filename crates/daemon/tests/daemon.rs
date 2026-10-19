@@ -1134,6 +1134,28 @@ fn effort_reaches_the_agent_and_changing_it_starts_a_new_process() {
 }
 
 #[test]
+fn restarting_the_agent_resumes_the_conversation_in_a_new_process() {
+    let w = World::new(&[]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "tell me your args");
+    c.wait_turns(&s, 1);
+    assert!(!c.text(&s).contains("--resume"), "{}", c.text(&s));
+    c.call(Request::RestartAgent { session: s.clone() })
+        .unwrap();
+    c.wait(
+        &s,
+        "the notice",
+        |b| matches!(b, Body::Notice { text } if text.contains("starts again")),
+    );
+    c.say(&s, "r2", "your args again", false);
+    c.wait_turns(&s, 2);
+    let last = c.text(&s);
+    let last = last.lines().last().unwrap_or_default();
+    assert!(last.contains("--resume"), "{last}");
+}
+
+#[test]
 fn a_fork_copies_the_conversation_and_resumes_it_as_a_new_agent_session() {
     let w = World::new(&[]);
     let mut c = w.client();
@@ -1503,7 +1525,14 @@ fn clients_joining_mid_reply_see_it_once_and_events_never_skip() {
     let want = c.text(&a);
     for l in &mut late {
         l.wait_turns(&a, 1);
-        assert_eq!(l.partial.get(&a).cloned().unwrap_or_default(), want);
+        // Under load a client can join after the reply finished: then it
+        // streamed nothing, and has the reply whole from the log instead.
+        let streamed = l.partial.get(&a).cloned().unwrap_or_default();
+        if streamed.is_empty() {
+            assert_eq!(l.text(&a), want);
+        } else {
+            assert_eq!(streamed, want);
+        }
     }
     let seqs: Vec<u64> = c.events.lock().unwrap().iter().map(|e| e.seq).collect();
     assert!(

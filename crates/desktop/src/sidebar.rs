@@ -526,6 +526,9 @@ impl Dent {
                         ("Fork", Do::Fork(sid.clone())),
                     ];
                     if !closed {
+                        items.push(("Restart Agent", Do::Restart(sid.clone())));
+                    }
+                    if !closed {
                         let pinned = this.pinned.contains(&sid);
                         items.push((
                             if pinned { "Unpin" } else { "Pin to top" },

@@ -28,6 +28,19 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 
 ## Open
 
+### A daemon test fails now and then under load
+- Seen: 2026-10-18. `clients_joining_mid_reply_see_it_once_and_events_never_skip` failed once in `just verify` (daemon.rs:1528, the late client's partial text), passed 5 of 5 alone and on the next full run. Nothing in the batch touched streaming.
+- Cost: one re-run of `just verify` (~15 s) and a few minutes checking it wasn't the change.
+- Fix: find what the late clients race against (likely the 15 ms joins against a fast fake reply) and wait on an event, not a sleep.
+- Check: 20 full `just verify` runs without it failing.
+- Found 2026-10-18 (second failure): the reply sometimes finishes before the last late clients join, so they stream nothing and hold the reply whole from the log. The daemon was right; the test assumed every client joined mid-reply. The test now takes either, and still fails on text seen twice or cut short. Left open until the check above holds.
+
+### Before stills taken after the change, not before
+- Seen: 2026-10-18, chat parity batch. The stills meant to be taken first were skipped; main was built in a second worktree (3 min 17 s, its own target folder) to take them after.
+- Cost: ~4 min and several GB of build output per batch it happens in.
+- Fix: take before stills at the start of a batch, as the batch workflow says; when a scene needs the new fake agent, copy only `crates/fake-claude` into a main worktree.
+- Check: batches that needed a second build for before stills.
+
 ### Walkthroughs need an unlocked screen, and no one is there to unlock it
 - Seen: 2026-10-15. Locked, macOS draws no windows, so walkthroughs stop dead. A `walk.sh compare` sat at "Starting dent…" for 14 min while the owner was away; another day two runs hung 10+ min each before the cause was found (about 30 min).
 - Fixed in part: `walk.sh` refuses to start on a locked screen and says so, keeps the display awake while it runs (`caffeinate -d`), and a still that doesn't come back in 15 s fails instead of waiting forever.

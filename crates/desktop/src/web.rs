@@ -20,7 +20,8 @@ use std::sync::{Arc, Mutex};
 
 use gpui_kit::*;
 use wry::dpi::{LogicalPosition, LogicalSize};
-use wry::http::{Response, header::CONTENT_TYPE};
+use wry::http::Response;
+use wry::http::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE};
 use wry::{Rect, WebView, WebViewBuilder};
 
 #[derive(Clone, Debug)]
@@ -211,6 +212,9 @@ pub struct Preview {
     /// The dev server origin pages may navigate within.
     origin: Shared<Option<String>>,
     snapshot: Shared<Option<Snapshot>>,
+    /// The latest snapshot as the web view gave it, for a page's card in
+    /// the chat to show; taken once by the app.
+    still: Shared<Option<(Source, Vec<u8>, ImageFormat)>>,
     /// Pictures replaced by newer ones, for the window to free.
     retired: Shared<Vec<Arc<RenderImage>>>,
     /// A snapshot is wanted; taken at most every `SNAP_EVERY`.
@@ -271,10 +275,15 @@ fn kind(path: &str) -> &'static str {
         "woff" => "font/woff",
         "ttf" => "font/ttf",
         "otf" => "font/otf",
-        "mp4" => "video/mp4",
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
         "webm" => "video/webm",
         "mp3" => "audio/mpeg",
+        "m4a" | "aac" => "audio/mp4",
         "wav" => "audio/wav",
+        "aiff" | "aif" => "audio/aiff",
+        "flac" => "audio/flac",
+        "ogg" | "oga" => "audio/ogg",
         "txt" | "md" | "csv" => "text/plain; charset=utf-8",
         "pdf" => "application/pdf",
         _ => "application/octet-stream",
@@ -317,10 +326,23 @@ impl Preview {
             .with_custom_protocol("dent".into(), move |_, req| {
                 let mut path = req.uri().path().trim_start_matches('/').to_string();
                 let root = r.lock().ok().and_then(|r| r.clone());
+                // Video and sound play from disk a piece at a time, as the
+                // player asks for them, so a long film never loads whole.
+                if crate::data::media_kind(&path).is_some()
+                    && let Some(full) = root.as_deref().and_then(|r| disk_path(r, &path))
+                {
+                    let range = req.headers().get(RANGE).and_then(|v| v.to_str().ok());
+                    return ranged(&full, range, kind(&path));
+                }
+                // A name with spaces arrives encoded (`Sign-ups%20by%20week`).
                 let mut body = f
                     .lock()
                     .ok()
-                    .and_then(|m| m.get(&path).cloned())
+                    .and_then(|m| {
+                        m.get(&path)
+                            .or_else(|| m.get(&percent_decode(&path)))
+                            .cloned()
+                    })
                     .or_else(|| from_disk(root.as_deref()?, &path));
                 // A link from the site's root (`/styles.css`) skips the version
                 // in the address: find it from the page's folder upwards.
@@ -482,6 +504,7 @@ impl Preview {
             pressed,
             origin,
             snapshot,
+            still: Arc::default(),
             retired: Arc::default(),
             want_snapshot: std::cell::Cell::new(false),
             last_snapshot: std::cell::Cell::new(None),
@@ -531,6 +554,40 @@ impl Preview {
         let key = format!("{v}/{name}");
         if let Ok(mut m) = self.files.lock() {
             m.insert(key, bytes.into());
+        }
+        self.load(src);
+    }
+
+    /// Show a video, a sound or a PDF from disk: a PDF as itself, the others
+    /// in a page of their own that plays them. Showing it again is a no-op.
+    pub fn show_file(&mut self, file: &std::path::Path) {
+        let (Some(dir), Some(name)) = (file.parent(), file.file_name()) else {
+            return;
+        };
+        let name = name.to_string_lossy().into_owned();
+        let root = Some(dir.to_path_buf());
+        let moved = match self.root.lock() {
+            Ok(mut r) => std::mem::replace(&mut *r, root.clone()) != root,
+            Err(_) => false,
+        };
+        if let Ok(mut d) = self.page_dir.lock() {
+            d.clear();
+        }
+        let pdf = crate::data::media_kind(&name) == Some("PDF");
+        let page = if pdf {
+            name.clone()
+        } else {
+            format!("{name}.html")
+        };
+        let src = Source::File {
+            name: page.clone(),
+            version: 0,
+        };
+        if self.showing.as_ref() == Some(&src) && !moved {
+            return;
+        }
+        if !pdf && let Ok(mut m) = self.files.lock() {
+            m.insert(format!("0/{page}"), media_page(&name).into_bytes().into());
         }
         self.load(src);
     }
@@ -792,6 +849,11 @@ impl Preview {
         (Some(&snap.source) == self.showing.as_ref() && (same_size || any_size)).then_some(snap)
     }
 
+    /// The page's latest picture as the web view gave it, once.
+    pub fn take_still(&self) -> Option<(Source, Vec<u8>, ImageFormat)> {
+        self.still.lock().ok()?.take()
+    }
+
     /// Ask the web view for a picture of itself. It arrives a moment later.
     pub fn take_snapshot(&self) {
         let (Some(size), Some(source)) = (self.bounds.map(|b| b.size), self.showing.clone()) else {
@@ -800,8 +862,15 @@ impl Preview {
         if !self.visible {
             return;
         }
-        let (slot, retired) = (self.snapshot.clone(), self.retired.clone());
+        let (slot, retired, still) = (
+            self.snapshot.clone(),
+            self.retired.clone(),
+            self.still.clone(),
+        );
         let store = move |bytes: Vec<u8>, format: ImageFormat| {
+            if let Ok(mut s) = still.lock() {
+                *s = Some((source.clone(), bytes.clone(), format));
+            }
             let (slot, retired, source) = (slot.clone(), retired.clone(), source.clone());
             // Decoding a full-panel picture takes a few milliseconds; keep it
             // off the main thread.
@@ -999,14 +1068,118 @@ fn from_site_root(root: &std::path::Path, dir: &str, path: &str) -> Option<(Arc<
 }
 
 fn from_disk(root: &std::path::Path, path: &str) -> Option<Arc<[u8]>> {
+    std::fs::read(disk_path(root, path)?).ok().map(Into::into)
+}
+
+/// The file a `{version}/{path}` address names under `root`, if it's there
+/// and inside it.
+fn disk_path(root: &std::path::Path, path: &str) -> Option<std::path::PathBuf> {
     let rel = path.split_once('/')?.1;
     let rel = percent_decode(rel);
     let root = root.canonicalize().ok()?;
     let full = root.join(rel).canonicalize().ok()?;
-    if !full.starts_with(&root) || !full.is_file() {
-        return None;
+    (full.starts_with(&root) && full.is_file()).then_some(full)
+}
+
+/// The most of a file one answer carries when the player asks for "the rest".
+const RANGE_CHUNK: u64 = 4 << 20;
+
+/// The bytes of `full` a `Range` header asks for (`bytes=a-b`, `bytes=a-`,
+/// `bytes=-n`): inclusive bounds, clamped to the file; `None` if it can't
+/// be met.
+fn byte_range(range: &str, total: u64) -> Option<(u64, u64)> {
+    let spec = range
+        .trim()
+        .strip_prefix("bytes=")?
+        .split(',')
+        .next()?
+        .trim();
+    let (a, b) = spec.split_once('-')?;
+    let last = total.checked_sub(1)?;
+    let (start, end) = match (a.trim(), b.trim()) {
+        ("", n) => {
+            let n: u64 = n.parse().ok()?;
+            (total.saturating_sub(n), last)
+        }
+        (a, "") => {
+            let a: u64 = a.parse().ok()?;
+            (a, last)
+        }
+        (a, b) => (a.parse().ok()?, b.parse::<u64>().ok()?.min(last)),
+    };
+    // At most a chunk at a time, whatever was asked: a player asking for
+    // all of a long recording at once gets its start and asks on, rather
+    // than dent reading gigabytes into memory.
+    let end = end.min(start.saturating_add(RANGE_CHUNK - 1));
+    (start <= end).then_some((start, end))
+}
+
+/// A media file's answer: the piece asked for, or all of it when nothing
+/// was asked.
+fn ranged(full: &std::path::Path, range: Option<&str>, ty: &str) -> Response<Cow<'static, [u8]>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let answer =
+        |status: u16, headers: &[(wry::http::header::HeaderName, String)], body: Vec<u8>| {
+            let mut b = Response::builder()
+                .status(status)
+                .header(ACCEPT_RANGES, "bytes");
+            for (k, v) in headers {
+                b = b.header(k, v.as_str());
+            }
+            b.body(Cow::Owned(body))
+                .unwrap_or_else(|_| Response::new(Cow::Borrowed(&[][..])))
+        };
+    let Ok(mut f) = std::fs::File::open(full) else {
+        return answer(404, &[], b"Not found".to_vec());
+    };
+    let total = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let Some(range) = range else {
+        let mut all = Vec::new();
+        let _ = f.read_to_end(&mut all);
+        return answer(200, &[(CONTENT_TYPE, ty.to_string())], all);
+    };
+    let Some((start, end)) = byte_range(range, total) else {
+        return answer(
+            416,
+            &[(CONTENT_RANGE, format!("bytes */{total}"))],
+            Vec::new(),
+        );
+    };
+    let mut piece = vec![0; (end - start + 1) as usize];
+    if f.seek(SeekFrom::Start(start)).is_err() || f.read_exact(&mut piece).is_err() {
+        return answer(500, &[], Vec::new());
     }
-    std::fs::read(full).ok().map(Into::into)
+    answer(
+        206,
+        &[
+            (CONTENT_TYPE, ty.to_string()),
+            (CONTENT_LENGTH, piece.len().to_string()),
+            (CONTENT_RANGE, format!("bytes {start}-{end}/{total}")),
+        ],
+        piece,
+    )
+}
+
+/// The page a video or a sound plays in: centred, at most its own size,
+/// on the page's own background in either theme.
+fn media_page(name: &str) -> String {
+    let src: String = name
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    let player = if crate::data::media_kind(name) == Some("Sound") {
+        format!(r#"<audio src="{src}" controls preload="metadata"></audio>"#)
+    } else {
+        format!(r#"<video src="{src}" controls playsinline preload="metadata"></video>"#)
+    };
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><style>html,body{{margin:0;height:100%;background:Canvas}}body{{display:flex;align-items:center;justify-content:center}}video{{max-width:100%;max-height:100%;outline:none}}audio{{width:min(480px,90%)}}</style></head><body>{player}</body></html>"#
+    )
 }
 
 /// `%20` and friends back to their characters, for paths in links.
@@ -1031,7 +1204,34 @@ pub fn percent_decode(s: &str) -> String {
 
 #[cfg(test)]
 mod root_tests {
-    use super::{from_site_root, kind, split_root};
+    use super::{byte_range, from_site_root, kind, media_page, split_root};
+
+    #[test]
+    fn ranges_are_read_as_the_player_asks() {
+        assert_eq!(byte_range("bytes=0-1", 100), Some((0, 1)));
+        assert_eq!(byte_range("bytes=10-", 100), Some((10, 99)));
+        assert_eq!(byte_range("bytes=-10", 100), Some((90, 99)));
+        assert_eq!(byte_range("bytes=50-500", 100), Some((50, 99)));
+        assert_eq!(byte_range("bytes=0-", 100 << 20), Some((0, (4 << 20) - 1)));
+        // All of a long file asked for at once, or its last half: a chunk.
+        assert_eq!(
+            byte_range(&format!("bytes=0-{}", (2u64 << 30) - 1), 2 << 30),
+            Some((0, (4 << 20) - 1))
+        );
+        assert_eq!(
+            byte_range("bytes=-1073741824", 2 << 30),
+            Some((1 << 30, (1 << 30) + (4 << 20) - 1))
+        );
+        assert_eq!(byte_range("bytes=200-", 100), None);
+        assert_eq!(byte_range("bytes=0-1", 0), None);
+    }
+
+    #[test]
+    fn a_video_page_names_its_file_safely() {
+        let p = media_page("my clip \"1\".mp4");
+        assert!(p.contains(r#"<video src="my%20clip%20%221%22.mp4""#));
+        assert!(media_page("talk.m4a").contains("<audio"));
+    }
 
     #[test]
     fn pages_outside_the_project_load_from_their_own_folder() {

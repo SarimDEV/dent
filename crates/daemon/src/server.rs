@@ -250,6 +250,10 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             d.command(&session, Op::SetEffort(effort)).await?;
             Reply::Ok
         }
+        Request::RestartAgent { session } => {
+            d.command(&session, Op::Restart).await?;
+            Reply::Ok
+        }
         Request::Rename { session, title } => {
             d.command(&session, Op::Rename(title)).await?;
             Reply::Ok

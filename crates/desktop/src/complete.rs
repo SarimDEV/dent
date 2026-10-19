@@ -237,10 +237,15 @@ pub fn mention(path: &str) -> String {
 /// Commands dent does itself, because it keeps what they'd change: the
 /// agent switching its model behind dent's back would leave the chips wrong.
 /// Name, what it does, and whether it needs an open session.
-pub const OWN: [(&str, &str, bool); 4] = [
+pub const OWN: [(&str, &str, bool); 5] = [
     ("model", "Choose the model", false),
     ("effort", "Choose how hard it thinks", false),
     ("rename", "Rename this session", true),
+    (
+        "restart",
+        "Start Claude Code again, to load new skills, plugins and settings",
+        true,
+    ),
     ("clear", "Start a new session in this project", true),
 ];
 
@@ -494,7 +499,7 @@ mod tests {
         let names = |s| -> Vec<String> { offered(&agent, s).into_iter().map(|c| c.name).collect() };
         assert_eq!(
             names(true),
-            ["model", "effort", "rename", "clear", "compact"]
+            ["model", "effort", "rename", "restart", "clear", "compact"]
         );
         assert_eq!(names(false), ["model", "effort", "compact"]);
     }
