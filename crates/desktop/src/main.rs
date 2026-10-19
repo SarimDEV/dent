@@ -20,6 +20,7 @@ mod diagram;
 mod draft;
 mod ds;
 mod find;
+mod github;
 mod highlight;
 mod hotkey;
 mod keys;
@@ -873,6 +874,7 @@ impl Render for Dent {
             .children(self.switcher_view(cx))
             .children(self.keys_view(cx))
             .children(self.context_view(window, cx))
+            .children(self.github_card(cx))
             // Over everything, menus painted late included.
             .children(
                 self.lightbox_view(window, cx)

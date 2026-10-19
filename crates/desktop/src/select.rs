@@ -273,6 +273,116 @@ pub fn link_at(p: Point<Pixels>, window: &Window) -> Option<String> {
     })
 }
 
+/// The link the pointer rests on: where it points, where it's drawn (the
+/// line of it under the pointer), and since when.
+#[derive(Clone, Debug)]
+pub struct Hovered {
+    pub url: String,
+    pub at: Bounds<Pixels>,
+    pub since: std::time::Instant,
+}
+
+thread_local! {
+    static HOVERED: RefCell<Option<Hovered>> = const { RefCell::new(None) };
+}
+
+/// The link under the pointer now, if it rests on one.
+pub fn hovered_link() -> Option<Hovered> {
+    HOVERED.with(|h| h.borrow().clone())
+}
+
+/// Forget the link under the pointer (a scroll moves it, a press acts on
+/// it), redrawing if there was one.
+fn unhover(window: &mut Window) {
+    if HOVERED.with(|h| h.borrow_mut().take()).is_some() {
+        window.refresh();
+    }
+}
+
+/// Forget the link under the pointer if this frame no longer draws it
+/// there: the session changed under a resting pointer, or it scrolled
+/// away. Called while painting what the hover shows, after the text.
+pub fn check_hover(window: &mut Window) {
+    let Some(h) = hovered_link() else { return };
+    let win = window.window_handle().window_id();
+    let p = h.at.center();
+    let still = with(|s| {
+        s.placed.iter().any(|x| {
+            x.win == win
+                && x.bounds.contains(&p)
+                && x.layout
+                    .index_for_position(p)
+                    .ok()
+                    .is_some_and(|at| x.links.iter().any(|(r, u)| r.contains(&at) && *u == h.url))
+        })
+    });
+    if !still {
+        unhover(window);
+    }
+}
+
+/// Note the link under `p`, redrawing when it changes.
+fn hover(p: Point<Pixels>, window: &mut Window) {
+    let win = window.window_handle().window_id();
+    let now = with(|s| {
+        let placed = s
+            .placed
+            .iter()
+            .rev()
+            .find(|x| x.win == win && x.bounds.contains(&p) && x.hitbox.is_hovered(window))?;
+        // Only right over its letters, not the nearest to the pointer.
+        let at = placed.layout.index_for_position(p).ok()?;
+        let (r, url) = placed.links.iter().find(|(r, _)| r.contains(&at))?;
+        let line = placed.layout.line_height();
+        let here = placed.layout.position_for_index(at)?;
+        let start = placed.layout.position_for_index(r.start)?;
+        let end = placed.layout.position_for_index(r.end).unwrap_or(here);
+        // One line: the whole link. Wrapped: the part of the line under
+        // the pointer.
+        let at = if start.y == end.y {
+            Bounds::from_corners(start, point(end.x, start.y + line))
+        } else {
+            Bounds::new(point(p.x, here.y), size(px(1.), line))
+        };
+        Some((url.clone(), at))
+    });
+    let changed = HOVERED.with(|h| {
+        let mut h = h.borrow_mut();
+        match (&*h, now) {
+            (Some(o), Some((url, at))) if o.url == url && o.at == at => false,
+            (None, None) => false,
+            (_, now) => {
+                *h = now.map(|(url, at)| Hovered {
+                    url,
+                    at,
+                    since: std::time::Instant::now(),
+                });
+                true
+            }
+        }
+    });
+    if changed {
+        window.refresh();
+    }
+}
+
+/// Where the first link drawn now to an address starting `prefix` is, for
+/// walkthroughs to rest the pointer on.
+pub fn link_bounds(prefix: &str) -> Option<Bounds<Pixels>> {
+    with(|s| {
+        s.placed.iter().find_map(|p| {
+            let (r, _) = p.links.iter().find(|(_, u)| u.starts_with(prefix))?;
+            let a = p.layout.position_for_index(r.start)?;
+            let b = p.layout.position_for_index(r.end)?;
+            let line = p.layout.line_height();
+            Some(Bounds::from_corners(
+                a,
+                point(b.x.max(a.x + px(4.)), a.y + line),
+            ))
+        })
+    })
+}
+
 /// Where every link drawn now points, for walkthroughs.
 pub fn drawn_links() -> Vec<String> {
     with(|s| {
@@ -535,6 +645,7 @@ pub fn layer() -> impl IntoElement {
             // control under the pointer has had its say.
             window.on_mouse_event(|e: &ScrollWheelEvent, phase, window, _| {
                 if phase == DispatchPhase::Capture {
+                    unhover(window);
                     let win = window.window_handle().window_id();
                     if let Some(area) = region_at(e.position, win, window) {
                         with(|s| s.last = Some(area));
@@ -547,6 +658,7 @@ pub fn layer() -> impl IntoElement {
                 // itself has still had the last word.
                 match (e.button, phase) {
                     (MouseButton::Left, DispatchPhase::Capture) => {
+                        unhover(window);
                         yield_keys();
                         let win = window.window_handle().window_id();
                         let area = region_at(e.position, win, window);
@@ -558,6 +670,11 @@ pub fn layer() -> impl IntoElement {
             });
             window.on_mouse_event(|e: &MouseMoveEvent, phase, window, cx| {
                 if phase.bubble() {
+                    if e.pressed_button.is_none() {
+                        hover(e.position, window);
+                    } else {
+                        unhover(window);
+                    }
                     drag_to(
                         e.position,
                         e.pressed_button == Some(MouseButton::Left),
@@ -566,6 +683,8 @@ pub fn layer() -> impl IntoElement {
                     );
                 }
             });
+            // Leaving the window leaves any link.
+            window.on_mouse_event(|_: &MouseExitEvent, _, window, _| unhover(window));
             window.on_mouse_event(|e: &MouseUpEvent, phase, window, cx| {
                 if phase.bubble() && e.button == MouseButton::Left {
                     release(e.position, window, cx);

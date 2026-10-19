@@ -259,8 +259,27 @@ impl Inline {
                 shifts.push((at, text.len() - start));
             }
         };
+        // `#12` with no repository to find it in reads as the words it is.
+        let dead: Vec<std::ops::Range<usize>> = LINK_BASE.with(|b| {
+            let b = b.borrow();
+            self.links
+                .iter()
+                .filter(|(_, u)| {
+                    u.starts_with(crate::github::SCHEME)
+                        && crate::github::url(u, b.as_deref()).is_none()
+                })
+                .map(|(r, _)| r.clone())
+                .collect()
+        });
         for (len, st) in &self.runs {
             insert(at, &mut text, &mut runs, at);
+            let unlinked;
+            let st = if st.link && dead.iter().any(|r| r.contains(&at)) {
+                unlinked = Style { link: false, ..*st };
+                &unlinked
+            } else {
+                st
+            };
             let mut f = font(if st.code { theme::mono() } else { face.family });
             f.weight = face.weight;
             if st.strong {
@@ -331,6 +350,7 @@ impl Inline {
                         resolve(u, b.as_deref()),
                     )
                 })
+                .filter(|(_, u)| !u.starts_with(crate::github::SCHEME))
                 .collect()
         });
         let styled = crate::select::styled(
@@ -553,17 +573,30 @@ impl Table {
 /// Head, rows, the row being read, and whether we are still in the head.
 type TableState = (Vec<Inline>, Vec<Vec<Inline>>, Vec<Inline>, Vec<Alignment>);
 
-/// Text with bare web addresses made into links.
+/// Text with bare web addresses, and references to GitHub issues and
+/// pull requests (`#12`), made into links.
 fn push_linking(cur: &mut Inline, s: &str, st: Style) {
     let mut at = 0;
-    for r in url_spans(s) {
+    for (r, href) in auto_links(s) {
         cur.push(&s[at..r.start], st);
-        cur.href = Some(s[r.clone()].to_string());
+        cur.href = Some(href);
         cur.push(&s[r.clone()], Style { link: true, ..st });
         cur.href = None;
         at = r.end;
     }
     cur.push(&s[at..], st);
+}
+
+/// The bare web addresses in `s`, and the GitHub references outside them.
+fn auto_links(s: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    let urls = url_spans(s);
+    let mut out: Vec<_> = crate::github::ref_spans(s)
+        .into_iter()
+        .filter(|(r, _)| !urls.iter().any(|u| u.start < r.end && r.start < u.end))
+        .collect();
+    out.extend(urls.into_iter().map(|r| (r.clone(), s[r].to_string())));
+    out.sort_by_key(|(r, _)| r.start);
+    out
 }
 
 /// Where the bare web addresses are in `s`.
@@ -600,6 +633,13 @@ pub fn plain_links(
         .iter()
         .map(|r| (r.clone(), s[r.clone()].to_string()))
         .collect();
+    // `#12` in the session's repository, when it has one on GitHub.
+    out.extend(
+        crate::github::ref_spans(s)
+            .into_iter()
+            .filter(|(r, _)| !urls.iter().any(|u| u.start < r.end && r.start < u.end))
+            .filter_map(|(r, href)| Some((r, crate::github::url(&href, base)?))),
+    );
     let mut at = 0;
     for word in s.split_whitespace() {
         let start = at + s[at..].find(word).unwrap_or(0);
@@ -610,7 +650,9 @@ pub fn plain_links(
         let r = start + lead..start + lead + trimmed.len();
         if !trimmed.is_empty()
             && looks_like_path(trimmed)
-            && !urls.iter().any(|u| u.start <= r.start && r.end <= u.end)
+            && !out
+                .iter()
+                .any(|(u, _)| u.start <= r.start && r.end <= u.end)
         {
             out.push((r, resolve(trimmed, base)));
         }
@@ -1152,6 +1194,11 @@ fn looks_like_path(c: &str) -> bool {
 /// Where a link or picture in a document points: a web address as it is,
 /// a path made whole from the document's folder (`~` is home).
 pub fn resolve(href: &str, base: Option<&std::path::Path>) -> String {
+    // A reference to an issue, in the repository `base` is in. One that
+    // can't be found keeps its `github:` and is no link.
+    if href.starts_with(crate::github::SCHEME) {
+        return crate::github::url(href, base).unwrap_or_else(|| href.to_string());
+    }
     if href.contains("://") || href.starts_with("mailto:") || href.starts_with('#') {
         return href.to_string();
     }

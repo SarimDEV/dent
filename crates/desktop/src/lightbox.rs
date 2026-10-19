@@ -7,6 +7,11 @@
 //! pictures of one message): ← and → step through it, so a dozen dropped
 //! screenshots can be looked through in a row.
 //!
+//! Large, a picture zooms in for a closer look: pinch, ⌘-scroll, ⌘+ and ⌘−
+//! (or +, − and 0), or a double-click, which goes to its own size and back.
+//! Zoomed, it drags (or scrolls) to show its other parts, and never leaves
+//! the window's edge for the backdrop.
+//!
 //! Every picture that opens is drawn through `picture`, which notes where it
 //! sits each frame, so the zoom starts from the thumbnail itself and goes
 //! back to whichever one is showing when it closes.
@@ -30,6 +35,12 @@ use crate::ui::{Control, Press, icon, tip_above};
 const OPEN_MS: f32 = motion::SLOW + 40.;
 /// Exits are quicker than enters.
 const CLOSE_MS: f32 = motion::BASE;
+/// A double-click's or a key's zoom eases; a pinch or a drag follows you.
+const ZOOM_MS: f32 = motion::BASE;
+/// Zoomed in at most this many times its own size.
+const MOST: f32 = 8.;
+/// What a key's step zooms by.
+const STEP: f32 = 1.5;
 
 /// One picture that can open: its element id (where it sits) and its file.
 #[derive(Clone, PartialEq, Debug)]
@@ -65,11 +76,148 @@ pub struct Lightbox {
     size: (u32, u32),
     opened: Instant,
     closing: Option<Instant>,
+    /// How far it's zoomed past fitting the window: 1 fits.
+    zoom: f32,
+    /// How far its middle has moved from the fitted middle, in points.
+    pan: (f32, f32),
+    /// A key's or a double-click's zoom on its way: the zoom and pan it
+    /// left, and when.
+    easing: Option<(f32, (f32, f32), Instant)>,
+    /// A drag moving it: where the pointer went down, and the pan then.
+    drag: Option<(Point<Pixels>, (f32, f32))>,
+    /// Where it fitted last frame.
+    fit: Fit,
+}
+
+/// Where a picture fits in the window, in points: its box, the window's
+/// size, and how much it was shrunk to fit (1 at its own size).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Fit {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    vw: f32,
+    vh: f32,
+    k: f32,
+}
+
+impl Default for Fit {
+    fn default() -> Self {
+        Self {
+            x: 0.,
+            y: 0.,
+            w: 1.,
+            h: 1.,
+            vw: 1.,
+            vh: 1.,
+            k: 1.,
+        }
+    }
+}
+
+impl Fit {
+    fn middle(&self) -> (f32, f32) {
+        (self.x + self.w / 2., self.y + self.h / 2.)
+    }
+
+    /// The most it zooms: `MOST` times its own size.
+    fn most(&self) -> f32 {
+        (MOST / self.k.max(0.001)).max(1.)
+    }
+
+    /// `pan` kept so the zoomed picture never shows backdrop past an edge
+    /// it could cover; along a side it doesn't fill, it stays centred.
+    fn clamped(&self, zoom: f32, pan: (f32, f32)) -> (f32, f32) {
+        let (mx, my) = self.middle();
+        let axis = |p: f32, size: f32, mid: f32, view: f32| {
+            if size <= view {
+                0.
+            } else {
+                p.clamp(view - size / 2. - mid, size / 2. - mid)
+            }
+        };
+        (
+            axis(pan.0, self.w * zoom, mx, self.vw),
+            axis(pan.1, self.h * zoom, my, self.vh),
+        )
+    }
+
+    /// Zoomed from `zoom` and `pan` to `to`, keeping the point under
+    /// `about` (in the window) where it is.
+    fn zoomed(&self, zoom: f32, pan: (f32, f32), to: f32, about: (f32, f32)) -> (f32, (f32, f32)) {
+        let to = to.clamp(1., self.most());
+        let (mx, my) = self.middle();
+        let (cx, cy) = (mx + pan.0, my + pan.1);
+        let r = to / zoom.max(0.001);
+        let (nx, ny) = (about.0 - (about.0 - cx) * r, about.1 - (about.1 - cy) * r);
+        (to, self.clamped(to, (nx - mx, ny - my)))
+    }
+
+    /// Where a double-click zooms to: its own size, or twice the fit
+    /// when that's already about its own size.
+    fn closer(&self) -> f32 {
+        let own = 1. / self.k.max(0.001);
+        if own > 1.25 { own } else { 2. }
+    }
 }
 
 impl Lightbox {
     fn shot(&self) -> &Shot {
         &self.set[self.at]
+    }
+
+    /// The zoom and pan showing now, part way along an easing.
+    fn shown(&self) -> (f32, (f32, f32)) {
+        match self.easing {
+            Some((z, (px, py), at)) if !crate::reduce_motion() => {
+                let e = anim::ease_out(anim::progress(at, ZOOM_MS));
+                (
+                    lerp(z, self.zoom, e),
+                    (lerp(px, self.pan.0, e), lerp(py, self.pan.1, e)),
+                )
+            }
+            _ => (self.zoom, self.pan),
+        }
+    }
+
+    fn easing_now(&self) -> bool {
+        self.easing
+            .is_some_and(|(.., at)| !crate::reduce_motion() && anim::progress(at, ZOOM_MS) < 1.)
+    }
+
+    /// What shows becomes where it is: a pinch or a drag starts from there.
+    fn settle(&mut self) {
+        (self.zoom, self.pan) = self.shown();
+        self.easing = None;
+    }
+
+    /// Zoom to `to` about `about` at once, as a pinch does.
+    fn zoom_now(&mut self, to: f32, about: (f32, f32)) {
+        self.settle();
+        (self.zoom, self.pan) = self.fit.zoomed(self.zoom, self.pan, to, about);
+    }
+
+    /// Zoom to `to` about `about`, easing there.
+    fn zoom_eased(&mut self, to: f32, about: (f32, f32)) {
+        self.settle();
+        let from = (self.zoom, self.pan);
+        (self.zoom, self.pan) = self.fit.zoomed(self.zoom, self.pan, to, about);
+        if from != (self.zoom, self.pan) {
+            self.easing = Some((from.0, from.1, Instant::now()));
+        }
+    }
+
+    fn zoomed_in(&self) -> bool {
+        self.zoom > 1.001
+    }
+
+    /// Back to fitting, at once (stepping to another picture).
+    fn unzoom(&mut self) {
+        self.zoom = 1.;
+        self.pan = (0., 0.);
+        self.easing = None;
+        self.drag = None;
     }
 }
 
@@ -201,7 +349,36 @@ impl Dent {
             size,
             opened: Instant::now(),
             closing: None,
+            zoom: 1.,
+            pan: (0., 0.),
+            easing: None,
+            drag: None,
+            fit: Fit::default(),
         });
+    }
+
+    /// How far the open picture is zoomed and moved, as showing now.
+    pub fn lightbox_zoom(&self) -> Option<(f32, (f32, f32))> {
+        self.lightbox.as_ref().map(|l| l.shown())
+    }
+
+    /// Zoom the open picture a step in (`1`), out (`-1`) or back to fitting
+    /// (`0`), about its middle. False if none is open.
+    pub fn zoom_lightbox(&mut self, by: i32, cx: &mut Context<Self>) -> bool {
+        let Some(l) = &mut self.lightbox else {
+            return false;
+        };
+        if l.closing.is_none() {
+            let about = l.fit.middle();
+            let to = match by {
+                0 => 1.,
+                b if b > 0 => l.zoom * STEP,
+                _ => l.zoom / STEP,
+            };
+            l.zoom_eased(to, about);
+            cx.notify();
+        }
+        true
     }
 
     /// Show the next (`1`) or previous (`-1`) picture of the set, at once:
@@ -216,6 +393,7 @@ impl Dent {
         }
         l.at = next as usize;
         l.size = pixel_size(&l.shot().path);
+        l.unzoom();
         cx.notify();
         true
     }
@@ -224,6 +402,8 @@ impl Dent {
     pub fn close_lightbox(&mut self, cx: &mut Context<Self>) -> bool {
         match &mut self.lightbox {
             Some(l) if l.closing.is_none() => {
+                l.settle();
+                l.drag = None;
                 // Back to where the showing picture sits, which after
                 // stepping isn't the one first clicked.
                 if let Some(b) = PLACED.with(|p| p.borrow().get(&l.set[l.at].key).copied()) {
@@ -271,6 +451,7 @@ impl Dent {
             None => anim::ease_out(anim::progress(l.opened, OPEN_MS)),
         };
         let moving = open > 0. && open < 1.;
+        let lifting = moving;
         // The backdrop leads the picture both ways: dark by three quarters
         // of the lift, and clear before the picture is home again.
         let cover = if l.closing.is_some() {
@@ -278,9 +459,6 @@ impl Dent {
         } else {
             (open / 0.75).min(1.)
         };
-        if moving {
-            window.request_animation_frame();
-        }
         // The picture fits the window with room for its name below, never
         // larger than it is (in points, at the screen's scale).
         let vw = window.viewport_size();
@@ -299,17 +477,55 @@ impl Dent {
         let k = (room_w / pw).min(room_h / ph).min(1.);
         let (tw, th) = (pw * k, ph * k);
         let (tx, ty) = ((vw - tw) / 2., (vh - th - space::S8) / 2.);
+        let fit = Fit {
+            x: tx,
+            y: ty,
+            w: tw,
+            h: th,
+            vw,
+            vh,
+            k,
+        };
+        // The window changed (or it just opened): the zoom keeps within
+        // what fits now.
+        let (zoom, pan, easing, dragging) = {
+            let l = self.lightbox.as_mut()?;
+            if l.fit != fit {
+                l.settle();
+                l.fit = fit;
+                l.zoom = l.zoom.clamp(1., fit.most());
+                l.pan = fit.clamped(l.zoom, l.pan);
+            }
+            let (z, p) = l.shown();
+            (z, p, l.easing_now(), l.drag.is_some())
+        };
+        if moving || easing {
+            window.request_animation_frame();
+        }
+        let zoomed = zoom > 1.001;
+        let l = self.lightbox.as_ref()?;
+        // Zoomed about the fitted middle, moved by the pan; the lift goes
+        // to (and comes back from) wherever that is.
+        let (zw, zh) = (tw * zoom, th * zoom);
+        let (zx, zy) = (
+            tx + tw / 2. + pan.0 - zw / 2.,
+            ty + th / 2. + pan.1 - zh / 2.,
+        );
         let f = l.from;
-        let x = lerp(f.origin.x.as_f32(), tx, open);
-        let y = lerp(f.origin.y.as_f32(), ty, open);
-        let w = lerp(f.size.width.as_f32(), tw, open);
-        let h = lerp(f.size.height.as_f32(), th, open);
+        let x = lerp(f.origin.x.as_f32(), zx, open);
+        let y = lerp(f.origin.y.as_f32(), zy, open);
+        let w = lerp(f.size.width.as_f32(), zw, open);
+        let h = lerp(f.size.height.as_f32(), zh, open);
         let path = l.shot().path.clone();
         let name = shown_name(&path);
         let mut caption = match l.size {
             (0, 0) => name,
             (pw, ph) => format!("{name} · {pw} × {ph}"),
         };
+        // Zoomed, how large against its own size.
+        if zoomed && l.size.0 > 0 {
+            caption = format!("{caption} · {}%", (k * zoom * 100.).round());
+        }
         let (n, at) = (l.set.len(), l.at);
         if n > 1 {
             caption = format!("{caption} · {} of {n}", at + 1);
@@ -336,6 +552,59 @@ impl Dent {
                         this.close_lightbox(cx);
                     }),
                 )
+                // Zoomed, a drag moves it; a release anywhere lets go.
+                .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
+                    let Some(l) = &mut this.lightbox else { return };
+                    let Some((start, from)) = l.drag else { return };
+                    if e.pressed_button != Some(MouseButton::Left) {
+                        l.drag = None;
+                    } else {
+                        let d = e.position - start;
+                        l.pan = l
+                            .fit
+                            .clamped(l.zoom, (from.0 + d.x.as_f32(), from.1 + d.y.as_f32()));
+                    }
+                    cx.notify();
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        if let Some(l) = &mut this.lightbox
+                            && l.drag.take().is_some()
+                        {
+                            cx.notify();
+                        }
+                    }),
+                )
+                // A pinch zooms about where it's pinched.
+                .on_pinch(cx.listener(|this, e: &PinchEvent, _, cx| {
+                    let Some(l) = &mut this.lightbox else { return };
+                    if l.closing.is_none() {
+                        let to = l.shown().0 * (1. + e.delta).max(0.1);
+                        l.zoom_now(to, (e.position.x.as_f32(), e.position.y.as_f32()));
+                        cx.notify();
+                    }
+                }))
+                // ⌘- or ⌃-scrolling zooms, as with a mouse; zoomed, scrolling
+                // moves it.
+                .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, window, cx| {
+                    let Some(l) = &mut this.lightbox else { return };
+                    if l.closing.is_some() {
+                        return;
+                    }
+                    let d = e.delta.pixel_delta(window.line_height());
+                    let (dx, dy) = (d.x.as_f32(), d.y.as_f32());
+                    if e.modifiers.platform || e.modifiers.control {
+                        let to = l.shown().0 * (dy * 0.01).exp();
+                        l.zoom_now(to, (e.position.x.as_f32(), e.position.y.as_f32()));
+                    } else if l.zoomed_in() {
+                        l.settle();
+                        l.pan = l.fit.clamped(l.zoom, (l.pan.0 + dx, l.pan.1 + dy));
+                    } else {
+                        return;
+                    }
+                    cx.notify();
+                }))
                 // The backdrop fades with the zoom, leading it both ways.
                 .child(
                     div()
@@ -359,7 +628,7 @@ impl Dent {
                         // has landed (shadows are never animated).
                         .border_1()
                         .border_color(gpui_kit::white().opacity(0.14 * open))
-                        .when(!moving, |d| {
+                        .when(!lifting, |d| {
                             d.shadow(vec![BoxShadow {
                                 color: hsla(0., 0., 0., 0.5),
                                 offset: point(px(0.), px(16.)),
@@ -368,9 +637,40 @@ impl Dent {
                                 inset: false,
                             }])
                         })
-                        // A press on the picture itself keeps it open.
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(img(path.clone()).size_full().object_fit(ObjectFit::Contain)),
+                        .when(zoomed, |d| {
+                            d.cursor(if dragging {
+                                CursorStyle::ClosedHand
+                            } else {
+                                CursorStyle::OpenHand
+                            })
+                        })
+                        // A press on the picture itself keeps it open: a
+                        // double-click zooms in to its own size where it's
+                        // clicked, or back out; zoomed, a press starts a drag.
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                let Some(l) = &mut this.lightbox else { return };
+                                if l.closing.is_some() {
+                                    return;
+                                }
+                                if e.click_count == 2 {
+                                    let to = if l.zoomed_in() { 1. } else { l.fit.closer() };
+                                    l.drag = None;
+                                    l.zoom_eased(
+                                        to,
+                                        (e.position.x.as_f32(), e.position.y.as_f32()),
+                                    );
+                                } else if l.zoomed_in() {
+                                    l.settle();
+                                    l.drag = Some((e.position, l.pan));
+                                }
+                                cx.notify();
+                            }),
+                        )
+                        .child(img(path.clone()).size_full().object_fit(ObjectFit::Contain))
+                        .child(crate::ui::probe(&self.probes, "lightbox-picture")),
                 )
                 .child(
                     div()
@@ -402,6 +702,23 @@ impl Dent {
                                         .w(px(1.))
                                         .h(px(14.))
                                         .bg(gpui_kit::white().opacity(0.25)),
+                                )
+                                .child(
+                                    band_action(
+                                        "lightbox-zoom",
+                                        if zoomed { "Fit" } else { "Zoom" },
+                                    )
+                                    .on_press(cx.listener(
+                                        |this, _, _, cx| {
+                                            if let Some(l) = &mut this.lightbox {
+                                                let to =
+                                                    if l.zoomed_in() { 1. } else { l.fit.closer() };
+                                                let about = l.fit.middle();
+                                                l.zoom_eased(to, about);
+                                                cx.notify();
+                                            }
+                                        },
+                                    )),
                                 )
                                 .child(
                                     band_action(
@@ -532,10 +849,11 @@ fn round(
         .items_center()
         .justify_center()
         .rounded_full()
-        .bg(gpui_kit::white().opacity(if on { 0.12 } else { 0.05 }))
+        // A dark grey, not a white wash: it reads on the backdrop and on a
+        // light picture zoomed in under it alike.
+        .bg(hsla(0., 0., 0.16, if on { 0.78 } else { 0.5 }))
         .when(on, |d| {
-            d.cursor_pointer()
-                .hover(|d| d.bg(gpui_kit::white().opacity(0.2)))
+            d.cursor_pointer().hover(|d| d.bg(hsla(0., 0., 0.26, 0.88)))
         })
         .when(!on, |d| d.cursor(CursorStyle::OperationNotAllowed))
         // A press on a button never reaches the backdrop, which would close.
@@ -585,7 +903,56 @@ fn picture_item(path: &std::path::Path) -> Option<ClipboardItem> {
 #[cfg(test)]
 mod tests {
     // Not `super::*`: gpui's own `test` attribute would come with it.
-    use super::pixel_size;
+    use super::{Fit, pixel_size};
+
+    /// A 1000 × 500 pt window, a picture shrunk to half to fit it.
+    fn fit() -> Fit {
+        Fit {
+            x: 100.,
+            y: 50.,
+            w: 800.,
+            h: 400.,
+            vw: 1000.,
+            vh: 500.,
+            k: 0.5,
+        }
+    }
+
+    #[test]
+    fn zooming_keeps_the_point_under_the_pointer() {
+        let f = fit();
+        // Twice the fit about its middle: nothing moves.
+        assert_eq!(f.zoomed(1., (0., 0.), 2., (500., 250.)), (2., (0., 0.)));
+        // About a point left of the middle: that point stays put, so the
+        // middle moves right.
+        let (z, pan) = f.zoomed(1., (0., 0.), 2., (300., 250.));
+        assert_eq!(z, 2.);
+        assert_eq!(pan, (200., 0.));
+        // About its left edge, it would move 400, but its edge stops at
+        // the window's.
+        assert_eq!(f.zoomed(1., (0., 0.), 2., (100., 250.)).1, (300., 0.));
+        // Its own size is twice the fit; at most eight times its own size.
+        assert_eq!(f.closer(), 2.);
+        assert_eq!(f.zoomed(1., (0., 0.), 100., (500., 250.)).0, 16.);
+        // Never smaller than fitting, and fitting is centred again.
+        assert_eq!(f.zoomed(3., (120., 40.), 0.2, (0., 0.)), (1., (0., 0.)));
+    }
+
+    #[test]
+    fn a_zoomed_picture_never_shows_backdrop_past_its_edge() {
+        let f = fit();
+        // 1600 wide in a 1000 window: its middle stays within 300 of the
+        // window's, which is the fitted middle.
+        assert_eq!(f.clamped(2., (900., 0.)), (300., 0.));
+        assert_eq!(f.clamped(2., (-900., 0.)), (-300., 0.));
+        // 800 high in a 500 window: up to 150 either way.
+        assert_eq!(f.clamped(2., (0., 400.)), (0., 150.));
+        // A small one already at its own size zooms to twice that.
+        let small = Fit { k: 1., ..f };
+        assert_eq!(small.closer(), 2.);
+        // Along a side it doesn't fill, it stays centred.
+        assert_eq!(small.clamped(1.1, (50., 0.)), (0., 0.));
+    }
 
     #[test]
     fn reads_a_pictures_size() {

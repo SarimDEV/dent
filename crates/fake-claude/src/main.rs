@@ -1300,6 +1300,16 @@ impl Agent {
             self.end("done", false);
             return Ok(());
         }
+        if lower.contains("link the pull request") {
+            // Names a pull request in its repository, one in another, and
+            // links straight to one, as agents do after `gh pr create`.
+            self.say(
+                "That landed in #3, after SarimDEV/dent#2. The whole change is at https://github.com/SarimDEV/dent/pull/3/files, and issue#9 or `#4` aren't references.",
+                None,
+            )?;
+            self.end("done", false);
+            return Ok(());
+        }
         if lower.contains("make a video") {
             // Renders a short clip into the project and names it, as an
             // agent making a demo does.

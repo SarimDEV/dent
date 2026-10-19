@@ -58,6 +58,8 @@ What's left to make the single-agent chat as close to perfect as it can be, coll
 
 - [x] **Video, sound and PDF** play or show in the viewer, with a card under a reply that names one ([0052](decisions/0052-media-visuals-and-secrets.md)).
 - [x] **Visuals** the agent shows with `show_visual`, and a picture of a page above its card.
+- [x] **Zooming into pictures** large: pinch, ⌘-scroll, keys, double-click; drag to pan.
+- [x] **GitHub references**: `#12` and `owner/repo#12` link to GitHub, with a card of the title and state on hover.
 - [x] **A private card for secrets** (`ask_secret`).
 - [x] **Tab steps the effort.**
 - [x] **Question cards:** files with a typed answer, Skip, ⌫ back.

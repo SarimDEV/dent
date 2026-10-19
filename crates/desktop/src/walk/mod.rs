@@ -49,11 +49,12 @@ mod switching;
 mod typing;
 mod view;
 mod visuals;
+mod zoom;
 use {
     ambient::*, attaching::*, changes::*, checks::*, common::*, composing::*, demo::*, edges::*,
     failures::*, find::*, finish::*, keys::*, look::*, markdown::*, motion::*, narration::*,
     parity::*, pickup::*, pins::*, polish::*, queue::*, real::*, recall::*, reply::*, stills::*,
-    sweep::*, switching::*, typing::*, view::*, visuals::*,
+    sweep::*, switching::*, typing::*, view::*, visuals::*, zoom::*,
 };
 
 type Pred = fn(&Dent, &App) -> bool;
@@ -106,6 +107,10 @@ pub enum Act {
     Release,
     /// Move the pointer over a probe, offset by this much, and rest there.
     Hover(&'static str, f32, f32),
+    /// Rest the pointer on the first link drawn to an address starting so.
+    HoverLink(&'static str),
+    /// Double-click a probe at a point given as fractions of its size.
+    DoubleClick(&'static str, f32, f32),
     /// Files from Finder dragged in and held over a probe, at fractions of
     /// its size: the project's red.png and "my notes.txt".
     DragFiles(&'static str, f32, f32),
@@ -210,6 +215,7 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("composing", &[composing]),
     ("edges", &[edges]),
     ("parity", &[parity]),
+    ("zoom-links", &[zoom_links]),
 ];
 
 /// Scenes that start on their own: no daemon, the real agent, or a
@@ -604,6 +610,65 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
         Release => {
             let at = POINTER.with(|p| p.get());
             mouse(window, cx, at, false);
+        }
+        HoverLink(prefix) => match crate::select::link_bounds(prefix) {
+            Some(b) => {
+                POINTER.with(|p| p.set(b.center()));
+                window.dispatch_event(
+                    PlatformInput::MouseMove(MouseMoveEvent {
+                        position: b.center(),
+                        pressed_button: None,
+                        modifiers: Modifiers::default(),
+                    }),
+                    cx,
+                );
+            }
+            None => note(
+                &me,
+                cx,
+                leak(format!("a link to {prefix} on screen")),
+                false,
+            ),
+        },
+        DoubleClick(name, fx, fy) => {
+            let at = me.read(cx).probes.borrow().get(name).copied().map(|b| {
+                point(
+                    b.origin.x + b.size.width * fx,
+                    b.origin.y + b.size.height * fy,
+                )
+            });
+            match at {
+                Some(at) => {
+                    POINTER.with(|p| p.set(at));
+                    for n in 1..=2 {
+                        window.dispatch_event(
+                            PlatformInput::MouseDown(MouseDownEvent {
+                                button: MouseButton::Left,
+                                position: at,
+                                modifiers: Modifiers::default(),
+                                click_count: n,
+                                first_mouse: false,
+                            }),
+                            cx,
+                        );
+                        window.dispatch_event(
+                            PlatformInput::MouseUp(MouseUpEvent {
+                                button: MouseButton::Left,
+                                position: at,
+                                modifiers: Modifiers::default(),
+                                click_count: n,
+                            }),
+                            cx,
+                        );
+                    }
+                }
+                None => note(
+                    &me,
+                    cx,
+                    leak(format!("double-click target “{name}” on screen")),
+                    false,
+                ),
+            }
         }
         Hover(name, dx, dy) => match center(&me, name, cx) {
             Some(at) => {

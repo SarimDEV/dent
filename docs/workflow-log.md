@@ -33,6 +33,7 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 - Cost: one re-run of `just verify` (~15 s) and a few minutes checking it wasn't the change.
 - Fix: find what the late clients race against (likely the 15 ms joins against a fast fake reply) and wait on an event, not a sleep.
 - Check: 20 full `just verify` runs without it failing.
+- Found 2026-10-18 (second failure): the reply sometimes finishes before the last late clients join, so they stream nothing and hold the reply whole from the log. The daemon was right; the test assumed every client joined mid-reply. The test now takes either, and still fails on text seen twice or cut short. Left open until the check above holds.
 
 ### Before stills taken after the change, not before
 - Seen: 2026-10-18, chat parity batch. The stills meant to be taken first were skipped; main was built in a second worktree (3 min 17 s, its own target folder) to take them after.

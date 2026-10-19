@@ -890,6 +890,13 @@ pub struct Dent {
     /// A still of each video or PDF a card shows, by its path: `None` while
     /// it's being made, or when none could be.
     pub posters: HashMap<&'static str, Option<std::path::PathBuf>>,
+    /// What each GitHub issue or pull request a link was rested on is,
+    /// and when that was read.
+    pub github: HashMap<(String, u64), (crate::github::Look, std::time::Instant)>,
+    /// Those being read from GitHub now.
+    pub github_asking: std::collections::HashSet<(String, u64)>,
+    /// The hover a GitHub card is waiting to show for, by when it began.
+    pub github_wait: Option<std::time::Instant>,
     /// A picture of each page as the viewer last drew it, with its version,
     /// for its card in the chat.
     pub stills: HashMap<&'static str, (usize, Arc<Image>)>,
@@ -1452,6 +1459,9 @@ impl Dent {
             mdv: crate::markdown::Md::default(),
             pictures: HashMap::new(),
             posters: HashMap::new(),
+            github: HashMap::new(),
+            github_asking: Default::default(),
+            github_wait: None,
             stills: HashMap::new(),
             popouts: HashMap::new(),
             servers_down: Default::default(),
@@ -2982,6 +2992,21 @@ impl Dent {
             self.step_find(k.modifiers.shift, window, cx);
             return true;
         }
+        // A picture open large: +, − and 0 zoom it (⇧= is +, as is ⇧+).
+        if self.lightbox.is_some()
+            && !k.modifiers.platform
+            && !k.modifiers.control
+            && !k.modifiers.alt
+            && let Some(by) = match k.key.as_str() {
+                "=" | "+" => Some(1),
+                "-" => Some(-1),
+                "0" if !k.modifiers.shift => Some(0),
+                _ => None,
+            }
+        {
+            self.zoom_lightbox(by, cx);
+            return true;
+        }
         // A picture open large: Space closes it (Esc is the Escape action's),
         // ← and → step through its set, and plain keys don't reach what's
         // behind it.
@@ -3508,6 +3533,10 @@ impl Dent {
 
     /// ⌘+ and ⌘−: one step bigger or smaller; ⌘0 (`by` 0): as designed.
     pub fn step_zoom(&mut self, by: i32, cx: &mut Context<Self>) {
+        // ⌘+ and ⌘− zoom a picture that's open large, not the text behind.
+        if self.zoom_lightbox(by, cx) {
+            return;
+        }
         let now = crate::ds::zoom();
         let at = crate::ds::ZOOMS
             .iter()
