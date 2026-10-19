@@ -44,6 +44,9 @@
 //!   servers turn on and off, reconnect (except `figma`) and sign in
 //! - `-p` starting "Title this conversation": the person's first message
 //!   as the title ("Checking the landing page" for a screenshot session)
+//! - `replay a real turn`: one turn recorded from the real agent (Haiku
+//!   fixing a word count), at its recorded pace; in Ask mode its last test
+//!   run waits for approval
 //! - anything else: a short Markdown reply
 //!
 //! `FAKE_CLAUDE_SPEED` scales every pause (0 makes it instant);
@@ -532,6 +535,62 @@ impl Agent {
         }
     }
 
+    /// [`REAL_TURN`] as it was recorded: every line in order, each after
+    /// the pause that came before it (at most 3 s, scaled). In Ask mode the
+    /// call marked `ask` waits for approval before its result.
+    fn replay(&mut self, ask: bool) -> Result<(), Cut> {
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let cwd = serde_json::to_string(&cwd).unwrap_or_default();
+        let cwd = &cwd[1..cwd.len() - 1];
+        let (mut at, mut said) = (0, String::new());
+        let mut waiting: Option<(String, String, Value)> = None;
+        for row in REAL_TURN.lines() {
+            let row: Value = serde_json::from_str(&row.replace("{cwd}", cwd))
+                .expect("assets/real-turn.jsonl is one JSON object a line");
+            let ms = row["ms"].as_u64().unwrap_or(at);
+            self.pause(ms.saturating_sub(at).min(3000))?;
+            at = ms;
+            let line = &row["line"];
+            let calls = line["message"]["content"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            if line["type"] == "assistant" {
+                for b in &calls {
+                    match b["type"].as_str() {
+                        Some("text") => said = b["text"].as_str().unwrap_or_default().into(),
+                        Some("tool_use") if ask && row["ask"] == true => {
+                            let s = |k: &str| b[k].as_str().unwrap_or_default().to_string();
+                            waiting = Some((s("name"), s("id"), b["input"].clone()));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // The call's result is next: ask first, as Claude Code does.
+            if let Some((name, id, input)) = waiting.take_if(|(_, id, _)| {
+                calls
+                    .iter()
+                    .any(|b| b["tool_use_id"].as_str() == Some(id.as_str()))
+            }) {
+                let resp = self.permission(&name, &id, &input)?;
+                if resp["behavior"] != "allow" {
+                    let why = resp["message"].as_str().unwrap_or("Denied").to_string();
+                    self.result(&id, &why, true, None);
+                    self.say(&format!("Okay, I didn't run it: {why}"), None)?;
+                    self.end("done", false);
+                    return Ok(());
+                }
+            }
+            let parent = line["parent_tool_use_id"].as_str().map(str::to_owned);
+            out(self.envelope(line.clone(), parent.as_deref()));
+        }
+        self.end(&said, false);
+        Ok(())
+    }
+
     /// Ask for permission and wait for the answer. A command comes with a
     /// rule it could save, as Claude Code suggests one; other tools don't.
     fn permission(&mut self, tool: &str, tool_id: &str, input: &Value) -> Result<Value, Cut> {
@@ -960,6 +1019,9 @@ impl Agent {
         self.pause(250)?;
         if lower.starts_with('/') {
             return self.command(text);
+        }
+        if lower.contains("replay a real turn") {
+            return self.replay(ask);
         }
         // Edges, checked before anything else so the odd words in them
         // can't set off another script.
@@ -1674,6 +1736,13 @@ fn file_body(path: &str, prompt: &str) -> String {
         format!("{prompt}\n")
     }
 }
+
+/// One real turn, recorded from `claude -p` (Haiku, with dent's flags and
+/// plan tool) fixing a word count in a scratch project: each stream-json
+/// line with the ms it arrived after the first, `{cwd}` for the project.
+/// One call is marked `ask`, for the approval. To record another, see
+/// docs/workflow-log.md ("Real walkthroughs used for every visual check").
+const REAL_TURN: &str = include_str!("../assets/real-turn.jsonl");
 
 const LONG: &str = "Let me walk through the whole design before changing anything, because the pieces depend on each other more than it first looks.\n\n## The event log\n\nEvery session is a list of events, and each one gets a number. A client that drops off asks for everything after the last number it saw, so catching up and staying live are the same thing. Nothing is ever rewritten, which keeps the log simple to reason about and cheap to copy.\n\n## The agents\n\nThe agent runs as a child of a tiny holder process rather than of the daemon itself. That way the daemon can restart, crash or upgrade without the agent noticing: the holder keeps the pipes open and writes everything to disk, and the new daemon picks up from the last byte it recorded.\n\n## The clients\n\nThe desktop and the phone are views. They keep a cache so they open instantly, and they send commands to the daemon that owns the session. They never decide anything on their own, so two of them can't disagree about what happened.\n\n## What I'd change\n\n1. Batch events while catching up, so a phone isn't held back by the cost of each message.\n2. Store only complete messages, and stream the rest.\n3. Keep the last usage reading per account, since the agent only reports it when it changes.\n\nThat's the plan. Shall I start with the first one?";
 

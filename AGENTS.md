@@ -49,8 +49,10 @@ Boundaries enforced by `just verify`: logic crates never import GPUI.
 | Command | When | What |
 | --- | --- | --- |
 | `just dev` | Every save | Build and run the thing you're working on (`just dev <crate>`) |
-| `just check` | While working | `cargo check` + unit tests for the crates you touched (`just check <crate>…`, default: all) |
-| `just verify` | Before merging | fmt, clippy `-D warnings`, all tests, crate-boundary check |
+| `just check` | While working | `cargo check` + unit tests (`just check <crate>…`; default: the crates changed since `origin/main` and everything depending on them) |
+| `just verify` | Before merging | fmt, clippy `-D warnings`, tests and the crate-boundary check, for the same changed crates and their dependents (`scripts/affected.py`). `just verify-all` for every crate, `just verify-spikes` for spikes too |
+| `scripts/walk.sh look --shots DIR` | A visual change | The fake agent replays one recorded real turn; stills of each moment in both themes, in well under a minute |
+| `scripts/walk.sh a+b` | A UI change | Only the scenes it touched (names in `crates/desktop/src/walk/mod.rs`). The full `checks` suite once per batch, started in the background while the next item begins; `compare` (the real agent) once, before a batch lands |
 
 Never run nightly-tier suites (screenshots, fuzzing, real agents) on your own.
 
@@ -79,7 +81,14 @@ The owner is often away from the machine doing the work, so the workflow has to 
 - **Speak up:** if something is costing a lot right now (a suite run repeatedly, a step waiting on the owner), suggest the fix in chat as well as logging it.
 - **Measure:** every entry carries numbers, and every fix is re-measured. "Feels faster" isn't a result.
 - **Work the log when asked:** take the open entries highest cost first, fix, re-measure, and move each to Done with before and after numbers.
-- **Be honest about output:** say what you checked and what you didn't. Describe behaviour only after reading the code or running it.
+- **Be honest about output:** say what you checked and what you didn't. Describe behaviour only after reading the code or running it; otherwise say it's unverified.
+
+## Working rules
+
+- **Briefs:** for a "make it feel like X" request, write the brief back in one paragraph (which experience, which moments) and get a yes before researching.
+- **Edits:** use the editor tool, which refuses an anchor that isn't unique, for anything but mechanical renames. A scripted edit anchors on whole lines and asserts each anchor matched exactly once.
+- **One writer per area:** before starting, check `git worktree list` and open branches for work on the same files. A second session starts from the first one's latest main, or waits; two walkthroughs never share the screen.
+- **Checks test the thing:** a walkthrough check reads a probe drawn by the feature it names (`drawn(d, "drop-message")`), not a stand-in such as "a drag is active".
 
 ## Definition of done
 

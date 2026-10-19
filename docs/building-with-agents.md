@@ -9,11 +9,11 @@ Speed of iteration comes before test coverage, especially early on.
 | Tier | When it runs | What it runs | Target time |
 | --- | --- | --- | --- |
 | Inner loop | Every save | `just dev` rebuilds and relaunches only what changed; `just check` compiles and runs unit tests for the crates you touched | Seconds |
-| Before merge | When a change is ready | `just verify`: lints, all unit tests, replays and UI checks for the areas the change touched | A few minutes |
+| Before merge | When a change is ready | `just verify`: lints and unit tests for the crates the change touched and their dependents; `scripts/walk.sh` for the scenes it touched | A few minutes |
 | Nightly | Overnight | Screenshot comparisons, simulation, fuzzing, performance budgets, real Claude Code and Codex runs | Unlimited |
 
 - **See changes instantly:** a dev gallery window shows any screen or chat block in any state with fake data, with no agents, machines or network needed.
-- **Fast builds:** many small crates, dependencies optimised even in debug builds, a fast linker, and a parallel test runner.
+- **Fast builds:** many small crates, dependencies optimised even in debug builds, and checks only for the crates a change touches and those that depend on them (`scripts/affected.py`). The system linker and cargo's own test runner are fast enough here (linking the desktop takes 0.4 s; see the workflow log).
 - **Tests arrive as things settle:** early phases test only what protects data and sessions. Screenshot, fuzz and performance suites switch on for a screen or format once it stops changing every day.
 - **Nightly failures become tasks,** not blockers on whatever you are doing that day.
 

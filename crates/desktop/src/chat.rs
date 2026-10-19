@@ -1123,6 +1123,8 @@ impl Dent {
         // there are no words yet. Compacting and retrying keep their lead.
         let lead = (kind != "working" || words.is_empty()).then_some(lead);
         div()
+            .relative()
+            .child(probe(&self.probes, "working-line"))
             .flex()
             .items_center()
             // Its words start where a note's do.
@@ -3141,6 +3143,8 @@ impl Dent {
         let open = self.plan_open;
         let head = div()
             .id("plan-strip")
+            .relative()
+            .child(probe(&self.probes, "plan-strip"))
             .flex()
             .items_center()
             .gap(px(space::S2))

@@ -623,22 +623,37 @@ fn todos(v: &SessionView) -> Vec<(String, String, String)> {
             _ => None,
         });
     let Some(c) = last else { return Vec::new() };
-    let input = c.input();
-    input["todos"]
-        .as_array()
-        .or(input["items"].as_array())
-        .map(|a| {
-            a.iter()
-                .map(|t| {
-                    (
-                        t["status"].as_str().unwrap_or("pending").to_string(),
-                        t["content"].as_str().unwrap_or_default().to_string(),
-                        t["activeForm"].as_str().unwrap_or_default().to_string(),
-                    )
-                })
-                .collect()
+    plan_steps(&c.input())
+}
+
+/// A plan call's steps as (status, step, what it's doing). Agents don't
+/// all keep to the plan tool's schema (`items` of `content`): TodoWrite
+/// sends `todos`, and models used to another tool's `update_plan` send
+/// `plan` of `step`, sometimes as a JSON string rather than an array.
+fn plan_steps(input: &serde_json::Value) -> Vec<(String, String, String)> {
+    let list = ["todos", "items", "plan"]
+        .iter()
+        .find_map(|k| match &input[*k] {
+            serde_json::Value::Array(a) => Some(a.clone()),
+            serde_json::Value::String(s) => serde_json::from_str(s).ok(),
+            _ => None,
+        });
+    let text = |t: &serde_json::Value, keys: &[&str]| {
+        keys.iter()
+            .find_map(|k| t[*k].as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    list.unwrap_or_default()
+        .iter()
+        .map(|t| {
+            (
+                t["status"].as_str().unwrap_or("pending").to_string(),
+                text(t, &["content", "step"]),
+                text(t, &["activeForm"]),
+            )
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 /// The latest step of any subagent still at work, after its task.
@@ -1339,6 +1354,41 @@ mod tests {
         assert_eq!(super::changed_lines("a\nc", "a\nb\nc"), (1, 0));
         assert_eq!(super::changed_lines("same", "same"), (0, 0));
         assert_eq!(super::changed_lines("", "x\ny"), (2, 0));
+    }
+
+    #[test]
+    fn a_plan_reads_in_every_shape_agents_send() {
+        let want = vec![
+            (
+                "completed".to_string(),
+                "Find it".to_string(),
+                String::new(),
+            ),
+            (
+                "in_progress".to_string(),
+                "Fix it".to_string(),
+                String::new(),
+            ),
+        ];
+        let steps =
+            r#"[{"step":"Find it","status":"completed"},{"step":"Fix it","status":"in_progress"}]"#;
+        // As Haiku sent it to the plan tool (recorded in the fake's real turn).
+        assert_eq!(
+            super::plan_steps(&serde_json::json!({ "plan": steps })),
+            want
+        );
+        let array: serde_json::Value = serde_json::from_str(steps).unwrap();
+        assert_eq!(
+            super::plan_steps(&serde_json::json!({ "plan": array })),
+            want
+        );
+        // The tool's own schema, and TodoWrite's.
+        let items = serde_json::json!({"items": [{"content": "Find it", "status": "completed"},
+            {"content": "Fix it", "status": "in_progress"}]});
+        assert_eq!(super::plan_steps(&items), want);
+        let todos = serde_json::json!({"todos": [{"content": "Find it", "status": "completed", "activeForm": "Finding it"}]});
+        assert_eq!(super::plan_steps(&todos)[0].2, "Finding it");
+        assert!(super::plan_steps(&serde_json::json!({"plan": "not a plan"})).is_empty());
     }
 
     use super::*;
