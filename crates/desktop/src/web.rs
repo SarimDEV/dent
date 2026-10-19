@@ -1103,10 +1103,14 @@ fn byte_range(range: &str, total: u64) -> Option<(u64, u64)> {
         }
         (a, "") => {
             let a: u64 = a.parse().ok()?;
-            (a, last.min(a.saturating_add(RANGE_CHUNK - 1)))
+            (a, last)
         }
         (a, b) => (a.parse().ok()?, b.parse::<u64>().ok()?.min(last)),
     };
+    // At most a chunk at a time, whatever was asked: a player asking for
+    // all of a long recording at once gets its start and asks on, rather
+    // than dent reading gigabytes into memory.
+    let end = end.min(start.saturating_add(RANGE_CHUNK - 1));
     (start <= end).then_some((start, end))
 }
 
@@ -1209,6 +1213,15 @@ mod root_tests {
         assert_eq!(byte_range("bytes=-10", 100), Some((90, 99)));
         assert_eq!(byte_range("bytes=50-500", 100), Some((50, 99)));
         assert_eq!(byte_range("bytes=0-", 100 << 20), Some((0, (4 << 20) - 1)));
+        // All of a long file asked for at once, or its last half: a chunk.
+        assert_eq!(
+            byte_range(&format!("bytes=0-{}", (2u64 << 30) - 1), 2 << 30),
+            Some((0, (4 << 20) - 1))
+        );
+        assert_eq!(
+            byte_range("bytes=-1073741824", 2 << 30),
+            Some((1 << 30, (1 << 30) + (4 << 20) - 1))
+        );
         assert_eq!(byte_range("bytes=200-", 100), None);
         assert_eq!(byte_range("bytes=0-1", 0), None);
     }

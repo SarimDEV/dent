@@ -451,7 +451,6 @@ impl Dent {
             None => anim::ease_out(anim::progress(l.opened, OPEN_MS)),
         };
         let moving = open > 0. && open < 1.;
-        let lifting = moving;
         // The backdrop leads the picture both ways: dark by three quarters
         // of the lift, and clear before the picture is home again.
         let cover = if l.closing.is_some() {
@@ -628,7 +627,7 @@ impl Dent {
                         // has landed (shadows are never animated).
                         .border_1()
                         .border_color(gpui_kit::white().opacity(0.14 * open))
-                        .when(!lifting, |d| {
+                        .when(!moving, |d| {
                             d.shadow(vec![BoxShadow {
                                 color: hsla(0., 0., 0., 0.5),
                                 offset: point(px(0.), px(16.)),

@@ -273,7 +273,7 @@ pub fn link_at(p: Point<Pixels>, window: &Window) -> Option<String> {
     })
 }
 
-/// The link the pointer rests on: where it points, where it's drawn (the
+/// The GitHub link the pointer rests on: where it points, where it's drawn (the
 /// line of it under the pointer), and since when.
 #[derive(Clone, Debug)]
 pub struct Hovered {
@@ -332,7 +332,12 @@ fn hover(p: Point<Pixels>, window: &mut Window) {
             .find(|x| x.win == win && x.bounds.contains(&p) && x.hitbox.is_hovered(window))?;
         // Only right over its letters, not the nearest to the pointer.
         let at = placed.layout.index_for_position(p).ok()?;
-        let (r, url) = placed.links.iter().find(|(r, _)| r.contains(&at))?;
+        // Only GitHub's issues and pull requests show anything on a rest;
+        // other links aren't followed, so the window isn't redrawn for them.
+        let (r, url) = placed
+            .links
+            .iter()
+            .find(|(r, u)| r.contains(&at) && crate::github::issue(u).is_some())?;
         let line = placed.layout.line_height();
         let here = placed.layout.position_for_index(at)?;
         let start = placed.layout.position_for_index(r.start)?;

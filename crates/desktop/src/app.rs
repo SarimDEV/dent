@@ -1956,6 +1956,10 @@ impl Dent {
         if let Some(id) = &id {
             self.used(id);
         }
+        // A secret typed for one session's card never waits in another's:
+        // one click there would save it in the wrong project.
+        self.secret_input
+            .update(cx, |i, cx| i.set_value("", window, cx));
         // Find belongs to the session it searched.
         self.unmark_page();
         if self.find.take().is_some() {
@@ -5150,7 +5154,9 @@ impl Dent {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let value = self.secret_input.read(cx).value().to_string();
+        // A key copied from a dashboard often brings a space or a line
+        // break with it, which would make it a different key.
+        let value = self.secret_input.read(cx).value().trim().to_string();
         if value.is_empty() {
             return;
         }
