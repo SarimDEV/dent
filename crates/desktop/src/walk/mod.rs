@@ -35,6 +35,7 @@ mod look;
 mod markdown;
 mod motion;
 mod narration;
+mod parity;
 mod pickup;
 mod pins;
 mod polish;
@@ -51,8 +52,8 @@ mod visuals;
 use {
     ambient::*, attaching::*, changes::*, checks::*, common::*, composing::*, demo::*, edges::*,
     failures::*, find::*, finish::*, keys::*, look::*, markdown::*, motion::*, narration::*,
-    pickup::*, pins::*, polish::*, queue::*, real::*, recall::*, reply::*, stills::*, sweep::*,
-    switching::*, typing::*, view::*, visuals::*,
+    parity::*, pickup::*, pins::*, polish::*, queue::*, real::*, recall::*, reply::*, stills::*,
+    sweep::*, switching::*, typing::*, view::*, visuals::*,
 };
 
 type Pred = fn(&Dent, &App) -> bool;
@@ -208,6 +209,7 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("visuals", &[visuals]),
     ("composing", &[composing]),
     ("edges", &[edges]),
+    ("parity", &[parity]),
 ];
 
 /// Scenes that start on their own: no daemon, the real agent, or a

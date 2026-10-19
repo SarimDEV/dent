@@ -1300,6 +1300,133 @@ impl Agent {
             self.end("done", false);
             return Ok(());
         }
+        if lower.contains("make a video") {
+            // Renders a short clip into the project and names it, as an
+            // agent making a demo does.
+            let id = self.tool(
+                "Bash",
+                json!({"command": "npm run render -- --out demo.mp4", "description": "Render the demo video"}),
+                None,
+            );
+            self.pause(900)?;
+            let _ = std::fs::write("demo.mp4", include_bytes!("../assets/demo.mp4"));
+            self.result(&id, "Rendered 45 frames to demo.mp4", false, None);
+            self.say(
+                "Rendered the demo to `demo.mp4`: a second and a half at 640×480.",
+                None,
+            )?;
+            self.end("done", false);
+            return Ok(());
+        }
+        if lower.contains("show a visual") {
+            let input = json!({"title": "Sign-ups by week", "html": VISUAL_PAGE});
+            let id = self.tool("mcp__dent__show_visual", input, None);
+            self.pause(300)?;
+            self.result(&id, "Shown beside the chat.", false, None);
+            self.say(
+                "Sign-ups doubled in week 3, after the launch post, and held.",
+                None,
+            )?;
+            self.end("done", false);
+            return Ok(());
+        }
+        if lower.contains("need a key") {
+            // dent's secret tool waits for the person's answer in the folder
+            // its server was given; so does this.
+            let input = json!({"name": "STRIPE_SECRET_KEY", "why": "to run the payment tests against Stripe's test mode"});
+            let id = self.tool("mcp__dent__ask_secret", input, None);
+            let asks = std::env::args()
+                .skip_while(|a| a != "--mcp-config")
+                .nth(1)
+                .and_then(|c| serde_json::from_str::<Value>(&c).ok())
+                .and_then(|c| {
+                    c["mcpServers"]["dent"]["env"]["DENT_ASKS"]
+                        .as_str()
+                        .map(str::to_owned)
+                });
+            let Some(asks) = asks else {
+                self.result(&id, "dent can't ask for secrets here.", true, None);
+                self.end("done", false);
+                return Ok(());
+            };
+            let file = std::path::Path::new(&asks).join("STRIPE_SECRET_KEY.answer");
+            let answer = loop {
+                if let Ok(a) = std::fs::read_to_string(&file) {
+                    let _ = std::fs::remove_file(&file);
+                    break serde_json::from_str::<Value>(&a).unwrap_or(Value::Null);
+                }
+                self.pause(100)?;
+            };
+            match answer["saved"].as_str() {
+                Some(path) => {
+                    self.result(
+                        &id,
+                        &format!("The person saved STRIPE_SECRET_KEY in {path}."),
+                        false,
+                        None,
+                    );
+                    self.say("Thanks. The payment tests load it from there now.", None)?;
+                }
+                None => {
+                    self.result(
+                        &id,
+                        "The person chose not to give STRIPE_SECRET_KEY.",
+                        false,
+                        None,
+                    );
+                    self.say("No problem: I'll skip the payment tests.", None)?;
+                }
+            }
+            self.end("done", false);
+            return Ok(());
+        }
+        if lower.contains("ask two things") {
+            let input = json!({"questions": [
+                {"question": "Which database should the cache use?", "header": "Cache",
+                    "multiSelect": false, "options": [
+                    {"label": "SQLite", "description": "One file, no server"},
+                    {"label": "Redis", "description": "Shared between machines"}]},
+                {"question": "How long should entries live?", "header": "Lifetime",
+                    "multiSelect": false, "options": [
+                    {"label": "An hour", "description": ""},
+                    {"label": "A day", "description": ""}]}]});
+            let id = self.tool("AskUserQuestion", input.clone(), None);
+            let resp = self.permission("AskUserQuestion", &id, &input)?;
+            if resp["behavior"] == "deny" {
+                self.result(
+                    &id,
+                    resp["message"].as_str().unwrap_or("Skipped"),
+                    true,
+                    None,
+                );
+                self.say(
+                    "I'll assume SQLite and an hour, and say so in the summary.",
+                    None,
+                )?;
+            } else {
+                let picked: Vec<String> = resp["updatedInput"]["answers"]
+                    .as_object()
+                    .map(|m| {
+                        m.values()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.result(
+                    &id,
+                    &format!("User answered: {}", picked.join(", ")),
+                    false,
+                    None,
+                );
+                self.say(
+                    &format!("Going with **{}**.", picked.join("** and **")),
+                    None,
+                )?;
+            }
+            self.end("done", false);
+            return Ok(());
+        }
         if lower.contains("ask") {
             // `ask several`: a question that takes more than one answer.
             let input = if lower.contains("several") {
@@ -1764,3 +1891,16 @@ fn base64(bytes: &[u8]) -> String {
     }
     s
 }
+
+/// The page `show a visual` shows: a small bar chart, all inline.
+const VISUAL_PAGE: &str = r#"<!doctype html><html><head><meta charset="utf-8"><style>
+body{font:14px -apple-system,system-ui,sans-serif;margin:24px;color:#1d1d1f;background:#fff}
+h1{font-size:17px;margin:0 0 16px}.bars{display:flex;gap:14px;align-items:flex-end;height:180px}
+.bar{flex:1;background:linear-gradient(#7aa7ff,#3d6fe0);border-radius:6px 6px 0 0;position:relative}
+.bar span{position:absolute;top:-20px;left:0;right:0;text-align:center;font-size:12px;color:#555}
+.weeks{display:flex;gap:14px;margin-top:8px}.weeks div{flex:1;text-align:center;color:#888;font-size:12px}
+</style></head><body><h1>Sign-ups by week</h1><div class="bars">
+<div class="bar" style="height:30%"><span>120</span></div><div class="bar" style="height:36%"><span>144</span></div>
+<div class="bar" style="height:72%"><span>290</span></div><div class="bar" style="height:70%"><span>281</span></div>
+<div class="bar" style="height:76%"><span>305</span></div></div>
+<div class="weeks"><div>W1</div><div>W2</div><div>W3</div><div>W4</div><div>W5</div></div></body></html>"#;
