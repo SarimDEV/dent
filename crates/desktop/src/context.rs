@@ -30,6 +30,8 @@ pub enum Do {
     Rename(String),
     /// Ask for a new title from what the session is about now.
     Retitle(String),
+    /// Start the session's agent again, to load new skills and settings.
+    Restart(String),
     Fork(String),
     CloseSession(String),
     Reopen(String),
@@ -87,6 +89,10 @@ impl Dent {
                     .map(|s| s.title.to_string())
                     .unwrap_or_default();
                 self.start_rename(&id, &title, window, cx);
+            }
+            Do::Restart(id) => {
+                self.live
+                    .send(dent_protocol::Request::RestartAgent { session: id });
             }
             Do::Retitle(id) => {
                 self.live

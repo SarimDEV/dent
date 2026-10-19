@@ -259,6 +259,7 @@ impl Render for Dent {
                 data::Item::Question { .. } => Some("Type your own answer, or pick one above"),
                 data::Item::Plan { .. } => Some("What to change in the plan (optional)"),
                 data::Item::Approval { .. } => Some("Reason for denying (optional)"),
+                data::Item::Secret { .. } => Some("The secret goes in the card above, not here"),
                 _ => None,
             })
         });

@@ -9,14 +9,15 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use dent_protocol::{
-    Act, Activity, Answer, Body, CommandOutcome, Out, Outcome, Permission, Section, Status, Task,
+    Act, Activity, Answer, Body, CommandOutcome, Out, Outcome, Permission, SecretPlace, Section,
+    Status, Task,
 };
 use dent_session_holder::wire::Proc as HeldProc;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
-use crate::claude::{self, wire, wire::Inbound};
+use crate::claude::{self, wire, wire::AssistantBlock, wire::Inbound};
 use crate::daemon::Daemon;
 use crate::store::{Row, Source};
 
@@ -92,6 +93,7 @@ pub enum Op {
         act: Act,
     },
     SetEffort(String),
+    Restart,
     Rename(String),
     Close,
     Reopen,
@@ -641,6 +643,25 @@ impl Session {
                 }
                 Ok(())
             }
+            Op::Restart => {
+                // As a new effort does: a fresh process resuming the same
+                // conversation, which reads skills, plugins and settings anew.
+                let later = self.in_turn || !self.background.is_empty();
+                if later {
+                    self.respawn = true;
+                } else {
+                    self.retire_proc().await;
+                }
+                self.log(Body::Notice {
+                    text: if later {
+                        "Claude Code starts again once this turn is done, with skills, plugins and settings as they are now."
+                    } else {
+                        "Claude Code starts again with your next message, with skills, plugins and settings as they are now."
+                    }
+                    .into(),
+                });
+                Ok(())
+            }
             Op::Rename(title) => {
                 // Named by you: dent never titles it again on its own.
                 let _ = self
@@ -1097,6 +1118,8 @@ impl Session {
         let env = self.d.env();
         // Each new agent also refreshes the PATH for the one after it.
         self.d.refresh_env();
+        let asks = self.asks_dir();
+        let _ = std::fs::create_dir_all(&asks);
         let argv = claude::argv(
             &env.claude,
             &env.path,
@@ -1104,6 +1127,7 @@ impl Session {
             self.permission,
             &start,
             self.effort.as_deref(),
+            &asks,
         );
         h.spawn(&proc, argv, Some(self.cwd.clone().into()), Vec::new())
             .await?;
@@ -1200,6 +1224,9 @@ impl Session {
         let Some(p) = self.asked.get(&id) else {
             bail!("already answered");
         };
+        if p.tool == crate::plan_tool::SECRET {
+            return self.answer_secret(id, answer);
+        }
         let msg = match (&answer, &p.dialog) {
             (Answer::Choose { answers }, Some(values)) => {
                 let picked = answers.first().map(String::as_str).unwrap_or_default();
@@ -1225,11 +1252,65 @@ impl Session {
                     &Value::Null,
                 ),
                 Answer::Expired => bail!("can't answer with expired"),
+                Answer::Secret { .. } => bail!("only a secret's card takes a secret"),
             },
         };
         self.write(&msg).await?;
         self.asked.remove(&id);
         self.log(Body::Answered { id, answer });
+        Ok(())
+    }
+
+    /// Where dent's tools wait for a secret's answer, this session's own.
+    fn asks_dir(&self) -> std::path::PathBuf {
+        self.d.paths.state.join("asks").join(&self.id)
+    }
+
+    /// The person's answer to `ask_secret`: the secret saved where they
+    /// chose, and only where it went said back. The value never goes in
+    /// the log, nor to the agent.
+    fn answer_secret(&mut self, id: String, answer: Answer) -> Result<()> {
+        let Some(p) = self.asked.get(&id) else {
+            bail!("already answered");
+        };
+        let name = crate::plan_tool::secret_key(p.input["name"].as_str().unwrap_or_default());
+        let (said, logged) = match answer {
+            Answer::Secret { value, place } => {
+                let file = match place {
+                    SecretPlace::Project => std::path::Path::new(&self.cwd).join(".env"),
+                    SecretPlace::Session => self
+                        .d
+                        .paths
+                        .state
+                        .join("secrets")
+                        .join(format!("{}.env", self.id)),
+                };
+                // A .env git would track is ignored first, so the secret
+                // never shows in Changes or goes into a commit.
+                let cwd = std::path::Path::new(&self.cwd);
+                let ignored_now = place == SecretPlace::Project
+                    && crate::secrets::tracked(cwd, &file)
+                    && crate::secrets::ignore(cwd, ".env").is_ok();
+                crate::secrets::save(&file, &name, &value)?;
+                (
+                    serde_json::json!({"saved": file.display().to_string(), "ignored": ignored_now}),
+                    Answer::Secret {
+                        value: String::new(),
+                        place,
+                    },
+                )
+            }
+            Answer::Deny { message } => (
+                serde_json::json!({"declined": true}),
+                Answer::Deny { message },
+            ),
+            _ => bail!("a secret is given or turned down"),
+        };
+        let dir = self.asks_dir();
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join(format!("{name}.answer")), said.to_string())?;
+        self.asked.remove(&id);
+        self.log(Body::Answered { id, answer: logged });
         Ok(())
     }
 
@@ -1499,10 +1580,44 @@ impl Session {
                         self.d.set_activity(&self.id, None);
                     }
                 }
+                // The agent asking for a secret waits on dent's own card.
+                let secrets: Vec<(String, Value)> = blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        AssistantBlock::ToolUse { id, name, input }
+                            if name == crate::plan_tool::SECRET =>
+                        {
+                            Some((id.clone(), input.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
                 // A server tool's result comes with its call.
                 for b in claude::assistant_bodies(parent, uuid, blocks, results, &mut self.reports)
                 {
                     self.log_from(b, end);
+                }
+                for (id, input) in secrets {
+                    self.log_from(
+                        Body::Asked {
+                            id: id.clone(),
+                            tool: crate::plan_tool::SECRET.into(),
+                            input: input.to_string(),
+                            description: None,
+                            keeps: false,
+                            suggestions: None,
+                        },
+                        end,
+                    );
+                    self.asked.insert(
+                        id,
+                        Pending {
+                            tool: crate::plan_tool::SECRET.into(),
+                            input,
+                            suggestions: Value::Null,
+                            dialog: None,
+                        },
+                    );
                 }
             }
             Inbound::ToolResults { parent, results } => {

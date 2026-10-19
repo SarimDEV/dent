@@ -472,8 +472,25 @@ pub enum Answer {
     },
     /// Answers to an agent's questions, in order.
     Choose { answers: Vec<String> },
+    /// A secret the agent asked for, and where to keep it. The value goes
+    /// only to the daemon, which saves it; the log keeps it empty.
+    Secret {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        value: String,
+        place: SecretPlace,
+    },
     /// The agent went away before anyone answered.
     Expired,
+}
+
+/// Where a secret the agent asked for is kept.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretPlace {
+    /// The project's `.env`.
+    Project,
+    /// A file of the session's own, under the daemon's state.
+    Session,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -804,6 +821,12 @@ pub enum Request {
     Rename {
         session: SessionId,
         title: String,
+    },
+    /// Start the agent again on the same conversation, so skills, plugins,
+    /// MCP servers and settings changed on disk load: with the next message,
+    /// or once the turn and its background work are done.
+    RestartAgent {
+        session: SessionId,
     },
     Close {
         session: SessionId,

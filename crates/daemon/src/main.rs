@@ -20,6 +20,7 @@ mod login;
 mod paths;
 mod plan_tool;
 mod projects;
+mod secrets;
 mod server;
 mod session;
 mod store;

@@ -116,6 +116,10 @@ impl Render for PopOut {
             let mut p = p.borrow_mut();
             if server {
                 p.show_server(a.path);
+            } else if a.kind == Kind::Media {
+                if let Some(f) = crate::viewer::art_file(&a) {
+                    p.show_file(&f);
+                }
             } else {
                 p.show(a.path, latest, &a.versions[latest - 1], a.dir.as_deref());
             }

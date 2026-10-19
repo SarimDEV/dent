@@ -286,6 +286,9 @@ pub const DAEMON_WAIT: Duration = Duration::from_secs(30);
 /// answer.
 pub const ASKED_WAIT: Duration = Duration::from_secs(3);
 
+/// What the agent hears when a question is skipped.
+const SKIPPED: &str = "The person skipped this question without answering. Carry on with your best judgment, and say what you assumed.";
+
 /// Where the new-session page keeps its draft and files among the
 /// sessions' (in `drafts` and the prefs).
 pub const NEW_DRAFT: &str = "";
@@ -682,6 +685,8 @@ pub struct Dent {
     pub flash: Option<(String, usize, String)>,
     /// The question card, when the keyboard is on it.
     pub ask_focus: FocusHandle,
+    /// The secret being typed into its card: masked, never kept in a draft.
+    pub secret_input: Entity<gpui_kit::base::input::InputState>,
     /// Whether the waiting ask's card had the keyboard at the last draw.
     pub ask_keyed: bool,
     /// Whether the reply box had the keyboard at the last draw.
@@ -726,6 +731,8 @@ pub struct Dent {
     /// The permission mode last asked for, by session, and when: until the
     /// daemon says it's in effect, ⇧Tab steps on from it.
     pub asked_permission: Option<(String, Permission, Instant)>,
+    /// The effort level just asked for (Tab, the menu), as the mode is.
+    pub asked_effort: Option<(String, Option<String>, Instant)>,
     /// dent's own commands you ran in each session (`/model`, `/rename`…),
     /// with when: they never reach the agent's log, but ↑ brings them back.
     pub ran_own: HashMap<String, Vec<(u64, String)>>,
@@ -880,6 +887,12 @@ pub struct Dent {
     pub mdv: crate::markdown::Md,
     /// Decoded pictures by artifact version, so a redraw never decodes or hashes again.
     pub pictures: HashMap<(&'static str, usize), Arc<Image>>,
+    /// A still of each video or PDF a card shows, by its path: `None` while
+    /// it's being made, or when none could be.
+    pub posters: HashMap<&'static str, Option<std::path::PathBuf>>,
+    /// A picture of each page as the viewer last drew it, with its version,
+    /// for its card in the chat.
+    pub stills: HashMap<&'static str, (usize, Arc<Image>)>,
     /// Pages open in their own windows, by artifact.
     pub popouts: HashMap<&'static str, (AnyWindowHandle, Entity<crate::popout::PopOut>)>,
     /// Dev servers that stopped answering, by tab.
@@ -1028,6 +1041,36 @@ impl Dent {
         )
         .detach();
         single_line(&rename_input, window, cx);
+        let secret_input = cx.new(|cx| {
+            gpui_kit::base::input::InputState::new(window, cx)
+                .masked(true)
+                .placeholder("Paste or type it")
+        });
+        cx.subscribe_in(
+            &secret_input,
+            window,
+            |this, _, ev: &InputEvent, window, cx| {
+                match ev {
+                    InputEvent::Change => cx.notify(),
+                    // Return saves it where the first button would.
+                    InputEvent::PressEnter { .. } => {
+                        if let Some(id) = this.selected.clone()
+                            && let Some(Item::Secret { id: ask, .. }) = this.open_ask(&id)
+                        {
+                            this.give_secret(
+                                &id,
+                                ask,
+                                dent_protocol::SecretPlace::Project,
+                                window,
+                                cx,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            },
+        )
+        .detach();
         let find_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 1)
@@ -1215,6 +1258,7 @@ impl Dent {
             focus: cx.focus_handle(),
             inbox_focus: cx.focus_handle(),
             ask_focus: cx.focus_handle(),
+            secret_input,
             ask_keyed: false,
             composer_keyed: false,
             ticks: HashMap::new(),
@@ -1330,6 +1374,7 @@ impl Dent {
             ran_own: HashMap::new(),
             ask_shown: None,
             asked_permission: None,
+            asked_effort: None,
             expanded: HashSet::new(),
             acting: Vec::new(),
             signing: HashMap::new(),
@@ -1406,6 +1451,8 @@ impl Dent {
             md: Default::default(),
             mdv: crate::markdown::Md::default(),
             pictures: HashMap::new(),
+            posters: HashMap::new(),
+            stills: HashMap::new(),
             popouts: HashMap::new(),
             servers_down: Default::default(),
             server_watch: None,
@@ -1681,9 +1728,13 @@ impl Dent {
             self.open_art(a, None, cx);
             return;
         }
-        let shown = std::fs::read(path)
-            .ok()
-            .and_then(|b| crate::data::Kind::opened(path, &b));
+        // A video or a PDF is known by its name; anything else is read to
+        // see whether it's text.
+        let shown = crate::data::Kind::of(path).or_else(|| {
+            std::fs::read(path)
+                .ok()
+                .and_then(|b| crate::data::Kind::opened(path, &b))
+        });
         if shown.is_none() {
             crate::open::open(path, cx);
             return;
@@ -1703,8 +1754,14 @@ impl Dent {
 
     /// Read a file into a viewer tab of `session`'s; its id, if it could.
     fn load_opened(&mut self, session: &str, path: &str) -> Option<&'static str> {
-        let bytes = std::fs::read(path).ok()?;
-        let kind = crate::data::Kind::opened(path, &bytes)?;
+        // Media plays from disk; it's never read in whole.
+        let (kind, bytes) = match crate::data::Kind::of(path) {
+            Some(crate::data::Kind::Media) => (crate::data::Kind::Media, Vec::new()),
+            _ => {
+                let bytes = std::fs::read(path).ok()?;
+                (crate::data::Kind::opened(path, &bytes)?, bytes)
+            }
+        };
         let id = crate::data::intern(&format!("{session}/open/{path}"));
         let name = std::path::Path::new(path)
             .file_name()
@@ -1772,6 +1829,17 @@ impl Dent {
             return;
         }
         self.opened_at.insert(art, m);
+        // A video made again plays the new one: the page loads it afresh.
+        if self
+            .art(art)
+            .is_some_and(|a| a.kind == crate::data::Kind::Media)
+        {
+            if let Some(p) = &self.preview {
+                p.borrow_mut().reload();
+            }
+            self.updated_at.insert(art, Instant::now());
+            return;
+        }
         if let Ok(bytes) = std::fs::read(path)
             && let Some(a) = self.arts.iter_mut().find(|a| a.id == art)
         {
@@ -2860,6 +2928,43 @@ impl Dent {
             }
             return true;
         }
+        // Tab in the reply box or a new session's field steps the effort,
+        // Default up to the most the model takes and round again, unless a
+        // menu is open (there Tab picks).
+        if k.key == "tab"
+            && plain
+            && self.menu.is_none()
+            && let Some(f @ (Field::Composer | Field::Starter)) = self.field_focused(window, cx)
+            && self.completion(cx).is_none_or(|c| c.items.is_empty())
+        {
+            let session = (f == Field::Composer)
+                .then(|| self.current().cloned())
+                .flatten();
+            let (model, now) = match &session {
+                Some(s) => (
+                    s.model.clone().unwrap_or_else(|| "default".into()),
+                    self.effort_shown(s),
+                ),
+                None => (
+                    self.defaults
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| "default".into()),
+                    self.defaults.effort.clone(),
+                ),
+            };
+            let steps = self.effort_steps(&model, now.as_deref());
+            let at = steps.iter().position(|e| *e == now.as_deref()).unwrap_or(0);
+            let next = steps.get((at + 1) % steps.len().max(1)).copied().flatten();
+            let next = next.map(str::to_string);
+            if session.is_some() {
+                self.set_effort(next, cx);
+            } else {
+                self.defaults.effort = next;
+                cx.notify();
+            }
+            return true;
+        }
         // ? with no text field in use: the shortcuts sheet.
         if k.key_char.as_deref() == Some("?")
             && !k.modifiers.platform
@@ -3273,6 +3378,18 @@ impl Dent {
             }
             return true;
         }
+        // On a card of several questions, ⌫ goes back to the one before:
+        // its answer is taken back, to pick again.
+        if plain
+            && k.key == "backspace"
+            && self.ask_focus.is_focused(window)
+            && let Some(id) = self.selected.clone()
+            && let Some(Item::Question { id: ask, .. }) = self.open_ask(&id)
+            && self.back_a_question(&ask)
+        {
+            cx.notify();
+            return true;
+        }
         // On the card, Return finishes a question that takes several.
         if plain
             && k.key == "enter"
@@ -3300,9 +3417,10 @@ impl Dent {
             .clone()
             .and_then(|id| self.open_ask(&id))
             .and_then(|i| match i {
-                Item::Approval { id, .. } | Item::Plan { id, .. } | Item::Question { id, .. } => {
-                    Some(id)
-                }
+                Item::Approval { id, .. }
+                | Item::Plan { id, .. }
+                | Item::Question { id, .. }
+                | Item::Secret { id, .. } => Some(id),
                 _ => None,
             });
         if self.ask_shown.as_ref().map(|(a, _)| a) != ask.as_ref() {
@@ -3921,6 +4039,13 @@ impl Dent {
                     }
                 }
             }
+            "restart" => {
+                if let Some(s) = session {
+                    self.live.send(Request::RestartAgent {
+                        session: s.id.clone(),
+                    });
+                }
+            }
             "clear" => {
                 // A fresh start in the same folder (as any new session from
                 // here is); this session stays.
@@ -4076,6 +4201,21 @@ impl Dent {
                     path: crate::data::intern(&reachable(url)),
                     dir: None,
                     versions: Vec::new(),
+                });
+            }
+        }
+        // Media its replies named play from disk, with no versions.
+        for path in &s.media {
+            let id = crate::bridge::art_id(&s.id, path);
+            if !self.arts.iter().any(|a| a.id == id) {
+                let name = path.rsplit('/').next().unwrap_or(path);
+                self.arts.push(Artifact {
+                    id,
+                    kind: crate::data::Kind::Media,
+                    title: crate::data::intern(name),
+                    path: crate::data::intern(path),
+                    dir: None,
+                    versions: vec![Rc::from(&b""[..])],
                 });
             }
         }
@@ -4431,12 +4571,20 @@ impl Dent {
         // something, the text is the reason for denying; on a plan, it's
         // what to change. That's Return's (and the send button's): ⌘↩ only
         // ever steers.
-        if !steer && d.atts.is_empty() {
-            if self.answer_with_text(&id, &text, cx) {
+        // Files attached to a typed answer go with it, by path, for the
+        // agent to read.
+        let files: Vec<String> = d
+            .atts
+            .iter()
+            .filter_map(|a| a.path().map(str::to_string))
+            .collect();
+        if !steer && files.len() == d.atts.len() {
+            if self.answer_with_text(&id, &crate::compose::with_files(&text, &files), cx) {
                 return;
             }
-            if let Some(Item::Approval { id: ask, .. } | Item::Plan { id: ask, .. }) =
-                self.open_ask(&id)
+            if d.atts.is_empty()
+                && let Some(Item::Approval { id: ask, .. } | Item::Plan { id: ask, .. }) =
+                    self.open_ask(&id)
             {
                 self.reply_to_ask(&id, ask, Answer::Deny { message: text }, cx);
                 return;
@@ -4802,7 +4950,10 @@ impl Dent {
             .find(|i| {
                 matches!(
                     i,
-                    Item::Approval { .. } | Item::Question { .. } | Item::Plan { .. }
+                    Item::Approval { .. }
+                        | Item::Question { .. }
+                        | Item::Plan { .. }
+                        | Item::Secret { .. }
                 )
             })
             .cloned()
@@ -4830,6 +4981,7 @@ impl Dent {
                 Item::Approval { id: a, .. }
                 | Item::Plan { id: a, .. }
                 | Item::Question { id: a, .. }
+                | Item::Secret { id: a, .. }
                     if a == want =>
                 {
                     Some(i.clone())
@@ -4944,6 +5096,74 @@ impl Dent {
             });
         })
         .detach();
+    }
+
+    /// Take back the last answer given on a card of several questions, so
+    /// that question is the one to answer again. Whether there was one.
+    pub fn back_a_question(&mut self, ask: &str) -> bool {
+        let Some(picks) = self.picks.get_mut(ask) else {
+            return false;
+        };
+        let Some(last) = picks.iter().rposition(Option::is_some) else {
+            return false;
+        };
+        picks[last] = None;
+        true
+    }
+
+    /// Give the secret typed in its card, kept in `place`. The field empties
+    /// at once; the value goes to the daemon and nowhere else.
+    pub fn give_secret(
+        &mut self,
+        id: &str,
+        ask: String,
+        place: dent_protocol::SecretPlace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = self.secret_input.read(cx).value().to_string();
+        if value.is_empty() {
+            return;
+        }
+        self.secret_input
+            .update(cx, |i, cx| i.set_value("", window, cx));
+        self.reply_to_ask(id, ask, Answer::Secret { value, place }, cx);
+        cx.notify();
+    }
+
+    /// Turn down a secret the agent asked for.
+    pub fn refuse_secret(
+        &mut self,
+        id: &str,
+        ask: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.secret_input
+            .update(cx, |i, cx| i.set_value("", window, cx));
+        self.reply_to_ask(
+            id,
+            ask,
+            Answer::Deny {
+                message: String::new(),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Skip a question: the agent hears it went unanswered and carries on.
+    pub fn skip_question(&mut self, id: &str, ask: String, cx: &mut Context<Self>) {
+        self.picks.remove(&ask);
+        self.reply_to_ask(
+            id,
+            ask,
+            Answer::Deny {
+                message: SKIPPED.into(),
+            },
+            cx,
+        );
+        cx.notify();
     }
 
     /// The ticked choices answer a question that takes several, in the
@@ -5751,6 +5971,7 @@ impl Dent {
 
     pub fn set_effort(&mut self, effort: Option<String>, cx: &mut Context<Self>) {
         if let Some(id) = self.selected.clone() {
+            self.asked_effort = Some((id.clone(), effort.clone(), Instant::now()));
             self.live.send(Request::SetEffort {
                 session: id,
                 effort: effort.clone().unwrap_or_default(),
@@ -5758,6 +5979,36 @@ impl Dent {
         }
         self.defaults.effort = effort;
         cx.notify();
+    }
+
+    /// The effort a session's chip shows: the one just asked for while the
+    /// daemon hasn't answered, then what's in effect.
+    pub fn effort_shown(&self, s: &Session) -> Option<String> {
+        self.asked_effort
+            .as_ref()
+            .filter(|(id, _, at)| *id == s.id && at.elapsed() < ASKED_WAIT)
+            .map_or(s.effort.clone(), |(_, e, _)| e.clone())
+    }
+
+    /// The effort levels `model` takes, in order from Default up: the
+    /// effort menu's rows, and what Tab steps through. `current` stays in
+    /// even if the model doesn't list it.
+    pub fn effort_steps(&self, model: &str, current: Option<&str>) -> Vec<Option<&'static str>> {
+        let takes = self
+            .models
+            .iter()
+            .find(|m| m.id == model)
+            .map(|m| m.efforts.clone())
+            .unwrap_or_default();
+        crate::chat::EFFORTS
+            .iter()
+            .map(|(v, _)| *v)
+            .filter(|value| {
+                value.is_none_or(|v| {
+                    takes.is_empty() || takes.iter().any(|e| e == v) || current == Some(v)
+                })
+            })
+            .collect()
     }
 
     /// The mode a session's chip shows: the one just asked for (⇧Tab, the
@@ -6082,6 +6333,33 @@ impl Dent {
         Some(p)
     }
 
+    /// A still of the video or PDF at `path` for its card, made once by the
+    /// Mac's own Quick Look off the main thread; `None` until it's ready.
+    pub fn poster(
+        &mut self,
+        path: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Option<std::path::PathBuf> {
+        if let Some(p) = self.posters.get(path) {
+            return p.clone();
+        }
+        self.posters.insert(path, None);
+        let made = cx
+            .background_executor()
+            .spawn(async move { crate::compose::poster(std::path::Path::new(path)) });
+        cx.spawn(async move |this, cx| {
+            let made = made.await;
+            let _ = this.update(cx, |this, cx| {
+                if made.is_some() {
+                    this.posters.insert(path, made);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        None
+    }
+
     /// Keep the conversation list's measurements in step with its items:
     /// a new session starts at the end; changed items are measured again.
     pub fn sync_transcript(&mut self, s: &Session) {
@@ -6220,6 +6498,7 @@ impl Dent {
                     .map(|p| p.iter().flatten().count())
                     .hash(&mut h);
             }
+            Item::Secret { id, name, why } => (id, name, why).hash(&mut h),
             Item::Note { text, .. } => fp(text, &mut h),
             Item::Changed { paths } => paths.hash(&mut h),
             Item::TurnEnd { at, took } => (at, took).hash(&mut h),
@@ -6746,6 +7025,11 @@ impl Dent {
         d.extend(self.sent_at.as_ref().map(|(_, _, at)| *at + STOPPABLE));
         d.extend(
             self.asked_permission
+                .as_ref()
+                .map(|(_, _, at)| *at + ASKED_WAIT),
+        );
+        d.extend(
+            self.asked_effort
                 .as_ref()
                 .map(|(_, _, at)| *at + ASKED_WAIT),
         );

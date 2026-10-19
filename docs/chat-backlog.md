@@ -54,6 +54,18 @@ What's left to make the single-agent chat as close to perfect as it can be, coll
 - [x] A table's Open side panel, and Find reaching rows a capped table keeps out of view.
 - [x] Row-at-a-time parsing for a table still streaming.
 
+## 7. From the October parity check
+
+- [x] **Video, sound and PDF** play or show in the viewer, with a card under a reply that names one ([0052](decisions/0052-media-visuals-and-secrets.md)).
+- [x] **Visuals** the agent shows with `show_visual`, and a picture of a page above its card.
+- [x] **A private card for secrets** (`ask_secret`).
+- [x] **Tab steps the effort.**
+- [x] **Question cards:** files with a typed answer, Skip, ⌫ back.
+- [x] **Restart the agent** to load new skills and plugins.
+- [x] **A hook that turns a message away says why**, tested against Claude Code 2.1.301.
+- [x] **One sound** when several sessions finish together.
+- [ ] Undecided: snoozing a session until a time; stepping between turns.
+
 ## Not now
 
 Still possible later, set aside for now:

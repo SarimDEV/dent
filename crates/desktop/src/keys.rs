@@ -258,6 +258,12 @@ pub const KEYS: &[Key] = &[
             "Step the permission mode (Ask, Edits, Plan; never Full)",
             "Shift+Tab in the reply box or a new session",
         ),
+    key("tab", Prompt, "step the effort")
+        .sheet(Writing, "Step the effort", "Tab")
+        .doc(
+            "Step the effort (Default, then each level the model takes)",
+            "Tab in the reply box or a new session, with no menu open",
+        ),
     key("enter", Card, "allow once, or start building").sheet(
         Writing,
         "Answer a waiting card",

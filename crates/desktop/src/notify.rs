@@ -9,6 +9,31 @@ pub static SOUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 /// Awake While Working).
 pub static AWAKE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
+/// Sessions that finish or ask together make one sound, not a chord: a
+/// notification within this long of the last one that sounded stays quiet.
+const SOUND_GAP: std::time::Duration = std::time::Duration::from_secs(2);
+
+static LAST_SOUND: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// Whether a notification posted `now` plays its sound, given when the
+/// last one did; it becomes the last if so.
+fn sounds(last: &mut Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    if last.is_some_and(|l| now.saturating_duration_since(l) < SOUND_GAP) {
+        return false;
+    }
+    *last = Some(now);
+    true
+}
+
+/// Whether the notification being posted now plays its sound.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn sound_now() -> bool {
+    SOUND.load(std::sync::atomic::Ordering::Relaxed)
+        && LAST_SOUND
+            .lock()
+            .is_ok_and(|mut l| sounds(&mut l, std::time::Instant::now()))
+}
+
 /// Take a session's notifications out of Notification Center: you've
 /// opened it, so they've done their job.
 pub fn clear(thread: &str) {
@@ -27,6 +52,25 @@ fn taken(posted: &mut Vec<(String, String)>, thread: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sessions_finishing_together_make_one_sound() {
+        let t = std::time::Instant::now();
+        let mut last = None;
+        assert!(super::sounds(&mut last, t));
+        assert!(!super::sounds(
+            &mut last,
+            t + std::time::Duration::from_millis(300)
+        ));
+        assert!(!super::sounds(
+            &mut last,
+            t + std::time::Duration::from_millis(1900)
+        ));
+        assert!(super::sounds(
+            &mut last,
+            t + std::time::Duration::from_secs(3)
+        ));
+    }
+
     #[test]
     fn opening_a_session_takes_only_its_notifications() {
         let mut p = vec![
@@ -155,7 +199,7 @@ mod mac {
         content.setTitle(&NSString::from_str(title));
         content.setBody(&NSString::from_str(body));
         content.setThreadIdentifier(&NSString::from_str(thread));
-        if super::SOUND.load(std::sync::atomic::Ordering::Relaxed) {
+        if super::sound_now() {
             content.setSound(Some(&UNNotificationSound::defaultSound()));
         }
         let key = format!("{thread}-{}", crate::message_id());

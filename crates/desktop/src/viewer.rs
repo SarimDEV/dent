@@ -169,6 +169,8 @@ impl Dent {
                 Tab::Art(a.id),
                 if a.kind == Kind::Server {
                     a.title.trim_start_matches("Dev server · ").to_string()
+                } else if let Some(v) = crate::data::visual_title(a.path) {
+                    v.to_string()
                 } else {
                     a.path.rsplit('/').next().unwrap_or(a.path).to_string()
                 },
@@ -385,7 +387,7 @@ impl Dent {
             .child(self.panel_toggle(cx));
         let body = match tab {
             Tab::Art(id) => match self.art(id).map(|a| a.kind) {
-                Some(Kind::Html | Kind::Server) => self.page(id, window, cx),
+                Some(Kind::Html | Kind::Server | Kind::Media) => self.page(id, window, cx),
                 Some(Kind::Doc) => self.doc(id, window, cx),
                 Some(Kind::Image) => self.image(id, window, cx),
                 Some(Kind::Text) => self.text(id, window, cx),
@@ -581,6 +583,8 @@ impl Dent {
             return div().into_any_element();
         };
         let server = a.kind == Kind::Server;
+        // A video, a sound or a PDF: no versions, widths or pointing.
+        let media = a.kind == Kind::Media;
         if self.popouts.contains_key(id) {
             return self.popped_out(id, &a, cx);
         }
@@ -595,8 +599,25 @@ impl Dent {
             let mut p = p.borrow_mut();
             if server {
                 p.show_server(a.path);
+            } else if media {
+                if let Some(f) = art_file(&a) {
+                    p.show_file(&f);
+                }
             } else {
                 p.show(a.path, v, &a.versions[v - 1], a.dir.as_deref());
+                // Its picture, for its card in the chat.
+                if let Some((src, bytes, format)) = p.take_still()
+                    && src
+                        == (crate::web::Source::File {
+                            name: a.path.to_string(),
+                            version: v,
+                        })
+                {
+                    self.stills.insert(
+                        id,
+                        (v, std::sync::Arc::new(Image::from_bytes(format, bytes))),
+                    );
+                }
             }
         }
         let errors = self.errors.get(&(id, v)).cloned().unwrap_or_default();
@@ -667,8 +688,13 @@ impl Dent {
                         })),
                 )
             })
-            .when(!server, |d| d.children(self.versions(&a, cx)))
-            .child(div().w(px(1.)).h(px(16.)).mx(px(space::S1)).bg(t.hairline))
+            .when(!server && !media, |d| {
+                d.children(self.versions(&a, cx))
+                    .child(div().w(px(1.)).h(px(16.)).mx(px(space::S1)).bg(t.hairline))
+            })
+            .when(server, |d| {
+                d.child(div().w(px(1.)).h(px(16.)).mx(px(space::S1)).bg(t.hairline))
+            })
             .child(match self.toolbar_hint {
                 Some(h) => div()
                     .flex_1()
@@ -712,7 +738,7 @@ impl Dent {
             })
             // Widths frame the page inside the viewer; a page in its own
             // window is sized by its window.
-            .when(!detached && self.panel_w >= 460., |d| {
+            .when(!detached && !media && self.panel_w >= 460., |d| {
                 d.child(seg(Viewport::Fill, "monitor", "fill", "Full width", cx))
                     .child(seg(
                         Viewport::Tablet,
@@ -730,43 +756,45 @@ impl Dent {
                     ))
                     .child(div().w(px(1.)).h(px(16.)).mx(px(space::S1)).bg(t.hairline))
             })
-            .child(
-                div()
-                    .id("pick")
-                    .relative()
-                    .h(px(size::CONTROL))
-                    // Off, its tooltip says why; the toolbar keeps the address.
-                    .when(!down, |d| {
-                        d.on_hover(Self::hint(
-                            "Click an element on the page to point the agent at it",
-                            cx,
+            .when(!media, |d| {
+                d.child(
+                    div()
+                        .id("pick")
+                        .relative()
+                        .h(px(size::CONTROL))
+                        // Off, its tooltip says why; the toolbar keeps the address.
+                        .when(!down, |d| {
+                            d.on_hover(Self::hint(
+                                "Click an element on the page to point the agent at it",
+                                cx,
+                            ))
+                        })
+                        .px(px(space::S2))
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S1H))
+                        .rounded(px(radius::MD))
+                        .cursor_pointer()
+                        .when(self.picking, |d| d.bg(t.ink).text_color(t.surface))
+                        .when(!self.picking && !down, |d| {
+                            d.text_color(t.ink).hover(|d| d.bg(t.hover()))
+                        })
+                        .map(|d| {
+                            if down {
+                                crate::ui::off(d.text_color(t.ink), "The dev server stopped", &t)
+                            } else {
+                                d.on_press(cx.listener(|this, _, _, cx| this.toggle_pick(cx)))
+                            }
+                        })
+                        .child(icon(
+                            "square-dashed-mouse-pointer",
+                            14.,
+                            if self.picking { t.surface } else { t.quiet },
                         ))
-                    })
-                    .px(px(space::S2))
-                    .flex()
-                    .items_center()
-                    .gap(px(space::S1H))
-                    .rounded(px(radius::MD))
-                    .cursor_pointer()
-                    .when(self.picking, |d| d.bg(t.ink).text_color(t.surface))
-                    .when(!self.picking && !down, |d| {
-                        d.text_color(t.ink).hover(|d| d.bg(t.hover()))
-                    })
-                    .map(|d| {
-                        if down {
-                            crate::ui::off(d.text_color(t.ink), "The dev server stopped", &t)
-                        } else {
-                            d.on_press(cx.listener(|this, _, _, cx| this.toggle_pick(cx)))
-                        }
-                    })
-                    .child(icon(
-                        "square-dashed-mouse-pointer",
-                        14.,
-                        if self.picking { t.surface } else { t.quiet },
-                    ))
-                    .child(div().ty(UI).child("Point"))
-                    .child(probe(&self.probes, "pick")),
-            )
+                        .child(div().ty(UI).child("Point"))
+                        .child(probe(&self.probes, "pick")),
+                )
+            })
             .child(
                 icon_button("reload", "rotate-cw", &t)
                     .on_hover(Self::hint("Reload", cx))
@@ -809,9 +837,20 @@ impl Dent {
                         a.path.rsplit('/').next().unwrap_or(a.path).to_string(),
                     )
                 });
+                let in_app = media.then(|| on_disk.clone()).flatten();
                 icon_button("external", "external-link", &t)
-                    .on_hover(Self::hint("Open in your browser", cx))
+                    .on_hover(Self::hint(
+                        if in_app.is_some() {
+                            "Open in its app"
+                        } else {
+                            "Open in your browser"
+                        },
+                        cx,
+                    ))
                     .on_press(move |_, _, cx| match (&on_disk, &file) {
+                        (Some(path), _) if in_app.is_some() => {
+                            crate::open::open(&path.display().to_string(), cx)
+                        }
                         (Some(path), _) => cx.open_url(&format!("file://{}", path.display())),
                         (None, Some((bytes, name))) => {
                             let path =
@@ -2457,7 +2496,7 @@ fn counts(f: &crate::data::FileDiff) -> String {
 }
 
 /// A file size in words people use: "812 bytes", "2.4 KB", "3.1 MB".
-fn bytes(n: u64) -> String {
+pub fn bytes(n: u64) -> String {
     match n {
         0..1024 => format!("{n} bytes"),
         1024..1_048_576 => format!("{:.1} KB", n as f64 / 1024.),

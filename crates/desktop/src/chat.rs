@@ -1245,14 +1245,26 @@ impl Dent {
                                     .map(|(j, f)| {
                                         let key = SharedString::from(format!("pic-{msg}-{j}"));
                                         let at = pictures.iter().position(|p| p.key == key);
-                                        sent_file(
+                                        let chip = sent_file(
                                             &crate::bridge::relative(cwd, f),
                                             at.map(|at| (&pictures, at)),
                                             &t,
-                                        )
+                                        );
+                                        if at.is_some() {
+                                            return chip.into_any_element();
+                                        }
+                                        // Any other file opens as a link to it would:
+                                        // a video plays, a PDF shows, text reads.
+                                        let full = f.clone();
+                                        chip.id(SharedString::from(format!("sent-open-{msg}-{j}")))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.open_file(&full, cx)
+                                            }))
+                                            .into_any_element()
                                     })
                                     .chain(notes.iter().map(|l| {
-                                        sent_note(l.trim_start_matches("› "), &t)
+                                        sent_note(l.trim_start_matches("› "), &t).into_any_element()
                                     }))
                                     .collect::<Vec<_>>()
                             })
@@ -2097,9 +2109,11 @@ impl Dent {
                 let fixed = questions.iter().any(|q| q.fixed);
                 let n = questions.get(next).map_or(0, |q| q.options.len().min(9));
                 let multi = questions.get(next).is_some_and(|q| q.multi);
+                let answered = picked.iter().any(Option::is_some);
+                let back = if many && answered { " · ⌫ back" } else { "" };
                 let hint = match (keyed, multi, fixed, many) {
-                    (true, true, ..) => format!("Press 1–{n} to tick, ↩ to continue"),
-                    (true, false, ..) => format!("Press 1–{n} to pick"),
+                    (true, true, ..) => format!("Press 1–{n} to tick, ↩ to continue{back}"),
+                    (true, false, ..) => format!("Press 1–{n} to pick{back}"),
                     (false, _, true, _) => "Esc, then a number key, to pick".to_string(),
                     (false, _, false, true) => {
                         "Answer each one, or type an answer in the box".to_string()
@@ -2234,7 +2248,125 @@ impl Dent {
                                 )
                             })
                     }))
-                    .child(div().ty(LABEL).text_color(t.faint).child(hint))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S2))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .ty(LABEL)
+                                    .text_color(t.faint)
+                                    .child(hint),
+                            )
+                            // Its own questions only: the agent hears it went
+                            // unanswered and carries on.
+                            .when(!fixed, |d| {
+                                let (sid, ask) = (s.id.clone(), ask.clone());
+                                d.child(
+                                    ghost(SharedString::from(format!("skip-{ask}")), "Skip", &t)
+                                        .relative()
+                                        .with_tip(tip("Carry on without an answer", None, t))
+                                        .on_press(cx.listener(move |this, _, _, cx| {
+                                            this.skip_question(&sid, ask.clone(), cx)
+                                        }))
+                                        .child(probe(&self.probes, "skip-question")),
+                                )
+                            }),
+                    )
+                    .into_any_element()
+            }
+            Item::Secret { id: ask, name, why } => {
+                let empty = self.secret_input.read(cx).value().is_empty();
+                let give =
+                    |place: dent_protocol::SecretPlace, label: &'static str, primary: bool| {
+                        let (sid, ask) = (s.id.clone(), ask.clone());
+                        let key = format!("secret-{}", if primary { "project" } else { "session" });
+                        button(SharedString::from(key.clone()), label, primary, &t)
+                            .relative()
+                            .map(|b| {
+                                if empty {
+                                    b.opacity(0.5).cursor_not_allowed().with_tip(tip(
+                                        "Type or paste it first",
+                                        None,
+                                        t,
+                                    ))
+                                } else {
+                                    b.on_press(cx.listener(move |this, _, window, cx| {
+                                        this.give_secret(&sid, ask.clone(), place, window, cx)
+                                    }))
+                                }
+                            })
+                            .child(probe(&self.probes, key))
+                    };
+                let (sid, no) = (s.id.clone(), ask.clone());
+                needs_card(&t)
+                    .id(SharedString::from(format!("ask-{ask}")))
+                    .child(needs_title("Claude asks for a secret", &t))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_baseline()
+                            .gap(px(space::S2))
+                            .child(div().ty(CODE).text_color(t.ink).child(name.clone()))
+                            .when(!why.is_empty(), |d| {
+                                d.child(div().ty(UI).text_color(t.quiet).child(why.clone()))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .relative()
+                            .h(px(size::CONTROL + space::S2))
+                            .px(px(space::S3))
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S2))
+                            .rounded(px(radius::MD))
+                            .border_1()
+                            .border_color(t.hairline)
+                            .bg(t.raised)
+                            .child(icon("key-round", 13., t.quiet))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .ty(CODE)
+                                    .text_color(t.ink)
+                                    .child(gpui_kit::base::input::Input::new(&self.secret_input)),
+                            )
+                            .child(probe(&self.probes, "secret-field")),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(space::S2))
+                            .child(give(
+                                dent_protocol::SecretPlace::Project,
+                                "Save to the project's .env",
+                                true,
+                            ))
+                            .child(give(
+                                dent_protocol::SecretPlace::Session,
+                                "This session only",
+                                false,
+                            ))
+                            .child(
+                                ghost("secret-no", "Don't give it", &t)
+                                    .relative()
+                                    .on_press(cx.listener(move |this, _, window, cx| {
+                                        this.refuse_secret(&sid, no.clone(), window, cx)
+                                    }))
+                                    .child(probe(&self.probes, "secret-no")),
+                            ),
+                    )
+                    .child(div().ty(LABEL).text_color(t.faint).child(
+                        "Kept on this Mac where you choose. Claude is told where it is, never what it is.",
+                    ))
                     .into_any_element()
             }
             Item::Note {
@@ -2638,6 +2770,16 @@ impl Dent {
         let thumb = (a.kind == Kind::Image)
             .then(|| self.picture(art, version))
             .flatten();
+        // A video or a PDF shows a still of itself once it's made.
+        let still = (a.kind == Kind::Media && crate::data::media_kind(a.path) != Some("Sound"))
+            .then(|| self.poster(a.path, cx))
+            .flatten();
+        // A page shows itself above its card, as the viewer last drew it.
+        let page = (a.kind == Kind::Html)
+            .then(|| self.stills.get(art))
+            .flatten()
+            .filter(|(v, _)| *v == version)
+            .map(|(_, p)| p.clone());
         // This turn's edits include the file: its counts and Review sit on
         // the card, opening Changes at it.
         let counts = review
@@ -2695,10 +2837,21 @@ impl Dent {
                 },
                 crate::data::machine_shown(&s.machine)
             )
+        } else if crate::data::visual_title(a.path).is_some() {
+            format!("Visual · v{version}")
+        } else if a.kind == Kind::Media {
+            let size = std::fs::metadata(a.path)
+                .map(|m| crate::viewer::bytes(m.len()))
+                .unwrap_or_default();
+            format!(
+                "{} · {} · {size}",
+                crate::bridge::relative(std::path::Path::new(&s.cwd), a.path),
+                crate::data::media_kind(a.path).unwrap_or_default(),
+            )
         } else {
             format!("{} · v{version}", a.path)
         };
-        div()
+        let card = div()
             .id(SharedString::from(format!("made-{art}-{version}")))
             .relative()
             .flex()
@@ -2727,13 +2880,18 @@ impl Dent {
                     .items_center()
                     .justify_center()
                     .overflow_hidden()
-                    .map(|d| match thumb {
-                        Some(picture) => {
+                    .map(|d| match (thumb, still) {
+                        (Some(picture), _) => {
                             d.child(img(picture).size_full().object_fit(ObjectFit::Cover))
                         }
-                        None => {
-                            d.child(icon(a.kind.icon(), 18., if old { t.faint } else { t.ink }))
+                        (None, Some(still)) => {
+                            d.child(img(still).size_full().object_fit(ObjectFit::Cover))
                         }
+                        (None, None) => d.child(icon(
+                            crate::data::file_icon(a.path).unwrap_or(a.kind.icon()),
+                            18.,
+                            if old { t.faint } else { t.ink },
+                        )),
                     }),
             )
             .child(
@@ -2776,7 +2934,34 @@ impl Dent {
                     .text_color(if showing { t.faint } else { t.quiet })
                     .child(if showing { "Showing" } else { "Open" }),
             )
-            .child(probe(&self.probes, format!("made-{art}-{version}")))
+            .child(probe(&self.probes, format!("made-{art}-{version}")));
+        let Some(picture) = page else {
+            return card.into_any_element();
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(space::S2))
+            .child(
+                div()
+                    .id(SharedString::from(format!("made-still-{art}-{version}")))
+                    .relative()
+                    .w_full()
+                    .h(px(PAGE_STILL_H))
+                    .rounded(px(radius::LG))
+                    .border_1()
+                    .border_color(t.hairline)
+                    .bg(t.panel)
+                    .overflow_hidden()
+                    .cursor_pointer()
+                    .hover(|d| d.border_color(t.ink.opacity(0.3)))
+                    .on_press(
+                        cx.listener(move |this, _, _, cx| this.open_art(art, Some(version), cx)),
+                    )
+                    .child(img(picture).size_full().object_fit(ObjectFit::Contain))
+                    .child(probe(&self.probes, format!("made-still-{art}"))),
+            )
+            .child(card)
             .into_any_element()
     }
 
@@ -2994,7 +3179,12 @@ impl Dent {
             // The attach button.
             - size::CONTROL
             - space::S1;
-        let effort_word = match s.effort.as_deref() {
+        let effort_now = if self.selected.as_deref() == Some(s.id.as_str()) {
+            self.effort_shown(s)
+        } else {
+            s.effort.clone()
+        };
+        let effort_word = match effort_now.as_deref() {
             None => "Effort",
             e => effort_name(e),
         };
@@ -3121,7 +3311,10 @@ impl Dent {
         let asking = s.items.iter().rev().any(|i| {
             matches!(
                 i,
-                Item::Approval { .. } | Item::Question { .. } | Item::Plan { .. }
+                Item::Approval { .. }
+                    | Item::Question { .. }
+                    | Item::Plan { .. }
+                    | Item::Secret { .. }
             )
         });
         let live = s.running() || asking;
@@ -4225,23 +4418,12 @@ impl Dent {
                     },
                     cx,
                 );
-                let takes = self
-                    .models
-                    .iter()
-                    .find(|m| m.id == model)
-                    .map(|m| m.efforts.clone())
-                    .unwrap_or_default();
+                // A level the model doesn't take isn't offered, unless it's
+                // the one already chosen.
+                let steps = self.effort_steps(&model, current.as_deref());
                 EFFORTS
                     .iter()
-                    // A level the model doesn't take isn't offered, unless
-                    // it's the one already chosen.
-                    .filter(|(value, _)| {
-                        value.is_none_or(|v| {
-                            takes.is_empty()
-                                || takes.iter().any(|e| e == v)
-                                || current.as_deref() == Some(v)
-                        })
-                    })
+                    .filter(|(value, _)| steps.contains(value))
                     .map(|(value, note)| {
                         let v = value.map(str::to_string);
                         Entry::row(
@@ -4710,7 +4892,7 @@ pub fn duration(secs: u64) -> String {
 const FADE: f32 = 48.;
 
 /// Effort levels, with what each is for.
-const EFFORTS: [(Option<&str>, &str); 6] = [
+pub const EFFORTS: [(Option<&str>, &str); 6] = [
     (None, "Whatever Claude Code picks for the model"),
     (Some("low"), "Fastest; for quick questions"),
     (Some("medium"), "Balanced"),
@@ -5018,6 +5200,8 @@ fn tool_pictures(session: &str, ix: usize, paths: &[String], t: &theme::Theme) -
 
 /// The most a tool's picture takes in the chat; it opens large on a click.
 const TOOL_PICTURE_W: f32 = 420.;
+/// How tall a page's picture stands above its card.
+const PAGE_STILL_H: f32 = 240.;
 const TOOL_PICTURE_H: f32 = 280.;
 /// Several pictures: how many tiles show, and each tile's size.
 const TOOL_TILES: usize = 5;

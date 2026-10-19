@@ -39,6 +39,37 @@ pub enum Kind {
     Server,
     /// Any other text file you opened from a link: shown read-only, by line.
     Text,
+    /// A video, a sound or a PDF: played or shown by the web view, read
+    /// from disk as it plays, never held in memory whole.
+    Media,
+}
+
+/// A visual's title, for a page shown with dent's own tool (kept under
+/// its folder of visuals); `None` for any other file.
+pub fn visual_title(path: &str) -> Option<&str> {
+    path.strip_prefix(dent_client_core::timeline::VISUAL_DIR)?
+        .strip_prefix('/')?
+        .strip_suffix(".html")
+}
+
+/// A media file's own icon, by its name.
+pub fn file_icon(path: &str) -> Option<&'static str> {
+    Some(match media_kind(path)? {
+        "Video" => "film",
+        "Sound" => "audio-lines",
+        _ => "file-text",
+    })
+}
+
+/// What a media file is, by its name: "Video", "Sound" or "PDF".
+pub fn media_kind(path: &str) -> Option<&'static str> {
+    let ext = path.rsplit('.').next()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "mp4" | "m4v" | "mov" | "webm" => "Video",
+        "mp3" | "m4a" | "aac" | "wav" | "aiff" | "aif" | "flac" | "ogg" | "oga" => "Sound",
+        "pdf" => "PDF",
+        _ => return None,
+    })
 }
 
 impl Kind {
@@ -48,6 +79,7 @@ impl Kind {
             "html" | "htm" => Kind::Html,
             "md" | "markdown" => Kind::Doc,
             "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" => Kind::Image,
+            _ if media_kind(path).is_some() => Kind::Media,
             _ => return None,
         })
     }
@@ -62,7 +94,7 @@ impl Kind {
     }
     /// Shown live in the web view.
     pub fn is_page(self) -> bool {
-        matches!(self, Kind::Html | Kind::Server)
+        matches!(self, Kind::Html | Kind::Server | Kind::Media)
     }
     pub fn icon(self) -> &'static str {
         match self {
@@ -71,6 +103,7 @@ impl Kind {
             Kind::Image => "image",
             Kind::Server => "globe",
             Kind::Text => "file-code",
+            Kind::Media => "file-play",
         }
     }
 }
@@ -153,6 +186,13 @@ pub enum Item {
     Question {
         id: String,
         questions: Vec<Question>,
+    },
+    /// The agent asks for a secret, typed into a private card: `name` is
+    /// what it's saved as, `why` what it's for.
+    Secret {
+        id: String,
+        name: String,
+        why: String,
     },
     /// One quiet line: Allowed, Stopped, an error…
     Note {
@@ -411,6 +451,8 @@ pub struct Session {
     pub todos: Vec<(String, String, String)>,
     /// Dev servers it started, by address.
     pub servers: Vec<String>,
+    /// Videos, sounds and PDFs its replies named, by full path.
+    pub media: Vec<String>,
     /// The agent's own id for it, for `claude --resume`.
     pub agent_session: Option<String>,
     /// Messages with a snapshot of the files from just before them.
@@ -490,6 +532,7 @@ impl Session {
             asides: Vec::new(),
             checkpoints: Default::default(),
             servers: Vec::new(),
+            media: Vec::new(),
             made_sig: 0,
             todos: Vec::new(),
             agent_session: None,

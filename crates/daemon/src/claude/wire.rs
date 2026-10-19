@@ -257,6 +257,18 @@ pub fn parse(line: &[u8]) -> serde_json::Result<Inbound> {
             Some(t) if !t.trim().is_empty() => Inbound::Notice(t.to_string()),
             _ => Inbound::Other,
         },
+        // A hook turned your message away before it reached the agent: say
+        // why in its own words, not with the hook's command and your prompt.
+        ("system", "informational") if v["prompt_submit_outcome"]["kind"] == "blocked_by_hook" => {
+            let reason = v["prompt_submit_outcome"]["reason"]
+                .as_str()
+                .map(str::trim)
+                .filter(|r| !r.is_empty());
+            Inbound::Notice(match reason {
+                Some(r) => format!("A hook stopped this message before it reached Claude: {r}"),
+                None => "A hook stopped this message before it reached Claude.".into(),
+            })
+        }
         // Suggestions and plain info are the terminal's chatter.
         ("system", "informational")
             if matches!(v["level"].as_str(), Some("warning" | "notice")) =>
@@ -944,6 +956,19 @@ mod tests {
         let b = image_block(real.to_str().unwrap()).unwrap();
         assert_eq!(b["source"]["media_type"], "image/png");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_message_a_hook_blocked_says_why() {
+        // As Claude Code 2.1.301 sends it.
+        let line = br#"{"type":"system","subtype":"informational","content":"UserPromptSubmit operation blocked by hook:\n[echo 'No secrets' >&2; exit 2]: No secrets\n\n\nOriginal prompt: hello","level":"warning","prevent_continuation":true,"prompt_submit_outcome":{"kind":"blocked_by_hook","prompt_kept":false,"reason":"No secrets"},"uuid":"u","session_id":"s"}"#;
+        match parse(line).unwrap() {
+            Inbound::Notice(t) => assert_eq!(
+                t,
+                "A hook stopped this message before it reached Claude: No secrets"
+            ),
+            _ => panic!("not a notice"),
+        }
     }
 
     #[test]
