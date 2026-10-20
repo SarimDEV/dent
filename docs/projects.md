@@ -42,6 +42,7 @@ The session header's Git button is the branch's next step, worked out from where
 - Commit messages are written from the diff, and pull requests' title and body from the branch's commits, by the same quick model as titles.
 - Pull requests use the GitHub CLI (`gh`), signed in; without it, the button stops at pushing.
 - A push to the remote's default branch asks for a second press ("Push to main?").
+- Where the branch stands is read with a fetch from `origin` at most every two minutes per repository, so a branch behind its remote offers Pull. The fetch never prompts: one that needs a password or passphrase is skipped.
 
 ## Project docs
 

@@ -33,6 +33,9 @@ pub fn status(dir: &Path, gh: Option<&Path>) -> Option<GitStatus> {
     let remote = run(dir, &["remote"])
         .map(|s| s.lines().any(|l| l == "origin"))
         .unwrap_or(false);
+    if remote {
+        fetch_now_and_then(dir);
+    }
     let default_branch = run(
         dir,
         &["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"],
@@ -75,6 +78,41 @@ pub fn status(dir: &Path, gh: Option<&Path>) -> Option<GitStatus> {
         gh: gh.is_some(),
         pr,
     })
+}
+
+/// How long a fetch stands before status fetches again.
+const FETCHED_FOR: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Fetch from origin unless the repository fetched in the last couple of
+/// minutes, so a branch that's behind its remote says so. Never asks for a
+/// password or passphrase: one that's needed means no fetch.
+fn fetch_now_and_then(dir: &Path) {
+    let Ok(common) = run(
+        dir,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ) else {
+        return;
+    };
+    let fresh = std::fs::metadata(Path::new(common.trim()).join("FETCH_HEAD"))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < FETCHED_FOR);
+    if fresh {
+        return;
+    }
+    let mut git = Command::new("git");
+    git.arg("-C")
+        .arg(dir)
+        .args(["fetch", "-q", "--no-tags", "origin"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
+        git.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+    }
+    let _ = git.status();
 }
 
 /// The open pull request for the branch checked out, if GitHub has one.
@@ -211,6 +249,34 @@ mod tests {
         assert_eq!((s.ahead, s.changes), (1, false));
         push(&d, true).unwrap();
         assert_eq!(status(&d, None).unwrap().ahead, 0);
+
+        // Another clone pushes: status fetches, and says it's behind.
+        let other = base.join("other");
+        run(
+            &base,
+            &["clone", "-q", &origin.display().to_string(), "other"],
+        )
+        .unwrap();
+        std::fs::write(other.join("c.txt"), "c\n").unwrap();
+        run(&other, &["add", "."]).unwrap();
+        run(
+            &other,
+            &[
+                "-c",
+                "user.name=o",
+                "-c",
+                "user.email=o@o",
+                "commit",
+                "-qm",
+                "Third",
+            ],
+        )
+        .unwrap();
+        run(&other, &["push", "-q"]).unwrap();
+        let _ = std::fs::remove_file(d.join(".git/FETCH_HEAD"));
+        assert_eq!(status(&d, None).unwrap().behind, 1);
+        pull(&d).unwrap();
+        assert_eq!(status(&d, None).unwrap().behind, 0);
     }
 
     #[test]
