@@ -46,7 +46,7 @@ Tests marked **(owner)** need the owner's hands: the Mac's lid, the Mac's Wi-Fi,
 | --- | --- | --- | --- |
 | R-B1 | Tailscale whois through the LocalAPI | Read `whois` for a connecting peer on studio (standalone Tailscale) and on the VM (tailscaled socket). Time it, then repeat 1,000 times | Returns the owner's login for each other. p99 under 50 ms. The CLI is never spawned on the connection path |
 | R-B2 | Another account | Look up `cakebal`'s address | A different login, so trust needs a code |
-| R-B3 | Tagged machine **(owner, once: create a tag and an auth key)** | A second VM joins with a tag | Never trusted through the account check; asks for a code |
+| R-B3 | Tagged machine (optional, before a public release; needs the owner to create a tag and an auth key) | A second VM joins with a tag | Never trusted through the account check; asks for a code |
 | R-B4 | Loopback through Tailscale Serve | `tailscale serve` on the VM forwards to the daemon; connect through it | The daemon sees loopback and refuses account trust |
 | R-B5 | LAN pairing | studio finds the VM with Bonjour across the bridge and pairs with the code | Paired. A wrong code, a dropped connection mid-exchange, and a version mismatch each give their own outcome. Only a completed wrong exchange counts as a guess |
 | R-B6 | Impostor at a known address | Stop the real daemon; start one with a new key at the same address and port, which then claims "you were removed" | The client aborts before sending its own key and ignores the claim. It shows "a different machine is now at …". The real machine is still trusted afterwards |
@@ -88,14 +88,13 @@ Tests marked **(owner)** need the owner's hands: the Mac's lid, the Mac's Wi-Fi,
 | R-E6 | Restart from inside | An agent on the VM runs the restart command | The restart completes through the service manager; the caller isn't left stopped |
 | R-E7 | LaunchAgent at logout **(owner)** | Log out of studio and back in | Matches what [0065](decisions/0065-launcher-and-updates.md) says the person is told |
 
-## F. Owner checklist (one sitting)
+## F. Owner checklist (one sitting, once there's a second device)
 
-Run once, after stage 0's other tests pass, with a reply streaming from the VM to a client on another device, or from studio to a client on the VM:
+Deferred until the phone app exists (2026-10-20). With one Mac, these tests can't be watched from the other end: the VM runs on the Mac, so it sleeps when the Mac does, and its link to the Mac doesn't use Wi-Fi. Stalls and freezes are covered from the VM side in [spike 12](spikes/12-link-under-real-networks.md). Run them with a reply streaming from studio to the phone:
 
 1. Close studio's lid on battery for 5 minutes, then open it. Then the same plugged in.
 2. Turn studio's Wi-Fi off for 30 s, then on. Switch it to a phone hotspot and back.
-3. Create a tag and an auth key in the Tailscale admin console for R-B3.
-4. Log out of studio and back in (R-E7).
+3. Log out of studio and back in (R-E7).
 
 For each, the agent records what the client showed, when, and whether anything was lost.
 
