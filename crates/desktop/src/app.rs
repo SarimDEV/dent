@@ -353,16 +353,17 @@ pub enum Menu {
 }
 
 impl Menu {
-    /// Menus with a field to type in: the project picker.
+    /// Menus with a field to type in: the project picker, and the
+    /// branches a worktree can start from.
     pub fn searches(self) -> bool {
-        self == Menu::Project
+        matches!(self, Menu::Project | Menu::Base)
     }
 
     /// Menus with longer rows: paths, session titles.
     pub fn wide(self) -> bool {
         matches!(
             self,
-            Menu::Project | Menu::Workspace | Menu::Pickup | Menu::Stash
+            Menu::Project | Menu::Workspace | Menu::Base | Menu::Pickup | Menu::Stash
         )
     }
 
@@ -492,7 +493,11 @@ pub struct Defaults {
 impl Defaults {
     /// Where a new session goes in `project` (a folder, or `None` for the
     /// scratch folder): its folder, and the worktree to make there, if any.
-    pub fn place(&self, project: Option<String>) -> (String, Option<dent_protocol::NewWorktree>) {
+    pub fn place(
+        &self,
+        project: Option<String>,
+        worktree: bool,
+    ) -> (String, Option<dent_protocol::NewWorktree>) {
         let Some(dir) = project else {
             let scratch = crate::scratch_dir();
             let _ = std::fs::create_dir_all(&scratch);
@@ -500,7 +505,7 @@ impl Defaults {
         };
         match &self.into {
             Some(w) => (w.clone(), None),
-            None if self.worktree => (
+            None if worktree => (
                 dir,
                 Some(dent_protocol::NewWorktree {
                     base: self.base.clone(),
@@ -610,6 +615,9 @@ pub enum Waiting {
     RemoveWorktree(String, bool),
 }
 
+/// How long a Git action's "Push to main?" waits for the second press.
+const GIT_CONFIRM_FOR: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The home folder, as a path string.
 pub fn home() -> String {
     std::env::var("HOME").unwrap_or_default()
@@ -673,7 +681,7 @@ pub struct Dent {
     /// The Git action running in each session.
     pub git_busy: HashMap<String, dent_protocol::GitAction>,
     /// A push to the default branch waiting for a second press.
-    pub git_confirm: Option<(String, dent_protocol::GitAction)>,
+    pub git_confirm: Option<(String, dent_protocol::GitAction, Instant)>,
     /// Closed sessions whose worktree has uncommitted changes: the next
     /// press removes it anyway.
     pub worktree_force: std::collections::HashSet<String>,
@@ -690,6 +698,7 @@ pub struct Dent {
     pub lightbox: Option<crate::lightbox::Lightbox>,
     /// What's typed in a menu that searches (the project picker).
     pub menu_query: Entity<TextareaState>,
+    pub branch_query: Entity<TextareaState>,
     /// ⌘F's field, and what it found.
     pub find_input: Entity<TextareaState>,
     pub find: Option<crate::find::Find>,
@@ -1162,6 +1171,22 @@ impl Dent {
         })
         .detach();
         single_line(&menu_query, window, cx);
+        // The branch menu's own field: it searches the branches.
+        let branch_query = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 1)
+                .placeholder("Search branches")
+                .submit_on_enter(true)
+        });
+        cx.subscribe_in(&branch_query, window, |this, _, ev: &InputEvent, _, cx| {
+            if let InputEvent::Change = ev {
+                this.menu_ix = this.base_entries(cx).iter().position(|e| e.choosable());
+                this.menu_scroll.scroll_to_item(0);
+                cx.notify();
+            }
+        })
+        .detach();
+        single_line(&branch_query, window, cx);
         single_line(&search, window, cx);
         // Only edits redraw the window: watching the fields themselves would
         // redraw on every caret blink, even after they lose focus.
@@ -1205,6 +1230,7 @@ impl Dent {
             &search,
             &rename_input,
             &menu_query,
+            &branch_query,
             &find_input,
         ] {
             cx.subscribe(field, |_, _, ev: &InputEvent, _| {
@@ -1369,6 +1395,7 @@ impl Dent {
             menu_scroll: ScrollHandle::new(),
             menu_ix: None,
             menu_query,
+            branch_query,
             find_input,
             find: None,
             lately: Vec::new(),
@@ -3011,6 +3038,23 @@ impl Dent {
         self.ask(Request::Repo { dir: dir.clone() }, Waiting::Repo(dir));
     }
 
+    /// Whether the next session gets a new worktree: chosen, and the
+    /// project is a repository with a commit to start from. While that's
+    /// still being asked, the choice stands; the daemon says if it can't.
+    pub fn new_worktree(&self) -> bool {
+        if !self.defaults.worktree || self.defaults.into.is_some() {
+            return false;
+        }
+        match &self.repo {
+            Some((dir, state)) if self.defaults.project.as_ref() == Some(dir) => match state {
+                Some(Some(r)) => !r.branches.is_empty(),
+                Some(None) => false,
+                None => true,
+            },
+            _ => self.defaults.project.is_some(),
+        }
+    }
+
     /// The new session's project as a repository, once known.
     pub fn repo_now(&self) -> Option<&dent_protocol::Repo> {
         let (dir, repo) = self.repo.as_ref()?;
@@ -3031,8 +3075,14 @@ impl Dent {
             .get(id)
             .is_some_and(|st| st.branch.is_some() && st.branch == st.default_branch);
         let pushes = matches!(action, A::CommitPush | A::CommitPushPr | A::Push | A::Pr);
-        if on_default && pushes && self.git_confirm != Some((id.to_string(), action)) {
-            self.git_confirm = Some((id.to_string(), action));
+        if on_default && pushes && self.git_confirming(id) != Some(action) {
+            self.git_confirm = Some((id.to_string(), action, Instant::now()));
+            // The question goes away by itself if it isn't answered.
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(GIT_CONFIRM_FOR).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
             cx.notify();
             return;
         }
@@ -3047,6 +3097,15 @@ impl Dent {
             Waiting::Git(id.to_string()),
         );
         cx.notify();
+    }
+
+    /// The Git action waiting for a second press in session `id`, while the
+    /// question still stands.
+    pub fn git_confirming(&self, id: &str) -> Option<dent_protocol::GitAction> {
+        self.git_confirm
+            .as_ref()
+            .filter(|(s, _, at)| s == id && at.elapsed() < GIT_CONFIRM_FOR)
+            .map(|(_, a, _)| *a)
     }
 
     /// Take away a closed session's worktree; its branch stays.
@@ -3715,7 +3774,7 @@ impl Dent {
     }
 
     /// Every text field, for what touches them all (the theme's colours).
-    pub fn fields(&self) -> [&Entity<TextareaState>; 8] {
+    pub fn fields(&self) -> [&Entity<TextareaState>; 9] {
         [
             &self.composer,
             &self.starter,
@@ -3724,6 +3783,7 @@ impl Dent {
             &self.search,
             &self.rename_input,
             &self.menu_query,
+            &self.branch_query,
             &self.find_input,
         ]
     }
@@ -4372,8 +4432,13 @@ impl Dent {
         {
             self.ask(Request::Repo { dir: dir.clone() }, Waiting::Repo(dir));
         }
-        if which.searches() {
-            self.open_project_picker(window, cx);
+        match which {
+            Menu::Project => self.open_project_picker(window, cx),
+            Menu::Base => self.branch_query.update(cx, |f, cx| {
+                put(f, "", window, cx);
+                f.focus_field(window, cx);
+            }),
+            _ => {}
         }
         self.menu_ix = self.menu_entries(which, cx).iter().position(|e| e.on);
         self.menu = Some(which);
@@ -4946,7 +5011,7 @@ impl Dent {
         }
         self.ambient.borrow_mut().submit();
         let d = self.defaults.clone();
-        let (cwd, worktree) = d.place(d.project.clone());
+        let (cwd, worktree) = d.place(d.project.clone(), self.new_worktree());
         // An existing worktree is for this session only.
         self.defaults.into = None;
         self.attachments.clear();
@@ -5087,7 +5152,13 @@ impl Dent {
             }
             None => d.project.clone(),
         };
-        let (cwd, worktree) = d.place(project);
+        // Another session's project: what the daemon makes of it decides.
+        let fresh = if project == self.defaults.project {
+            self.new_worktree()
+        } else {
+            d.worktree && project.is_some()
+        };
+        let (cwd, worktree) = d.place(project, fresh);
         self.defaults.into = None;
         self.attachments.clear();
         let n = self.live.send(Request::Create {

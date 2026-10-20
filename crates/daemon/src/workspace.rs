@@ -248,25 +248,63 @@ pub fn setup_script(worktree: &Path, root: &Path) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// How long a setup script may run before it's stopped.
+const SETUP_FOR: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 /// Run a setup script in a new worktree with `sh`: Ok or Err with the end
-/// of what it printed.
+/// of what it printed. One still running after ten minutes is stopped, so
+/// a script waiting on something never holds the task back for good.
 pub fn run_setup(script: &Path, worktree: &Path, root: &Path) -> Result<String, String> {
-    let out = Command::new("sh")
+    run_setup_for(script, worktree, root, SETUP_FOR)
+}
+
+fn run_setup_for(
+    script: &Path,
+    worktree: &Path,
+    root: &Path,
+    limit: std::time::Duration,
+) -> Result<String, String> {
+    // Output goes to a file, not a pipe: a chatty script can't fill a pipe
+    // nobody reads while this waits on it.
+    let log = std::env::temp_dir().join(format!("dent-setup-{}.log", token()));
+    let file = std::fs::File::create(&log).map_err(|e| e.to_string())?;
+    let err = file.try_clone().map_err(|e| e.to_string())?;
+    let mut child = Command::new("sh")
         .arg(script)
         .current_dir(worktree)
         .env("DENT_ROOT", root)
         .env("DENT_WORKTREE", worktree)
         .stdin(Stdio::null())
-        .output()
+        .stdout(file)
+        .stderr(err)
+        .spawn()
         .map_err(|e| format!("couldn't run {SETUP}: {e}"))?;
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if started.elapsed() < limit => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let text = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_file(&log);
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail = lines[lines.len().saturating_sub(12)..].join("\n");
-    if out.status.success() {
-        Ok(tail)
-    } else {
-        Err(tail)
+    match status {
+        Some(s) if s.success() => Ok(tail),
+        Some(_) => Err(tail),
+        None => Err(format!(
+            "stopped after {} minutes{}{tail}",
+            limit.as_secs() / 60,
+            if tail.is_empty() { "" } else { "\n" }
+        )),
     }
 }
 
@@ -395,6 +433,21 @@ mod tests {
         // The branch stays, and the worktree comes back on it.
         restore(&wt, &root, &named).unwrap();
         assert_eq!(super::branch(&wt).as_deref(), Some(named.as_str()));
+    }
+
+    #[test]
+    fn setup_reports_failure_and_stops_a_script_that_hangs() {
+        let (d, _) = repo_with_commit("setup");
+        let script = d.join("s.sh");
+        std::fs::write(&script, "echo one\necho two >&2\nexit 3\n").unwrap();
+        assert_eq!(run_setup(&script, &d, &d).unwrap_err(), "one\ntwo");
+        std::fs::write(&script, "echo waiting\nsleep 30\n").unwrap();
+        let err =
+            run_setup_for(&script, &d, &d, std::time::Duration::from_millis(300)).unwrap_err();
+        assert!(
+            err.starts_with("stopped after") && err.ends_with("waiting"),
+            "{err}"
+        );
     }
 
     #[test]

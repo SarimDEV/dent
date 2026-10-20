@@ -486,8 +486,17 @@ pub fn session(
             arts.push(art);
         }
     }
-    let status = status(v.status);
-    let working_since = v.working_since.map(|ms| {
+    // Readying a new worktree is work too: it shows as working, timed
+    // from when it began, though no turn has started yet.
+    let setting_up = match &v.activity {
+        Some(dent_protocol::Activity::SettingUp { since, .. }) => Some(*since),
+        _ => None,
+    };
+    let status = match setting_up {
+        Some(_) => Status::Working,
+        None => status(v.status),
+    };
+    let working_since = v.working_since.or(setting_up).map(|ms| {
         Instant::now()
             .checked_sub(Duration::from_millis(cx.now_ms.saturating_sub(ms)))
             .unwrap_or_else(Instant::now)

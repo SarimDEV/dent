@@ -1835,3 +1835,85 @@ fn resent_creates_forks_and_rewinds_happen_once() {
     c.pump(Duration::from_millis(100));
     assert_eq!(c.count(&s, |b| matches!(b, Body::Rewound { .. })), 1);
 }
+
+#[test]
+fn messages_sent_while_a_new_worktree_is_set_up_wait_and_go_in_order() {
+    // Worktrees go under HOME: a scratch one, not yours.
+    let home = std::env::temp_dir().join(format!("dent-th{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let w = World::new(&[("HOME", home.to_str().unwrap())]);
+    std::fs::create_dir_all(w.project.join(".dent")).unwrap();
+    std::fs::write(
+        w.project.join(".dent/setup"),
+        "sleep 1\necho ok > ready.txt\n",
+    )
+    .unwrap();
+    for args in [
+        &["add", ".dent/setup"][..],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "setup",
+        ][..],
+    ] {
+        Command::new("git")
+            .args(args)
+            .current_dir(&w.project)
+            .status()
+            .unwrap();
+    }
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = match c.call(Request::Create {
+        cwd: w.cwd(),
+        worktree: Some(dent_protocol::NewWorktree::default()),
+        model: None,
+        permission: Permission::Full,
+        effort: None,
+        id: "w1".into(),
+        text: "first".into(),
+        attachments: Vec::new(),
+    }) {
+        Ok(Out::Reply {
+            reply: dent_protocol::Reply::Created { session },
+        }) => session,
+        other => panic!("{other:?}"),
+    };
+    // Sent while setup still runs: it waits behind the first.
+    c.say(&s, "w2", "second", false);
+    c.wait_turns(&s, 2);
+    let events = c.events(&s);
+    let at = |f: &dyn Fn(&Body) -> bool| events.iter().position(f);
+    let setup = at(&|b| matches!(b, Body::Notice { text } if text.contains("Set up the worktree")))
+        .expect("the setup notice");
+    let first = at(&|b| matches!(b, Body::Delivered { id } if id == "w1")).expect("w1 delivered");
+    let second = at(&|b| matches!(b, Body::Delivered { id } if id == "w2")).expect("w2 delivered");
+    let reply = at(&|b| matches!(b, Body::Assistant { .. })).expect("a reply");
+    assert!(
+        setup < first && first < reply && first < second,
+        "{events:#?}"
+    );
+    // Both waited, shown, rather than vanishing until setup ended.
+    assert!(
+        events
+            .iter()
+            .any(|b| matches!(b, Body::User { id, queued: true, .. } if id == "w1"))
+    );
+    let cwd = events
+        .iter()
+        .find_map(|b| match b {
+            Body::Created { cwd, .. } => Some(cwd.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        cwd.starts_with(home.to_str().unwrap()) || cwd.contains("/dent/worktrees/"),
+        "{cwd}"
+    );
+    assert!(std::path::Path::new(&cwd).join("ready.txt").exists());
+}

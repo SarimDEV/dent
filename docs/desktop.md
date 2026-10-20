@@ -78,7 +78,7 @@ Behind the page you can choose an ambient background (View › Ambient Backgroun
 
 ## Viewer
 
-The viewer shows, as tabs, everything the open session made or changed ([0037](decisions/0037-viewer-system-web-view.md)). Every viewable file an agent writes becomes a card in the chat that opens it here. Writing the same file again adds a version; nothing is replaced. A card for an older version says what replaced it.
+The viewer shows, as tabs, everything the open session made or changed ([0037](decisions/0037-viewer-system-web-view.md)). Every viewable file an agent writes becomes a card in the chat that opens it here. Writing the same file again adds a version; nothing is replaced. A card for an older version says what replaced it. Tabs share their strip: names give up letters from the middle first, and when that's not enough the files not showing are their icon alone (their path in the tooltip), so no tab is cut off at an edge; past that the strip scrolls, a fading edge saying there's more.
 
 - **Pages** (HTML files, and forwarded dev servers) run live in the system web view through a `dent://` scheme, with the network like any page.
   - **Versions:** a stepper (v3 of 4). An older version shows a "Back to v4" bar. A new version shows straight away when you're following the latest, with a brief "updated to v4" and the scroll position kept.

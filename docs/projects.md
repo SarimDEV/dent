@@ -26,13 +26,14 @@ A new idea should cost one keystroke, not a setup screen.
 
 dent makes a session's worktree when you ask for one ([0053](decisions/0053-projects-are-repos.md)).
 
-- Under a new session's field, the worktree chip picks **Current checkout**, **New worktree** (remembered as what you used last), or an existing worktree of the project to carry on in. With New worktree, a second chip picks the branch it starts from, the one checked out by default.
+- Under a new session's field, the worktree chip picks **Current checkout**, **New worktree** (remembered as what you used last), or one of the project's eight newest worktrees to carry on in. With New worktree, a second chip picks the branch it starts from: the one checked out by default, the chosen and checked-out ones first, and a field to search the rest.
+- New worktree is only offered for a repository with a commit to start from; elsewhere (no project, a plain folder, an empty repository) the session works in the folder as it is, whatever was chosen last.
 - A new worktree goes in `~/dent/worktrees/<project>/<id>` on a new branch, `dent/<id>` at first and renamed from the task (`dent/fix-footer-on-mobile`) as the agent starts.
 - The main checkout's ignored `.env` files are copied in. A secret saved to the project's `.env` from a worktree session is saved to the main checkout's too.
-- If the repository has `.dent/setup`, it runs with `sh` in each new worktree before the first message, with `DENT_ROOT` (the main checkout) and `DENT_WORKTREE` set; the chat says how it went, and the task goes either way. Commit it, and every worktree has it.
+- If the repository has `.dent/setup`, it runs with `sh` in each new worktree before the agent starts, with `DENT_ROOT` (the main checkout) and `DENT_WORKTREE` set. Meanwhile the session shows as working ("Setting up"), and what you send waits in its queue, in order; it goes when setup is done, whatever came of it. The chat says how it went (a failure with its last line), and a script still running after ten minutes is stopped. Commit it, and every worktree has it.
 - A session shows its branch under its reply box, marked "Worktree" when it has its own. A branch the agent switches to shows at the end of the turn.
 - Worktrees made in a terminal count too: the project list folds them into their main checkout, and they can be picked to carry on in.
-- Closing a session never touches its worktree. A closed session offers **Remove worktree** (its branch and commits stay; one with uncommitted changes asks again), and reopening one whose worktree is gone brings it back on its branch.
+- Closing a session never touches its worktree. A closed session offers **Remove worktree** (its branch and commits stay; one with uncommitted changes asks again), and reopening one whose worktree is gone, or sending to one, brings it back on its branch.
 - Diffs and docs work the same in a worktree as in the main checkout.
 
 ## Getting work out
@@ -41,7 +42,8 @@ The session header's Git button is the branch's next step, worked out from where
 
 - Commit messages are written from the diff, and pull requests' title and body from the branch's commits, by the same quick model as titles.
 - Pull requests use the GitHub CLI (`gh`), signed in; without it, the button stops at pushing.
-- A push to the remote's default branch asks for a second press ("Push to main?").
+- A push to the remote's default branch asks for a second press ("Push to main?"); the question goes after five seconds unanswered.
+- While the agent's turn runs, the button is off: it may be halfway through a file.
 - Where the branch stands is read with a fetch from `origin` at most every two minutes per repository, so a branch behind its remote offers Pull. The fetch never prompts: one that needs a password or passphrase is skipped.
 
 ## Project docs

@@ -490,10 +490,21 @@ pub fn menu_row(
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .child(div().ty(UI).text_color(t.ink).child(name.to_string()))
+                // A name is one line; one too long ends in an ellipsis.
+                .child(
+                    div()
+                        .truncate()
+                        .ty(UI)
+                        .text_color(t.ink)
+                        .child(name.to_string()),
+                )
                 .when_some(note, |d, n| {
+                    // Words wrap; one long word (a path, a branch) can't
+                    // break between words, so it ends in an ellipsis.
+                    let one_word = !n.contains(' ');
                     d.child(
                         div()
+                            .when(one_word, |d| d.truncate())
                             .ty(UI)
                             .text_size(px(12.))
                             .line_height(px(16.))

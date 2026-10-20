@@ -63,6 +63,8 @@ impl Cmd {
 }
 
 pub enum Op {
+    /// The session's new worktree is set up.
+    SetUp,
     Send {
         id: String,
         text: String,
@@ -567,6 +569,13 @@ impl Session {
                 steer,
                 attachments,
             } => self.send(id, text, steer, attachments).await,
+            // A new worktree is ready: what waited for it goes.
+            Op::SetUp => {
+                if !self.in_turn && self.asked.is_empty() {
+                    self.deliver_held().await;
+                }
+                Ok(())
+            }
             Op::Rewind { to, files } => self.rewind(to, files).await,
             Op::Unqueue { id } => {
                 let before = self.held.len();
@@ -840,8 +849,9 @@ impl Session {
         }
         let working = self.in_turn && self.proc.is_some();
         // Nothing can be steered into an agent that's being stopped: it
-        // waits for the turn to end like any other.
-        let queued = working && (!steer || !self.running());
+        // waits for the turn to end like any other. While a new worktree
+        // is set up, everything waits for that.
+        let queued = (working && (!steer || !self.running())) || self.d.setting_up(&self.id);
         self.log(Body::User {
             id: id.clone(),
             text: text.clone(),
@@ -1078,7 +1088,22 @@ impl Session {
             self.retire_proc().await;
         }
         if !std::path::Path::new(&self.cwd).is_dir() {
-            bail!("the session's folder {} no longer exists", self.cwd);
+            // A worktree taken away outside dent comes back on its branch.
+            let cwd = std::path::PathBuf::from(&self.cwd);
+            let restored = match self.d.workspace_of(&self.id) {
+                (Some(branch), Some(root)) => tokio::task::spawn_blocking(move || {
+                    crate::workspace::restore(&cwd, std::path::Path::new(&root), &branch)
+                })
+                .await
+                .is_ok_and(|r| r.is_ok()),
+                _ => false,
+            };
+            if !restored {
+                bail!("the session's folder {} no longer exists", self.cwd);
+            }
+            self.log(Body::Notice {
+                text: "Its worktree was gone; brought it back on its branch".into(),
+            });
         }
         let h = self.d.holder().await?;
         // dent names the agent's session up front, so it can be resumed
@@ -1329,7 +1354,11 @@ impl Session {
         let now = Instant::now();
         if self.release_at.is_some_and(|t| t <= now) {
             self.release_at = None;
-            if !self.in_turn && self.asked.is_empty() && !self.held.is_empty() {
+            if !self.in_turn
+                && self.asked.is_empty()
+                && !self.held.is_empty()
+                && !self.d.setting_up(&self.id)
+            {
                 self.deliver_held().await;
             }
         }

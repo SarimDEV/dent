@@ -69,6 +69,8 @@ pub enum Field {
     Starter,
     Comment,
     Aside,
+    /// The base branch menu's search.
+    Branches,
 }
 
 /// The walkthrough's vocabulary; not every scene uses every step.
@@ -224,6 +226,7 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("parity", &[parity]),
     ("zoom-links", &[zoom_links]),
     ("worktrees", &[worktrees]),
+    ("worktree-edges", &[worktree_edges]),
 ];
 
 /// Scenes that start on their own: no daemon, the real agent, or a
@@ -457,6 +460,7 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
                     Field::Starter => this.starter.clone(),
                     Field::Comment => this.comment_input.clone(),
                     Field::Aside => this.aside_input.clone(),
+                    Field::Branches => this.branch_query.clone(),
                 };
                 input.update(cx, |i, cx| {
                     // As typed: the caret ends up after the text.

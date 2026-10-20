@@ -71,6 +71,8 @@ pub struct Daemon {
     /// What each session's agent is doing besides talking.
     activities: Mutex<HashMap<String, dent_protocol::Activity>>,
     awake: Mutex<Awake>,
+    /// Sessions whose new worktree is being set up.
+    setting_up: Mutex<std::collections::HashSet<String>>,
 }
 
 /// Keeping the machine awake while agents work: the sessions working now,
@@ -135,6 +137,7 @@ impl Daemon {
                 on: true,
                 hold: None,
             }),
+            setting_up: Mutex::new(Default::default()),
         })
     }
 
@@ -600,6 +603,14 @@ impl Daemon {
             )?;
         }
         self.note_workspace(&session, &cwd).await;
+        // A setup script runs first: meanwhile messages wait in the
+        // session's queue, shown, and go in order once it's done.
+        let setup = made
+            .as_ref()
+            .and_then(|(path, _, root)| crate::workspace::setup_script(path, root));
+        if setup.is_some() {
+            lock(&self.setting_up).insert(session.clone());
+        }
         let row = self
             .store()
             .session(&session)?
@@ -624,21 +635,25 @@ impl Daemon {
                 }
             });
         }
-        match crate::workspace::setup_script(&path, &root) {
-            // Setup runs first; the message goes when it's done, whatever
-            // came of it, so a failed install never strands the task.
-            Some(script) => {
-                let (d, session) = (self.clone(), session.clone());
-                tokio::spawn(async move {
-                    d.set_up(&session, &script, &path, &root).await;
-                    if let Err(e) = d.command(&session, first).await {
-                        eprintln!("dent-daemon: {session}: couldn't send after setup: {e:#}");
-                    }
-                });
-            }
-            None => self.command(&session, first).await?,
+        self.command(&session, first).await?;
+        // The queue goes when setup's done, whatever came of it, so a
+        // failed install never strands the task.
+        if let Some(script) = setup {
+            let (d, session) = (self.clone(), session.clone());
+            tokio::spawn(async move {
+                d.set_up(&session, &script, &path, &root).await;
+                lock(&d.setting_up).remove(&session);
+                if let Err(e) = d.command(&session, Op::SetUp).await {
+                    eprintln!("dent-daemon: {session}: couldn't carry on after setup: {e:#}");
+                }
+            });
         }
         Ok(session)
+    }
+
+    /// Session `id`'s new worktree is being set up: what's sent waits.
+    pub fn setting_up(&self, id: &str) -> bool {
+        lock(&self.setting_up).contains(id)
     }
 
     /// Run a repository's setup script in a session's new worktree, saying
@@ -673,8 +688,15 @@ impl Daemon {
                 "Set up the worktree with {} in {secs}s",
                 crate::workspace::SETUP
             ),
-            Err(tail) if tail.is_empty() => format!("{} failed", crate::workspace::SETUP),
-            Err(tail) => format!("{} failed:\n\n```\n{tail}\n```", crate::workspace::SETUP),
+            Err(tail) => match tail.lines().last() {
+                // Its last words say most; the chat line is plain text.
+                Some(last) => format!(
+                    "{} failed in {secs}s: {}",
+                    crate::workspace::SETUP,
+                    last.trim()
+                ),
+                None => format!("{} failed in {secs}s", crate::workspace::SETUP),
+            },
         };
         if let Err(e) = self.append(session, Body::Notice { text }, None) {
             eprintln!("dent-daemon: {session}: {e:#}");
@@ -1341,6 +1363,27 @@ impl Daemon {
         } else {
             Vec::new()
         };
+        // Sessions whose branch was never said (older than branches being
+        // noted) get it now, in the background.
+        let unsaid: Vec<(String, String)> = rows
+            .iter()
+            .filter(|r| {
+                self.store()
+                    .get(&format!("{WORKSPACE}{}", r.id))
+                    .ok()
+                    .flatten()
+                    .is_none()
+            })
+            .map(|r| (r.id.clone(), r.cwd.clone()))
+            .collect();
+        if !unsaid.is_empty() {
+            let d = self.clone();
+            tokio::spawn(async move {
+                for (id, cwd) in unsaid {
+                    d.note_workspace(&id, &cwd).await;
+                }
+            });
+        }
         for row in rows {
             session::start(self.clone(), row, live.clone());
         }
