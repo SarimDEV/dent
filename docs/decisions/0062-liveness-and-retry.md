@@ -1,6 +1,6 @@
 # 0062. Liveness and retry: any frame is life, probe before replacing, capped backoff from v1
 
-Status: proposed (2026-10-20) · confirmed by [R-A1–A8](../remote-tests.md#a-links-liveness-and-routes) · Changes spike 05's timings · Plan: [remote-plan.md](../remote-plan.md)
+Status: proposed (2026-10-20) · R-A1 and R-A3 passed ([spike 12](../spikes/12-link-under-real-networks.md)); still to confirm: [R-A4–A8](../remote-tests.md#a-links-liveness-and-routes) · Changes spike 05's timings · Plan: [remote-plan.md](../remote-plan.md)
 
 ## Decision
 
@@ -10,7 +10,8 @@ The client core owns one connection actor per machine. Views only send it signal
 
 - **Any frame counts as life,** not only a pong. Frames are counted as they arrive at the socket, so the app being busy can't hide a live link.
 - **Pings:** both sides ping every 2 s while idle.
-- **Silence:** after 3 s with no frame the machine shows "Reconnecting…" while the socket is kept. After 5 s a replacement is dialled in parallel, and whichever proves alive first wins. The socket is torn down only after **15 s with no frame**.
+- **Silence:** after 3 s with no frame the machine shows "Reconnecting…" while the socket is kept. After 5 s a replacement is dialled in parallel, and whichever proves alive first wins. After an outage, TCP's own retransmission backoff keeps the old socket silent long after the network is back, so the replacement turns a 12 s stall into a sub-millisecond swap ([spike 12](../spikes/12-link-under-real-networks.md)). While silent, a new dial starts every second. The socket is torn down only after **15 s with no frame**.
+- **The daemon waits longer than the client:** its idle limit is 30 s, twice the client's teardown, so the client decides when a link is dead and its replacement takes over. A daemon limit at or below the client's resets links the client would keep.
 - **Announced states:** asleep, quitting and restarting show at once. Silence falls back to offline after 15 s.
 - **Probes:** foreground, Retry, a network change and the OS saying "offline" all probe the live socket rather than replacing it. A probe waits max(3 s, 4 × smoothed round trip), is extended while frames keep arriving, and gives up at 15 s.
 
