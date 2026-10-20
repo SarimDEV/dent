@@ -5,17 +5,17 @@
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+/// What every agent runs with; which command each runs is its driver's
+/// ([`crate::agent::Driver::command`]).
 pub struct AgentEnv {
     pub path: String,
-    /// The `claude` to run: `DENT_CLAUDE`, or `claude` on the PATH above.
-    pub claude: String,
 }
 
 impl AgentEnv {
     pub fn detect() -> Self {
-        let path = login_path().unwrap_or_else(fallback_path);
-        let claude = std::env::var("DENT_CLAUDE").unwrap_or_else(|_| "claude".into());
-        Self { path, claude }
+        Self {
+            path: login_path().unwrap_or_else(fallback_path),
+        }
     }
 }
 

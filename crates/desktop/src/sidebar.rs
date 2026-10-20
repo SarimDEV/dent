@@ -622,13 +622,15 @@ impl Dent {
                 .find(|w| w.name == name && w.resets_at > now)
                 .map(|w| crate::data::span((w.resets_at - now) as u64))
         };
+        // The usage shown is the default agent's.
+        let who = crate::bridge::agent_info(&self.agents, "").short;
         let usage_tip = match (resets("five_hour"), resets("seven_day")) {
             (Some(a), Some(b)) => {
-                format!("Claude usage. The 5-hour window resets in {a}, the week in {b}.")
+                format!("{who} usage. The 5-hour window resets in {a}, the week in {b}.")
             }
-            (Some(a), None) => format!("Claude usage. The 5-hour window resets in {a}."),
-            (None, Some(b)) => format!("Claude usage. The week resets in {b}."),
-            (None, None) => "Claude usage across every way you use your account".to_string(),
+            (Some(a), None) => format!("{who} usage. The 5-hour window resets in {a}."),
+            (None, Some(b)) => format!("{who} usage. The week resets in {b}."),
+            (None, None) => format!("{who} usage across every way you use your account"),
         };
         let machine = crate::data::machine_shown(&self.machine);
         let (link, link_tip) = match &self.connection {

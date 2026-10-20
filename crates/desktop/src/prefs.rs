@@ -14,6 +14,9 @@ pub const VERSION: u32 = 1;
 pub struct Prefs {
     /// Which shape these were written in (0: before `VERSION` 1).
     pub version: u32,
+    /// The agent new sessions run; none is the daemon's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     pub project: Option<String>,
     pub model: Option<String>,
     /// The permission a new session starts with: Full access until you pick

@@ -6,23 +6,10 @@
 //!
 //! [decision 0046]: ../../../../docs/decisions/0046-commands-by-type.md
 
-use dent_protocol::{Args, Choice, Command, Model, Setting};
+use dent_protocol::{Args, Choice, Command, Setting};
 use serde_json::Value;
 
-/// What the agent knows that fills a command's arguments in.
-#[derive(Default, Clone, Debug)]
-pub struct Catalog {
-    pub models: Vec<Model>,
-    /// Output styles, with what each does.
-    pub styles: Vec<(String, String)>,
-    pub style: Option<String>,
-    /// What `/config` takes, from its own usage text.
-    pub settings: Vec<Setting>,
-    /// `get_settings`: what's in effect.
-    pub effective: Value,
-    pub applied: Value,
-    pub servers: Vec<String>,
-}
+pub use crate::agent::Catalog;
 
 /// The agent's commands with what each takes.
 pub fn typed(raw: &[Command], cat: &Catalog) -> Vec<Command> {
@@ -384,7 +371,7 @@ mod tests {
 
     fn cat() -> Catalog {
         Catalog {
-            models: vec![Model {
+            models: vec![dent_protocol::Model {
                 id: "opus".into(),
                 name: "Opus 5.5".into(),
                 description: "For complex work".into(),

@@ -4,7 +4,22 @@ The daemon is one Rust binary per machine that owns every agent session, git ope
 
 ## Agent drivers
 
-Each agent sits behind one `AgentDriver` trait: start a session, send a user message, interrupt, answer an approval, resume after restart, and emit normalized events. Drivers translate their agent's wire format into dent's event types; nothing above the driver knows which agent it is talking to.
+Each agent sits behind one `Driver` trait (`crates/daemon/src/agent`, [0055](decisions/0055-agent-layer.md)). It covers:
+- starting a session's process;
+- reading each line it writes as an `agent::Event`;
+- sending messages, requests and answers in its words;
+- one-off runs (titles, branch names, commit messages, side questions);
+- reading usage, models and commands;
+- saying how it stands on the machine;
+- picking up its terminal sessions.
+
+Drivers translate their agent's wire format into dent's types, and nothing above a driver knows which agent it is talking to (a test guards this). `DRIVERS` lists them, the default first; adding an agent is one module and one entry there.
+
+- **A session keeps its agent** (`Created`'s `agent`, kept on its row; sessions from before ran `claude`). Forks, side questions, titles, branch names and commit messages run on the session's agent. A session whose agent this daemon has no driver for is left as it is.
+- **What an agent can do** is its `Caps`: steering, rewind, fork, side questions, the permission modes it takes, effort, project rules, sheets, stopping one piece of background work, context, compaction, dent's tools, terminal sessions, usage, restart. Clients offer only what it says.
+- **Clients learn the agents** from the welcome (names and `Caps`), and how each stands from `Request::Agents`: installed, its version against the tested one, and signed in to a plan, an API key or signed out. That answer is cached for a minute.
+- **Models, starting commands and usage are kept per agent.** `Request::Models` and `Request::Usage` take an optional agent; none means the default.
+- **What every agent's output becomes in the log** is shared (`agent::log`): tool output cut to its start and end, pictures saved, a subagent's report kept longer, the thought on the working line.
 
 | Driver | How it runs | Approvals | Limits |
 | --- | --- | --- | --- |

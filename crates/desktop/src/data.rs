@@ -437,6 +437,11 @@ pub struct Session {
     pub machine: String,
     /// "Claude · Opus", for the composer.
     pub agent: String,
+    /// Its agent's full name ("Claude Code") and short name ("Claude"),
+    /// and what it can do.
+    pub agent_name: String,
+    pub agent_short: String,
+    pub caps: dent_protocol::Caps,
     pub model: Option<String>,
     pub permission: Permission,
     pub effort: Option<String>,
@@ -523,6 +528,9 @@ impl Session {
             pr: None,
             machine: String::new(),
             agent: String::new(),
+            agent_name: "Claude Code".into(),
+            agent_short: "Claude".into(),
+            caps: dent_protocol::Caps::everything(),
             model: None,
             permission: Permission::Ask,
             effort: None,

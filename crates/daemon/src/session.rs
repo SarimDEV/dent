@@ -10,14 +10,14 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use dent_protocol::{
     Act, Activity, Answer, Body, CommandOutcome, Out, Outcome, Permission, SecretPlace, Section,
-    Status, Task,
+    Status, Task, View,
 };
 use dent_session_holder::wire::Proc as HeldProc;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
-use crate::claude::{self, wire, wire::AssistantBlock, wire::Inbound};
+use crate::agent::{self, Asked, AssistantBlock, Driver, Event, Launch, Reply, Req, Start, log};
 use crate::daemon::Daemon;
 use crate::store::{Row, Source};
 
@@ -46,10 +46,6 @@ fn start_limit() -> Duration {
         .map(Duration::from_millis)
         .unwrap_or(Duration::from_secs(60))
 }
-
-/// What Claude Code says when the conversation it was asked to resume has
-/// no transcript (it was stopped before writing one, or the file is gone).
-const FORGOTTEN: &str = "No conversation found with session ID";
 
 pub struct Cmd {
     pub op: Op,
@@ -130,15 +126,6 @@ struct Proc {
     resumed: bool,
 }
 
-struct Pending {
-    tool: String,
-    input: Value,
-    suggestions: Value,
-    /// A question from Claude Code itself (`request_user_dialog`), shown
-    /// as an agent question: each option's label and the answer it gives.
-    dialog: Option<Vec<(String, String)>>,
-}
-
 #[derive(Clone)]
 enum Ctl {
     Initialize,
@@ -163,14 +150,33 @@ enum Ctl {
         command: String,
         act: Act,
     },
-    /// A model or permission mode, kept once Claude Code takes it.
+    /// A model or permission mode, kept once the agent takes it.
     Model(String),
     Permission(Permission),
-    StopTask,
+    StopTask(String),
+}
+
+impl Ctl {
+    /// What it asks the agent.
+    fn req(&self) -> Req {
+        match self {
+            Ctl::Initialize => Req::Initialize,
+            Ctl::Interrupt => Req::Interrupt,
+            Ctl::ContextUsage => Req::ContextUsage,
+            Ctl::Settings => Req::Settings,
+            Ctl::Sheet { command, .. } | Ctl::Refresh { command } => Req::Sheet(command.clone()),
+            Ctl::Act { act, .. } => Req::Act(act.clone()),
+            Ctl::Model(m) => Req::Model(m.clone()),
+            Ctl::Permission(p) => Req::Permission(*p),
+            Ctl::StopTask(t) => Req::StopTask(t.clone()),
+        }
+    }
 }
 
 struct Session {
     d: Arc<Daemon>,
+    /// The agent this session runs, for good.
+    agent: &'static dyn Driver,
     id: String,
     cwd: String,
     model: Option<String>,
@@ -211,7 +217,7 @@ struct Session {
     mcp_told: HashSet<String>,
     /// When to carry on by itself (Unix seconds): a used-up limit resets.
     wake: Option<u64>,
-    asked: HashMap<String, Pending>,
+    asked: HashMap<String, Asked>,
     /// Client message ids already logged, so a resend never runs twice.
     seen: HashSet<String>,
     proc: Option<Proc>,
@@ -242,8 +248,8 @@ struct Session {
     /// changes nothing says nothing.
     sheets: HashMap<String, Vec<Section>>,
     /// Calls that run a subagent, whose result is its report and is kept
-    /// far longer than other output ([`wire::keep`]).
-    reports: claude::Reports,
+    /// far longer than other output ([`log::keep`]).
+    reports: log::Reports,
     /// A sign-in finishing in the browser: refresh this command's sheet
     /// now and then until it's done or the time's up.
     watch: Option<Watch>,
@@ -258,10 +264,20 @@ struct Watch {
 /// Start a session's task from its row. `held` is what the holder is
 /// running right now, for reattaching after a restart.
 pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
+    // A session from a newer daemon, with an agent this one can't drive,
+    // stays as it is: its log still reads, and nothing else runs it.
+    let Some(agent) = agent::driver(&row.agent) else {
+        eprintln!(
+            "dent-daemon: {}: no driver for agent {:?}, leaving it be",
+            row.id, row.agent
+        );
+        return;
+    };
     let (tx, rx) = mpsc::unbounded_channel();
-    d.register(&row.id, tx);
+    d.register(&row.id, tx, agent);
     let mut s = Session {
         d,
+        agent,
         id: row.id.clone(),
         cwd: row.cwd.clone(),
         model: row.model.clone(),
@@ -301,7 +317,7 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
         forgot: false,
         stop_asked: false,
         sheets: HashMap::new(),
-        reports: claude::Reports::default(),
+        reports: log::Reports::default(),
         watch: None,
     };
     s.rebuild();
@@ -385,9 +401,9 @@ impl Session {
                     let input = serde_json::from_str(&input).unwrap_or(Value::Null);
                     self.asked.insert(
                         id,
-                        Pending {
+                        Asked {
                             tool,
-                            dialog: claude::dialog_values(&input),
+                            dialog: agent::dialog_values(&input),
                             input,
                             // Unknown in older logs: "always" then allows
                             // once rather than more than was offered.
@@ -576,7 +592,12 @@ impl Session {
                 }
                 Ok(())
             }
-            Op::Rewind { to, files } => self.rewind(to, files).await,
+            Op::Rewind { to, files } => {
+                if !self.agent.caps().rewind {
+                    bail!("{} can't go back to an earlier message", self.agent.name());
+                }
+                self.rewind(to, files).await
+            }
             Op::Unqueue { id } => {
                 let before = self.held.len();
                 self.held.retain(|(h, _, _)| *h != id);
@@ -601,11 +622,15 @@ impl Session {
                 if self.model.as_deref() == Some(model.as_str()) {
                     return Ok(());
                 }
-                if self.running() {
-                    let extra = json!({ "model": model });
-                    self.control("set_model", extra, Ctl::Model(model)).await?;
+                if self.running() && self.agent.caps().set_model {
+                    self.control(Ctl::Model(model)).await?;
                 } else {
                     self.keep(Ctl::Model(model), None);
+                    // One that can't change its model as it runs takes it
+                    // in a new process, as a new effort does.
+                    if self.running() {
+                        self.respawn_soon().await;
+                    }
                 }
                 Ok(())
             }
@@ -613,27 +638,30 @@ impl Session {
                 if p == self.permission {
                     return Ok(());
                 }
+                if !self.agent.caps().permissions.contains(&p) {
+                    bail!("{} has no {} mode", self.agent.name(), p.label());
+                }
                 if self.running() {
-                    let extra = json!({ "mode": claude::mode_name(p) });
-                    self.control("set_permission_mode", extra, Ctl::Permission(p))
-                        .await?;
+                    self.control(Ctl::Permission(p)).await?;
                 } else {
                     self.keep(Ctl::Permission(p), None);
                 }
                 Ok(())
             }
             Op::Act { command, act } => {
-                let Some((subtype, extra)) = claude::sheets::request(&act) else {
+                if self.agent.request("", &Req::Act(act.clone())).is_none() {
                     bail!("that's for the client to do");
-                };
+                }
                 self.ensure_proc().await?;
-                self.control(subtype, extra, Ctl::Act { command, act })
-                    .await
+                self.control(Ctl::Act { command, act }).await
             }
             Op::SetEffort(effort) => {
                 // The same effort again mustn't restart the agent.
                 if self.effort.as_deref().unwrap_or("") == effort {
                     return Ok(());
+                }
+                if !self.agent.caps().effort {
+                    bail!("{} has no effort levels", self.agent.name());
                 }
                 self.effort = (!effort.is_empty()).then(|| effort.clone());
                 self.log(Body::Settings {
@@ -642,17 +670,17 @@ impl Session {
                     permission: None,
                     title: None,
                 });
-                // Effort is fixed when the agent starts: start a fresh process
-                // that resumes the same conversation, now, or with the next
-                // message once this turn and any background work are done.
-                if self.in_turn || !self.background.is_empty() {
-                    self.respawn = true;
-                } else {
-                    self.retire_proc().await;
-                }
+                // Effort is fixed when the agent starts.
+                self.respawn_soon().await;
                 Ok(())
             }
             Op::Restart => {
+                if !self.agent.caps().restart {
+                    bail!(
+                        "{} can't start again on the same conversation",
+                        self.agent.name()
+                    );
+                }
                 // As a new effort does: a fresh process resuming the same
                 // conversation, which reads skills, plugins and settings anew.
                 let later = self.in_turn || !self.background.is_empty();
@@ -661,13 +689,17 @@ impl Session {
                 } else {
                     self.retire_proc().await;
                 }
+                let name = self.agent.name();
                 self.log(Body::Notice {
                     text: if later {
-                        "Claude Code starts again once this turn is done, with skills, plugins and settings as they are now."
+                        format!(
+                            "{name} starts again once this turn is done, with skills, plugins and settings as they are now."
+                        )
                     } else {
-                        "Claude Code starts again with your next message, with skills, plugins and settings as they are now."
-                    }
-                    .into(),
+                        format!(
+                            "{name} starts again with your next message, with skills, plugins and settings as they are now."
+                        )
+                    },
                 });
                 Ok(())
             }
@@ -693,11 +725,16 @@ impl Session {
                 Ok(())
             }
             Op::StopTask(task) => {
+                if !self.agent.caps().stop_task {
+                    bail!(
+                        "{} can't stop one piece of background work",
+                        self.agent.name()
+                    );
+                }
                 if self.proc.is_none() || !self.background.iter().any(|t| t.id == task) {
                     bail!("that work has already stopped");
                 }
-                self.control("stop_task", json!({ "task_id": task }), Ctl::StopTask)
-                    .await
+                self.control(Ctl::StopTask(task)).await
             }
             Op::Seen(upto) => {
                 self.log(Body::Seen { upto });
@@ -756,6 +793,17 @@ impl Session {
                 }
                 Ok(())
             }
+        }
+    }
+
+    /// Start a fresh process that resumes the same conversation: now, or
+    /// with the next message once this turn and any background work are
+    /// done.
+    async fn respawn_soon(&mut self) {
+        if self.in_turn || !self.background.is_empty() {
+            self.respawn = true;
+        } else {
+            self.retire_proc().await;
         }
     }
 
@@ -847,6 +895,8 @@ impl Session {
         if self.wake.take().is_some() && text != RESUME_TEXT {
             self.log(Body::Resume { at: None });
         }
+        // An agent that can't be steered gets it once the turn ends.
+        let steer = steer && self.agent.caps().steer;
         let working = self.in_turn && self.proc.is_some();
         // Nothing can be steered into an agent that's being stopped: it
         // waits for the turn to end like any other. While a new worktree
@@ -891,14 +941,14 @@ impl Session {
         }
         if let Err(e) = self.ensure_proc().await {
             self.log(Body::Notice {
-                text: format!("Couldn't start Claude Code: {e:#}"),
+                text: format!("Couldn't start {}: {e:#}", self.agent.name()),
             });
             self.end_turn(Outcome::Error {
                 message: format!("{e:#}"),
             });
             return Err(e);
         }
-        let msg = wire::user_message(text, &crate::daemon::uuid(), steer, attachments);
+        let msg = self.agent.message(text, steer, attachments);
         if let Err(e) = self.write(&msg).await {
             // The agent went between starting and now. A new message gets
             // one more go with a new agent; a steer belonged to the turn.
@@ -917,7 +967,7 @@ impl Session {
             };
             if let Err(e) = again {
                 self.log(Body::Notice {
-                    text: format!("Couldn't reach Claude Code: {e:#}"),
+                    text: format!("Couldn't reach {}: {e:#}", self.agent.name()),
                 });
                 if !steer {
                     self.end_turn(Outcome::Error {
@@ -940,9 +990,11 @@ impl Session {
         self.agent_started = false;
         self.resume_at = Some(None);
         self.log(Body::Notice {
-            text: "Claude Code no longer had this conversation's history, so it started a new \
-                   one. It won't remember what was said before."
-                .into(),
+            text: format!(
+                "{} no longer had this conversation's history, so it started a new one. It \
+                 won't remember what was said before.",
+                self.agent.name()
+            ),
         });
         match self.last.clone() {
             Some((_, text, attachments)) => {
@@ -1121,7 +1173,7 @@ impl Session {
             }
         };
         let start = match self.resume_at.take() {
-            Some(Some(at)) => claude::Start::ResumeAt {
+            Some(Some(at)) => Start::ResumeAt {
                 id: agent_session,
                 at,
             },
@@ -1133,26 +1185,27 @@ impl Session {
                     agent_session: Some(a.clone()),
                     version: None,
                 });
-                claude::Start::Fresh(a)
+                Start::Fresh(a)
             }
-            None if self.agent_started => claude::Start::Resume(agent_session),
-            None => claude::Start::Fresh(agent_session),
+            None if self.agent_started => Start::Resume(agent_session),
+            None => Start::Fresh(agent_session),
         };
-        let resumed = !matches!(start, claude::Start::Fresh(_));
+        let resumed = !matches!(start, Start::Fresh(_));
         let proc = self.d.store().next_proc(&self.id)?;
         let env = self.d.env();
         // Each new agent also refreshes the PATH for the one after it.
         self.d.refresh_env();
         let asks = self.asks_dir();
         let _ = std::fs::create_dir_all(&asks);
-        let argv = claude::argv(
-            &env.claude,
-            &env.path,
-            self.model.as_deref(),
-            self.permission,
-            &start,
-            self.effort.as_deref(),
-            &asks,
+        let argv = self.agent.launch(
+            &env,
+            &Launch {
+                model: self.model.as_deref(),
+                permission: self.permission,
+                effort: self.effort.as_deref(),
+                start: &start,
+                asks: &asks,
+            },
         );
         h.spawn(&proc, argv, Some(self.cwd.clone().into()), Vec::new())
             .await?;
@@ -1167,12 +1220,7 @@ impl Session {
             resumed,
         });
         self.start_by = Some(Instant::now() + start_limit());
-        self.control(
-            "initialize",
-            json!({ "supportedDialogKinds": claude::DIALOGS }),
-            Ctl::Initialize,
-        )
-        .await?;
+        self.control(Ctl::Initialize).await?;
         Ok(())
     }
 
@@ -1192,21 +1240,23 @@ impl Session {
         format!("dent-{}-{}", self.d.boot, self.next_ctl)
     }
 
-    /// A control request sent once the current output is handled, for
-    /// places that can't wait on the write.
-    fn control_later(&mut self, subtype: &str, kind: Ctl) {
+    /// A request sent once the current output is handled, for places that
+    /// can't wait on the write. One the agent has no words for is dropped.
+    fn control_later(&mut self, kind: Ctl) {
         let id = self.ctl_id();
-        self.controls.insert(id.clone(), kind);
-        self.outbox
-            .push(wire::control_request(&id, subtype, json!({})));
+        if let Some(msg) = self.agent.request(&id, &kind.req()) {
+            self.controls.insert(id, kind);
+            self.outbox.push(msg);
+        }
     }
 
-    async fn control(&mut self, subtype: &str, extra: Value, kind: Ctl) -> Result<()> {
+    async fn control(&mut self, kind: Ctl) -> Result<()> {
         let id = self.ctl_id();
+        let Some(msg) = self.agent.request(&id, &kind.req()) else {
+            bail!("{} can't do that", self.agent.name());
+        };
         self.controls.insert(id.clone(), kind);
-        let wrote = self
-            .write(&wire::control_request(&id, subtype, extra))
-            .await;
+        let wrote = self.write(&msg).await;
         // Never sent, so never answered: it mustn't apply later either.
         if wrote.is_err() {
             self.controls.remove(&id);
@@ -1235,7 +1285,7 @@ impl Session {
         let _ = self.d.store().put(&self.stop_key(), "1");
         // The agent doesn't always end the turn after an interrupt, and one
         // that can't be reached gets its process stopped straight away.
-        let asked = self.control("interrupt", json!({}), Ctl::Interrupt).await;
+        let asked = self.control(Ctl::Interrupt).await;
         let grace = if asked.is_ok() {
             STOP_GRACE
         } else {
@@ -1252,34 +1302,7 @@ impl Session {
         if p.tool == crate::plan_tool::SECRET {
             return self.answer_secret(id, answer);
         }
-        let msg = match (&answer, &p.dialog) {
-            (Answer::Choose { answers }, Some(values)) => {
-                let picked = answers.first().map(String::as_str).unwrap_or_default();
-                let value = values
-                    .iter()
-                    .find(|(label, _)| label == picked)
-                    .map(|(_, v)| v.as_str())
-                    .unwrap_or("cancelled");
-                wire::dialog_answer(&id, Some(value))
-            }
-            (Answer::Deny { .. }, Some(_)) => wire::dialog_answer(&id, None),
-            (answer, _) => match answer {
-                Answer::Allow { always, project } => {
-                    wire::allow(&id, &p.tool, &p.input, *always, *project, &p.suggestions)
-                }
-                Answer::Deny { message } => wire::deny(&id, message),
-                Answer::Choose { answers } => wire::allow(
-                    &id,
-                    &p.tool,
-                    &claude::answers(&p.input, answers),
-                    false,
-                    false,
-                    &Value::Null,
-                ),
-                Answer::Expired => bail!("can't answer with expired"),
-                Answer::Secret { .. } => bail!("only a secret's card takes a secret"),
-            },
-        };
+        let msg = self.agent.answer(&id, p, &answer)?;
         self.write(&msg).await?;
         self.asked.remove(&id);
         self.log(Body::Answered { id, answer });
@@ -1393,7 +1416,7 @@ impl Session {
                 let tail = String::from_utf8_lossy(&p.err).trim().to_string();
                 let last = tail.lines().last().unwrap_or_default().to_string();
                 self.retire_proc().await;
-                let mut message = "Claude Code didn't start within a minute".to_string();
+                let mut message = format!("{} didn't start within a minute", self.agent.name());
                 if !last.is_empty() {
                     message = format!("{message}: {last}");
                 }
@@ -1406,12 +1429,8 @@ impl Session {
             if w.until <= now {
                 self.watch = None;
             }
-            if let Some(source) = claude::sheets::source(&command)
-                && self.proc.is_some()
-            {
-                let _ = self
-                    .control(source, json!({}), Ctl::Refresh { command })
-                    .await;
+            if self.agent.has_sheet(&command) && self.proc.is_some() {
+                let _ = self.control(Ctl::Refresh { command }).await;
             }
         }
         // A used-up limit has reset: carry on where the turn stopped.
@@ -1472,7 +1491,7 @@ impl Session {
             let line: Vec<u8> = p.buf.drain(..=i).collect();
             p.off += line.len() as u64;
             let end = p.off;
-            match wire::parse(&line[..line.len() - 1]) {
+            match self.agent.parse(&line[..line.len() - 1]) {
                 Ok(ev) => self.inbound(ev, end),
                 Err(_) if line.iter().all(u8::is_ascii_whitespace) => {}
                 Err(e) => eprintln!("dent-daemon: {}: unreadable agent line: {e}", self.id),
@@ -1482,23 +1501,20 @@ impl Session {
     }
 
     /// One line from the agent, which ended at byte `end` of its output.
-    fn inbound(&mut self, ev: Inbound, end: u64) {
+    fn inbound(&mut self, ev: Event, end: u64) {
         match ev {
-            Inbound::Init {
-                session_id,
+            Event::TurnStarted {
+                agent_session,
                 version,
-                permission_mode,
+                permission,
                 mcp,
             } => {
                 // An MCP server that won't connect, or wants you to sign
-                // in, says so once in the chat (claude.ai's connectors
-                // you haven't set up are left out: they're yours to add).
+                // in, says so once in the chat.
                 for (name, status) in mcp {
                     let said = match status.as_str() {
                         "failed" => format!("The MCP server {name} couldn't connect."),
-                        "needs-auth" if !name.starts_with("claude.ai ") => {
-                            format!("The MCP server {name} needs you to sign in.")
-                        }
+                        "needs-auth" => format!("The MCP server {name} needs you to sign in."),
                         _ => continue,
                     };
                     if self.mcp_told.insert(format!("{name}/{status}")) {
@@ -1508,19 +1524,19 @@ impl Session {
                 // A steer has been taken in by the time a turn starts: an
                 // abort from here on is a real one.
                 self.steered = false;
-                if self.agent_session.as_deref() != Some(session_id.as_str())
-                    && !session_id.is_empty()
+                if self.agent_session.as_deref() != Some(agent_session.as_str())
+                    && !agent_session.is_empty()
                 {
-                    self.agent_session = Some(session_id.clone());
+                    self.agent_session = Some(agent_session.clone());
                     self.log_from(
                         Body::Agent {
-                            agent_session: Some(session_id),
+                            agent_session: Some(agent_session),
                             version: Some(version),
                         },
                         end,
                     );
                 }
-                if let Some(p) = claude::permission_from(&permission_mode)
+                if let Some(p) = permission
                     && p != self.permission
                 {
                     self.permission = p;
@@ -1540,21 +1556,21 @@ impl Session {
                 self.start_by = None;
                 self.log_from(Body::TurnStarted, end);
             }
-            Inbound::MessageStart { parent: None } => {
+            Event::MessageStart { parent: None } => {
                 // A reply is coming: any retry worked.
                 self.preparing = None;
                 self.d.set_activity(&self.id, None);
                 self.d.clear_partial(&self.id);
             }
-            Inbound::TextDelta { parent: None, text } => {
+            Event::TextDelta { parent: None, text } => {
                 self.thought_ends();
                 self.d.delta(&self.id, &text, false)
             }
             // What it's thinking shows on the working line, a finished
             // sentence at a time.
-            Inbound::ThinkingDelta { parent: None, text } => {
+            Event::ThinkingDelta { parent: None, text } => {
                 self.thinking.push_str(&text);
-                if let Some(latest) = claude::latest_sentence(&self.thinking)
+                if let Some(latest) = log::latest_sentence(&self.thinking)
                     && self.thought.as_deref() != Some(latest.as_str())
                 {
                     self.thought = Some(latest.clone());
@@ -1563,7 +1579,7 @@ impl Session {
                 }
             }
             // Writing a long file streams nothing else for minutes: say so.
-            Inbound::ToolStart { parent: None, name } => {
+            Event::ToolStart { parent: None, name } => {
                 self.thought_ends();
                 self.d.set_activity(
                     &self.id,
@@ -1574,13 +1590,13 @@ impl Session {
                 );
                 self.preparing = Some((name, Some(String::new())));
             }
-            Inbound::InputDelta { parent: None, json } => {
+            Event::InputDelta { parent: None, json } => {
                 if let Some((tool, input)) = &mut self.preparing
                     && let Some(head) = input
                 {
                     head.push_str(&json);
                     // The target comes first, if at all.
-                    let what = claude::target(tool, head);
+                    let what = self.agent.target(tool, head);
                     if what.is_some() || head.len() > 4096 {
                         *input = None;
                     }
@@ -1596,11 +1612,11 @@ impl Session {
                     }
                 }
             }
-            // The turn's result says the same thing, as an error.
-            Inbound::Assistant {
+            // The turn's end says the same thing, as an error.
+            Event::Assistant {
                 synthetic: true, ..
             } => {}
-            Inbound::Assistant {
+            Event::Assistant {
                 parent,
                 uuid,
                 blocks,
@@ -1633,8 +1649,7 @@ impl Session {
                     })
                     .collect();
                 // A server tool's result comes with its call.
-                for b in claude::assistant_bodies(parent, uuid, blocks, results, &mut self.reports)
-                {
+                for b in log::assistant_bodies(parent, uuid, blocks, results, &mut self.reports) {
                     self.log_from(b, end);
                 }
                 for (id, input) in secrets {
@@ -1651,7 +1666,7 @@ impl Session {
                     );
                     self.asked.insert(
                         id,
-                        Pending {
+                        Asked {
                             tool: crate::plan_tool::SECRET.into(),
                             input,
                             suggestions: Value::Null,
@@ -1660,23 +1675,20 @@ impl Session {
                     );
                 }
             }
-            Inbound::ToolResults { parent, results } => {
+            Event::ToolResults { parent, results } => {
                 let media = self.d.paths.state.join("attachments").join(&self.id);
-                for b in claude::result_bodies(parent, results, &mut self.reports, Some(&media)) {
+                for b in log::result_bodies(parent, results, &mut self.reports, Some(&media)) {
                     self.log_from(b, end);
                 }
             }
-            Inbound::RateLimit(info) => self.log_from(claude::limits(&info), end),
-            Inbound::TaskStarted {
-                task_id,
-                tool_use_id,
-            } => {
-                if let Some(call) = tool_use_id {
-                    self.task_calls.insert(task_id, call);
+            Event::Limits(windows) => self.log_from(Body::Limits { windows }, end),
+            Event::TaskStarted { task, call } => {
+                if let Some(call) = call {
+                    self.task_calls.insert(task, call);
                 }
             }
-            Inbound::BackgroundTasks(tasks) => {
-                self.background = claude::tasks(&tasks, &self.task_calls);
+            Event::BackgroundTasks(tasks) => {
+                self.background = log::tasks(&tasks, &self.task_calls);
                 self.log_from(
                     Body::Background {
                         tasks: self.background.clone(),
@@ -1689,198 +1701,45 @@ impl Session {
                     self.idle_at = Some(Instant::now() + idle());
                 }
             }
-            Inbound::CanUseTool {
-                request_id,
-                tool_name,
+            Event::Approval {
+                id,
+                tool,
                 input,
                 description,
+                keeps,
                 suggestions,
             } => {
                 self.log_from(
                     Body::Asked {
-                        id: request_id.clone(),
-                        tool: tool_name.clone(),
+                        id: id.clone(),
+                        tool: tool.clone(),
                         input: input.to_string(),
                         description,
-                        keeps: wire::keeps(&suggestions),
+                        keeps,
                         suggestions: (!suggestions.is_null()).then(|| suggestions.to_string()),
                     },
                     end,
                 );
                 self.asked.insert(
-                    request_id,
-                    Pending {
-                        tool: tool_name,
+                    id,
+                    Asked {
+                        tool,
                         input,
                         suggestions,
                         dialog: None,
                     },
                 );
             }
-            Inbound::ControlResponse {
-                request_id,
-                ok,
-                body,
-            } => match (self.controls.remove(&request_id), ok) {
-                (Some(Ctl::Initialize), _) if !ok => {
-                    self.start_by = None;
-                    self.log_from(
-                        Body::Notice {
-                            text: format!(
-                                "Claude Code refused: {}",
-                                body.as_str().unwrap_or("unknown request")
-                            ),
-                        },
-                        end,
-                    );
-                }
-                (Some(Ctl::Initialize), true) => {
-                    self.start_by = None;
-                    self.d.set_models(claude::models(&body));
-                    self.d.set_commands(&self.id, claude::commands(&body));
-                    let (styles, style) = claude::styles(&body);
-                    self.d.catalog(&self.id, |c| {
-                        c.styles = styles;
-                        c.style = style;
-                    });
-                    self.control_later("get_settings", Ctl::Settings);
-                    // A resumed conversation is as full as it was: say so
-                    // before the first reply rather than after it.
-                    if self.agent_started {
-                        self.control_later("get_context_usage", Ctl::ContextUsage);
-                    }
-                }
-                (Some(Ctl::ContextUsage), true) => {
-                    if let Some(used) = body["totalTokens"].as_u64() {
-                        self.context = Some(used);
-                        self.max_context = body["maxTokens"].as_u64().or(self.max_context);
-                        self.log_from(
-                            Body::Context {
-                                used,
-                                max: self.max_context,
-                                compacts_at: body["autoCompactThreshold"]
-                                    .as_u64()
-                                    .filter(|_| body["isAutoCompactEnabled"] != false),
-                                parts: wire::parts(&body["categories"]),
-                            },
-                            end,
-                        );
-                    }
-                }
-                (Some(c @ (Ctl::Model(_) | Ctl::Permission(_))), true) => {
-                    self.keep(c, Some(end));
-                }
-                (Some(Ctl::Settings), true) => {
-                    self.d.catalog(&self.id, |c| {
-                        c.effective = body["effective"].clone();
-                        c.applied = body["applied"].clone();
-                    });
-                }
-                (
-                    Some(Ctl::Sheet {
-                        command,
-                        args,
-                        text,
-                        outcome,
-                    }),
-                    ok,
-                ) => {
-                    let sections = ok
-                        .then(|| claude::sheets::sheet(&command, &body, &self.d.models()))
-                        .flatten();
-                    let body = match sections {
-                        Some(sections) => {
-                            self.sheets.insert(command.clone(), sections.clone());
-                            Body::Command {
-                                text: match outcome {
-                                    // Its own words, when it had some.
-                                    CommandOutcome::Done if !text.trim().is_empty() => text,
-                                    _ => claude::sheets::text(&sections),
-                                },
-                                name: command,
-                                args,
-                                outcome: CommandOutcome::Done,
-                                view: Some(claude::sheets::view(sections)),
-                            }
-                        }
-                        None => Body::Command {
-                            name: command,
-                            args,
-                            text,
-                            outcome,
-                            view: None,
-                        },
-                    };
-                    self.log_from(body, end);
-                }
-                (Some(Ctl::Refresh { command }), true) => {
-                    if let Some(sections) = claude::sheets::sheet(&command, &body, &self.d.models())
-                        && self.sheets.get(&command) != Some(&sections)
-                    {
-                        self.sheets.insert(command.clone(), sections.clone());
-                        self.d.tell(Out::Sheet {
-                            session: self.id.clone(),
-                            command,
-                            sections,
-                        });
-                    }
-                }
-                (Some(Ctl::Act { command, act }), ok) => {
-                    let url = body["authUrl"]
-                        .as_str()
-                        .filter(|_| ok && body["requiresUserAction"] == true)
-                        .map(str::to_string);
-                    // Signing in finishes in the browser: watch for it.
-                    if url.is_some() {
-                        let now = Instant::now();
-                        self.watch = Some(Watch {
-                            command: command.clone(),
-                            next: now + Duration::from_secs(2),
-                            until: now + Duration::from_secs(180),
-                        });
-                    }
-                    self.d.tell(Out::Acted {
-                        session: self.id.clone(),
-                        command: command.clone(),
-                        act,
-                        url,
-                        error: (!ok).then(|| {
-                            body.as_str()
-                                .unwrap_or("Claude Code couldn't do that")
-                                .to_string()
-                        }),
-                    });
-                    if let Some(source) = claude::sheets::source(&command) {
-                        self.control_later(source, Ctl::Refresh { command });
-                    }
-                }
-                (
-                    Some(
-                        Ctl::Interrupt
-                        | Ctl::ContextUsage
-                        | Ctl::Settings
-                        | Ctl::Refresh { .. }
-                        | Ctl::StopTask,
-                    ),
-                    _,
-                )
-                | (None, _) => {}
-                (Some(_), false) => self.log_from(
-                    Body::Notice {
-                        text: format!(
-                            "Claude Code refused: {}",
-                            body.as_str().unwrap_or("unknown request")
-                        ),
-                    },
-                    end,
-                ),
-            },
-            Inbound::Request {
-                request_id,
-                subtype,
-                server,
-            } => {
-                if subtype == "elicitation" {
+            Event::Response { id, ok, body } => {
+                let Some(ctl) = self.controls.remove(&id) else {
+                    return;
+                };
+                let models = self.d.models(self.agent.id());
+                let reply = self.agent.reply(&ctl.req(), ok, &body, &models);
+                self.replied(ctl, reply, end);
+            }
+            Event::Unanswerable { id, what, server } => {
+                if what == "elicitation" {
                     let who = server.unwrap_or_else(|| "An MCP server".into());
                     self.log_from(
                         Body::Notice {
@@ -1891,30 +1750,26 @@ impl Session {
                         end,
                     );
                 }
-                self.outbox.push(wire::refuse(&request_id, &subtype));
+                self.outbox.push(self.agent.refuse(&id, &what));
             }
-            Inbound::CancelRequest { request_id } => {
-                if self.asked.remove(&request_id).is_some() {
+            Event::Cancelled { id } => {
+                if self.asked.remove(&id).is_some() {
                     self.log_from(
                         Body::Answered {
-                            id: request_id,
+                            id,
                             answer: Answer::Expired,
                         },
                         end,
                     );
                 }
             }
-            Inbound::Result {
-                is_error,
+            Event::TurnEnded {
+                aborted,
+                error,
                 text,
-                terminal_reason,
             } => {
-                let aborted = matches!(
-                    terminal_reason.as_deref(),
-                    Some("aborted_streaming" | "aborted_tools")
-                );
-                if is_error
-                    && text.as_deref().is_some_and(|t| t.starts_with(FORGOTTEN))
+                if error
+                    && text.as_deref().is_some_and(|t| self.agent.forgot(t))
                     && self.proc.as_ref().is_some_and(|p| p.resumed)
                 {
                     self.forgot = true;
@@ -1934,7 +1789,7 @@ impl Session {
                 self.steered = false;
                 let outcome = if aborted {
                     Outcome::Interrupted { reason: None }
-                } else if is_error {
+                } else if error {
                     Outcome::Error {
                         message: text.clone().unwrap_or_else(|| "The turn failed".into()),
                     }
@@ -1969,10 +1824,10 @@ impl Session {
                 // The agent's own count, with its real window size; after
                 // a command that changed the context (/compact, /clear)
                 // it's the only one.
-                self.control_later("get_context_usage", Ctl::ContextUsage);
+                self.control_later(Ctl::ContextUsage);
                 self.end_turn_at(outcome, Some(end));
             }
-            Inbound::Compacted {
+            Event::Compacted {
                 auto,
                 before,
                 after,
@@ -1990,13 +1845,13 @@ impl Session {
                     end,
                 )
             }
-            Inbound::Compacting { on: true, .. } => self.d.set_activity(
+            Event::Compacting { on: true, .. } => self.d.set_activity(
                 &self.id,
                 Some(Activity::Compacting {
                     since: crate::daemon::now_ms(),
                 }),
             ),
-            Inbound::Compacting { on: false, failed } => {
+            Event::Compacting { on: false, failed } => {
                 self.d.set_activity(&self.id, None);
                 if let Some(why) = failed {
                     self.log_from(
@@ -2007,7 +1862,7 @@ impl Session {
                     );
                 }
             }
-            Inbound::Retrying {
+            Event::Retrying {
                 attempt,
                 max,
                 delay_ms,
@@ -2021,10 +1876,10 @@ impl Session {
                     error,
                 }),
             ),
-            Inbound::CommandsChanged(v) => {
-                self.d.commands_changed(&self.id, claude::commands(&v));
+            Event::CommandsChanged(commands) => {
+                self.d.commands_changed(&self.id, commands);
             }
-            Inbound::LocalCommand {
+            Event::LocalCommand {
                 name,
                 args,
                 text,
@@ -2044,20 +1899,18 @@ impl Session {
                 self.said = true;
                 // A command whose answer is a screen gets its data as a
                 // sheet, even where the agent refused to draw it.
-                let sheet = claude::sheets::source(&name).filter(|_| {
-                    args.is_empty() && !matches!(outcome, CommandOutcome::Unknown { .. })
-                });
-                match sheet {
-                    Some(source) => self.control_later(
-                        source,
-                        Ctl::Sheet {
-                            command: name,
-                            args,
-                            text,
-                            outcome,
-                        },
-                    ),
-                    None => self.log_from(
+                let sheet = self.agent.has_sheet(&name)
+                    && args.is_empty()
+                    && !matches!(outcome, CommandOutcome::Unknown { .. });
+                if sheet {
+                    self.control_later(Ctl::Sheet {
+                        command: name,
+                        args,
+                        text,
+                        outcome,
+                    });
+                } else {
+                    self.log_from(
                         Body::Command {
                             name,
                             args,
@@ -2066,48 +1919,201 @@ impl Session {
                             view,
                         },
                         end,
-                    ),
+                    );
                 }
                 // It may have changed a setting a command offers.
-                self.control_later("get_settings", Ctl::Settings);
+                self.control_later(Ctl::Settings);
             }
-            Inbound::Notice(text) => self.log_from(Body::Notice { text }, end),
-            Inbound::Dialog {
-                request_id,
-                kind,
-                payload,
-            } => {
-                // A kind dent didn't declare is never answered: Claude Code
-                // takes its default.
-                if let Some((input, values)) = claude::dialog(&kind, &payload) {
+            Event::Notice(text) => self.log_from(Body::Notice { text }, end),
+            Event::Question { id, input, options } => {
+                self.log_from(
+                    Body::Asked {
+                        id: id.clone(),
+                        tool: "AskUserQuestion".into(),
+                        input: input.to_string(),
+                        description: None,
+                        keeps: false,
+                        suggestions: None,
+                    },
+                    end,
+                );
+                self.asked.insert(
+                    id,
+                    Asked {
+                        tool: "AskUserQuestion".into(),
+                        input,
+                        suggestions: Value::Null,
+                        dialog: Some(options),
+                    },
+                );
+            }
+            Event::MessageStart { .. }
+            | Event::TextDelta { .. }
+            | Event::ThinkingDelta { .. }
+            | Event::ToolStart { .. }
+            | Event::InputDelta { .. }
+            | Event::Other => {}
+        }
+    }
+
+    /// What the agent answered to request `ctl`.
+    fn replied(&mut self, ctl: Ctl, reply: Reply, end: u64) {
+        match (ctl, reply) {
+            (Ctl::Initialize, Reply::Refused(why)) => {
+                self.start_by = None;
+                self.log_from(
+                    Body::Notice {
+                        text: format!("{} refused: {why}", self.agent.name()),
+                    },
+                    end,
+                );
+            }
+            (
+                Ctl::Initialize,
+                Reply::Initialized {
+                    models,
+                    commands,
+                    styles,
+                    style,
+                },
+            ) => {
+                self.start_by = None;
+                self.d.set_models(self.agent.id(), models);
+                self.d.set_commands(&self.id, commands);
+                self.d.catalog(&self.id, |c| {
+                    c.styles = styles;
+                    c.style = style;
+                });
+                self.control_later(Ctl::Settings);
+                // A resumed conversation is as full as it was: say so
+                // before the first reply rather than after it.
+                if self.agent_started {
+                    self.control_later(Ctl::ContextUsage);
+                }
+            }
+            (
+                Ctl::ContextUsage,
+                Reply::Context {
+                    used,
+                    max,
+                    compacts_at,
+                    parts,
+                },
+            ) => {
+                self.context = Some(used);
+                self.max_context = max.or(self.max_context);
+                self.log_from(
+                    Body::Context {
+                        used,
+                        max: self.max_context,
+                        compacts_at,
+                        parts,
+                    },
+                    end,
+                );
+            }
+            (c @ (Ctl::Model(_) | Ctl::Permission(_)), Reply::Done) => {
+                self.keep(c, Some(end));
+            }
+            (Ctl::Settings, Reply::Settings { effective, applied }) => {
+                self.d.catalog(&self.id, |c| {
+                    c.effective = effective;
+                    c.applied = applied;
+                });
+            }
+            (
+                Ctl::Sheet {
+                    command,
+                    args,
+                    text,
+                    outcome,
+                },
+                reply,
+            ) => {
+                let sections = match reply {
+                    Reply::Sheet(s) => s,
+                    _ => None,
+                };
+                let body = match sections {
+                    Some(sections) => {
+                        self.sheets.insert(command.clone(), sections.clone());
+                        Body::Command {
+                            text: match outcome {
+                                // Its own words, when it had some.
+                                CommandOutcome::Done if !text.trim().is_empty() => text,
+                                _ => log::sheet_text(&sections),
+                            },
+                            name: command,
+                            args,
+                            outcome: CommandOutcome::Done,
+                            view: Some(View::Sheet { sections }),
+                        }
+                    }
+                    None => Body::Command {
+                        name: command,
+                        args,
+                        text,
+                        outcome,
+                        view: None,
+                    },
+                };
+                self.log_from(body, end);
+            }
+            (Ctl::Refresh { command }, Reply::Sheet(Some(sections))) => {
+                if self.sheets.get(&command) != Some(&sections) {
+                    self.sheets.insert(command.clone(), sections.clone());
+                    self.d.tell(Out::Sheet {
+                        session: self.id.clone(),
+                        command,
+                        sections,
+                    });
+                }
+            }
+            (Ctl::Act { command, act }, reply) => {
+                let (url, error) = match reply {
+                    Reply::Acted { url } => (url, None),
+                    Reply::Refused(why) => (None, Some(why)),
+                    _ => (None, None),
+                };
+                // Signing in finishes in the browser: watch for it.
+                if url.is_some() {
+                    let now = Instant::now();
+                    self.watch = Some(Watch {
+                        command: command.clone(),
+                        next: now + Duration::from_secs(2),
+                        until: now + Duration::from_secs(180),
+                    });
+                }
+                self.d.tell(Out::Acted {
+                    session: self.id.clone(),
+                    command: command.clone(),
+                    act,
+                    url,
+                    error,
+                });
+                if self.agent.has_sheet(&command) {
+                    self.control_later(Ctl::Refresh { command });
+                }
+            }
+            (
+                Ctl::Interrupt
+                | Ctl::ContextUsage
+                | Ctl::Settings
+                | Ctl::Refresh { .. }
+                | Ctl::StopTask(_)
+                | Ctl::Initialize,
+                _,
+            ) => {}
+            (Ctl::Model(_) | Ctl::Permission(_), reply) => {
+                if let Reply::Refused(why) = reply {
                     self.log_from(
-                        Body::Asked {
-                            id: request_id.clone(),
-                            tool: "AskUserQuestion".into(),
-                            input: input.to_string(),
-                            description: None,
-                            keeps: false,
-                            suggestions: None,
+                        Body::Notice {
+                            text: format!("{} refused: {why}", self.agent.name()),
                         },
                         end,
                     );
-                    self.asked.insert(
-                        request_id,
-                        Pending {
-                            tool: "AskUserQuestion".into(),
-                            input,
-                            suggestions: Value::Null,
-                            dialog: Some(values),
-                        },
-                    );
                 }
             }
-            Inbound::MessageStart { .. }
-            | Inbound::TextDelta { .. }
-            | Inbound::ThinkingDelta { .. }
-            | Inbound::ToolStart { .. }
-            | Inbound::InputDelta { .. }
-            | Inbound::Other => {}
         }
     }
 
@@ -2205,7 +2211,7 @@ impl Session {
             return;
         }
         let tail = String::from_utf8_lossy(&p.err).trim().to_string();
-        if self.in_turn && p.resumed && !p.stopping && tail.contains(FORGOTTEN) {
+        if self.in_turn && p.resumed && !p.stopping && self.agent.forgot(&tail) {
             self.start_over().await;
             return;
         }
@@ -2219,23 +2225,24 @@ impl Session {
             // `env` couldn't find it: maybe installed since dent started.
             self.d.refresh_env();
         }
+        let name = self.agent.name();
         if self.in_turn {
             let reason = if p.stopping {
                 None
             } else if code == Some(127) {
                 Some(format!(
-                    "Couldn't find Claude Code (`{}`). Install it, then send again.",
-                    self.d.env().claude
+                    "Couldn't find {name} (`{}`). Install it, then send again.",
+                    self.agent.command()
                 ))
             } else if last.is_empty() {
-                Some(format!("Claude Code stopped unexpectedly ({why})"))
+                Some(format!("{name} stopped unexpectedly ({why})"))
             } else {
-                Some(format!("Claude Code stopped unexpectedly ({why}): {last}"))
+                Some(format!("{name} stopped unexpectedly ({why}): {last}"))
             };
             self.end_turn(Outcome::Interrupted { reason });
         } else if code != Some(0) && !last.is_empty() {
             self.log(Body::Notice {
-                text: format!("Claude Code exited ({why}): {last}"),
+                text: format!("{name} exited ({why}): {last}"),
             });
         }
     }

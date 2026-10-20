@@ -33,6 +33,8 @@
 //! - `hit the limit`: the 5-hour usage limit is used up and the turn fails
 //! - `crash`: the process exits mid-turn
 //! - `your args`: replies with its command line
+//! - `--version` and `auth status --json`: as Claude Code 2.1.301 signed in
+//!   to a Max plan (`FAKE_CLAUDE_SIGNED_OUT`: signed out)
 //! - `retry`: the API fails twice and is retried before it answers
 //! - `declined`: the model declines; Claude Code asks whether to retry
 //! - `/compact`, `/context`, `/usage`, `/config`, `/autocompact`,
@@ -97,6 +99,23 @@ enum Cut {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // What dent asks to see whether it's installed and signed in.
+    // `FAKE_CLAUDE_SIGNED_OUT` says it isn't signed in.
+    if args.get(1).map(String::as_str) == Some("--version") {
+        println!("2.1.301 (Claude Code)");
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("auth")
+        && args.get(2).map(String::as_str) == Some("status")
+    {
+        let out = if std::env::var_os("FAKE_CLAUDE_SIGNED_OUT").is_some() {
+            json!({ "loggedIn": false })
+        } else {
+            json!({ "loggedIn": true, "authMethod": "claude.ai", "email": "walk@example.com", "subscriptionType": "max" })
+        };
+        println!("{out}");
+        return;
+    }
     let arg = |flag: &str| {
         args.iter()
             .position(|a| a == flag)

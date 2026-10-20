@@ -1,29 +1,37 @@
-//! The Claude Code driver: how to start `claude -p`, and how its stream
-//! becomes dent events ([decision 0008]).
+//! The Claude Code driver ([decision 0008]): how to start `claude -p`, how
+//! its stream becomes dent's [`Event`]s, and how dent's requests and
+//! answers are put to it. Everything Claude Code calls things lives here
+//! and below; the rest of the daemon knows it only as a [`Driver`].
 //!
 //! [decision 0008]: ../../../docs/decisions/0008-claude-code-stream-json.md
 
+pub mod check;
 pub mod commands;
 pub mod sheets;
+pub mod terminal;
+pub mod usage;
 pub mod wire;
 
-use dent_protocol::{Block, Body, Model, Permission, Task, Window};
-use serde_json::Value;
+use dent_protocol::{Account, Answer, Caps, Model, Permission, Window, runs_subagent};
+use serde_json::{Value, json};
 
-use wire::AssistantBlock;
+use crate::agent::{
+    Asked, Catalog, Driver, Event, Imported, Launch, OneOff, Probe, Reply, Req, Start,
+};
+use crate::env::AgentEnv;
+use wire::Inbound;
 
 /// The agent's process, with dent's flags. `env` strips variables a parent
 /// Claude Code session would leak into it, and sets the login shell's PATH
 /// so its tools behave as in a terminal.
-pub fn argv(
-    claude: &str,
-    path: &str,
-    model: Option<&str>,
-    permission: Permission,
-    start: &Start,
-    effort: Option<&str>,
-    asks: &std::path::Path,
-) -> Vec<String> {
+pub fn argv(claude: &str, path: &str, l: &Launch<'_>) -> Vec<String> {
+    let Launch {
+        model,
+        permission,
+        effort,
+        start,
+        asks,
+    } = *l;
     let mut v: Vec<String> = [
         "/usr/bin/env",
         "-u",
@@ -105,59 +113,6 @@ pub fn argv(
 /// Added to every session's system prompt.
 const PLAN_NUDGE: &str = "Before you start any task with three or more steps, call the update_plan tool (from the dent server) with the whole plan, one short line per step. Call it again whenever a step starts or finishes, marking it in_progress or completed, so the plan always shows where you are, and mark every step completed before your final answer. Give every Bash command a short description of what it is for, starting with a verb. When you make a file for the person to look at (a video, a recording, a PDF), name its path in your reply. To show a chart, a diagram or a mock-up, use the show_visual tool rather than writing a file. If you need a secret (an API key, a token, a password), ask with the ask_secret tool, never in chat.";
 
-/// A one-off side question: the conversation `agent_session` so far, forked
-/// so the original never sees it, answered without changing anything.
-/// The last finished sentence of thinking still streaming (or its last
-/// line), at most 140 characters, for the working line. None until one
-/// has finished.
-pub fn latest_sentence(thinking: &str) -> Option<String> {
-    // Where sentences end: a full stop, ! or ? with a space after it (so
-    // "file.rs" and "e.g." mid-word don't count), or a line's end.
-    let b = thinking.as_bytes();
-    let ends: Vec<usize> = (0..b.len())
-        .filter(|&i| {
-            b[i] == b'\n'
-                || matches!(b[i], b'.' | b'!' | b'?')
-                    && b.get(i + 1).is_some_and(u8::is_ascii_whitespace)
-        })
-        .collect();
-    let end = *ends.last()?;
-    let start = ends.iter().rev().nth(1).map_or(0, |i| i + 1);
-    let s = thinking[start..=end].trim();
-    if s.chars().count() < 4 {
-        return None;
-    }
-    let mut out: String = s.chars().take(140).collect();
-    if s.chars().count() > 140 {
-        out.push('…');
-    }
-    Some(out)
-}
-
-#[cfg(test)]
-#[test]
-fn the_working_line_shows_the_last_finished_thought() {
-    assert_eq!(latest_sentence("Looking at main.rs now"), None);
-    assert_eq!(
-        latest_sentence("Looking at main.rs now. The parser drops a toke"),
-        Some("Looking at main.rs now.".into())
-    );
-    assert_eq!(
-        latest_sentence("First. Then the second one! And"),
-        Some("Then the second one!".into())
-    );
-}
-
-/// What a small model is asked to title a conversation (through
-/// [`ask_argv`]: one turn, no tools).
-pub fn title_prompt(conversation: &str) -> String {
-    format!(
-        "Title this conversation between a person and a coding agent. The title is at most \
-         5 words, like a short task name (\"Fix the footer on mobile\"), sentence case, with no \
-         colon, quotes or full stop. Reply with the title only.\n\n{conversation}"
-    )
-}
-
 /// One question to a small, quick model with no tools, answered in one
 /// turn: titles, branch names, commit messages.
 pub fn ask_argv(claude: &str, path: &str, prompt: &str) -> Vec<String> {
@@ -192,6 +147,8 @@ pub fn ask_argv(claude: &str, path: &str, prompt: &str) -> Vec<String> {
     v
 }
 
+/// A one-off side question: the conversation `agent_session` so far, forked
+/// so the original never sees it, answered without changing anything.
 pub fn aside_argv(
     claude: &str,
     path: &str,
@@ -233,18 +190,6 @@ pub fn aside_argv(
     }
     v.extend(["-p".into(), question.into()]);
     v
-}
-
-/// How an agent process picks up its conversation.
-pub enum Start {
-    /// A new conversation, under an id dent chose.
-    Fresh(String),
-    Resume(String),
-    /// Resume up to the assistant message `at`, as a new session.
-    ResumeAt {
-        id: String,
-        at: String,
-    },
 }
 
 /// Claude Code's name for a permission mode. `None` is its default.
@@ -335,123 +280,6 @@ pub fn default_models() -> Vec<Model> {
     .into()
 }
 
-pub use dent_protocol::runs_subagent;
-
-/// Calls that run a subagent and whose report hasn't come yet: a report,
-/// being the subagent's whole answer, keeps more of itself (`wire::keep`).
-#[derive(Default)]
-pub struct Reports(std::collections::HashSet<String>);
-
-impl Reports {
-    /// Note the subagent calls in an assistant message as logged (live,
-    /// imported, or read back from the log after a restart).
-    pub fn note(&mut self, blocks: &[Block]) {
-        for b in blocks {
-            if let Block::Tool { id, name, .. } = b
-                && runs_subagent(name)
-            {
-                self.0.insert(id.clone());
-            }
-        }
-    }
-
-    /// Whether call `id`'s result is a report; it's answered now.
-    pub fn answered(&mut self, id: &str) -> bool {
-        self.0.remove(id)
-    }
-}
-
-/// What an assistant message becomes in the log: its blocks, then the
-/// results of server tools that came with it. The same for a live session
-/// and one picked up from the terminal.
-pub fn assistant_bodies(
-    parent: Option<String>,
-    uuid: Option<String>,
-    blocks: Vec<AssistantBlock>,
-    results: Vec<wire::ToolResult>,
-    reports: &mut Reports,
-) -> Vec<Body> {
-    let blocks = self::blocks(blocks);
-    reports.note(&blocks);
-    let mut out = Vec::new();
-    if !blocks.is_empty() {
-        out.push(Body::Assistant {
-            parent: parent.clone(),
-            blocks,
-            uuid,
-        });
-    }
-    out.extend(result_bodies(parent, results, reports, None));
-    out
-}
-
-/// What tool results become in the log, a subagent's report keeping more.
-/// Pictures in a result are saved under `media` (the session's
-/// attachments), so the chat can show them; without it, or if one can't be
-/// saved, the output says a picture was there.
-pub fn result_bodies(
-    parent: Option<String>,
-    results: Vec<wire::ToolResult>,
-    reports: &mut Reports,
-    media: Option<&std::path::Path>,
-) -> Vec<Body> {
-    results
-        .into_iter()
-        .map(|r| {
-            let report = reports.answered(&r.tool_use_id);
-            let mut output = r.output;
-            let mut images = Vec::new();
-            for (n, source) in r.images.iter().enumerate() {
-                let name = format!("tool-{}-{}", safe_name(&r.tool_use_id), n + 1);
-                match media.and_then(|m| save_picture(source, m, &name)) {
-                    Some(path) => images.push(path),
-                    None => {
-                        if !output.is_empty() {
-                            output.push('\n');
-                        }
-                        output.push_str("[image]");
-                    }
-                }
-            }
-            Body::ToolResult {
-                tool: r.tool_use_id,
-                error: r.is_error,
-                output: wire::keep(output, report),
-                parent: parent.clone(),
-                images,
-            }
-        })
-        .collect()
-}
-
-/// Letters, digits, `-` and `_` only: an id made safe for a file name.
-fn safe_name(id: &str) -> String {
-    id.chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .collect()
-}
-
-/// A base64 picture (an image block's `source`) written to `media` as
-/// `name` and its kind's extension. Its path, or None if it isn't a kind
-/// that shows or can't be written.
-pub fn save_picture(source: &Value, media: &std::path::Path, name: &str) -> Option<String> {
-    let data = source["data"].as_str()?;
-    let bytes = dent_protocol::b64::decode(data)?;
-    // By what the bytes are, not what they're labelled: an empty or broken
-    // picture would show as a blank frame, and a mislabelled one wouldn't
-    // open in Preview.
-    let ext = match wire::picture_kind(&bytes)? {
-        "image/png" => "png",
-        "image/jpeg" => "jpg",
-        "image/gif" => "gif",
-        _ => "webp",
-    };
-    std::fs::create_dir_all(media).ok()?;
-    let path = media.join(format!("{name}.{ext}"));
-    std::fs::write(&path, bytes).ok()?;
-    Some(path.display().to_string())
-}
-
 /// What a call being written out works on, once its input has streamed
 /// that far: the file, or a subagent's task.
 pub fn target(tool: &str, head: &str) -> Option<String> {
@@ -477,50 +305,13 @@ pub fn target(tool: &str, head: &str) -> Option<String> {
     None
 }
 
-pub fn blocks(blocks: Vec<AssistantBlock>) -> Vec<Block> {
-    blocks
-        .into_iter()
-        // Some models send empty thinking blocks; there's nothing to keep.
-        .filter(|b| !matches!(b, AssistantBlock::Thinking(t) if t.trim().is_empty()))
-        .map(|b| match b {
-            AssistantBlock::Text(text) => Block::Text { text },
-            AssistantBlock::Thinking(text) => Block::Thinking { text },
-            AssistantBlock::ToolUse { id, name, input } => Block::Tool {
-                id,
-                name,
-                input: input.to_string(),
-            },
-        })
-        .collect()
-}
-
-pub fn limits(info: &wire::RateLimitInfo) -> Body {
-    Body::Limits {
-        windows: info
-            .unified_windows
-            .iter()
-            .map(|(name, w)| Window {
-                name: name.clone(),
-                used: w.utilization,
-                resets_at: w.resets_at,
-            })
-            .collect(),
-    }
-}
-
-/// The agent's background tasks as dent's, each with the call that started
-/// it when `calls` knows it.
-pub fn tasks(
-    tasks: &[wire::BackgroundTask],
-    calls: &std::collections::HashMap<String, String>,
-) -> Vec<Task> {
-    tasks
+pub fn limits(info: &wire::RateLimitInfo) -> Vec<Window> {
+    info.unified_windows
         .iter()
-        .map(|t| Task {
-            id: t.task_id.clone(),
-            description: t.description.clone(),
-            kind: t.task_type.clone(),
-            call: calls.get(&t.task_id).cloned(),
+        .map(|(name, w)| Window {
+            name: name.clone(),
+            used: w.utilization,
+            resets_at: w.resets_at,
         })
         .collect()
 }
@@ -659,15 +450,6 @@ pub fn dialog(kind: &str, p: &Value) -> Option<(Value, Vec<(String, String)>)> {
     Some((input, values))
 }
 
-/// A dialog's labels and answers, from the question it became.
-pub fn dialog_values(input: &Value) -> Option<Vec<(String, String)>> {
-    input["dent_dialog"].as_array().map(|a| {
-        a.iter()
-            .filter_map(|p| Some((p[0].as_str()?.to_string(), p[1].as_str()?.to_string())))
-            .collect()
-    })
-}
-
 /// A model id as people say it: `claude-opus-5-5` is "Opus 5.5".
 pub fn model_name(id: &str) -> String {
     let id = id.trim_start_matches("claude-");
@@ -689,8 +471,472 @@ pub fn model_name(id: &str) -> String {
     name
 }
 
+/// What Claude Code says when the conversation it was asked to resume has
+/// no transcript (it was stopped before writing one, or the file is gone).
+const FORGOTTEN: &str = "No conversation found with session ID";
+
+/// Claude Code, driven through `claude -p` and stream-json.
+pub struct Claude;
+
+impl Driver for Claude {
+    fn id(&self) -> &'static str {
+        "claude"
+    }
+
+    fn name(&self) -> &'static str {
+        "Claude Code"
+    }
+
+    fn short(&self) -> &'static str {
+        "Claude"
+    }
+
+    fn tested(&self) -> &'static str {
+        "2.1.301"
+    }
+
+    fn caps(&self) -> Caps {
+        Caps {
+            steer: true,
+            rewind: true,
+            fork: true,
+            aside: true,
+            permissions: Permission::ALL.to_vec(),
+            effort: true,
+            set_model: true,
+            deny_reason: true,
+            project_rules: true,
+            commands: true,
+            sheets: true,
+            stop_task: true,
+            context: true,
+            compact: true,
+            dent_tools: true,
+            adopt: true,
+            usage: true,
+            restart: true,
+        }
+    }
+
+    fn command(&self) -> String {
+        std::env::var("DENT_CLAUDE").unwrap_or_else(|_| "claude".into())
+    }
+
+    fn status(&self, env: &AgentEnv) -> (Option<String>, Account) {
+        let run = |args: &[&str]| {
+            let mut argv = vec![
+                "/usr/bin/env".to_string(),
+                format!("PATH={}", env.path),
+                self.command(),
+            ];
+            argv.extend(args.iter().map(|a| a.to_string()));
+            crate::agent::run_briefly(&argv, 10)
+        };
+        let Some(version) = run(&["--version"])
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        else {
+            return (None, Account::Unknown);
+        };
+        let account = run(&["auth", "status", "--json"])
+            .and_then(|out| serde_json::from_str::<Value>(&out).ok())
+            .map(|v| account(&v))
+            .unwrap_or_default();
+        (Some(version), account)
+    }
+
+    fn launch(&self, env: &AgentEnv, l: &Launch<'_>) -> Vec<String> {
+        argv(&self.command(), &env.path, l)
+    }
+
+    fn parse(&self, line: &[u8]) -> serde_json::Result<Event> {
+        wire::parse(line).map(event)
+    }
+
+    fn message(&self, text: &str, steer: bool, attachments: &[String]) -> Value {
+        wire::user_message(text, &crate::daemon::uuid(), steer, attachments)
+    }
+
+    fn request(&self, id: &str, req: &Req) -> Option<Value> {
+        let (subtype, extra) = match req {
+            Req::Initialize => ("initialize", json!({ "supportedDialogKinds": DIALOGS })),
+            Req::Interrupt => ("interrupt", json!({})),
+            Req::ContextUsage => ("get_context_usage", json!({})),
+            Req::Settings => ("get_settings", json!({})),
+            Req::Sheet(command) => (sheets::source(command)?, json!({})),
+            Req::Act(act) => sheets::request(act)?,
+            Req::Model(m) => ("set_model", json!({ "model": m })),
+            Req::Permission(p) => ("set_permission_mode", json!({ "mode": mode_name(*p) })),
+            Req::StopTask(task) => ("stop_task", json!({ "task_id": task })),
+        };
+        Some(wire::control_request(id, subtype, extra))
+    }
+
+    fn reply(&self, req: &Req, ok: bool, body: &Value, models: &[Model]) -> Reply {
+        if !ok {
+            return Reply::Refused(body.as_str().map(str::to_string).unwrap_or_else(
+                || match req {
+                    Req::Act(_) => "Claude Code couldn't do that".into(),
+                    _ => "unknown request".into(),
+                },
+            ));
+        }
+        match req {
+            Req::Initialize => {
+                let (styles, style) = styles(body);
+                Reply::Initialized {
+                    models: self::models(body),
+                    commands: commands(body),
+                    styles,
+                    style,
+                }
+            }
+            Req::ContextUsage => match body["totalTokens"].as_u64() {
+                Some(used) => Reply::Context {
+                    used,
+                    max: body["maxTokens"].as_u64(),
+                    compacts_at: body["autoCompactThreshold"]
+                        .as_u64()
+                        .filter(|_| body["isAutoCompactEnabled"] != false),
+                    parts: wire::parts(&body["categories"]),
+                },
+                None => Reply::Done,
+            },
+            Req::Settings => Reply::Settings {
+                effective: body["effective"].clone(),
+                applied: body["applied"].clone(),
+            },
+            Req::Sheet(command) => Reply::Sheet(sheets::sheet(command, body, models)),
+            Req::Act(_) => Reply::Acted {
+                url: body["authUrl"]
+                    .as_str()
+                    .filter(|_| body["requiresUserAction"] == true)
+                    .map(str::to_string),
+            },
+            Req::Interrupt | Req::Model(_) | Req::Permission(_) | Req::StopTask(_) => Reply::Done,
+        }
+    }
+
+    fn answer(&self, id: &str, asked: &Asked, answer: &Answer) -> anyhow::Result<Value> {
+        Ok(match (answer, &asked.dialog) {
+            (Answer::Choose { answers }, Some(values)) => {
+                let picked = answers.first().map(String::as_str).unwrap_or_default();
+                let value = values
+                    .iter()
+                    .find(|(label, _)| label == picked)
+                    .map(|(_, v)| v.as_str())
+                    .unwrap_or("cancelled");
+                wire::dialog_answer(id, Some(value))
+            }
+            (Answer::Deny { .. }, Some(_)) => wire::dialog_answer(id, None),
+            (Answer::Allow { always, project }, _) => wire::allow(
+                id,
+                &asked.tool,
+                &asked.input,
+                *always,
+                *project,
+                &asked.suggestions,
+            ),
+            (Answer::Deny { message }, _) => wire::deny(id, message),
+            (Answer::Choose { answers }, _) => wire::allow(
+                id,
+                &asked.tool,
+                &self::answers(&asked.input, answers),
+                false,
+                false,
+                &Value::Null,
+            ),
+            (Answer::Expired, _) => anyhow::bail!("can't answer with expired"),
+            (Answer::Secret { .. }, _) => anyhow::bail!("only a secret's card takes a secret"),
+        })
+    }
+
+    fn refuse(&self, id: &str, what: &str) -> Value {
+        wire::refuse(id, what)
+    }
+
+    fn target(&self, tool: &str, head: &str) -> Option<String> {
+        target(tool, head)
+    }
+
+    fn forgot(&self, text: &str) -> bool {
+        text.contains(FORGOTTEN)
+    }
+
+    fn has_sheet(&self, name: &str) -> bool {
+        sheets::source(name).is_some()
+    }
+
+    fn ask(&self, env: &AgentEnv, prompt: &str) -> Vec<String> {
+        ask_argv(&self.command(), &env.path, prompt)
+    }
+
+    fn aside(
+        &self,
+        env: &AgentEnv,
+        model: Option<&str>,
+        agent_session: &str,
+        question: &str,
+    ) -> Vec<String> {
+        aside_argv(&self.command(), &env.path, model, agent_session, question)
+    }
+
+    fn one_off(&self, line: &[u8]) -> OneOff {
+        match wire::parse(line) {
+            Ok(Inbound::Init { session_id, .. }) => OneOff::Session(session_id),
+            Ok(Inbound::Assistant {
+                parent: None,
+                blocks,
+                synthetic: false,
+                ..
+            }) => {
+                let text: Vec<String> = blocks
+                    .into_iter()
+                    .filter_map(|b| match b {
+                        wire::AssistantBlock::Text(t) if !t.trim().is_empty() => Some(t),
+                        _ => None,
+                    })
+                    .collect();
+                if text.is_empty() {
+                    OneOff::Other
+                } else {
+                    OneOff::Text(text.join("\n\n"))
+                }
+            }
+            Ok(Inbound::Result {
+                is_error: true,
+                text,
+                ..
+            }) => OneOff::Failed(text.unwrap_or_else(|| "The side question failed".into())),
+            _ => OneOff::Other,
+        }
+    }
+
+    fn default_models(&self) -> Vec<Model> {
+        default_models()
+    }
+
+    fn probe(&self, env: &AgentEnv) -> Probe {
+        usage::probe(env, &self.command())
+    }
+
+    fn typed(
+        &self,
+        raw: &[dent_protocol::Command],
+        catalog: &Catalog,
+    ) -> Vec<dent_protocol::Command> {
+        commands::typed(raw, catalog)
+    }
+
+    fn recent(
+        &self,
+        owned: &std::collections::HashSet<String>,
+        limit: usize,
+    ) -> Vec<dent_protocol::RecentSession> {
+        terminal::recent(owned, limit)
+    }
+
+    fn projects(&self) -> Vec<(String, u64)> {
+        terminal::projects()
+    }
+
+    fn is_open(&self, agent_session: &str) -> bool {
+        terminal::is_open(agent_session)
+    }
+
+    fn import(&self, agent_session: &str, media: &std::path::Path) -> Option<Imported> {
+        terminal::import(&terminal::find(agent_session)?, media)
+    }
+}
+
+/// How `claude auth status --json` says it's signed in.
+fn account(v: &Value) -> Account {
+    if v["loggedIn"] != true {
+        return Account::SignedOut;
+    }
+    let method = v["authMethod"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if method.contains("api") || method.contains("key") {
+        return Account::ApiKey;
+    }
+    let s = |k: &str| v[k].as_str().filter(|s| !s.is_empty()).map(str::to_string);
+    Account::SignedIn {
+        email: s("email"),
+        plan: s("subscriptionType"),
+    }
+}
+
+/// A line of the stream in dent's terms.
+fn event(i: Inbound) -> Event {
+    match i {
+        Inbound::Init {
+            session_id,
+            version,
+            permission_mode,
+            mcp,
+        } => Event::TurnStarted {
+            agent_session: session_id,
+            version,
+            permission: permission_from(&permission_mode),
+            // claude.ai's connectors you haven't set up want signing in:
+            // they're yours to add, not trouble.
+            mcp: mcp
+                .into_iter()
+                .filter(|(name, status)| {
+                    !(status == "needs-auth" && name.starts_with("claude.ai "))
+                })
+                .collect(),
+        },
+        Inbound::BackgroundTasks(t) => Event::BackgroundTasks(t),
+        Inbound::TaskStarted {
+            task_id,
+            tool_use_id,
+        } => Event::TaskStarted {
+            task: task_id,
+            call: tool_use_id,
+        },
+        Inbound::MessageStart { parent } => Event::MessageStart { parent },
+        Inbound::TextDelta { parent, text } => Event::TextDelta { parent, text },
+        Inbound::ThinkingDelta { parent, text } => Event::ThinkingDelta { parent, text },
+        Inbound::ToolStart { parent, name } => Event::ToolStart { parent, name },
+        Inbound::InputDelta { parent, json } => Event::InputDelta { parent, json },
+        Inbound::Assistant {
+            parent,
+            uuid,
+            blocks,
+            context,
+            synthetic,
+            results,
+        } => Event::Assistant {
+            parent,
+            uuid,
+            blocks,
+            context,
+            synthetic,
+            results,
+        },
+        Inbound::ToolResults { parent, results } => Event::ToolResults { parent, results },
+        Inbound::RateLimit(info) => Event::Limits(limits(&info)),
+        Inbound::CanUseTool {
+            request_id,
+            tool_name,
+            input,
+            description,
+            suggestions,
+        } => Event::Approval {
+            id: request_id,
+            tool: tool_name,
+            input,
+            description,
+            keeps: wire::keeps(&suggestions),
+            suggestions,
+        },
+        Inbound::ControlResponse {
+            request_id,
+            ok,
+            body,
+        } => Event::Response {
+            id: request_id,
+            ok,
+            body,
+        },
+        Inbound::Request {
+            request_id,
+            subtype,
+            server,
+        } => Event::Unanswerable {
+            id: request_id,
+            what: subtype,
+            server,
+        },
+        Inbound::CancelRequest { request_id } => Event::Cancelled { id: request_id },
+        Inbound::Compacted {
+            auto,
+            before,
+            after,
+        } => Event::Compacted {
+            auto,
+            before,
+            after,
+        },
+        Inbound::Compacting { on, failed } => Event::Compacting { on, failed },
+        Inbound::Retrying {
+            attempt,
+            max,
+            delay_ms,
+            error,
+        } => Event::Retrying {
+            attempt,
+            max,
+            delay_ms,
+            error,
+        },
+        Inbound::CommandsChanged(v) => Event::CommandsChanged(commands(&v)),
+        Inbound::LocalCommand {
+            name,
+            args,
+            text,
+            outcome,
+            view,
+        } => Event::LocalCommand {
+            name,
+            args,
+            text,
+            outcome,
+            view,
+        },
+        Inbound::Notice(t) => Event::Notice(t),
+        // A kind dent didn't declare is never answered: Claude Code takes
+        // its default.
+        Inbound::Dialog {
+            request_id,
+            kind,
+            payload,
+        } => match dialog(&kind, &payload) {
+            Some((input, options)) => Event::Question {
+                id: request_id,
+                input,
+                options,
+            },
+            None => Event::Other,
+        },
+        Inbound::Result {
+            terminal_reason,
+            is_error,
+            text,
+        } => Event::TurnEnded {
+            aborted: matches!(
+                terminal_reason.as_deref(),
+                Some("aborted_streaming" | "aborted_tools")
+            ),
+            error: is_error,
+            text,
+        },
+        Inbound::Other => Event::Other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn auth_status_says_how_it_is_signed_in() {
+        use dent_protocol::Account;
+        let v = serde_json::json!({"loggedIn": true, "authMethod": "claude.ai", "email": "a@b.c", "subscriptionType": "max"});
+        assert_eq!(
+            super::account(&v),
+            Account::SignedIn {
+                email: Some("a@b.c".into()),
+                plan: Some("max".into())
+            }
+        );
+        let v = serde_json::json!({"loggedIn": true, "authMethod": "api_key"});
+        assert_eq!(super::account(&v), Account::ApiKey);
+        let v = serde_json::json!({"loggedIn": false});
+        assert_eq!(super::account(&v), Account::SignedOut);
+    }
+
     #[test]
     fn model_ids_read_as_names() {
         assert_eq!(super::model_name("claude-opus-5-5"), "Opus 5.5");

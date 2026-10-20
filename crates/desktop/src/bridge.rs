@@ -15,6 +15,8 @@ use crate::theme::Status;
 pub struct Context<'a> {
     pub machine: &'a str,
     pub models: &'a [Model],
+    /// The agents the daemon drives; empty from one older than agent ids.
+    pub agents: &'a [dent_protocol::AgentInfo],
     pub diff: Option<Rc<Vec<FileDiff>>>,
     pub now_ms: u64,
 }
@@ -163,6 +165,41 @@ pub struct Built {
     media: Vec<(usize, String)>,
 }
 
+/// Agent `id` as the daemon described it (an empty id is the default
+/// agent). A daemon older than agent ids describes none, and its one agent,
+/// Claude Code, offered everything; an agent it doesn't describe is offered
+/// nothing, rather than things that would fail.
+pub fn agent_info(agents: &[dent_protocol::AgentInfo], id: &str) -> dent_protocol::AgentInfo {
+    let found = match id {
+        "" => agents.first(),
+        id => agents.iter().find(|a| a.id == id),
+    };
+    if let Some(a) = found {
+        return a.clone();
+    }
+    let old = agents.is_empty() && (id.is_empty() || id == dent_protocol::DEFAULT_AGENT);
+    dent_protocol::AgentInfo {
+        id: if id.is_empty() {
+            dent_protocol::DEFAULT_AGENT
+        } else {
+            id
+        }
+        .into(),
+        name: if old { "Claude Code" } else { id }.into(),
+        short: if old { "Claude" } else { id }.into(),
+        installed: false,
+        command: String::new(),
+        version: None,
+        tested: String::new(),
+        account: dent_protocol::Account::Unknown,
+        caps: if old {
+            dent_protocol::Caps::everything()
+        } else {
+            dent_protocol::Caps::default()
+        },
+    }
+}
+
 /// Turn a timeline into what the window draws. `from` is the first entry
 /// that changed since `built` was made (`None`: no entry changed).
 pub fn session(
@@ -172,6 +209,7 @@ pub fn session(
     from: Option<usize>,
 ) -> Session {
     let cwd = Path::new(&v.cwd);
+    let agent = agent_info(cx.agents, &v.agent);
     let open_asks: Vec<(String, String)> = v
         .entries
         .iter()
@@ -525,7 +563,14 @@ pub fn session(
         root: v.root.clone(),
         pr: v.pr.clone(),
         machine: cx.machine.to_string(),
-        agent: format!("Claude · {}", model_name(cx.models, v.model.as_deref())),
+        agent: format!(
+            "{} · {}",
+            agent.short,
+            model_name(cx.models, v.model.as_deref())
+        ),
+        agent_name: agent.name.clone(),
+        agent_short: agent.short.clone(),
+        caps: agent.caps.clone(),
         model: v.model.clone(),
         effort: v.effort.clone(),
         permission: v.permission,
@@ -1515,6 +1560,25 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn a_session_runs_the_agent_the_daemon_describes() {
+        let mut claude = agent_info(&[], "");
+        // A daemon older than agent ids: Claude Code, offering everything.
+        assert_eq!(
+            (claude.id.as_str(), claude.short.as_str()),
+            ("claude", "Claude")
+        );
+        assert!(claude.caps.steer && claude.caps.rewind);
+        claude.caps.steer = false;
+        let agents = vec![claude];
+        assert!(!agent_info(&agents, "claude").caps.steer);
+        assert!(!agent_info(&agents, "").caps.steer);
+        // One it doesn't describe is offered nothing.
+        let other = agent_info(&agents, "other");
+        assert_eq!(other.name, "other");
+        assert_eq!(other.caps, dent_protocol::Caps::default());
+    }
+
     /// What an item shows, enough to tell two builds apart.
     fn shown(items: &[Item]) -> Vec<String> {
         items
@@ -1615,6 +1679,7 @@ mod tests {
         let cx = || Context {
             machine: "m",
             models: &[],
+            agents: &[],
             diff: None,
             now_ms: 0,
         };
@@ -1691,6 +1756,7 @@ mod tests {
         let cx = || Context {
             machine: "m",
             models: &[],
+            agents: &[],
             diff: None,
             now_ms: 0,
         };
@@ -1810,6 +1876,7 @@ mod bench {
                 super::Context {
                     machine: "m",
                     models: &[],
+                    agents: &[],
                     diff: None,
                     now_ms: 0,
                 },
@@ -1826,6 +1893,7 @@ mod bench {
             super::Context {
                 machine: "m",
                 models: &[],
+                agents: &[],
                 diff: None,
                 now_ms: 0,
             },
@@ -1839,6 +1907,7 @@ mod bench {
                 super::Context {
                     machine: "m",
                     models: &[],
+                    agents: &[],
                     diff: None,
                     now_ms: 0,
                 },

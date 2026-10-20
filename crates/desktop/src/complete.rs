@@ -243,7 +243,7 @@ pub const OWN: [(&str, &str, bool); 5] = [
     ("rename", "Rename this session", true),
     (
         "restart",
-        "Start Claude Code again, to load new skills, plugins and settings",
+        "Start the agent again, to load new skills, plugins and settings",
         true,
     ),
     ("clear", "Start a new session in this project", true),

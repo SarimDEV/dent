@@ -10,42 +10,24 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use dent_protocol::{Model, Window};
+use dent_protocol::Window;
 use serde_json::{Value, json};
 
+use crate::agent::{Catalog, Probe};
 use crate::env::AgentEnv;
 
-/// What the CLI said: usage windows (`None` when it can't say: signed out,
-/// an API key, or the CLI failed) and the models it offers (empty if it
-/// didn't answer).
-pub struct Probe {
-    pub windows: Option<Vec<Window>>,
-    pub models: Vec<Model>,
-    /// The slash commands any session starts with: built-ins, the user's
-    /// own commands and skills (not a project's, which need its folder).
-    pub commands: Vec<dent_protocol::Command>,
-    /// What `/config` takes and what's set, for typing commands.
-    pub catalog: crate::claude::commands::Catalog,
-}
-
 /// Ask the CLI for the account's usage windows and its models.
-pub fn probe(env: &AgentEnv) -> Probe {
-    let none = || Probe {
-        windows: None,
-        models: Vec::new(),
-        commands: Vec::new(),
-        catalog: Default::default(),
-    };
+pub fn probe(env: &AgentEnv, claude: &str) -> Probe {
     let Some(Answers {
         init,
         usage,
         config,
         settings,
-    }) = ask(env)
+    }) = ask(env, claude)
     else {
-        return none();
+        return Probe::default();
     };
-    let mut catalog = crate::claude::commands::Catalog::default();
+    let mut catalog = Catalog::default();
     if let Some(text) = config {
         catalog.settings = crate::claude::commands::settings_from_usage(&text);
     }
@@ -80,11 +62,11 @@ struct Answers {
 /// with nothing after it, which the CLI answers itself with no model call.
 /// Nothing is saved (`--no-session-persistence`) and the person's hooks
 /// don't run for it.
-fn ask(env: &AgentEnv) -> Option<Answers> {
+fn ask(env: &AgentEnv, claude: &str) -> Option<Answers> {
     let mut child = Command::new("/usr/bin/env")
         .args(["-u", "CLAUDECODE", "-u", "CLAUDE_CODE_ENTRYPOINT"])
         .arg(format!("PATH={}", env.path))
-        .arg(&env.claude)
+        .arg(claude)
         .args([
             "-p",
             "--input-format",

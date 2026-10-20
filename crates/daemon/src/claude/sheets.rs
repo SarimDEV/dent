@@ -7,7 +7,7 @@
 //!
 //! [decision 0046]: ../../../../docs/decisions/0046-commands-by-type.md
 
-use dent_protocol::{Act, Action, Field, Mark, Model, Row, Section, View};
+use dent_protocol::{Act, Action, Field, Mark, Model, Row, Section};
 use serde_json::{Value, json};
 
 /// The control request that answers a command with a sheet.
@@ -50,32 +50,6 @@ pub fn sheet(command: &str, body: &Value, models: &[Model]) -> Option<Vec<Sectio
         _ => return None,
     };
     (!sections.is_empty()).then_some(sections)
-}
-
-/// A sheet in plain words, for clients that don't draw one.
-pub fn text(sections: &[Section]) -> String {
-    let mut out = String::new();
-    for s in sections {
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(&s.title);
-        out.push('\n');
-        if !s.note.is_empty() {
-            out.push_str(&format!("  {}\n", s.note));
-        }
-        for r in &s.rows {
-            match r.value.is_empty() {
-                true => out.push_str(&format!("  {}\n", r.label)),
-                false => out.push_str(&format!("  {}: {}\n", r.label, r.value)),
-            }
-        }
-    }
-    out
-}
-
-pub fn view(sections: Vec<Section>) -> View {
-    View::Sheet { sections }
 }
 
 fn str_of<'a>(v: &'a Value, key: &str) -> &'a str {
@@ -662,6 +636,6 @@ mod tests {
         assert_eq!(k[0].rows[0].value, "120 tokens");
         assert_eq!(k[0].rows[0].detail, "Charts. Managed by its plugin.");
 
-        assert!(text(&k).contains("dataviz: 120 tokens"));
+        assert!(crate::agent::log::sheet_text(&k).contains("dataviz: 120 tokens"));
     }
 }

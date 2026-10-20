@@ -33,13 +33,16 @@ pub fn list(
     for (p, t) in added {
         add(p.clone(), *t);
     }
-    // From the terminal's history, a folder in temporary space was a
-    // one-off; one used or added here is kept wherever it is.
-    for p in claude_projects().into_iter().filter(|p| !temporary(p)) {
-        // Ordered by when the terminal last used it, so ones never used
-        // here still sort by recency, not by name.
-        let used = terminal_used(&p);
-        add(p, used);
+    // From each agent's terminal history, a folder in temporary space was
+    // a one-off; one used or added here is kept wherever it is. Ordered by
+    // when the terminal last used it, so ones never used here still sort
+    // by recency, not by name.
+    for d in crate::agent::DRIVERS {
+        for (p, used) in d.projects() {
+            if !temporary(&p) {
+                add(p, used);
+            }
+        }
     }
     let mut out: Vec<Project> = by_path
         .into_iter()
@@ -57,29 +60,6 @@ pub fn list(
     out
 }
 
-/// When Claude Code last wrote a transcript for a project in the terminal,
-/// in Unix milliseconds; 0 if never. It keeps them in
-/// `~/.claude/projects/<the path, every other character than a letter or
-/// digit made a dash>`.
-fn terminal_used(path: &str) -> u64 {
-    let dir: String = path
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let Ok(entries) = std::fs::read_dir(crate::paths::home().join(".claude/projects").join(dir))
-    else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
-        .filter_map(|e| e.metadata().ok()?.modified().ok())
-        .filter_map(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
-        .max()
-        .unwrap_or(0)
-}
-
 /// A folder in the system's temporary space.
 fn temporary(path: &str) -> bool {
     let tmp = std::env::temp_dir();
@@ -94,21 +74,6 @@ fn temporary(path: &str) -> bool {
     ]
     .iter()
     .any(|t| path == *t || path.starts_with(&format!("{t}/")))
-}
-
-/// The project paths in `~/.claude.json`. Only the keys are read.
-fn claude_projects() -> Vec<String> {
-    let path = crate::paths::home().join(".claude.json");
-    let Ok(bytes) = std::fs::read(path) else {
-        return Vec::new();
-    };
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return Vec::new();
-    };
-    v["projects"]
-        .as_object()
-        .map(|m| m.keys().cloned().collect())
-        .unwrap_or_default()
 }
 
 /// Where projects made here go: `~/dent/projects`, beside the scratch folder.

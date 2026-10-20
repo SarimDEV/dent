@@ -475,6 +475,8 @@ pub use crate::draft::{Attachment, Draft, Place};
 /// Settings for a new session: chosen for you, each one click to change.
 #[derive(Clone)]
 pub struct Defaults {
+    /// The agent it runs; `None` is the daemon's default.
+    pub agent: Option<String>,
     /// A folder; `None` starts in a scratch folder. Never guessed: the
     /// session you came from, else the last one you started or picked.
     pub project: Option<String>,
@@ -580,6 +582,7 @@ pub struct Completion {
 /// What a request's reply is for.
 pub enum Waiting {
     Models,
+    Agents,
     Files(String),
     Recent,
     Usage,
@@ -746,7 +749,11 @@ pub struct Dent {
     pub ambient: Rc<RefCell<crate::ambient::State>>,
     /// Times the connection dropped, for the walkthrough.
     pub drops: u32,
+    /// The default agent's models.
     pub models: Vec<Model>,
+    /// The agents the daemon drives, the default first, as its welcome
+    /// described them and the last `Agents` reply said they stand.
+    pub agents: Vec<dent_protocol::AgentInfo>,
     pub projects: Vec<Project>,
     /// Requests whose replies matter, by request number.
     waiting: HashMap<u64, Waiting>,
@@ -1385,6 +1392,7 @@ impl Dent {
             forced_dark: forced,
             recall: None,
             defaults: Defaults {
+                agent: prefs.agent.clone(),
                 project: prefs.project.clone(),
                 model: prefs.model.clone(),
                 permission: prefs.permission,
@@ -1470,6 +1478,7 @@ impl Dent {
             window_visible: true,
             ambient: Rc::default(),
             models: Vec::new(),
+            agents: Vec::new(),
             projects: Vec::new(),
             waiting: HashMap::new(),
             changes: HashMap::new(),
@@ -2406,14 +2415,32 @@ impl Dent {
         let mut changed: Vec<String> = Vec::new();
         for m in batch {
             match m {
-                Incoming::Up { machine } => {
+                Incoming::Up { machine, agents } => {
                     self.machine = machine;
                     self.connection = Ok(());
+                    // What each agent is (names, what it can do) from the
+                    // welcome; how it stands comes with the Agents reply.
+                    let what = |a: &dent_protocol::AgentInfo| {
+                        (
+                            a.id.clone(),
+                            a.name.clone(),
+                            a.short.clone(),
+                            a.caps.clone(),
+                        )
+                    };
+                    if self.agents.iter().map(what).ne(agents.iter().map(what)) {
+                        self.agents = agents;
+                        changed.extend(self.core.list.keys().cloned());
+                    }
+                    self.waiting
+                        .insert(self.live.send(Request::Agents), Waiting::Agents);
                     self.live.send(Request::KeepAwake {
                         on: crate::notify::AWAKE.load(std::sync::atomic::Ordering::Relaxed),
                     });
-                    self.waiting
-                        .insert(self.live.send(Request::Models), Waiting::Models);
+                    self.waiting.insert(
+                        self.live.send(Request::Models { agent: None }),
+                        Waiting::Models,
+                    );
                     self.waiting
                         .insert(self.live.send(Request::Projects), Waiting::Projects);
                     self.fetch_usage();
@@ -2481,7 +2508,10 @@ impl Dent {
                     {
                         self.acted(session, command, act, url.as_deref(), error.as_deref(), cx);
                     }
-                    if let Out::Models { models } = &out {
+                    // Only the default agent's models are kept so far.
+                    if let Out::Models { models, agent } = &out
+                        && (agent.is_empty() || Some(agent) == self.agents.first().map(|a| &a.id))
+                    {
                         self.models = models.clone();
                         changed.extend(self.core.list.keys().cloned());
                     }
@@ -2577,6 +2607,18 @@ impl Dent {
                 },
             ) => {
                 self.models = models;
+                let ids: Vec<String> = self.core.list.keys().cloned().collect();
+                for id in ids {
+                    self.rebuild(&id);
+                }
+            }
+            (
+                Waiting::Agents,
+                Out::Reply {
+                    reply: Reply::Agents { agents, .. },
+                },
+            ) => {
+                self.agents = agents;
                 let ids: Vec<String> = self.core.list.keys().cloned().collect();
                 for id in ids {
                     self.rebuild(&id);
@@ -2740,6 +2782,9 @@ impl Dent {
             (Waiting::Discard(id), Out::Reply { .. }) => self.fetch_changes(&id),
             (Waiting::Discard(_), Out::Error { message }) => self.toast(ToastAction::Info, message),
             (Waiting::Requeue, _) => {}
+            // A daemon too old to say how its agents stand: the welcome's
+            // list stands.
+            (Waiting::Agents, Out::Error { .. }) => {}
             (
                 Waiting::Repo(dir),
                 Out::Reply {
@@ -3338,15 +3383,11 @@ impl Dent {
         {
             // From the mode last asked for, if the daemon hasn't said yet:
             // two quick presses step twice.
-            let now = match (f, self.current()) {
-                (Field::Composer, Some(s)) => self.permission_shown(s),
-                _ => self.defaults.permission,
+            let (now, caps) = match (f, self.current()) {
+                (Field::Composer, Some(s)) => (self.permission_shown(s), s.caps.clone()),
+                _ => (self.defaults.permission, self.new_caps()),
             };
-            let next = match now {
-                Permission::Ask => Permission::Edits,
-                Permission::Edits => Permission::Plan,
-                Permission::Plan | Permission::Full => Permission::Ask,
-            };
+            let next = next_permission(&caps, now);
             if f == Field::Composer && self.selected.is_some() {
                 self.set_permission(next, cx);
             } else {
@@ -4071,8 +4112,14 @@ impl Dent {
         if self.creating() {
             return;
         }
+        let agent = self
+            .recent
+            .iter()
+            .find(|r| r.agent_session == agent_session)
+            .map(|r| r.agent.clone());
         let n = self.live.send(Request::Adopt {
             agent_session: agent_session.to_string(),
+            agent,
         });
         self.waiting.insert(n, Waiting::Create(None));
         self.creating = true;
@@ -4083,7 +4130,7 @@ impl Dent {
 
     /// Ask the daemon for the account's usage.
     pub fn fetch_usage(&mut self) {
-        let n = self.live.send(Request::Usage);
+        let n = self.live.send(Request::Usage { agent: None });
         self.waiting.insert(n, Waiting::Usage);
     }
 
@@ -4487,7 +4534,11 @@ impl Dent {
                 }
             }
             "restart" => {
-                if let Some(s) = session {
+                if let Some(s) = session
+                    && self.can(&s.id, "can't start again on the same conversation", |c| {
+                        c.restart
+                    })
+                {
                     self.live.send(Request::RestartAgent {
                         session: s.id.clone(),
                     });
@@ -4610,6 +4661,7 @@ impl Dent {
             crate::bridge::Context {
                 machine: &self.machine,
                 models: &self.models,
+                agents: &self.agents,
                 diff: self.changes.get(id).cloned(),
                 now_ms,
             },
@@ -4627,6 +4679,7 @@ impl Dent {
                 crate::bridge::Context {
                     machine: &self.machine,
                     models: &self.models,
+                    agents: &self.agents,
                     diff: None,
                     now_ms,
                 },
@@ -4937,6 +4990,7 @@ impl Dent {
         };
         let p = crate::prefs::Prefs {
             version: crate::prefs::VERSION,
+            agent: self.defaults.agent.clone(),
             project: self.defaults.project.clone(),
             model: self.defaults.model.clone(),
             permission: self.defaults.permission,
@@ -5026,6 +5080,18 @@ impl Dent {
         let Some(id) = self.selected.clone() else {
             return;
         };
+        // An agent that can't be steered gets it once the turn is done
+        // (said only when there's a turn to steer into).
+        let working = self
+            .session(&id)
+            .is_some_and(|s| s.status == crate::theme::Status::Working);
+        let steer = steer
+            && (!working
+                || self.can(
+                    &id,
+                    "can't take a message mid-turn, so it goes once this turn is done",
+                    |c| c.steer,
+                ));
         let mut d = self.box_draft(cx);
         // Folded pastes go in full.
         let text = d.words_out(&self.pastes);
@@ -5164,6 +5230,7 @@ impl Dent {
         self.defaults.into = None;
         self.attachments.clear();
         let n = self.live.send(Request::Create {
+            agent: self.new_agent(),
             cwd,
             worktree,
             model: d.model,
@@ -5255,7 +5322,11 @@ impl Dent {
         let Some(seq) = self.session(id).and_then(|s| s.old) else {
             return;
         };
-        if self.creating() {
+        if self.creating()
+            || !self.can(id, "can't carry a conversation on in a new session", |c| {
+                c.fork
+            })
+        {
             return;
         }
         self.creating = true;
@@ -5310,6 +5381,7 @@ impl Dent {
         self.defaults.into = None;
         self.attachments.clear();
         let n = self.live.send(Request::Create {
+            agent: self.new_agent(),
             cwd,
             worktree,
             model: d.model,
@@ -5908,7 +5980,9 @@ impl Dent {
         let Some(id) = self.selected.clone() else {
             return;
         };
-        if self.pressed_again(format!("rewind/{msg}")) {
+        if !self.can(&id, "can't go back to an earlier message", |c| c.rewind)
+            || self.pressed_again(format!("rewind/{msg}"))
+        {
             return;
         }
         let sent = self.session(&id).and_then(|s| {
@@ -6074,7 +6148,13 @@ impl Dent {
     /// just before message `before`. It opens when the daemon has made it.
     pub fn fork(&mut self, session: &str, before: Option<String>, cx: &mut Context<Self>) {
         // One fork per press, however fast the presses come.
-        if self.creating() {
+        if self.creating()
+            || !self.can(
+                session,
+                "can't carry a conversation on in a new session",
+                |c| c.fork,
+            )
+        {
             return;
         }
         self.creating = true;
@@ -6147,6 +6227,10 @@ impl Dent {
     /// message, and send it again. When the turn changed files, it first
     /// asks whether to undo them too (`files` is the answer).
     pub fn try_again(&mut self, id: &str, files: Option<bool>, cx: &mut Context<Self>) {
+        // Before asking about files: it can't happen at all.
+        if !self.can(id, "can't go back to an earlier message", |c| c.rewind) {
+            return;
+        }
         let Some(s) = self.session(id) else { return };
         let Some((msg, text, sent_files)) = s.items.iter().rev().find_map(|i| match i {
             Item::User {
@@ -6233,7 +6317,9 @@ impl Dent {
     /// all: once the daemon has taken it out of the queue, so a message
     /// that went meanwhile is never sent twice.
     pub fn steer_queued(&mut self, id: &str, msg: &str, cx: &mut Context<Self>) {
-        if self.pressed_again(format!("queued/{msg}")) {
+        if !self.can(id, "can't take a message mid-turn", |c| c.steer)
+            || self.pressed_again(format!("queued/{msg}"))
+        {
             return;
         }
         let Some((text, files)) = self.queued(id, msg) else {
@@ -6449,8 +6535,41 @@ impl Dent {
         true
     }
 
+    /// What the agent a new session would run can do.
+    pub fn new_caps(&self) -> dent_protocol::Caps {
+        crate::bridge::agent_info(&self.agents, self.new_agent().as_deref().unwrap_or("")).caps
+    }
+
+    /// The agent a new session asks for: the one chosen, while the daemon
+    /// drives it; else its default.
+    pub fn new_agent(&self) -> Option<String> {
+        self.defaults
+            .agent
+            .clone()
+            .filter(|a| self.agents.iter().any(|x| x.id == *a))
+    }
+
+    /// Whether session `id`'s agent can do something, by what the daemon
+    /// says it can do. When it can't, a toast says so ("Claude Code `why`")
+    /// and nothing is sent: every request that needs a capability asks
+    /// here first. A session not known here is the daemon's to refuse.
+    pub fn can(&mut self, id: &str, why: &str, has: impl Fn(&dent_protocol::Caps) -> bool) -> bool {
+        let Some(s) = self.session(id) else {
+            return true;
+        };
+        if has(&s.caps) {
+            return true;
+        }
+        let said = format!("{} {why}", s.agent_name);
+        self.toast(ToastAction::Info, said);
+        false
+    }
+
     pub fn set_model(&mut self, model: String, cx: &mut Context<Self>) {
         if let Some(id) = self.selected.clone() {
+            if !self.can(&id, "can't change its model mid-session", |c| c.set_model) {
+                return;
+            }
             self.live.send(Request::SetModel {
                 session: id,
                 model: model.clone(),
@@ -6462,6 +6581,9 @@ impl Dent {
 
     pub fn set_effort(&mut self, effort: Option<String>, cx: &mut Context<Self>) {
         if let Some(id) = self.selected.clone() {
+            if !self.can(&id, "has no effort levels", |c| c.effort) {
+                return;
+            }
             self.asked_effort = Some((id.clone(), effort.clone(), Instant::now()));
             self.live.send(Request::SetEffort {
                 session: id,
@@ -6514,6 +6636,10 @@ impl Dent {
 
     pub fn set_permission(&mut self, p: Permission, cx: &mut Context<Self>) {
         if let Some(id) = self.selected.clone() {
+            let why = format!("has no {} mode", p.label());
+            if !self.can(&id, &why, |c| c.permissions.contains(&p)) {
+                return;
+            }
             // A refusal shows once the wait is over (see `deadlines`): the
             // chip goes back.
             self.asked_permission = Some((id.clone(), p, Instant::now()));
@@ -6530,7 +6656,10 @@ impl Dent {
 
     /// Open the side chat for the open session, ready to type.
     pub fn open_side_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected.is_none() {
+        let Some(id) = self.selected.clone() else {
+            return;
+        };
+        if !self.can(&id, "can't answer side questions", |c| c.aside) {
             return;
         }
         self.show_tab(Tab::Aside, cx);
@@ -7768,5 +7897,40 @@ mod word_tests {
         assert!(super::has_word("fix (cache) now", "cache"));
         assert!(!super::has_word("caches", "cache"));
         assert!(super::has_word("日本語 タイトル", "タイトル"));
+    }
+}
+
+/// The mode ⇧Tab steps to from `now`: Ask, Edits, Plan and round again,
+/// never Full, and only modes the agent takes. Full steps back to the
+/// first; with none to step to, it stays.
+pub fn next_permission(caps: &dent_protocol::Caps, now: Permission) -> Permission {
+    let steps: Vec<Permission> = [Permission::Ask, Permission::Edits, Permission::Plan]
+        .into_iter()
+        .filter(|p| caps.permissions.contains(p))
+        .collect();
+    match steps.iter().position(|p| *p == now) {
+        Some(i) => steps[(i + 1) % steps.len()],
+        None => steps.first().copied().unwrap_or(now),
+    }
+}
+
+#[cfg(test)]
+mod permission_steps {
+    use super::{Permission, next_permission};
+
+    #[test]
+    fn shift_tab_steps_only_through_modes_the_agent_takes() {
+        let all = dent_protocol::Caps::everything();
+        assert_eq!(next_permission(&all, Permission::Ask), Permission::Edits);
+        assert_eq!(next_permission(&all, Permission::Plan), Permission::Ask);
+        assert_eq!(next_permission(&all, Permission::Full), Permission::Ask);
+        let some = dent_protocol::Caps {
+            permissions: vec![Permission::Ask, Permission::Plan, Permission::Full],
+            ..Default::default()
+        };
+        assert_eq!(next_permission(&some, Permission::Ask), Permission::Plan);
+        assert_eq!(next_permission(&some, Permission::Plan), Permission::Ask);
+        let none = dent_protocol::Caps::default();
+        assert_eq!(next_permission(&none, Permission::Full), Permission::Full);
     }
 }

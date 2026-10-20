@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use dent_protocol::{Block, Body, Permission, Status};
 use serde_json::Value;
 
-use crate::terminal;
+use super::terminal;
 
 #[derive(Default)]
 struct Tally {
@@ -287,7 +287,7 @@ fn save(
     store: &mut crate::store::Store,
     session: &str,
     agent_session: &str,
-    imported: terminal::Imported,
+    imported: crate::agent::Imported,
 ) -> Result<()> {
     let now = crate::daemon::now_ms();
     let mut put = |b: Body| store.append(session, now, &b, None).map(|_| ());

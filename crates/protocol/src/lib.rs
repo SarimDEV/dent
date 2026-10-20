@@ -554,6 +554,150 @@ impl Permission {
     }
 }
 
+fn default_agent() -> String {
+    DEFAULT_AGENT.into()
+}
+
+/// The agent a session runs when nothing says otherwise, and the one every
+/// session made before agents had names ran.
+pub const DEFAULT_AGENT: &str = "claude";
+
+/// What an agent can do, so clients offer only what works with it. Every
+/// flag is false for an agent that doesn't say, which hides the feature
+/// rather than offering something that fails.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct Caps {
+    /// A message can go into the running turn (Send now, ⌘↩).
+    pub steer: bool,
+    /// The conversation can go back to before one of your messages (Edit
+    /// from here, Try again).
+    pub rewind: bool,
+    /// A new session can carry on from this one's conversation.
+    pub fork: bool,
+    /// Side questions answered from a copy of the conversation.
+    pub aside: bool,
+    /// The permission modes it takes, in the order to offer them.
+    pub permissions: Vec<Permission>,
+    /// It takes an effort level (the model's own list says which).
+    pub effort: bool,
+    /// Its model can change mid-session.
+    pub set_model: bool,
+    /// A denial carries a reason the agent reads.
+    pub deny_reason: bool,
+    /// It can save "always allow" as a rule of the project's.
+    pub project_rules: bool,
+    /// Slash commands, with `/` completion.
+    pub commands: bool,
+    /// Commands whose answer is a sheet of rows to act on (`/mcp`…).
+    pub sheets: bool,
+    /// Background work it lists, each stoppable on its own.
+    pub stop_task: bool,
+    /// It reports how full its context is.
+    pub context: bool,
+    /// It can be asked to compact its context.
+    pub compact: bool,
+    /// dent's own tools (the plan, visuals, secrets) reach it.
+    pub dent_tools: bool,
+    /// Sessions started in its own terminal app can be picked up.
+    pub adopt: bool,
+    /// It reports the account's usage windows.
+    pub usage: bool,
+    /// It can start again on the same conversation to load new skills,
+    /// plugins and settings.
+    pub restart: bool,
+}
+
+impl Caps {
+    /// Everything on: what a daemon from before agents said what they can
+    /// do always offered.
+    pub fn everything() -> Self {
+        Self {
+            steer: true,
+            rewind: true,
+            fork: true,
+            aside: true,
+            permissions: Permission::ALL.to_vec(),
+            effort: true,
+            set_model: true,
+            deny_reason: true,
+            project_rules: true,
+            commands: true,
+            sheets: true,
+            stop_task: true,
+            context: true,
+            compact: true,
+            dent_tools: true,
+            adopt: true,
+            usage: true,
+            restart: true,
+        }
+    }
+}
+
+/// How an agent's CLI is signed in.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Account {
+    /// Signed in to a plan; usage windows apply.
+    SignedIn {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        email: Option<String>,
+        /// The plan, as the agent names it ("max", "pro").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<String>,
+    },
+    /// Billed by API key: no plan limits.
+    ApiKey,
+    SignedOut,
+    /// It couldn't be asked (not installed, or it didn't answer).
+    #[default]
+    Unknown,
+}
+
+/// One agent this machine's daemon can drive, and how it stands.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct AgentInfo {
+    /// Stable id, as in [`Body::Created`]: `claude`.
+    pub id: String,
+    /// Its full name: "Claude Code".
+    pub name: String,
+    /// What to call it in a sentence about the model ("Claude is
+    /// compacting"): "Claude".
+    pub short: String,
+    /// Its CLI was found and answered.
+    pub installed: bool,
+    /// The command dent runs.
+    pub command: String,
+    /// The version it reports, when installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// The version this dent was tested against: another may still work,
+    /// and clients can say it's untested.
+    pub tested: String,
+    #[serde(default)]
+    pub account: Account,
+    pub caps: Caps,
+}
+
+impl AgentInfo {
+    /// A version other than the one this dent was tested against.
+    pub fn untested(&self) -> bool {
+        self.version
+            .as_deref()
+            .is_some_and(|v| version_number(v) != version_number(&self.tested))
+    }
+}
+
+/// The dotted number in an agent's version line: `2.1.301` from
+/// `2.1.301 (Claude Code)`.
+pub fn version_number(v: &str) -> &str {
+    v.split_whitespace()
+        .map(|w| w.trim_start_matches('v'))
+        .find(|w| w.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .unwrap_or(v)
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
@@ -691,6 +835,9 @@ pub struct Setting {
 /// A session someone started with the agent in a terminal.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RecentSession {
+    /// Which agent ran it ([`AgentInfo::id`]).
+    #[serde(default = "default_agent")]
+    pub agent: String,
     /// The agent's own session id.
     pub agent_session: String,
     pub cwd: String,
@@ -875,6 +1022,9 @@ pub enum Request {
     },
     Create {
         cwd: String,
+        /// Which agent runs it ([`AgentInfo::id`]); none means the default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
         /// Work in a new worktree of `cwd`'s repository instead of `cwd`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         worktree: Option<NewWorktree>,
@@ -1019,14 +1169,28 @@ pub enum Request {
         id: String,
     },
     Projects,
-    Models,
-    /// The account's usage windows, read from the provider.
-    Usage,
-    /// Sessions started with the agent in a terminal, newest first.
+    /// The agents this machine can drive, and how each stands.
+    Agents,
+    /// An agent's models (none: the default agent's).
+    Models {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+    },
+    /// The account's usage windows, read from the provider (for an agent;
+    /// none: the default agent).
+    Usage {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+    },
+    /// Sessions started with an agent in a terminal, newest first, from
+    /// every agent that can be picked up.
     Recent,
     /// Carry on a terminal session in dent, with its history.
     Adopt {
         agent_session: String,
+        /// Whose session it is; none means the default agent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
     },
     /// The agent's slash commands: the session's, or the last ones seen.
     Commands {
@@ -1151,9 +1315,12 @@ pub enum Out {
     Events {
         events: Vec<Event>,
     },
-    /// The agent's model list changed, say after it updated.
+    /// An agent's model list changed, say after it updated.
     Models {
         models: Vec<Model>,
+        /// Whose; empty from a daemon older than agent ids (the default).
+        #[serde(default)]
+        agent: String,
     },
     /// Catch-up is over; what follows is live.
     CaughtUp {
@@ -1213,6 +1380,12 @@ pub enum Reply {
         /// modification time. A client beside a newer one asks it to restart.
         #[serde(default)]
         build: String,
+        /// The agents it can drive, their names and what each can do, the
+        /// default first. How each stands on the machine (installed,
+        /// signed in) isn't asked here, which takes seconds: see
+        /// [`Request::Agents`].
+        #[serde(default)]
+        agents: Vec<AgentInfo>,
     },
     Ok,
     Created {
@@ -1235,6 +1408,11 @@ pub enum Reply {
     },
     Models {
         models: Vec<Model>,
+    },
+    Agents {
+        agents: Vec<AgentInfo>,
+        /// The agent a new session gets when none is asked for.
+        default: String,
     },
     Commands {
         commands: Vec<Command>,
@@ -1346,6 +1524,41 @@ pub fn encode<T: Serialize>(req: u64, body: &T) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requests_from_before_agent_ids_still_parse() {
+        let r = |s: &str| serde_json::from_str::<Request>(s).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(r(r#"{"op":"models"}"#), Request::Models { agent: None });
+        assert_eq!(r(r#"{"op":"usage"}"#), Request::Usage { agent: None });
+        assert!(matches!(
+            r(r#"{"op":"adopt","agent_session":"a"}"#),
+            Request::Adopt { agent: None, .. }
+        ));
+        let recent: RecentSession =
+            serde_json::from_str(r#"{"agent_session":"a","cwd":"/","title":"t","updated":1}"#)
+                .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(recent.agent, DEFAULT_AGENT);
+    }
+
+    #[test]
+    fn a_version_other_than_the_tested_one_says_so() {
+        let mut a = AgentInfo {
+            id: "claude".into(),
+            name: "Claude Code".into(),
+            short: "Claude".into(),
+            installed: true,
+            command: "claude".into(),
+            version: Some("2.1.301 (Claude Code)".into()),
+            tested: "2.1.301".into(),
+            account: Account::Unknown,
+            caps: Caps::default(),
+        };
+        assert!(!a.untested());
+        a.version = Some("v2.2.0".into());
+        assert!(a.untested());
+        a.version = None;
+        assert!(!a.untested());
+    }
 
     #[test]
     fn a_stop_from_an_older_client_still_parses() {

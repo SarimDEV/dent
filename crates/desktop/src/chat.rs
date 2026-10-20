@@ -2136,20 +2136,22 @@ impl Dent {
                                 )
                                 .relative()
                                 .child(probe(&self.probes, "allow-project"));
-                                if *keeps {
+                                if *keeps && s.caps.project_rules {
                                     let (a3, k4) = (s.id.clone(), ask.clone());
-                                    el.with_tip(tip(
-                                        "Saved to the project's own settings, where Claude Code keeps its rules",
-                                        None,
+                                    el.with_tip(tip_owned(
+                                        format!(
+                                            "Saved to the project's own settings, where {} keeps its rules",
+                                            s.agent_name
+                                        ),
                                         t,
                                     ))
                                     .on_press(cx.listener(move |this, _, _, cx| {
                                         this.allow(&a3, Some(&k4), Scope::Project, cx)
                                     }))
                                 } else {
-                                    crate::ui::off(
+                                    crate::ui::off_owned(
                                         el,
-                                        "Claude Code has no rule it can save for this",
+                                        format!("{} has no rule it can save for this", s.agent_name),
                                         &t,
                                     )
                                 }
@@ -2467,7 +2469,7 @@ impl Dent {
                 let (sid, no) = (s.id.clone(), ask.clone());
                 needs_card(&t)
                     .id(SharedString::from(format!("ask-{ask}")))
-                    .child(needs_title("Claude asks for a secret", &t))
+                    .child(needs_title(&format!("{} asks for a secret", s.agent_short), &t))
                     .child(
                         div()
                             .flex()
@@ -2528,7 +2530,10 @@ impl Dent {
                             ),
                     )
                     .child(div().ty(LABEL).text_color(t.faint).child(
-                        "Kept on this Mac where you choose. Claude is told where it is, never what it is.",
+                        format!(
+                            "Kept on this Mac where you choose. {} is told where it is, never what it is.",
+                            s.agent_short
+                        ),
                     ))
                     .into_any_element()
             }
@@ -2713,7 +2718,7 @@ impl Dent {
                 auto,
                 before,
                 after,
-            } => self.compacted_line(ix, *auto, *before, *after),
+            } => self.compacted_line(ix, &s.agent_short, *auto, *before, *after),
             Item::Command {
                 name,
                 args,
@@ -3635,6 +3640,7 @@ impl Dent {
         }
         let t = self.t;
         let n = s.background.len();
+        let stoppable = s.caps.stop_task;
         let rows = s.background.iter().map(|task| {
             let kind = match task.kind.as_str() {
                 "local_bash" => "shell",
@@ -3681,21 +3687,24 @@ impl Dent {
                         .on_press(cx.listener(move |this, _, _, cx| this.open_file(&path, cx))),
                     )
                 })
-                .child(
-                    ghost(
-                        SharedString::from(format!("bg-stop-{}", task.id)),
-                        "Stop",
-                        &t,
+                // Only where the agent can stop one piece on its own.
+                .when(stoppable, |d| {
+                    d.child(
+                        ghost(
+                            SharedString::from(format!("bg-stop-{}", task.id)),
+                            "Stop",
+                            &t,
+                        )
+                        .child(probe(&self.probes, format!("bg-stop-{}", task.id)))
+                        .on_press(cx.listener(move |this, _, _, cx| {
+                            this.live.send(dent_protocol::Request::StopTask {
+                                session: sid.clone(),
+                                task: tid.clone(),
+                            });
+                            cx.notify();
+                        })),
                     )
-                    .child(probe(&self.probes, format!("bg-stop-{}", task.id)))
-                    .on_press(cx.listener(move |this, _, _, cx| {
-                        this.live.send(dent_protocol::Request::StopTask {
-                            session: sid.clone(),
-                            task: tid.clone(),
-                        });
-                        cx.notify();
-                    })),
-                )
+                })
         });
         let all: Vec<String> = s.background.iter().map(|t| t.id.clone()).collect();
         let sid = s.id.clone();
@@ -3725,7 +3734,7 @@ impl Dent {
                         } else {
                             format!("Running in the background · {n}")
                         }))
-                        .when(n > 1, |d| {
+                        .when(n > 1 && stoppable, |d| {
                             d.child(ghost("bg-stop-all", "Stop all", &t).on_press(cx.listener(
                                 move |this, _, _, cx| {
                                     for task in &all {
@@ -4090,7 +4099,7 @@ impl Dent {
             "Esc to close"
         } else if c.loading {
             // dent's own commands are here; the agent's are on their way.
-            "Looking up Claude's commands…"
+            "Looking up the agent's commands…"
         } else {
             "↑↓ choose · ↩ or Tab to pick · Esc to close"
         };
@@ -4847,7 +4856,7 @@ impl Dent {
                 };
                 let mut v: Vec<Entry> = latest.iter().map(row).collect();
                 if v.is_empty() {
-                    v.push(Entry::note("Asking Claude Code for its models…"));
+                    v.push(Entry::note("Asking the agent for its models…"));
                 }
                 if !older.is_empty() {
                     let at = v.len();
@@ -4872,13 +4881,15 @@ impl Dent {
                 v
             }
             Menu::Permission | Menu::SessionPermission => {
-                let current = if which == Menu::Permission {
-                    d.permission
-                } else {
-                    self.current().map(|s| s.permission).unwrap_or_default()
+                let (current, caps) = match (which, self.current()) {
+                    (Menu::SessionPermission, Some(s)) => (s.permission, s.caps.clone()),
+                    (Menu::SessionPermission, None) => (Permission::default(), self.new_caps()),
+                    _ => (d.permission, self.new_caps()),
                 };
+                // Only the modes the agent takes.
                 Permission::ALL
                     .iter()
+                    .filter(|p| caps.permissions.contains(p))
                     .map(|p| {
                         let p = *p;
                         Entry::row(
@@ -5390,7 +5401,7 @@ const FADE: f32 = 48.;
 
 /// Effort levels, with what each is for.
 pub const EFFORTS: [(Option<&str>, &str); 6] = [
-    (None, "Whatever Claude Code picks for the model"),
+    (None, "Whatever the agent picks for the model"),
     (Some("low"), "Fastest; for quick questions"),
     (Some("medium"), "Balanced"),
     (Some("high"), "Thinks harder before acting"),

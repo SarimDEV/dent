@@ -358,10 +358,14 @@ impl Dent {
             })
             .child(probe(&self.probes, "context-gauge"));
         let popover = open.then(|| {
-            let (label, off): (&str, Option<&'static str>) = if compacting {
-                ("Compacting…", Some("Claude is compacting now"))
+            let who = &s.agent_short;
+            let (label, off): (&str, Option<String>) = if compacting {
+                ("Compacting…", Some(format!("{who} is compacting now")))
             } else if busy {
-                ("Compact now", Some("Wait for Claude to finish this turn"))
+                (
+                    "Compact now",
+                    Some(format!("Wait for {who} to finish this turn")),
+                )
             } else {
                 ("Compact now", None)
             };
@@ -452,6 +456,7 @@ impl Dent {
     pub fn compacted_line(
         &self,
         ix: usize,
+        who: &str,
         auto: bool,
         before: u64,
         after: Option<u64>,
@@ -488,8 +493,10 @@ impl Dent {
             )
             .child(rule())
             .with_tip(tip_owned(
-                "Claude summarized the conversation so far to make room. \
-                 Everything stays here to read; Claude works from the summary.",
+                format!(
+                    "{who} summarized the conversation so far to make room. \
+                     Everything stays here to read; {who} works from the summary."
+                ),
                 t,
             ))
             .child(probe(&self.probes, format!("compacted-{ix}")))
@@ -544,7 +551,9 @@ impl Dent {
         // what might have been meant.
         match outcome {
             CommandOutcome::TerminalOnly => {
-                return rule(div().child("Works only in Claude Code in the terminal."));
+                return rule(
+                    div().child(format!("Works only in {} in the terminal.", s.agent_name)),
+                );
             }
             CommandOutcome::Unknown { suggestion } => {
                 let sid = s.id.clone();
@@ -553,7 +562,7 @@ impl Dent {
                         .flex()
                         .items_center()
                         .gap(px(space::S1))
-                        .child("Claude has no command by that name.")
+                        .child(format!("{} has no command by that name.", s.agent_short))
                         .children(suggestion.clone().map(|sug| {
                             let label = format!("Use /{sug}");
                             ghost(SharedString::from(format!("suggest-{ix}")), label, &t)
