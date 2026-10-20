@@ -218,6 +218,63 @@ fn tail(text: &str, n: usize) -> String {
     format!("… (cut short)\n{}", &kept[start..])
 }
 
+/// A CI log as a person would read it. `gh run view --log-failed` puts the
+/// job, the step and a timestamp before every line, keeps the terminal's
+/// colour codes, and marks folds with `##[group]`: all of that goes.
+fn clean_log(text: &str) -> String {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        // job <tab> step <tab> rest
+        let rest = line.splitn(3, '\t').nth(2).unwrap_or(line);
+        let rest = rest.trim_start_matches('\u{feff}');
+        // An ISO timestamp, then a space.
+        let rest = match rest.split_once(' ') {
+            Some((stamp, after))
+                if stamp.len() >= 20 && stamp.ends_with('Z') && stamp.contains('T') =>
+            {
+                after
+            }
+            _ => rest,
+        };
+        let rest = strip_ansi(rest);
+        if rest.starts_with("##[group]") || rest.starts_with("##[endgroup]") {
+            continue;
+        }
+        let rest = match rest.strip_prefix("##[error]") {
+            Some(e) => format!("error: {e}"),
+            None => rest,
+        };
+        out.push(rest);
+    }
+    out.join("\n")
+}
+
+/// Text without terminal escape sequences (colours, cursor moves), whether
+/// as the escape character or as GitHub's logs spell it, `^[`.
+fn strip_ansi(s: &str) -> String {
+    let s = s.replace("^[[", "\u{1b}[");
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // ESC [ … final letter, or ESC and one more character.
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                chars.next();
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// The most of a failing check's log a brief carries.
 const LOG_CAP: usize = 8 * 1024;
 
@@ -263,7 +320,10 @@ pub fn checks_brief(dir: &Path, gh: &Path, pr: u64) -> Result<String, String> {
     {
         // Indented, not fenced: a message shown folded never stops on a
         // bare fence.
-        let indented: Vec<String> = tail(&log, 80).lines().map(|l| format!("    {l}")).collect();
+        let indented: Vec<String> = tail(&clean_log(&log), 80)
+            .lines()
+            .map(|l| format!("    {l}"))
+            .collect();
         text.push_str(&format!(
             "\n\nThe end of the first failure's log:\n\n{}",
             indented.join("\n")
@@ -495,6 +555,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!((odd.checks.failed, odd.checks.pending), (2, 1));
+    }
+
+    #[test]
+    fn a_ci_log_reads_as_its_lines() {
+        // As `gh run view --log-failed` gave it for a real failing check.
+        let log = "notes\tThe notes say they're fixed\t\u{feff}2026-10-20T07:27:41.6339530Z ##[group]Run if ! grep -q \"fixed\" ship.md; then\n\
+notes\tThe notes say they're fixed\t2026-10-20T07:27:41.6342820Z ^[[36;1m  echo \"error: ship.md must say the footer is fixed\"^[[0m\n\
+notes\tThe notes say they're fixed\t2026-10-20T07:27:41.6589344Z ##[endgroup]\n\
+notes\tThe notes say they're fixed\t2026-10-20T07:27:41.6772582Z error: ship.md must say the footer is fixed\n\
+notes\tThe notes say they're fixed\t2026-10-20T07:27:41.6791725Z ##[error]Process completed with exit code 1.";
+        assert_eq!(
+            clean_log(log),
+            "  echo \"error: ship.md must say the footer is fixed\"\n\
+error: ship.md must say the footer is fixed\n\
+error: Process completed with exit code 1."
+        );
     }
 
     #[test]

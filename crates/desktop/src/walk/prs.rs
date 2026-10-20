@@ -129,7 +129,7 @@ pub(super) fn prs() -> Vec<(f32, Act)> {
                 "failing checks put the session in Needs you, saying why in the list",
                 |d, _| {
                     status_is(d, Status::Needs)
-                        && current(d).is_some_and(|s| s.detail == "PR #12 · Checks failing")
+                        && current(d).is_some_and(|s| s.detail == "Checks failing · PR #12")
                 },
                 5.,
             ),
@@ -356,5 +356,34 @@ pub(super) fn scripts() -> Vec<(f32, Act)> {
             ),
         ),
         (0.3, Shot("scripts-busy")),
+    ]
+}
+
+/// A look at whatever daemon this window connects to: the session with a
+/// pull request, as it is now (for checking against real GitHub data).
+pub(super) fn look_pr() -> Vec<(f32, Act)> {
+    vec![
+        (
+            0.1,
+            Until(
+                "a session with a pull request is there",
+                |d, _| d.sessions.iter().any(|s| s.pr.is_some()),
+                20.,
+            ),
+        ),
+        (
+            0.2,
+            Call(|d, w, cx| {
+                let id = d
+                    .sessions
+                    .iter()
+                    .find(|s| s.pr.is_some())
+                    .map(|s| s.id.clone());
+                d.select(id, w, cx);
+                d.panel_open = false;
+                cx.notify();
+            }),
+        ),
+        (1.5, Shot("real-pr")),
     ]
 }

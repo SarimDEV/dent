@@ -229,6 +229,7 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("worktrees", &[worktrees]),
     ("worktree-edges", &[worktree_edges]),
     ("prs", &[prs]),
+    ("look-pr", &[look_pr]),
     ("project-defaults", &[project_defaults]),
     ("scripts", &[scripts]),
 ];

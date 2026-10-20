@@ -784,7 +784,8 @@ fn detail(v: &SessionView) -> String {
             return format!("Merged · PR #{}", pr.number);
         }
         if pr_trouble(v) {
-            return format!("PR #{} · {}", pr.number, crate::gitbar::pr_words(pr));
+            // What's wrong first: a narrow list keeps it.
+            return format!("{} · PR #{}", crate::gitbar::pr_words(pr), pr.number);
         }
     }
     // Waiting for a used-up limit to reset, to carry on by itself.
