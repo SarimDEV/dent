@@ -18,10 +18,20 @@ pub fn list(
     hidden: &HashSet<String>,
 ) -> Vec<Project> {
     let mut by_path: HashMap<String, u64> = HashMap::new();
-    let added = added.iter().map(|(p, t)| (p.clone(), *t));
-    for (p, t) in recent.iter().cloned().chain(added) {
+    // A project is a repository: a worktree counts as its main checkout
+    // (decision 0053).
+    let mut add = |p: String, t: u64| {
+        let p = crate::workspace::main_checkout(Path::new(&p))
+            .map(|m| m.display().to_string())
+            .unwrap_or(p);
         let e = by_path.entry(p).or_default();
         *e = (*e).max(t);
+    };
+    for (p, t) in recent.iter().cloned() {
+        add(p, t);
+    }
+    for (p, t) in added {
+        add(p.clone(), *t);
     }
     // From the terminal's history, a folder in temporary space was a
     // one-off; one used or added here is kept wherever it is.
@@ -29,8 +39,7 @@ pub fn list(
         // Ordered by when the terminal last used it, so ones never used
         // here still sort by recency, not by name.
         let used = terminal_used(&p);
-        let e = by_path.entry(p).or_default();
-        *e = (*e).max(used);
+        add(p, used);
     }
     let mut out: Vec<Project> = by_path
         .into_iter()

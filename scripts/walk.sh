@@ -88,7 +88,25 @@ cat > "$root/home/.claude/projects/-proj/33333333-4444-4555-8666-777777777777.js
 {"type":"user","entrypoint":"cli","cwd":"$root/proj","uuid":"o1","timestamp":"$now","message":{"role":"user","content":"Profile the startup path"}}
 {"type":"assistant","uuid":"o2","timestamp":"$now","message":{"content":[{"type":"text","text":"Looking at the startup path now."}]}}
 JSONL
+# A stand-in GitHub CLI: a pull request's state is a file a scene writes.
+cat > "$root/gh" <<'GH'
+#!/bin/sh
+state="$DENT_WALK_GH_STATE"
+case "$1 $2" in
+  "pr view") if [ -f "$state" ]; then cat "$state"; else echo "no pull requests found" >&2; exit 1; fi ;;
+  "pr create")
+    echo '{"number":12,"url":"https://github.com/walk/proj/pull/12","state":"OPEN","statusCheckRollup":[{"name":"test","status":"IN_PROGRESS","conclusion":""}]}' > "$state"
+    echo "https://github.com/walk/proj/pull/12" ;;
+  "run view") echo "test footer_on_mobile ... FAILED"; echo "assertion failed: left == right" ;;
+  "api "*) echo "src/footer.rs:12 reviewer: Use the theme colour here" ;;
+  *) exit 1 ;;
+esac
+GH
+chmod +x "$root/gh"
 HOME="$root/home" \
+DENT_GH="$root/gh" DENT_WALK_GH_STATE="$root/gh-state.json" DENT_PR_EVERY=2 \
+GIT_AUTHOR_NAME=walk GIT_AUTHOR_EMAIL=walk@example.com \
+GIT_COMMITTER_NAME=walk GIT_COMMITTER_EMAIL=walk@example.com \
 DENT_STATE="$root/state" \
 DENT_HOLDER_ORPHAN_MS=10000 \
 DENT_CLAUDE="$bin/dent-fake-claude" \

@@ -23,9 +23,11 @@ mod projects;
 mod secrets;
 mod server;
 mod session;
+mod ship;
 mod store;
 mod terminal;
 mod usage;
+mod workspace;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -86,6 +88,7 @@ fn main() -> Result<()> {
             d.paths.state.display()
         );
         d.restore().await?;
+        d.watch_prs();
         {
             let d = d.clone();
             tokio::spawn(async move {

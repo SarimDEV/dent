@@ -211,6 +211,23 @@ pub enum Body {
     Notice {
         text: String,
     },
+    /// The session's pull request, said when it's first seen and whenever
+    /// its state, checks or review change; `None` when it no longer has one.
+    PullRequest {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pr: Option<PullRequest>,
+    },
+    /// Where the session works in Git terms, said when it starts and
+    /// whenever its branch changes.
+    Workspace {
+        /// The branch checked out; `None` when detached or not a repository.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        /// For a session in a linked worktree, the project's main checkout:
+        /// the folder its project is named after.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        root: Option<String>,
+    },
     /// What the agent said about itself when it started.
     Agent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -413,6 +430,9 @@ pub enum Activity {
     },
     /// Thinking, and the last thing it thought, a sentence at most.
     Thinking { latest: String },
+    /// Getting a new worktree ready before the first message goes, since
+    /// Unix milliseconds `since`: `what` is the step ("Running .dent/setup").
+    SettingUp { since: u64, what: String },
 }
 
 /// The command a one-line message runs (`/compact`,
@@ -698,6 +718,129 @@ pub struct Project {
     pub last_used: u64,
 }
 
+/// Where a new session's worktree starts.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct NewWorktree {
+    /// The branch it starts from; `None` is the one checked out now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+}
+
+/// A repository as a new session sees it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct Repo {
+    /// Its main checkout, even when asked about one of its worktrees.
+    pub root: String,
+    /// The branch checked out in the folder asked about.
+    #[serde(default)]
+    pub current: Option<String>,
+    /// Local branches, the most recently committed to first.
+    #[serde(default)]
+    pub branches: Vec<String>,
+    /// Its linked worktrees, newest first; the main checkout isn't one.
+    #[serde(default)]
+    pub worktrees: Vec<Worktree>,
+    /// It has a `.dent/setup` script, run in each new worktree.
+    #[serde(default)]
+    pub setup: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Worktree {
+    pub path: String,
+    #[serde(default)]
+    pub branch: Option<String>,
+}
+
+/// Where a session's branch stands against its remote.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct GitStatus {
+    /// `None` when detached.
+    pub branch: Option<String>,
+    /// The remote's default branch (`main`), when known.
+    #[serde(default)]
+    pub default_branch: Option<String>,
+    /// Changes not yet committed.
+    pub changes: bool,
+    /// The repository has an `origin` to push to.
+    pub remote: bool,
+    /// The branch tracks one on the remote.
+    pub upstream: bool,
+    pub ahead: u32,
+    pub behind: u32,
+    /// The GitHub CLI is there and signed in, so pull requests can be made.
+    pub gh: bool,
+    /// The branch's latest pull request, open or not, when there is one.
+    #[serde(default)]
+    pub pr: Option<PullRequest>,
+}
+
+/// A branch's pull request as GitHub has it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct PullRequest {
+    pub number: u64,
+    pub url: String,
+    #[serde(default)]
+    pub state: PrState,
+    #[serde(default)]
+    pub checks: Checks,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<Review>,
+}
+
+impl PullRequest {
+    pub fn open(&self) -> bool {
+        self.state == PrState::Open
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PrState {
+    #[default]
+    Open,
+    Merged,
+    Closed,
+}
+
+/// Its CI checks, counted.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Checks {
+    pub passed: u32,
+    pub failed: u32,
+    pub pending: u32,
+}
+
+/// What its reviewers decided, when they have.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Review {
+    Approved,
+    ChangesRequested,
+}
+
+/// What of a pull request to brief the agent on.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrBrief {
+    /// The failing checks, with the end of their logs.
+    Checks,
+    /// The review's requested changes and comments on lines.
+    Review,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitAction {
+    Commit,
+    CommitPush,
+    CommitPushPr,
+    Push,
+    /// Push if needed, then open a pull request.
+    Pr,
+    Pull,
+}
+
 /// A changed file, with its diff in unified format.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct FileChange {
@@ -732,6 +875,9 @@ pub enum Request {
     },
     Create {
         cwd: String,
+        /// Work in a new worktree of `cwd`'s repository instead of `cwd`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree: Option<NewWorktree>,
         #[serde(default)]
         model: Option<String>,
         #[serde(default)]
@@ -945,6 +1091,37 @@ pub enum Request {
     CloneProject {
         url: String,
     },
+    /// A folder's repository, for the new session's worktree and branch
+    /// choices.
+    Repo {
+        dir: String,
+    },
+    /// Take away the worktree a closed session worked in. Without `force`,
+    /// one with changes not committed is kept and the error says so. Its
+    /// branch, and the commits on it, stay.
+    RemoveWorktree {
+        session: SessionId,
+        #[serde(default)]
+        force: bool,
+    },
+    /// Where the session's branch stands, for the Git actions.
+    GitStatus {
+        session: SessionId,
+    },
+    /// What the agent needs to fix a pull request's failing checks or
+    /// answer its review, as a message to send it.
+    PrBrief {
+        session: SessionId,
+        about: PrBrief,
+    },
+    /// Commit, push, open a pull request or pull, in the session's folder.
+    /// A commit with no `message` gets one written from the diff.
+    Git {
+        session: SessionId,
+        action: GitAction,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
     /// A file in the session's directory, for the viewer.
     ReadFile {
         session: SessionId,
@@ -1080,6 +1257,24 @@ pub enum Reply {
     },
     File {
         bytes_b64: String,
+    },
+    /// `None` when the folder isn't in a Git repository.
+    Repo {
+        repo: Option<Repo>,
+    },
+    /// `None` when the session's folder isn't in a Git repository.
+    GitStatus {
+        status: Option<GitStatus>,
+    },
+    PrBrief {
+        text: String,
+    },
+    /// A Git action done: what happened, in a line, and the pull request's
+    /// address when there is one.
+    GitDone {
+        summary: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
     },
 }
 

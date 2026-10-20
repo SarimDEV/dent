@@ -71,6 +71,8 @@ pub struct Daemon {
     /// What each session's agent is doing besides talking.
     activities: Mutex<HashMap<String, dent_protocol::Activity>>,
     awake: Mutex<Awake>,
+    /// Sessions whose new worktree is being set up.
+    setting_up: Mutex<std::collections::HashSet<String>>,
 }
 
 /// Keeping the machine awake while agents work: the sessions working now,
@@ -135,6 +137,7 @@ impl Daemon {
                 on: true,
                 hold: None,
             }),
+            setting_up: Mutex::new(Default::default()),
         })
     }
 
@@ -523,6 +526,7 @@ impl Daemon {
     pub async fn create(self: &Arc<Self>, new: NewSession) -> Result<String> {
         let NewSession {
             cwd,
+            worktree,
             model,
             permission,
             effort,
@@ -550,11 +554,29 @@ impl Daemon {
             .await?;
             return Ok(session);
         }
+        // A new worktree is made before the session exists, so one that
+        // can't be made leaves nothing behind.
+        let made = match worktree {
+            Some(w) => {
+                let (dir, under) = (cwd.clone(), crate::workspace::worktrees_root());
+                let made = tokio::task::spawn_blocking(move || {
+                    crate::workspace::make(std::path::Path::new(&dir), w.base.as_deref(), &under)
+                })
+                .await?
+                .map_err(|e| anyhow::anyhow!("couldn't make a worktree: {e}"))?;
+                Some(made)
+            }
+            None => None,
+        };
+        let cwd = match &made {
+            Some((path, ..)) => path.display().to_string(),
+            None => cwd,
+        };
         self.append(
             &session,
             Body::Created {
                 agent: "claude".into(),
-                cwd,
+                cwd: cwd.clone(),
                 model,
                 permission,
                 // Started with files alone: named after the first.
@@ -580,22 +602,366 @@ impl Daemon {
                 None,
             )?;
         }
+        self.note_workspace(&session, &cwd).await;
+        // A setup script runs first: meanwhile messages wait in the
+        // session's queue, shown, and go in order once it's done.
+        let setup = made
+            .as_ref()
+            .and_then(|(path, _, root)| crate::workspace::setup_script(path, root));
+        if setup.is_some() {
+            lock(&self.setting_up).insert(session.clone());
+        }
         let row = self
             .store()
             .session(&session)?
             .context("session row missing")?;
         session::start(self.clone(), row, Vec::new());
-        self.command(
-            &session,
-            Op::Send {
-                id,
-                text,
-                steer: false,
-                attachments,
-            },
-        )
-        .await?;
+        let first = Op::Send {
+            id,
+            text: text.clone(),
+            steer: false,
+            attachments,
+        };
+        let Some((path, branch, root)) = made else {
+            self.command(&session, first).await?;
+            return Ok(session);
+        };
+        // The branch gets a name from the task while the worktree readies.
+        {
+            let (d, session, path) = (self.clone(), session.clone(), path.clone());
+            tokio::spawn(async move {
+                if let Err(e) = d.name_branch(&session, &path, &branch, &text).await {
+                    eprintln!("dent-daemon: {session}: couldn't name its branch: {e:#}");
+                }
+            });
+        }
+        self.command(&session, first).await?;
+        // The queue goes when setup's done, whatever came of it, so a
+        // failed install never strands the task.
+        if let Some(script) = setup {
+            let (d, session) = (self.clone(), session.clone());
+            tokio::spawn(async move {
+                d.set_up(&session, &script, &path, &root).await;
+                lock(&d.setting_up).remove(&session);
+                if let Err(e) = d.command(&session, Op::SetUp).await {
+                    eprintln!("dent-daemon: {session}: couldn't carry on after setup: {e:#}");
+                }
+            });
+        }
         Ok(session)
+    }
+
+    /// Session `id`'s new worktree is being set up: what's sent waits.
+    pub fn setting_up(&self, id: &str) -> bool {
+        lock(&self.setting_up).contains(id)
+    }
+
+    /// Run a repository's setup script in a session's new worktree, saying
+    /// so while it runs and in the chat when it's done.
+    async fn set_up(
+        self: &Arc<Self>,
+        session: &str,
+        script: &std::path::Path,
+        worktree: &std::path::Path,
+        root: &std::path::Path,
+    ) {
+        let started = now_ms();
+        self.set_activity(
+            session,
+            Some(dent_protocol::Activity::SettingUp {
+                since: started,
+                what: format!("Running {}", crate::workspace::SETUP),
+            }),
+        );
+        let (s, w, r) = (
+            script.to_path_buf(),
+            worktree.to_path_buf(),
+            root.to_path_buf(),
+        );
+        let got = tokio::task::spawn_blocking(move || crate::workspace::run_setup(&s, &w, &r))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+        self.set_activity(session, None);
+        let secs = now_ms().saturating_sub(started).div_ceil(1000);
+        let text = match got {
+            Ok(_) => format!(
+                "Set up the worktree with {} in {secs}s",
+                crate::workspace::SETUP
+            ),
+            Err(tail) => match tail.lines().last() {
+                // Its last words say most; the chat line is plain text.
+                Some(last) => format!(
+                    "{} failed in {secs}s: {}",
+                    crate::workspace::SETUP,
+                    last.trim()
+                ),
+                None => format!("{} failed in {secs}s", crate::workspace::SETUP),
+            },
+        };
+        if let Err(e) = self.append(session, Body::Notice { text }, None) {
+            eprintln!("dent-daemon: {session}: {e:#}");
+        }
+    }
+
+    /// Name a new worktree's placeholder branch after the task.
+    async fn name_branch(
+        self: &Arc<Self>,
+        session: &str,
+        worktree: &std::path::Path,
+        placeholder: &str,
+        task: &str,
+    ) -> Result<()> {
+        let task: String = task.chars().take(2000).collect();
+        let answer = self
+            .ask(&format!(
+                "Name a Git branch for this task given to a coding agent: two to four \
+                 lowercase words joined by hyphens, like fix-footer-on-mobile. Reply with the \
+                 name only.\n\nTask: {task}"
+            ))
+            .await?;
+        let Some(wanted) = crate::workspace::branch_name(&answer) else {
+            return Ok(());
+        };
+        let (w, old) = (worktree.to_path_buf(), placeholder.to_string());
+        tokio::task::spawn_blocking(move || crate::workspace::rename(&w, &old, &wanted))
+            .await?
+            .map_err(|e| anyhow::anyhow!(e))?;
+        self.note_workspace(session, &worktree.display().to_string())
+            .await;
+        Ok(())
+    }
+
+    /// Say the session's branch, and its main checkout when it's in a
+    /// worktree, if either changed since last said.
+    pub async fn note_workspace(self: &Arc<Self>, session: &str, cwd: &str) {
+        let dir = std::path::PathBuf::from(cwd);
+        if !dir.is_dir() {
+            return;
+        }
+        let Ok((branch, root)) = tokio::task::spawn_blocking(move || {
+            (
+                crate::workspace::branch(&dir),
+                crate::workspace::main_checkout(&dir).map(|p| p.display().to_string()),
+            )
+        })
+        .await
+        else {
+            return;
+        };
+        let key = format!("{WORKSPACE}{session}");
+        let now = serde_json::json!({ "branch": branch, "root": root }).to_string();
+        let said = self.store().get(&key).ok().flatten();
+        if said.as_deref() == Some(now.as_str()) {
+            return;
+        }
+        // Outside a repository, there's nothing to say until there is.
+        if said.is_none() && branch.is_none() && root.is_none() {
+            return;
+        }
+        if let Err(e) = self
+            .append(session, Body::Workspace { branch, root }, None)
+            .and_then(|_| self.store().put(&key, &now))
+        {
+            eprintln!("dent-daemon: {session}: {e:#}");
+        }
+    }
+
+    /// Say the session's pull request if its state, checks or review
+    /// changed since last said. Only a pushed branch is asked about.
+    pub async fn note_pr(self: &Arc<Self>, session: &str, cwd: &str) {
+        let Some(gh) = crate::ship::gh(&self.env().path) else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(cwd);
+        if !dir.is_dir() {
+            return;
+        }
+        let key = format!("{PR}{session}");
+        let said = self.store().get(&key).ok().flatten();
+        let asked = tokio::task::spawn_blocking(move || {
+            let run =
+                |args: &[&str]| crate::workspace::run(&dir, args).map(|s| s.trim().to_string());
+            // Pushed, and not the default branch, which has no pull request.
+            let Ok(upstream) = run(&["rev-parse", "--abbrev-ref", "-q", "@{u}"]) else {
+                return Ok(None);
+            };
+            let default = run(&["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"]);
+            if default.is_ok_and(|d| d == upstream) {
+                return Ok(None);
+            }
+            crate::ship::pull_request(&dir, &gh)
+        })
+        .await;
+        // GitHub couldn't be asked: what was said stands.
+        let Ok(Ok(pr)) = asked else {
+            return;
+        };
+        // Never had one: nothing to say until there is.
+        if said.is_none() && pr.is_none() {
+            return;
+        }
+        let now = serde_json::to_string(&pr).unwrap_or_default();
+        if said.as_deref() == Some(now.as_str()) {
+            return;
+        }
+        if let Err(e) = self
+            .append(session, Body::PullRequest { pr }, None)
+            .and_then(|_| self.store().put(&key, &now))
+        {
+            eprintln!("dent-daemon: {session}: {e:#}");
+        }
+    }
+
+    /// Every couple of minutes, look again at the pull requests of the
+    /// sessions that are open, so checks, reviews and merges show.
+    pub fn watch_prs(self: &Arc<Self>) {
+        let d = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(pr_every()).await;
+                let open = d.store().open_sessions().unwrap_or_default();
+                for (id, cwd) in open {
+                    d.note_pr(&id, &cwd).await;
+                }
+            }
+        });
+    }
+
+    /// The branch and main checkout last said for a session.
+    pub fn workspace_of(&self, session: &str) -> (Option<String>, Option<String>) {
+        let v: serde_json::Value = self
+            .store()
+            .get(&format!("{WORKSPACE}{session}"))
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let s = |k: &str| v[k].as_str().map(str::to_owned);
+        (s("branch"), s("root"))
+    }
+
+    /// One question to a small, quick model, run in dent's own folder so
+    /// it leaves nothing in a project's history: its answer.
+    pub async fn ask(self: &Arc<Self>, prompt: &str) -> Result<String> {
+        let env = self.env();
+        let argv = crate::claude::ask_argv(&env.claude, &env.path, prompt);
+        let dir = self.paths.state.join("titles");
+        std::fs::create_dir_all(&dir)?;
+        let dir = dir.display().to_string();
+        let got = tokio::task::spawn_blocking(move || run_aside(&argv, &dir))
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(got.0)
+    }
+
+    /// Commit, push, open a pull request or pull in a session's folder:
+    /// what happened in a line, and the pull request's address.
+    pub async fn git(
+        self: &Arc<Self>,
+        cwd: &str,
+        action: dent_protocol::GitAction,
+        message: Option<String>,
+    ) -> Result<(String, Option<String>)> {
+        use crate::ship;
+        use dent_protocol::GitAction as A;
+        let dir = std::path::PathBuf::from(cwd);
+        let gh = ship::gh(&self.env().path);
+        let blocking = |f: Box<dyn FnOnce() -> std::result::Result<String, String> + Send>| async {
+            tokio::task::spawn_blocking(f)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+                .map_err(|e| anyhow::anyhow!(e))
+        };
+        let st = {
+            let (dir, gh) = (dir.clone(), gh.clone());
+            tokio::task::spawn_blocking(move || ship::status(&dir, gh.as_deref()))
+                .await?
+                .context("the session's folder isn't in a Git repository")?
+        };
+        let commits = matches!(action, A::Commit | A::CommitPush | A::CommitPushPr);
+        let pushes = matches!(action, A::CommitPush | A::CommitPushPr | A::Push | A::Pr);
+        let opens = matches!(action, A::CommitPushPr | A::Pr);
+        if (pushes || action == A::Pull) && !st.remote {
+            bail!("the repository has no remote called origin");
+        }
+        if opens && gh.is_none() {
+            bail!("pull requests need the GitHub CLI (gh), signed in");
+        }
+        let mut done = Vec::new();
+        if commits {
+            if !st.changes {
+                bail!("there's nothing to commit");
+            }
+            let message = match message.filter(|m| !m.trim().is_empty()) {
+                Some(m) => m,
+                None => {
+                    let d = dir.clone();
+                    let pending = blocking(Box::new(move || Ok(ship::pending(&d)))).await?;
+                    let answer = self
+                        .ask(&format!(
+                            "Write a Git commit message for these changes: a subject line in \
+                             the imperative, at most 60 characters, then, only if it helps, a \
+                             blank line and a few short lines on why. No quotes or code fences. \
+                             Reply with the message only.\n\n{pending}"
+                        ))
+                        .await
+                        .unwrap_or_default();
+                    ship::message(&answer).unwrap_or_else(|| "Update files".into())
+                }
+            };
+            let (d, m) = (dir.clone(), message.clone());
+            blocking(Box::new(move || {
+                ship::commit(&d, &m).map(|_| String::new())
+            }))
+            .await?;
+            done.push(format!(
+                "Committed “{}”",
+                message.lines().next().unwrap_or_default()
+            ));
+        }
+        if pushes && (commits || st.ahead > 0 || !st.upstream) {
+            let (d, up) = (dir.clone(), st.upstream);
+            blocking(Box::new(move || ship::push(&d, up).map(|_| String::new()))).await?;
+            done.push("pushed".into());
+        }
+        let mut url = None;
+        if opens {
+            if let Some(pr) = st.pr.as_ref().filter(|p| p.open()) {
+                url = Some(pr.url.clone());
+                done.push(format!("pull request #{} is open", pr.number));
+            } else {
+                let base = format!("origin/{}", st.default_branch.as_deref().unwrap_or("main"));
+                let d = dir.clone();
+                let since = blocking(Box::new(move || Ok(ship::since(&d, &base)))).await?;
+                let answer = self
+                    .ask(&format!(
+                        "Write a GitHub pull request for this branch: a title on the first line \
+                         (at most 70 characters, no prefix), then a blank line and a short body \
+                         in Markdown saying what changed and why. Reply with those only.\n\n{since}"
+                    ))
+                    .await
+                    .unwrap_or_default();
+                let (mut title, body) = ship::title_and_body(&answer);
+                if title.is_empty() {
+                    title = st.branch.clone().unwrap_or_else(|| "Changes".into());
+                }
+                let (d, gh) = (dir.clone(), gh.clone().context("no gh")?);
+                let got = blocking(Box::new(move || ship::open(&d, &gh, &title, &body))).await?;
+                done.push("opened a pull request".into());
+                url = (!got.is_empty()).then_some(got);
+            }
+        }
+        if action == A::Pull {
+            let d = dir.clone();
+            blocking(Box::new(move || ship::pull(&d).map(|_| String::new()))).await?;
+            done.push("Pulled".into());
+        }
+        let mut summary = done.join(", ");
+        if let Some(c) = summary.get(..1) {
+            summary = c.to_uppercase() + &summary[1..];
+        }
+        Ok((summary, url))
     }
 
     /// A new session that carries on from `parent`: its history up to just
@@ -1010,16 +1376,10 @@ impl Daemon {
         } else {
             said
         };
-        let env = self.env();
-        let argv = crate::claude::title_argv(&env.claude, &env.path, &keep.join("\n\n"));
-        let dir = self.paths.state.join("titles");
-        std::fs::create_dir_all(&dir)?;
-        let dir = dir.display().to_string();
-        let got = tokio::task::spawn_blocking(move || run_aside(&argv, &dir))
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let t = clean_title(&got.0);
+        let answer = self
+            .ask(&crate::claude::title_prompt(&keep.join("\n\n")))
+            .await?;
+        let t = clean_title(&answer);
         if !t.is_empty() {
             self.append(
                 session,
@@ -1064,6 +1424,27 @@ impl Daemon {
         } else {
             Vec::new()
         };
+        // Sessions whose branch was never said (older than branches being
+        // noted) get it now, in the background.
+        let unsaid: Vec<(String, String)> = rows
+            .iter()
+            .filter(|r| {
+                self.store()
+                    .get(&format!("{WORKSPACE}{}", r.id))
+                    .ok()
+                    .flatten()
+                    .is_none()
+            })
+            .map(|r| (r.id.clone(), r.cwd.clone()))
+            .collect();
+        if !unsaid.is_empty() {
+            let d = self.clone();
+            tokio::spawn(async move {
+                for (id, cwd) in unsaid {
+                    d.note_workspace(&id, &cwd).await;
+                }
+            });
+        }
         for row in rows {
             session::start(self.clone(), row, live.clone());
         }
@@ -1138,12 +1519,28 @@ fn clean_title(answer: &str) -> String {
     title(&words[..words.len().min(8)].join(" "))
 }
 
+/// Each session's branch and main checkout as last said, as JSON.
+const WORKSPACE: &str = "workspace.";
+/// Each session's pull request as last said, as JSON.
+const PR: &str = "pr.";
+/// How often open sessions' pull requests are looked at again: two
+/// minutes, or `DENT_PR_EVERY` seconds (the walkthroughs').
+fn pr_every() -> std::time::Duration {
+    let secs = std::env::var("DENT_PR_EVERY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(120);
+    std::time::Duration::from_secs(secs)
+}
+
 /// Set once every session older than seen marks has one.
 const SEEN_MARKS: &str = "seen-marks";
 
 /// What a new session starts with.
 pub struct NewSession {
     pub cwd: String,
+    /// Work in a new worktree of `cwd`'s repository.
+    pub worktree: Option<dent_protocol::NewWorktree>,
     pub model: Option<String>,
     pub permission: Permission,
     pub effort: Option<String>,

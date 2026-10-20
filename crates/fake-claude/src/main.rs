@@ -44,6 +44,9 @@
 //!   servers turn on and off, reconnect (except `figma`) and sign in
 //! - `-p` starting "Title this conversation": the person's first message
 //!   as the title ("Checking the landing page" for a screenshot session)
+//! - `-p` asking to name a Git branch, or write a commit message or pull
+//!   request: `walk-task`, "Update the notes", and "Update the notes" with
+//!   a line of body
 //! - `replay a real turn`: one turn recorded from the real agent (Haiku
 //!   fixing a word count), at its recorded pace; in Ask mode its last test
 //!   run waits for approval
@@ -166,6 +169,21 @@ fn main() {
             };
             a.init();
             a.say(&t, None).ok();
+            a.end("done", false);
+            return;
+        }
+        let canned = if prompt.starts_with("Name a Git branch") {
+            Some("walk-task")
+        } else if prompt.starts_with("Write a Git commit message") {
+            Some("Update the notes")
+        } else if prompt.starts_with("Write a GitHub pull request") {
+            Some("Update the notes\n\nWrites the notes the walk asked for.")
+        } else {
+            None
+        };
+        if let Some(answer) = canned {
+            a.init();
+            a.say(answer, None).ok();
             a.end("done", false);
             return;
         }

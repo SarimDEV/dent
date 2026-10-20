@@ -67,17 +67,18 @@ The desktop app is a GPUI client for macOS, Linux and Windows, built around a ch
 
 ## New session
 
-Cmd/Ctrl+N opens an empty chat with the cursor in the composer: you start by typing. Under the composer are the session's settings, already chosen, each a click (or a key) to change:
+Cmd/Ctrl+N opens an empty chat with the cursor in the composer: you start by typing. The session's settings are already chosen, each a click (or a key) to change. How it runs (model, permissions, effort) sits in the box beside Start, as in a session's composer; where it runs (project, worktree, the branch it starts from, and terminal sessions to pick up at the end) sits in a tray tucked under the box. Neither ever wraps: short of room, words give way to icons (each says what it is on hover) and a long branch name gives up letters from the middle.
 
 - **Project:** never guessed from what you type ([0045](decisions/0045-no-project-guessing.md)): the folder of the session you came from, otherwise the last project you started or picked. Its chip opens a picker you type into ([0044](decisions/0044-project-picker.md)): words search the projects (name, then a folder on the path), newest first, ⌘1–⌘9 for the first nine; a path starting with `/` or `~` goes to a folder, Tab steps into the lit subfolder and "Make …" creates one that isn't there; a name that matches nothing offers New project, a Git repository with a first commit in `~/dent/projects`; a pasted Git URL offers Clone into the same place. "Choose a folder…" opens the Mac's folder picker and "No project" uses `~/dent/scratch`. The lit row's ×, or ⌘⌫ while nothing is typed (with text, ⌘⌫ deletes it), takes a project off the list (its folder stays), with Undo. Esc steps back out of naming or cloning, then closes.
 - **Machine:** the least busy online machine with the project's repo.
-- **Model, permissions, worktree:** whatever you used last; a first session starts in Full access ([0048](decisions/0048-full-access-default.md)).
+- **Worktree:** in a Git repository, Current checkout, New worktree (with a second chip for the branch it starts from) or an existing worktree to carry on in; new or not is what you used last ([0053](decisions/0053-projects-are-repos.md), [projects.md](projects.md#worktrees)).
+- **Model, permissions:** what the project's last new session started with, else whatever you used last ([0054](decisions/0054-project-defaults-prs-and-scripts.md)); a first session starts in Full access ([0048](decisions/0048-full-access-default.md)).
 
 Behind the page you can choose an ambient background (View › Ambient Background): a live picture of your sessions in one of thirteen styles, None by default. It runs only while this page shows and stops the moment a session starts ([ambient.md](ambient.md), [0049](decisions/0049-ambient-backgrounds.md)).
 
 ## Viewer
 
-The viewer shows, as tabs, everything the open session made or changed ([0037](decisions/0037-viewer-system-web-view.md)). Every viewable file an agent writes becomes a card in the chat that opens it here. Writing the same file again adds a version; nothing is replaced. A card for an older version says what replaced it.
+The viewer shows, as tabs, everything the open session made or changed ([0037](decisions/0037-viewer-system-web-view.md)). Every viewable file an agent writes becomes a card in the chat that opens it here. Writing the same file again adds a version; nothing is replaced. A card for an older version says what replaced it. Tabs share their strip: names give up letters from the middle first, and when that's not enough the files not showing are their icon alone (their path in the tooltip), so no tab is cut off at an edge; past that the strip scrolls, a fading edge saying there's more.
 
 - **Pages** (HTML files, and forwarded dev servers) run live in the system web view through a `dent://` scheme, with the network like any page.
   - **Versions:** a stepper (v3 of 4). An older version shows a "Back to v4" bar. A new version shows straight away when you're following the latest, with a brief "updated to v4" and the scroll position kept.
@@ -128,7 +129,7 @@ The goal is VS Code's Source Control flow, at native speed.
 - Per-file stage, unstage and discard; stage all and unstage all; hunk and line staging too.
 - Side-by-side and inline views with syntax highlighting, word-level changes, collapsed unchanged regions, and next and previous change navigation.
 - The modified side is editable for small fixes, saved straight to the working tree on the daemon's machine.
-- A commit box with commit and amend, plus push, for the times the agent does not.
+- A commit box with commit and amend, plus push, for the times the agent does not. For now, the session header's Git button does the next step in one press: commit with a written message, push, open a pull request or pull ([projects.md](projects.md#getting-work-out)).
 - Diffs are computed on the daemon and streamed per file; very large files render lazily.
 - Status updates live as agents edit, without stealing focus or scroll.
 

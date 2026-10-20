@@ -51,3 +51,6 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0049. Ambient backgrounds on the new-session page](0049-ambient-backgrounds.md)
 - [0050. Sessions title themselves; what you've seen is kept by the daemon](0050-titles-and-seen-marks.md)
 - [0051. A global shortcut through Carbon; the daemon keeps the Mac awake with caffeinate](0051-global-shortcut-and-keep-awake.md)
+- [0052. Media plays from disk in the web view; visuals and secrets go through dent's own tools](0052-media-visuals-and-secrets.md)
+- [0053. A project is a repository; dent makes a session's worktree](0053-projects-are-repos.md)
+- [0054. Each project keeps its own defaults; a session shows its pull request; projects have scripts](0054-project-defaults-prs-and-scripts.md)

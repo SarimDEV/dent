@@ -486,8 +486,24 @@ pub fn session(
             arts.push(art);
         }
     }
-    let status = status(v.status);
-    let working_since = v.working_since.map(|ms| {
+    // Readying a new worktree is work too: it shows as working, timed
+    // from when it began, though no turn has started yet.
+    let setting_up = match &v.activity {
+        Some(dent_protocol::Activity::SettingUp { since, .. }) => Some(*since),
+        _ => None,
+    };
+    let status = match setting_up {
+        Some(_) => Status::Working,
+        None => status(v.status),
+    };
+    // A finished session whose pull request's checks fail or whose review
+    // asks for changes needs you (decision 0036's "a failed check").
+    let status = if status == Status::Done && pr_trouble(v) {
+        Status::Needs
+    } else {
+        status
+    };
+    let working_since = v.working_since.or(setting_up).map(|ms| {
         Instant::now()
             .checked_sub(Duration::from_millis(cx.now_ms.saturating_sub(ms)))
             .unwrap_or_else(Instant::now)
@@ -496,10 +512,18 @@ pub fn session(
         id: v.id.clone(),
         title: v.title.clone(),
         cwd: v.cwd.clone(),
-        project: cwd
+        // A session in a worktree belongs to its repository's project.
+        project: v
+            .root
+            .as_deref()
+            .map(Path::new)
+            .unwrap_or(cwd)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| v.cwd.clone()),
+        branch: v.branch.clone(),
+        root: v.root.clone(),
+        pr: v.pr.clone(),
         machine: cx.machine.to_string(),
         agent: format!("Claude · {}", model_name(cx.models, v.model.as_deref())),
         model: v.model.clone(),
@@ -745,7 +769,25 @@ fn preparing(tool: &str, what: Option<&str>) -> String {
 }
 
 /// What it's doing or wants, for the inbox row and the working line.
+/// Its pull request is open with failing checks or changes asked for.
+pub fn pr_trouble(v: &SessionView) -> bool {
+    v.pr.as_ref()
+        .is_some_and(|p| p.open() && crate::gitbar::pr_tone(p) == crate::gitbar::Tone::Trouble)
+}
+
 fn detail(v: &SessionView) -> String {
+    // Finished, with news of its pull request: that's what to say.
+    if matches!(v.status, Wire::Done)
+        && let Some(pr) = &v.pr
+    {
+        if pr.state == dent_protocol::PrState::Merged {
+            return format!("Merged · PR #{}", pr.number);
+        }
+        if pr_trouble(v) {
+            // What's wrong first: a narrow list keeps it.
+            return format!("{} · PR #{}", crate::gitbar::pr_words(pr), pr.number);
+        }
+    }
     // Waiting for a used-up limit to reset, to carry on by itself.
     if let Some(at) = v.resume_at {
         return format!("Carries on at {}", crate::data::clock(at * 1000));
@@ -770,6 +812,9 @@ fn detail(v: &SessionView) -> String {
                 }
                 Some(dent_protocol::Activity::Retrying { error, .. }) => {
                     return format!("Retrying · {error}");
+                }
+                Some(dent_protocol::Activity::SettingUp { what, .. }) => {
+                    return format!("Setting up the worktree · {what}");
                 }
                 Some(dent_protocol::Activity::Preparing { tool, what }) => {
                     return preparing(tool, what.as_deref());

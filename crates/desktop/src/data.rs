@@ -426,7 +426,14 @@ pub struct Session {
     pub title: String,
     /// The folder it works in.
     pub cwd: String,
+    /// Its repository's name: in a worktree, the main checkout's.
     pub project: String,
+    /// The branch it works on, as the daemon last said.
+    pub branch: Option<String>,
+    /// In a linked worktree: the project's main checkout.
+    pub root: Option<String>,
+    /// Its branch's pull request, as the daemon last said.
+    pub pr: Option<dent_protocol::PullRequest>,
     pub machine: String,
     /// "Claude · Opus", for the composer.
     pub agent: String,
@@ -511,6 +518,9 @@ impl Session {
             title: String::new(),
             cwd: String::new(),
             project: String::new(),
+            branch: None,
+            root: None,
+            pr: None,
             machine: String::new(),
             agent: String::new(),
             model: None,

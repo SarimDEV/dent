@@ -4,6 +4,7 @@
 //! `cargo run -p dent-desktop -- [--dark] [--size WxH] [--reduce-motion] [--background]`
 //! starts the daemon beside it when none is running.
 
+mod actions;
 mod ambient;
 mod anim;
 mod ansi;
@@ -20,6 +21,7 @@ mod diagram;
 mod draft;
 mod ds;
 mod find;
+mod gitbar;
 mod github;
 mod highlight;
 mod hotkey;
@@ -373,6 +375,7 @@ impl Render for Dent {
                     | ToastAction::UnhideProject(_)
                     | ToastAction::Unremove { .. } => "Undo",
                     ToastAction::Resume(_) => "Resume",
+                    ToastAction::Open(_) => "Open",
                     ToastAction::Info => "OK",
                 };
                 div()
@@ -408,6 +411,7 @@ impl Render for Dent {
                                     ToastAction::UnhideProject(_) => "folder",
                                     ToastAction::Unremove { .. } => "x",
                                     ToastAction::Resume(_) => "square",
+                                    ToastAction::Open(_) => "git-pull-request",
                                     ToastAction::Info => "info",
                                 },
                                 14.,

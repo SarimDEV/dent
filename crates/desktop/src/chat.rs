@@ -40,7 +40,7 @@ impl Dent {
         }
     }
 
-    fn header(&self, s: &Session, cx: &mut Context<Self>) -> Div {
+    fn header(&mut self, s: &Session, cx: &mut Context<Self>) -> Div {
         let t = self.t;
         let id = s.id.clone();
         let has_viewer = self.shows_panel(s);
@@ -53,7 +53,10 @@ impl Dent {
             .items_center()
             .gap(px(space::S1))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-        if s.items.iter().any(|i| matches!(i, Item::User { .. })) {
+        // Very narrow, the helpers with keys of their own step out (⌥↑ ⌥↓,
+        // ⌘;), so the title and the actions that are only here keep room.
+        let cramped = self.chat_w < CRAMPED;
+        if !cramped && s.items.iter().any(|i| matches!(i, Item::User { .. })) {
             actions = actions.child(self.message_arrows(s, cx));
         }
         if s.stopped && !s.closed {
@@ -62,6 +65,111 @@ impl Dent {
                 button("resume", "Resume", false, &t)
                     .on_press(cx.listener(move |this, _, _, cx| this.resume(&sid, cx))),
             );
+        }
+        // The project's scripts, run into your terminal.
+        if !s.closed && self.actions.get(&s.id).is_some_and(|a| !a.is_empty()) {
+            let label = if tight { "" } else { "Run" };
+            actions = actions.child(self.chip(Menu::Actions, "play", label, false, cx));
+        }
+        // Its pull request, as GitHub has it: a click opens it.
+        if let Some(pr) = &s.pr {
+            use crate::gitbar::Tone;
+            let tone = crate::gitbar::pr_tone(pr);
+            let ink = match tone {
+                Tone::Trouble => t.needs.0,
+                Tone::Good => t.done.0,
+                Tone::Running => t.working.0,
+                Tone::Merged => t.spectrum[0],
+                Tone::Closed => t.removed,
+            };
+            let icon_name = match tone {
+                Tone::Merged => "git-merge",
+                Tone::Closed => "git-pull-request-closed",
+                _ => "git-pull-request",
+            };
+            let words = crate::gitbar::pr_words(pr);
+            let url = pr.url.clone();
+            let badge = div()
+                .id("pr-badge")
+                .relative()
+                .flex_none()
+                .h(px(size::CONTROL))
+                .px(px(space::S2))
+                .flex()
+                .items_center()
+                .gap(px(space::S1H))
+                .rounded(px(radius::MD))
+                .cursor_pointer()
+                .hover(|d| d.bg(t.hover()))
+                .active(|d| d.bg(t.press()))
+                .ty(UI)
+                .text_color(t.ink)
+                .child(icon(icon_name, 13., ink))
+                .child(format!("#{}", pr.number))
+                // Narrow, the state is its colour and its tooltip.
+                .when(!tight, |d| {
+                    d.child(div().text_color(t.quiet).child("·"))
+                        .child(div().text_color(t.quiet).child(words))
+                })
+                .with_tip(crate::ui::tip_owned(
+                    format!("Pull request #{} · {words}", pr.number),
+                    t,
+                ))
+                .on_press(cx.listener(move |_, _, _, cx| cx.open_url(&url)))
+                .child(probe(&self.probes, "pr-badge"));
+            actions = actions.child(badge);
+        }
+        // The branch's next Git step, while the session is open.
+        // The pull request as last said live wins over the last status read.
+        let st = self.git.get(&s.id).map(|st| dent_protocol::GitStatus {
+            pr: s.pr.clone().or_else(|| st.pr.clone()),
+            ..st.clone()
+        });
+        if !s.closed
+            && let Some(st) = st.as_ref()
+            && let Some(q) = crate::gitbar::quick(st)
+        {
+            let sid = id.clone();
+            let busy = self.git_busy.get(&s.id).copied();
+            let confirming = self.git_confirming(&s.id);
+            let label = match (busy, confirming) {
+                // Asking GitHub for a brief, not running Git.
+                (Some(_), _) if matches!(q.press, Some(crate::gitbar::Press::Brief(_))) => {
+                    "Gathering…".to_string()
+                }
+                (Some(a), _) => crate::gitbar::busy(a).to_string(),
+                (None, Some(_)) => crate::gitbar::confirm(st),
+                _ => q.label.clone(),
+            };
+            let b = if tight && busy.is_none() && confirming.is_none() {
+                icon_button("git-action", q.icon, &t)
+            } else {
+                button("git-action", &label, confirming.is_some(), &t)
+            };
+            let b = b.relative().child(probe(&self.probes, "git-action"));
+            let b =
+                match (&q.press, busy) {
+                    (_, Some(_)) => crate::ui::off(b, "Working on it", &t),
+                    // Mid-turn the agent may be halfway through a file.
+                    _ if s.running() => crate::ui::off(b, "Once the agent's turn ends", &t),
+                    (Some(press), None) => {
+                        let press = press.clone();
+                        b.with_tip(crate::ui::tip_owned(
+                            if tight {
+                                format!("{label}: {}", q.tip)
+                            } else {
+                                q.tip.clone()
+                            },
+                            t,
+                        ))
+                        .on_press(cx.listener(move |this, _, _, cx| match &press {
+                            crate::gitbar::Press::Run(a) => this.run_git(&sid, *a, cx),
+                            crate::gitbar::Press::Brief(b) => this.brief_agent(&sid, *b, cx),
+                        }))
+                    }
+                    (None, None) => crate::ui::off_owned(b, q.tip.clone(), &t),
+                };
+            actions = actions.child(b);
         }
         {
             let sid = id.clone();
@@ -118,7 +226,7 @@ impl Dent {
                     .child(probe(&self.probes, "terminal")),
             );
         }
-        if !s.items.is_empty() {
+        if !cramped && !s.items.is_empty() {
             actions = actions.child(
                 icon_button("side-chat", "message-circle-question-mark", &t)
                     .relative()
@@ -1002,7 +1110,65 @@ impl Dent {
                 .pb(px(space::S4))
                 // Reading back in a closed session gets the way down too.
                 .children(latest)
-                .child(
+                .child({
+                    // Its worktree is cleaned up only when you say;
+                    // reopening brings one back on its branch.
+                    let remove = (s.root.is_some() && std::path::Path::new(&s.cwd).exists()).then(|| {
+                        let sid = s.id.clone();
+                        let force = self.worktree_force.contains(&s.id);
+                        // Its own id once it asks again, so its tooltip is the new one.
+                        button(
+                            if force { "remove-worktree-anyway" } else { "remove-worktree" },
+                            if force { "Remove anyway" } else { "Remove worktree" },
+                            false,
+                            &t,
+                        )
+                        .relative()
+                        .with_tip(tip(
+                            if force {
+                                "Its changes that aren't committed go too; the branch stays"
+                            } else {
+                                "Take away its folder; the branch and its commits stay"
+                            },
+                            None,
+                            t,
+                        ))
+                        .on_press(cx.listener(move |this, _, _, cx| this.remove_worktree(&sid, cx)))
+                        .child(probe(&self.probes, "remove-worktree"))
+                    });
+                    let reopen = button("reopen", "Reopen", true, &t)
+                        .relative()
+                        .child(probe(&self.probes, "reopen"))
+                        .on_press(cx.listener(move |this, _, window, cx| {
+                            this.reopen(&id, cx);
+                            this.composer.update(cx, |c, cx| c.focus_field(window, cx));
+                        }));
+                    let words = div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S3))
+                        .flex_1()
+                        .min_w_0()
+                        .child(icon("archive", 15., t.quiet))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .ty(UI)
+                                .text_color(t.quiet)
+                                .child("Closed. It stays searchable, and reopening puts it back in your inbox."),
+                        );
+                    let buttons = div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .gap(px(space::S2))
+                        .children(remove)
+                        .child(reopen);
+                    // Narrow, the words take the width and the buttons go
+                    // under them, rather than the words standing in a column.
+                    let narrow = self.chat_w < 600.;
                     div()
                         .px(px(space::S4))
                         .py(px(space::S3))
@@ -1010,15 +1176,11 @@ impl Dent {
                         .border_1()
                         .border_color(t.hairline)
                         .flex()
-                        .items_center()
                         .gap(px(space::S3))
-                        .child(icon("archive", 15., t.quiet))
-                        .child(div().flex_1().ty(UI).text_color(t.quiet).child("Closed. It stays searchable, and reopening puts it back in your inbox."))
-                        .child(button("reopen", "Reopen", true, &t).on_press(cx.listener(move |this, _, window, cx| {
-                            this.reopen(&id, cx);
-                            this.composer.update(cx, |c, cx| c.focus_field(window, cx));
-                        }))),
-                )
+                        .map(|d| if narrow { d.flex_col() } else { d.items_center() })
+                        .child(words)
+                        .child(buttons)
+                })
                 .into_any_element()
         } else {
             // A short fade so the conversation runs under the composer, not into a cut.
@@ -1078,6 +1240,7 @@ impl Dent {
         let kind = match &s.activity {
             Some(dent_protocol::Activity::Compacting { .. }) => "compacting",
             Some(dent_protocol::Activity::Retrying { .. }) => "retrying",
+            Some(dent_protocol::Activity::SettingUp { .. }) => "setting-up",
             Some(dent_protocol::Activity::Preparing { .. })
             | Some(dent_protocol::Activity::Thinking { .. })
             | None => "working",
@@ -2679,6 +2842,11 @@ impl Dent {
                                     .text_color(t.faint)
                                     .child(if ahead.is_some() {
                                         "Queued · sends after the one above"
+                                    } else if matches!(
+                                        s.activity,
+                                        Some(dent_protocol::Activity::SettingUp { .. })
+                                    ) {
+                                        "Queued · sends once the worktree is set up"
                                     } else {
                                         "Queued · sends when this reply finishes"
                                     }),
@@ -2717,17 +2885,25 @@ impl Dent {
                                         }))
                                         .child(probe(&self.probes, format!("unqueue-{ix}"))),
                                     )
-                                    .child(
-                                        ghost(
-                                            SharedString::from(format!("steer-{ix}")),
-                                            "Send now",
-                                            &t,
-                                        )
-                                        .relative()
-                                        .on_press(cx.listener(move |this, _, _, cx| {
-                                            this.steer_queued(&sid2, &msg2, cx)
-                                        }))
-                                        .child(probe(&self.probes, format!("steer-{ix}"))),
+                                    // Nothing runs to send it into while the
+                                    // worktree is set up: it goes first then.
+                                    .children(
+                                        (!matches!(
+                                            s.activity,
+                                            Some(dent_protocol::Activity::SettingUp { .. })
+                                        ))
+                                        .then(|| {
+                                            ghost(
+                                                SharedString::from(format!("steer-{ix}")),
+                                                "Send now",
+                                                &t,
+                                            )
+                                            .relative()
+                                            .on_press(cx.listener(move |this, _, _, cx| {
+                                                this.steer_queued(&sid2, &msg2, cx)
+                                            }))
+                                            .child(probe(&self.probes, format!("steer-{ix}")))
+                                        }),
                                     )
                                     .child(
                                         ghost(
@@ -3284,6 +3460,35 @@ impl Dent {
                         ),
                     ),
             )
+            // Where it works, under the box: the branch, and a worktree's
+            // folder when it has one of its own.
+            .children(s.branch.clone().map(|b| {
+                let worktree = s.root.is_some();
+                div()
+                    .relative()
+                    .mt(px(space::S2))
+                    .px(px(space::S2))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S1H))
+                    .ty(LABEL)
+                    .text_color(t.quiet)
+                    .child(icon(
+                        if worktree {
+                            "folder-git-2"
+                        } else {
+                            "git-branch"
+                        },
+                        12.,
+                        t.quiet,
+                    ))
+                    .child(div().min_w_0().truncate().child(b))
+                    .when(worktree, |d| {
+                        d.child(div().text_color(t.faint).child("·"))
+                            .child(div().flex_none().text_color(t.faint).child("Worktree"))
+                    })
+                    .child(probe(&self.probes, "branch-strip"))
+            }))
     }
 
     /// Opens the system's file picker; what you pick rides along with the
@@ -3960,6 +4165,7 @@ impl Dent {
     }
 
     fn starter_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.want_repo();
         let t = self.t;
         let text = self.starter.read(cx).value();
         let empty = text.trim().is_empty() && self.attachments.is_empty();
@@ -3981,24 +4187,37 @@ impl Dent {
             };
             self.chip(Menu::Pickup, "square-terminal", label, true, cx)
         });
-        let chips = div()
-            .flex()
-            .flex_wrap()
-            .gap(px(space::S1))
-            .mx(px(-space::S2))
-            .child(self.chip(Menu::Project, "folder", &project, d.project.is_none(), cx))
-            .child(self.chip(Menu::Model, "claude", &model, false, cx))
-            .child(self.chip(Menu::Permission, "shield", d.permission.label(), false, cx))
-            .child(self.chip(
-                Menu::Effort,
-                "gauge",
-                effort_label(d.effort.as_deref()),
-                false,
-                cx,
-            ));
-        // Last, at the row's end: it wraps with the rest and keeps its
-        // whole label.
-        let chips = chips.children(pickup.map(|p| div().flex_none().ml_auto().child(p)));
+        // How it runs sits in the box, as in a session's composer: words
+        // give way (model's "Default ·", effort's, then permission's) before
+        // the row ever wraps; each chip keeps its icon and says itself on
+        // hover. Where it runs is a tray tucked under the box, one line.
+        let column = self.chat_w.min(size::COLUMN + space::S8 * 2.) - space::S8 * 2.;
+        let room = column - space::S4 * 2. + space::S2 - size::CONTROL - space::S1 - START_W;
+        let fit = fit_footer(
+            room,
+            [
+                (
+                    model.clone(),
+                    model.trim_start_matches("Default · ").to_string(),
+                ),
+                (d.permission.label().to_string(), String::new()),
+                (
+                    effort_label(d.effort.as_deref()).to_string(),
+                    match d.effort.as_deref() {
+                        None => "Effort".to_string(),
+                        e => effort_name(e).to_string(),
+                    },
+                ),
+            ],
+            false,
+            "",
+        );
+        let how = [
+            self.chip(Menu::Model, "claude", &fit.labels[0], false, cx),
+            self.chip(Menu::Permission, "shield", &fit.labels[1], false, cx),
+            self.chip(Menu::Effort, "gauge", &fit.labels[2], false, cx),
+        ];
+        let tray = self.where_tray(&project, d.project.is_none(), pickup, column, cx);
         let ready = if self.creating() {
             Ready::No("Starting the session…")
         } else if empty {
@@ -4102,9 +4321,11 @@ impl Dent {
                                 div()
                                     .flex()
                                     .items_center()
-                                    .justify_between()
+                                    .gap(px(space::S1))
                                     .ml(px(-space::S2))
                                     .child(self.attach_button(cx))
+                                    .children(how.into_iter().map(|c| keep(true, c)))
+                                    .child(div().flex_1())
                                     .child(start),
                             )
                             .child(probe(&self.probes, "starter"))
@@ -4125,9 +4346,9 @@ impl Dent {
                     )
                     .child(
                         div()
-                            .self_start()
+                            .w_full()
                             .relative()
-                            .child(chips)
+                            .child(tray)
                             .child(probe(&self.probes, "ambient-chips")),
                     ),
             )
@@ -4135,6 +4356,269 @@ impl Dent {
             // As much room below as above the header.
             .child(div().h(px(size::HEADER)).flex_none())
             .into_any_element()
+    }
+
+    /// Where the session runs, in a tray tucked under the box: the project,
+    /// in a repository the worktree and the branch it starts from, and the
+    /// terminal sessions to pick up at the end. One line at any width: the
+    /// pick-up and the worktree give up their words first, then the branch
+    /// gives up letters.
+    fn where_tray(
+        &mut self,
+        project: &str,
+        no_project: bool,
+        pickup: Option<AnyElement>,
+        column: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.t;
+        let text = |s: &str| s.chars().count() as f32 * 7.2 + 52.;
+        let room = column - space::S4 * 2. - space::S2 * 2.;
+        let pickup_w = if pickup.is_some() {
+            text("Pick up from terminal")
+        } else {
+            0.
+        };
+        let fresh = self.new_worktree();
+        let full = text(project)
+            + if self.repo_now().is_some() {
+                text("Current checkout") + if fresh { text("from main") } else { 0. }
+            } else {
+                0.
+            };
+        // Least loss first: the pick-up's words, then the worktree's.
+        let pickup_bare = full + pickup_w > room;
+        let worktree_bare = pickup_bare && full + 44. > room;
+        let pickup = pickup.map(|p| div().flex_none().ml_auto().child(p).into_any_element());
+        let pickup = if pickup_bare {
+            (!self.recent.is_empty()).then(|| {
+                div()
+                    .flex_none()
+                    .ml_auto()
+                    .child(self.chip(Menu::Pickup, "square-terminal", "", true, cx))
+                    .into_any_element()
+            })
+        } else {
+            pickup
+        };
+        div()
+            .mx(px(space::S4))
+            .mt(px(-space::S3))
+            .px(px(space::S2))
+            .pt(px(space::S1))
+            .pb(px(space::S1))
+            .flex()
+            .items_center()
+            .gap(px(space::S1))
+            .min_w_0()
+            .overflow_hidden()
+            .bg(t.tint())
+            .border_1()
+            .border_t_0()
+            .border_color(t.hairline)
+            .rounded_b(px(radius::LG))
+            .child(keep(
+                true,
+                self.chip(Menu::Project, "folder", project, no_project, cx),
+            ))
+            .children(self.workspace_chips(worktree_bare, cx))
+            .children(pickup)
+            .into_any_element()
+    }
+
+    /// In a repository: where the session works, and for a new worktree
+    /// the branch it starts from (decision 0053). `bare`: the worktree chip
+    /// is its icon alone; the branch chip always takes what room is left.
+    fn workspace_chips(&mut self, bare: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(repo) = self.repo_now().cloned() else {
+            return Vec::new();
+        };
+        let d = self.defaults.clone();
+        let mut v = Vec::new();
+        let (icon_name, label) = match &d.into {
+            Some(path) => (
+                "folder-git-2",
+                crate::viewer::middle_ellipsis(
+                    &repo
+                        .worktrees
+                        .iter()
+                        .find(|w| w.path == *path)
+                        .and_then(|w| w.branch.clone())
+                        .unwrap_or_else(|| Self::project_name(path)),
+                    CHIP_BRANCH,
+                ),
+            ),
+            None if self.new_worktree() => ("git-branch-plus", "New worktree".to_string()),
+            None => ("folder-git", "Current checkout".to_string()),
+        };
+        let label = if bare { String::new() } else { label };
+        v.push(keep(
+            true,
+            self.chip(Menu::Workspace, icon_name, &label, false, cx),
+        ));
+        if self.new_worktree() {
+            let from = d
+                .base
+                .clone()
+                .or(repo.current.clone())
+                .unwrap_or_else(|| "HEAD".into());
+            // Tight, "from" goes (the icon says it's a branch) and the name
+            // gives up letters from the middle, where long names differ least.
+            let label = if bare {
+                crate::viewer::middle_ellipsis(&from, 12)
+            } else {
+                format!(
+                    "from {}",
+                    crate::viewer::middle_ellipsis(&from, CHIP_BRANCH)
+                )
+            };
+            v.push(self.chip(Menu::Base, "git-branch", &label, false, cx));
+        }
+        v
+    }
+
+    pub fn workspace_entries(&self) -> Vec<Entry> {
+        let act = |f: Box<ActFn>| -> Option<Act> { Some(Rc::from(f)) };
+        let Some(repo) = self.repo_now() else {
+            return vec![Entry::note("Not a Git repository")];
+        };
+        let d = &self.defaults;
+        let name = Self::project_name(&repo.root);
+        let here = match &repo.current {
+            Some(b) => format!("Works in {name}, on {b}"),
+            None => format!("Works in {name}"),
+        };
+        let fresh = if repo.setup {
+            "A folder and branch of its own; runs .dent/setup".to_string()
+        } else {
+            "A folder and branch of its own".to_string()
+        };
+        // With no commit to start from, there's no worktree to make.
+        let empty = repo.branches.is_empty();
+        let fresh_on = self.new_worktree();
+        let mut v = vec![
+            Entry::row(
+                "m-here".into(),
+                "Current checkout",
+                Some(here),
+                !fresh_on && d.into.is_none(),
+                act(Box::new(|this, _, _| {
+                    this.defaults.worktree = false;
+                    this.defaults.into = None;
+                })),
+            ),
+            Entry {
+                off: empty.then_some("The repository has no commits yet"),
+                ..Entry::row(
+                    "m-worktree".into(),
+                    "New worktree",
+                    Some(fresh),
+                    fresh_on,
+                    act(Box::new(|this, _, _| {
+                        this.defaults.worktree = true;
+                        this.defaults.into = None;
+                    })),
+                )
+            },
+        ];
+        if !repo.worktrees.is_empty() {
+            v.push(Entry::of("m-sep".into(), "", EntryKind::Separator));
+            v.push(Entry::note("Carry on in a worktree"));
+            for (i, w) in repo.worktrees.iter().take(8).enumerate() {
+                let path = w.path.clone();
+                let shown = crate::picker::tilde(&path);
+                v.push(Entry::row(
+                    format!("m-wt-{i}"),
+                    &crate::viewer::middle_ellipsis(
+                        w.branch.as_deref().unwrap_or("Detached"),
+                        MENU_BRANCH,
+                    ),
+                    Some(shown),
+                    d.into.as_deref() == Some(path.as_str()),
+                    act(Box::new(move |this, _, _| {
+                        this.defaults.into = Some(path.clone());
+                    })),
+                ));
+            }
+        }
+        v
+    }
+
+    /// The session's project scripts; choosing one runs it in your terminal.
+    fn action_entries(&self) -> Vec<Entry> {
+        let act = |f: Box<ActFn>| -> Option<Act> { Some(Rc::from(f)) };
+        let Some(s) = self.current() else {
+            return Vec::new();
+        };
+        let id = s.id.clone();
+        self.actions
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .map(|(name, about)| {
+                let (id, name2) = (id.clone(), name.clone());
+                Entry::row(
+                    format!("m-action-{name}"),
+                    name,
+                    Some(if about.is_empty() {
+                        format!("{}/{name}", crate::actions::DIR)
+                    } else {
+                        about.clone()
+                    }),
+                    false,
+                    act(Box::new(move |this, window, cx| {
+                        this.run_action(&id, &name2, window, cx);
+                    })),
+                )
+            })
+            .collect()
+    }
+
+    /// The branches a new worktree can start from, most recently committed
+    /// to first, narrowed by what's typed in the menu's field.
+    pub fn base_entries(&self, cx: &App) -> Vec<Entry> {
+        let act = |f: Box<ActFn>| -> Option<Act> { Some(Rc::from(f)) };
+        let Some(repo) = self.repo_now() else {
+            return Vec::new();
+        };
+        let q = self.branch_query.read(cx).value().trim().to_lowercase();
+        let chosen = self.defaults.base.clone().or(repo.current.clone());
+        let current = repo.current.clone();
+        // The chosen branch and the one checked out lead; the rest follow
+        // by their latest commit.
+        let lead: Vec<&String> = [&chosen, &current].into_iter().flatten().collect();
+        let mut order: Vec<&String> = Vec::new();
+        for b in lead.into_iter().chain(repo.branches.iter()) {
+            if repo.branches.contains(b) && !order.contains(&b) {
+                order.push(b);
+            }
+        }
+        let mut v: Vec<Entry> = order
+            .into_iter()
+            .filter(|b| q.is_empty() || b.to_lowercase().contains(&q))
+            .take(MAX_BRANCHES_SHOWN)
+            .map(|b| {
+                let (b2, cur) = (b.clone(), current.clone());
+                Entry::row(
+                    format!("m-base-{b}"),
+                    &crate::viewer::middle_ellipsis(b, MENU_BRANCH),
+                    (current.as_deref() == Some(b.as_str())).then(|| "Checked out".to_string()),
+                    chosen.as_deref() == Some(b.as_str()),
+                    act(Box::new(move |this, _, _| {
+                        this.defaults.base =
+                            (cur.as_deref() != Some(b2.as_str())).then(|| b2.clone());
+                    })),
+                )
+            })
+            .collect();
+        if v.is_empty() {
+            v.push(Entry::note(if q.is_empty() {
+                "No branches yet"
+            } else {
+                "No branch matches"
+            }));
+        }
+        v
     }
 
     /// One remembered choice; a click opens its menu.
@@ -4189,6 +4673,9 @@ impl Dent {
                         d.child(
                             div()
                                 .min_w_0()
+                                // A long name (a branch, a project) stops
+                                // here, so one chip never takes the row.
+                                .max_w(px(CHIP_LABEL_MAX))
                                 .truncate()
                                 .ty(UI)
                                 .text_color(if unset { t.quiet } else { t.ink })
@@ -4222,6 +4709,9 @@ impl Dent {
                                 ),
                                 Menu::Model | Menu::SessionModel => "Model".into(),
                                 Menu::Project => "Project".into(),
+                                Menu::Workspace => "Where it works".into(),
+                                Menu::Base => "The branch the worktree starts from".into(),
+                                Menu::Actions => "Run a project script in your terminal".into(),
                                 Menu::Pickup => "Pick up from terminal".into(),
                                 Menu::Stash => "Drafts put aside".into(),
                             },
@@ -4306,6 +4796,9 @@ impl Dent {
         let act = |f: Box<ActFn>| -> Option<Act> { Some(Rc::from(f)) };
         match which {
             Menu::Project => self.project_entries(cx),
+            Menu::Workspace => self.workspace_entries(),
+            Menu::Base => self.base_entries(cx),
+            Menu::Actions => self.action_entries(),
             Menu::Pickup => self.pickup_entries(),
             Menu::Stash => self.stash_entries(),
             Menu::Model | Menu::SessionModel => {
@@ -4608,7 +5101,11 @@ impl Dent {
                         .min_w_0()
                         .ty(UI)
                         .text_color(t.ink)
-                        .child(Textarea::new(&self.menu_query)),
+                        .child(Textarea::new(if which == Menu::Base {
+                            &self.branch_query
+                        } else {
+                            &self.menu_query
+                        })),
                 )
         });
         floating(&t)
@@ -5967,3 +6464,19 @@ mod emoji_tests {
         assert!(!emoji_only(""));
     }
 }
+
+/// Branches the base menu lists at once; typing narrows the rest.
+const MAX_BRANCHES_SHOWN: usize = 60;
+
+/// The widest a chip's words get before they end in an ellipsis.
+const CHIP_LABEL_MAX: f32 = 240.;
+
+/// Below this chat width the header keeps only what has no other way in.
+const CRAMPED: f32 = 480.;
+/// A branch's name in a chip, and in a menu row, before it gives up letters
+/// from the middle (where long names differ least).
+const CHIP_BRANCH: usize = 28;
+const MENU_BRANCH: usize = 40;
+
+/// About how wide the new-session page's Start button is, with its key.
+const START_W: f32 = 88.;

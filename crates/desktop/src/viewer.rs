@@ -217,6 +217,14 @@ impl Dent {
             }
         }
         let many = tabs.iter().filter(|(_, _, _, p)| p.is_some()).count() > 1;
+        // Names give up letters (from the middle) to share the strip before
+        // it has to scroll: 28 at most, 10 at least.
+        let room = (self.panel_w - TAB_STRIP_CHROME) / tabs.len().max(1) as f32;
+        let fit = ((room - TAB_CHROME) / TAB_LETTER).floor().max(0.) as usize;
+        let letters = fit.clamp(10, 28);
+        // Too narrow even for that: files not showing are their icon alone
+        // (the tooltip has the path), so no tab is cut off at an edge.
+        let bare = fit < 10;
         let header = div()
             .h(px(size::HEADER))
             .flex_none()
@@ -245,7 +253,7 @@ impl Dent {
                         .absolute()
                         .top_0()
                         .bottom_0()
-                        .w(px(space::S4))
+                        .w(px(space::S8))
                         .map(|d| if left { d.left_0() } else { d.right_0() })
                         .bg(linear_gradient(
                             if left { 90. } else { 270. },
@@ -315,12 +323,14 @@ impl Dent {
                                         )
                                     })
                                     .child(icon(ic, 13., if on { t.ink } else { t.quiet }))
-                                    .child(
-                                        div()
-                                            .ty(UI)
-                                            .text_color(if on { t.ink } else { t.quiet })
-                                            .child(middle_ellipsis(&name, 28)),
-                                    )
+                                    .when(!(bare && !on && art.is_some()), |d| {
+                                        d.child(
+                                            div()
+                                                .ty(UI)
+                                                .text_color(if on { t.ink } else { t.quiet })
+                                                .child(middle_ellipsis(&name, letters)),
+                                        )
+                                    })
                                     .when_some(art, |d, a| {
                                         d.child(
                                             div()
@@ -2643,3 +2653,10 @@ impl Dent {
             .into_any_element()
     }
 }
+
+/// The tab strip's own room besides its tabs: the panel toggle and padding.
+const TAB_STRIP_CHROME: f32 = 56.;
+/// A tab's room besides its name: icon, padding, the close button, the gap.
+const TAB_CHROME: f32 = 56.;
+/// About how wide a letter of a tab's name is.
+const TAB_LETTER: f32 = 7.;

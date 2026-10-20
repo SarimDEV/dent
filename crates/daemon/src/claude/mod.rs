@@ -148,9 +148,19 @@ fn the_working_line_shows_the_last_finished_thought() {
     );
 }
 
-/// Claude Code asked for a short title for a conversation: a small model,
-/// one turn, no tools, nothing of the person's settings that could act.
-pub fn title_argv(claude: &str, path: &str, conversation: &str) -> Vec<String> {
+/// What a small model is asked to title a conversation (through
+/// [`ask_argv`]: one turn, no tools).
+pub fn title_prompt(conversation: &str) -> String {
+    format!(
+        "Title this conversation between a person and a coding agent. The title is at most \
+         5 words, like a short task name (\"Fix the footer on mobile\"), sentence case, with no \
+         colon, quotes or full stop. Reply with the title only.\n\n{conversation}"
+    )
+}
+
+/// One question to a small, quick model with no tools, answered in one
+/// turn: titles, branch names, commit messages.
+pub fn ask_argv(claude: &str, path: &str, prompt: &str) -> Vec<String> {
     let mut v: Vec<String> = [
         "/usr/bin/env",
         "-u",
@@ -178,14 +188,7 @@ pub fn title_argv(claude: &str, path: &str, conversation: &str) -> Vec<String> {
         ]
         .map(String::from),
     );
-    v.extend([
-        "-p".into(),
-        format!(
-            "Title this conversation between a person and a coding agent. The title is at most \
-             5 words, like a short task name (\"Fix the footer on mobile\"), sentence case, with no \
-             colon, quotes or full stop. Reply with the title only.\n\n{conversation}"
-        ),
-    ]);
+    v.extend(["-p".into(), prompt.into()]);
     v
 }
 

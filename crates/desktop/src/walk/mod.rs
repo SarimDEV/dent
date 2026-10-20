@@ -39,6 +39,7 @@ mod parity;
 mod pickup;
 mod pins;
 mod polish;
+mod prs;
 mod queue;
 mod real;
 mod recall;
@@ -49,12 +50,13 @@ mod switching;
 mod typing;
 mod view;
 mod visuals;
+mod worktrees;
 mod zoom;
 use {
     ambient::*, attaching::*, changes::*, checks::*, common::*, composing::*, demo::*, edges::*,
     failures::*, find::*, finish::*, keys::*, look::*, markdown::*, motion::*, narration::*,
-    parity::*, pickup::*, pins::*, polish::*, queue::*, real::*, recall::*, reply::*, stills::*,
-    sweep::*, switching::*, typing::*, view::*, visuals::*, zoom::*,
+    parity::*, pickup::*, pins::*, polish::*, prs::*, queue::*, real::*, recall::*, reply::*,
+    stills::*, sweep::*, switching::*, typing::*, view::*, visuals::*, worktrees::*, zoom::*,
 };
 
 type Pred = fn(&Dent, &App) -> bool;
@@ -68,6 +70,8 @@ pub enum Field {
     Starter,
     Comment,
     Aside,
+    /// The base branch menu's search.
+    Branches,
 }
 
 /// The walkthrough's vocabulary; not every scene uses every step.
@@ -222,6 +226,12 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("edges", &[edges]),
     ("parity", &[parity]),
     ("zoom-links", &[zoom_links]),
+    ("worktrees", &[worktrees]),
+    ("worktree-edges", &[worktree_edges]),
+    ("prs", &[prs]),
+    ("look-pr", &[look_pr]),
+    ("project-defaults", &[project_defaults]),
+    ("scripts", &[scripts]),
 ];
 
 /// Scenes that start on their own: no daemon, the real agent, or a
@@ -455,6 +465,7 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
                     Field::Starter => this.starter.clone(),
                     Field::Comment => this.comment_input.clone(),
                     Field::Aside => this.aside_input.clone(),
+                    Field::Branches => this.branch_query.clone(),
                 };
                 input.update(cx, |i, cx| {
                     // As typed: the caret ends up after the text.

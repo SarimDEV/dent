@@ -85,9 +85,31 @@ pub fn repo(url: &str) -> String {
     parts.into_iter().rev().collect::<Vec<_>>().join("/")
 }
 
-/// A path as shown: the home folder as `~`.
+/// A path as shown: the home folder as `~`, however the path spells it
+/// (`/var` or `/private/var`), and only as whole folders.
 pub fn tilde(path: &str) -> String {
-    path.replacen(&home(), "~", 1)
+    tilde_in(path, &home())
+}
+
+fn tilde_in(path: &str, home: &str) -> String {
+    let home = home.trim_end_matches('/');
+    if home.is_empty() {
+        return path.to_string();
+    }
+    let real = std::fs::canonicalize(home)
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    for h in [home, real.as_str()].into_iter().filter(|h| !h.is_empty()) {
+        if path == h {
+            return "~".into();
+        }
+        if let Some(rest) = path.strip_prefix(h)
+            && rest.starts_with('/')
+        {
+            return format!("~{rest}");
+        }
+    }
+    path.to_string()
 }
 
 /// A path as typed, with `~` for the home folder, as the daemon reads it.
@@ -179,7 +201,7 @@ impl Dent {
                 Some("A scratch folder, ~/dent/scratch".into()),
                 d.project.is_none(),
                 act(Box::new(|this, _, _| {
-                    this.defaults.project = None;
+                    this.set_project(None);
                 })),
             ));
         }
@@ -387,7 +409,7 @@ impl Dent {
             },
             Waiting::Projects,
         );
-        self.defaults.project = Some(path.to_string());
+        self.set_project(Some(path.to_string()));
     }
 
     /// Take a project off the list, or put it back (Undo).
@@ -403,7 +425,7 @@ impl Dent {
             // Gone from the list now, not when the daemon answers.
             self.projects.retain(|p| p.path != path);
             if self.defaults.project.as_deref() == Some(path) {
-                self.defaults.project = None;
+                self.set_project(None);
             }
             let name = crate::app::Dent::project_name(path);
             self.toast(
@@ -447,6 +469,16 @@ impl Dent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tilde_takes_whole_folders_only() {
+        assert_eq!(tilde_in("/Users/al/code", "/Users/al"), "~/code");
+        assert_eq!(
+            tilde_in("/Users/alice/code", "/Users/al"),
+            "/Users/alice/code"
+        );
+        assert_eq!(tilde_in("/Users/al", "/Users/al/"), "~");
+    }
 
     fn p(name: &str, path: &str) -> Project {
         Project {

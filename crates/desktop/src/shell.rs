@@ -77,6 +77,12 @@ pub struct Shell {
     /// Where the grid was drawn last frame, for the mouse.
     origin: Rc<Cell<Point<Pixels>>>,
     pub exited: bool,
+    /// The shell's process, to tell whether something runs in front of it.
+    pid: u32,
+    /// A line to type once the shell has started and gone quiet (a script
+    /// run as the terminal opens), and when it last printed.
+    pub pending: Option<String>,
+    pub printed_at: std::time::Instant,
 }
 
 impl Shell {
@@ -112,6 +118,7 @@ impl Shell {
             escape_args: false,
         };
         let pty = tty::new(&opts, window, 0)?;
+        let pid = pty.child().id();
         let listener = Listener {
             id: id.to_string(),
             tx,
@@ -134,7 +141,37 @@ impl Shell {
             size: Rc::new(Cell::new((cols, lines))),
             origin: Rc::default(),
             exited: false,
+            pid,
+            pending: None,
+            printed_at: std::time::Instant::now(),
         })
+    }
+
+    /// The folder the shell is in now, as the system says.
+    pub fn cwd(&self) -> Option<String> {
+        let out = std::process::Command::new("lsof")
+            .args(["-a", "-d", "cwd", "-Fn", "-p", &self.pid.to_string()])
+            .output()
+            .ok()?;
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find_map(|l| l.strip_prefix('n'))
+            .map(str::to_owned)
+    }
+
+    /// Something other than the shell is running in front (a dev server, an
+    /// editor): what's typed would go to it.
+    pub fn busy(&self) -> bool {
+        // The terminal's foreground process group against the shell's own.
+        let Ok(out) = std::process::Command::new("ps")
+            .args(["-o", "tpgid=", "-o", "pgid=", "-p", &self.pid.to_string()])
+            .output()
+        else {
+            return false;
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut it = text.split_whitespace();
+        matches!((it.next(), it.next()), (Some(fg), Some(own)) if fg != own)
     }
 
     /// Bytes for the shell, as if typed.
@@ -462,6 +499,23 @@ impl Dent {
         let Some(sh) = self.shells.get_mut(&id) else {
             return;
         };
+        // A line waiting for the shell to start goes once it's gone quiet.
+        if matches!(event, Event::Wakeup) && sh.pending.is_some() {
+            sh.printed_at = std::time::Instant::now();
+            let id = id.clone();
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SETTLE).await;
+                let _ = this.update(cx, |this, _| {
+                    if let Some(sh) = this.shells.get_mut(&id)
+                        && sh.printed_at.elapsed() >= SETTLE
+                        && let Some(line) = sh.pending.take()
+                    {
+                        sh.type_bytes(line.into_bytes());
+                    }
+                });
+            })
+            .detach();
+        }
         match event {
             Event::PtyWrite(text) => sh.write(text.into_bytes()),
             Event::ClipboardStore(_, text) => {
@@ -1017,3 +1071,6 @@ mod link_tests {
         assert_eq!(link_at_column(line, 1, None), None);
     }
 }
+
+/// How long a starting shell is quiet before a waiting line is typed.
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(300);

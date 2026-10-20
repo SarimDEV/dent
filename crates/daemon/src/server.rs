@@ -139,6 +139,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
         }
         Request::Create {
             cwd,
+            worktree,
             model,
             permission,
             effort,
@@ -149,6 +150,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             session: d
                 .create(crate::daemon::NewSession {
                     cwd,
+                    worktree,
                     model,
                     permission,
                     effort,
@@ -263,8 +265,79 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             Reply::Ok
         }
         Request::Reopen { session } => {
+            // Its worktree taken away since: back on its branch.
+            let cwd = cwd_of(d, &session)?;
+            if let (Some(branch), Some(root)) = d.workspace_of(&session)
+                && !Path::new(&cwd).exists()
+            {
+                tokio::task::spawn_blocking(move || {
+                    crate::workspace::restore(Path::new(&cwd), Path::new(&root), &branch)
+                })
+                .await?
+                .map_err(|e| anyhow::anyhow!("couldn't bring its worktree back: {e}"))?;
+            }
             d.command(&session, Op::Reopen).await?;
             Reply::Ok
+        }
+        Request::RemoveWorktree { session, force } => {
+            let cwd = cwd_of(d, &session)?;
+            // Only ever a linked worktree: never a project's main checkout.
+            let root = crate::workspace::main_checkout(Path::new(&cwd))
+                .map(|p| p.display().to_string())
+                .or(d.workspace_of(&session).1)
+                .context("the session doesn't work in a worktree")?;
+            tokio::task::spawn_blocking(move || {
+                crate::workspace::remove(Path::new(&cwd), Path::new(&root), force)
+            })
+            .await?
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            Reply::Ok
+        }
+        Request::Repo { dir } => Reply::Repo {
+            repo: tokio::task::spawn_blocking(move || crate::workspace::repo(Path::new(&dir)))
+                .await?,
+        },
+        Request::GitStatus { session } => {
+            let cwd = cwd_of(d, &session)?;
+            let gh = crate::ship::gh(&d.env().path);
+            Reply::GitStatus {
+                status: tokio::task::spawn_blocking(move || {
+                    crate::ship::status(Path::new(&cwd), gh.as_deref())
+                })
+                .await?,
+            }
+        }
+        Request::Git {
+            session,
+            action,
+            message,
+        } => {
+            let cwd = cwd_of(d, &session)?;
+            let (summary, url) = d.git(&cwd, action, message).await?;
+            d.note_workspace(&session, &cwd).await;
+            d.note_pr(&session, &cwd).await;
+            Reply::GitDone { summary, url }
+        }
+        Request::PrBrief { session, about } => {
+            let cwd = cwd_of(d, &session)?;
+            let gh = crate::ship::gh(&d.env().path)
+                .context("this needs the GitHub CLI (gh), signed in")?;
+            let text = tokio::task::spawn_blocking(move || {
+                let dir = Path::new(&cwd);
+                let pr = crate::ship::pull_request(dir, &gh)?
+                    .ok_or_else(|| "the branch has no pull request".to_string())?;
+                match about {
+                    dent_protocol::PrBrief::Checks => {
+                        crate::ship::checks_brief(dir, &gh, pr.number)
+                    }
+                    dent_protocol::PrBrief::Review => {
+                        crate::ship::review_brief(dir, &gh, pr.number)
+                    }
+                }
+            })
+            .await?
+            .map_err(|e| anyhow::anyhow!(e))?;
+            Reply::PrBrief { text }
         }
         Request::Retitle { session } => {
             let d = d.clone();
