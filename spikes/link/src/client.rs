@@ -301,6 +301,9 @@ pub struct Rules {
     pub jitter: bool,
     /// Only a link that stayed up this long resets the ladder.
     pub reset_after: Duration,
+    /// After this much silence, dial a replacement while keeping the old
+    /// link, and move to whichever proves alive first.
+    pub replace_after: Option<Duration>,
 }
 
 impl Rules {
@@ -313,6 +316,7 @@ impl Rules {
             cap: Duration::from_secs(2),
             jitter: false,
             reset_after: Duration::ZERO,
+            replace_after: None,
         }
     }
 
@@ -325,6 +329,7 @@ impl Rules {
             cap: Duration::from_secs(60),
             jitter: true,
             reset_after: Duration::from_secs(30),
+            replace_after: Some(Duration::from_secs(5)),
         }
     }
 
@@ -382,6 +387,7 @@ pub fn follow_with(
         tally.lock().await.last = after;
         let mut attempt = 0usize;
         let mut first = true;
+        let mut ready: Option<Opened> = None;
         loop {
             let addrs = {
                 let r = resolve.clone();
@@ -390,14 +396,26 @@ pub fn follow_with(
                     .unwrap_or_default()
             };
             let mut wait = None;
-            tally.lock().await.dials += 1;
+            let pre = ready.take();
+            if pre.is_none() {
+                tally.lock().await.dials += 1;
+            }
             let started = std::time::Instant::now();
-            let result = link(&rules, &me, &key, &addrs, &session, &tally, &out, first).await;
+            let result = link(&rules, &me, &key, &addrs, pre, &session, &tally, &out, first).await;
             // A link that stayed up long enough starts the ladder again.
             if matches!(result, Ok(Ended::Lost(_))) && started.elapsed() >= rules.reset_after {
                 attempt = 0;
             }
             let reason = match result {
+                Ok(Ended::Swap(o)) => {
+                    // A replacement is already up: move to it at once.
+                    first = false;
+                    ready = Some(*o);
+                    let _ = out.send(Note::Down {
+                        reason: "replaced a silent link".into(),
+                    });
+                    continue;
+                }
                 Ok(Ended::Denied) => return,
                 Ok(Ended::Incompatible) => {
                     // Nothing will change until one side updates.
@@ -423,6 +441,8 @@ pub fn follow_with(
 
 enum Ended {
     Lost(String),
+    /// A replacement dialled during silence answered first.
+    Swap(Box<Opened>),
     Denied,
     Incompatible,
 }
@@ -433,12 +453,16 @@ async fn link(
     me: &Identity,
     key: &[u8],
     addrs: &[SocketAddr],
+    pre: Option<Opened>,
     session: &str,
     tally: &Arc<Mutex<Tally>>,
     out: &mpsc::UnboundedSender<Note>,
     first: bool,
 ) -> Result<Ended> {
-    let o = open_any(addrs, me, Some(key)).await?;
+    let o = match pre {
+        Some(o) => o,
+        None => open_any(addrs, me, Some(key)).await?,
+    };
     let addr = o.addr;
     if !o.compatible() {
         let _ = out.send(Note::Incompatible {
@@ -490,11 +514,56 @@ async fn link(
             }
         })
     };
+    // The reader never waits on anything but the socket, so a slow consumer
+    // can't hide a live link, and a half-read message is never cancelled.
+    let (ftx, mut frx) = mpsc::unbounded_channel();
+    let reader = tokio::spawn(async move {
+        loop {
+            let r = rx.recv::<Down>().await;
+            let end = r.is_err();
+            if ftx.send(r).is_err() || end {
+                return;
+            }
+        }
+    });
+    let mut heard = std::time::Instant::now();
+    let mut swap: Option<tokio::task::JoinHandle<Result<Opened>>> = None;
     let ended = loop {
-        match tokio::time::timeout(rules.silence, rx.recv::<Down>()).await {
-            Err(_) => break Ended::Lost(format!("silent for {} s", rules.silence.as_secs())),
-            Ok(Err(e)) => break Ended::Lost(format!("{e:#}")),
-            Ok(Ok(Down::Event(ev))) => {
+        let m = tokio::select! {
+            m = frx.recv() => m,
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                let quiet = heard.elapsed();
+                if let Some(h) = swap.as_ref().filter(|h| h.is_finished()) {
+                    let _ = h;
+                    match swap.take().expect("checked").await {
+                        Ok(Ok(o)) if o.trusted && o.compatible() => break Ended::Swap(Box::new(o)),
+                        _ => {}
+                    }
+                }
+                if quiet >= rules.silence {
+                    break Ended::Lost(format!("silent for {} s", rules.silence.as_secs()));
+                }
+                if let Some(after) = rules.replace_after
+                    && quiet >= after
+                    && swap.is_none()
+                {
+                    tally.lock().await.dials += 1;
+                    let (me, key, addrs) = (me.clone(), key.to_vec(), addrs.to_vec());
+                    swap = Some(tokio::spawn(async move { open_any(&addrs, &me, Some(&key)).await }));
+                }
+                continue;
+            }
+        };
+        let Some(m) = m else {
+            break Ended::Lost("reader ended".into());
+        };
+        heard = std::time::Instant::now();
+        if let Some(h) = swap.take() {
+            h.abort();
+        }
+        match m {
+            Err(e) => break Ended::Lost(format!("{e:#}")),
+            Ok(Down::Event(ev)) => {
                 let mut t = tally.lock().await;
                 if ev.seq <= t.last {
                     t.dups += 1;
@@ -507,23 +576,27 @@ async fn link(
                 drop(t);
                 let _ = out.send(Note::Event(ev));
             }
-            Ok(Ok(Down::Denied { reason })) => {
+            Ok(Down::Denied { reason }) => {
                 let _ = out.send(Note::Denied(reason));
                 break Ended::Denied;
             }
-            Ok(Ok(Down::Bye { reason })) => {
+            Ok(Down::Bye { reason }) => {
                 let _ = out.send(Note::Bye(reason.clone()));
                 break Ended::Lost(format!("said goodbye: {reason}"));
             }
-            Ok(Ok(Down::Health(h))) => {
+            Ok(Down::Health(h)) => {
                 let _ = out.send(Note::Health(h));
             }
-            Ok(Ok(Down::Pong { t })) if t > 0 => {
+            Ok(Down::Pong { t }) if t > 0 => {
                 let _ = out.send(Note::Rtt(now_ms().saturating_sub(t)));
             }
-            Ok(Ok(_)) => {}
+            Ok(_) => {}
         }
     };
     pinger.abort();
+    reader.abort();
+    if let Some(h) = swap {
+        h.abort();
+    }
     Ok(ended)
 }
