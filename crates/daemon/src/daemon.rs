@@ -778,15 +778,22 @@ impl Daemon {
         }
         let key = format!("{PR}{session}");
         let said = self.store().get(&key).ok().flatten();
-        let Ok(pr) = tokio::task::spawn_blocking(move || {
-            let pushed =
-                crate::workspace::run(&dir, &["rev-parse", "--abbrev-ref", "-q", "@{u}"]).is_ok();
-            pushed
-                .then(|| crate::ship::pull_request(&dir, &gh))
-                .flatten()
+        let asked = tokio::task::spawn_blocking(move || {
+            let run =
+                |args: &[&str]| crate::workspace::run(&dir, args).map(|s| s.trim().to_string());
+            // Pushed, and not the default branch, which has no pull request.
+            let Ok(upstream) = run(&["rev-parse", "--abbrev-ref", "-q", "@{u}"]) else {
+                return Ok(None);
+            };
+            let default = run(&["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"]);
+            if default.is_ok_and(|d| d == upstream) {
+                return Ok(None);
+            }
+            crate::ship::pull_request(&dir, &gh)
         })
-        .await
-        else {
+        .await;
+        // GitHub couldn't be asked: what was said stands.
+        let Ok(Ok(pr)) = asked else {
             return;
         };
         // Never had one: nothing to say until there is.

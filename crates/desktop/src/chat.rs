@@ -4561,7 +4561,7 @@ impl Dent {
                     format!("m-action-{name}"),
                     name,
                     Some(if about.is_empty() {
-                        crate::actions::command(name)
+                        format!("{}/{name}", crate::actions::DIR)
                     } else {
                         about.clone()
                     }),

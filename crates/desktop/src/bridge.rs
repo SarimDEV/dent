@@ -496,6 +496,13 @@ pub fn session(
         Some(_) => Status::Working,
         None => status(v.status),
     };
+    // A finished session whose pull request's checks fail or whose review
+    // asks for changes needs you (decision 0036's "a failed check").
+    let status = if status == Status::Done && pr_trouble(v) {
+        Status::Needs
+    } else {
+        status
+    };
     let working_since = v.working_since.or(setting_up).map(|ms| {
         Instant::now()
             .checked_sub(Duration::from_millis(cx.now_ms.saturating_sub(ms)))
@@ -762,14 +769,23 @@ fn preparing(tool: &str, what: Option<&str>) -> String {
 }
 
 /// What it's doing or wants, for the inbox row and the working line.
+/// Its pull request is open with failing checks or changes asked for.
+pub fn pr_trouble(v: &SessionView) -> bool {
+    v.pr.as_ref()
+        .is_some_and(|p| p.open() && crate::gitbar::pr_tone(p) == crate::gitbar::Tone::Trouble)
+}
+
 fn detail(v: &SessionView) -> String {
-    // Finished, with its pull request merged: that's the news.
+    // Finished, with news of its pull request: that's what to say.
     if matches!(v.status, Wire::Done)
-        && let Some(pr) =
-            v.pr.as_ref()
-                .filter(|p| p.state == dent_protocol::PrState::Merged)
+        && let Some(pr) = &v.pr
     {
-        return format!("Merged · PR #{}", pr.number);
+        if pr.state == dent_protocol::PrState::Merged {
+            return format!("Merged · PR #{}", pr.number);
+        }
+        if pr_trouble(v) {
+            return format!("PR #{} · {}", pr.number, crate::gitbar::pr_words(pr));
+        }
     }
     // Waiting for a used-up limit to reset, to carry on by itself.
     if let Some(at) = v.resume_at {

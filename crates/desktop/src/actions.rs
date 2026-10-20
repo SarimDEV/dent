@@ -22,8 +22,13 @@ pub fn list(dir: &Path) -> Vec<(String, String)> {
             if name.starts_with('.') || name.ends_with('~') {
                 return None;
             }
-            let text = std::fs::read_to_string(e.path()).unwrap_or_default();
-            Some((name, about(&text)))
+            // Only its start: the description is its first comment.
+            let mut head = Vec::new();
+            if let Ok(f) = std::fs::File::open(e.path()) {
+                use std::io::Read;
+                let _ = f.take(HEAD).read_to_end(&mut head);
+            }
+            Some((name, about(&String::from_utf8_lossy(&head))))
         })
         .collect();
     out.sort();
@@ -41,9 +46,24 @@ fn about(text: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The line typed into your terminal to run one.
-pub fn command(name: &str) -> String {
-    format!("sh {}", crate::shell::shell_quote(&format!("{DIR}/{name}")))
+/// How much of a script is read for its description.
+const HEAD: u64 = 1024;
+
+/// The line typed into your terminal to run one. In the session's folder
+/// it's just the script; anywhere else it goes there first in a subshell,
+/// leaving the terminal where it was. `here` is where the terminal is.
+pub fn command(name: &str, cwd: &str, here: Option<&str>) -> String {
+    let script = format!("sh {}", crate::shell::shell_quote(&format!("{DIR}/{name}")));
+    if here == Some(cwd) {
+        return script;
+    }
+    // `~` left bare so the shell expands it; the rest quoted.
+    let shown = crate::picker::tilde(cwd);
+    let dir = match shown.strip_prefix("~/") {
+        Some(rest) => format!("~/{}", crate::shell::shell_quote(rest)),
+        None => crate::shell::shell_quote(cwd),
+    };
+    format!("(cd {dir} && {script})")
 }
 
 #[cfg(test)]
@@ -69,7 +89,14 @@ mod tests {
                 ("test".to_string(), "Run the tests".to_string())
             ]
         );
-        assert_eq!(command("my script"), "sh '.dent/actions/my script'");
+        assert_eq!(
+            command("my script", "/p/my app", Some("/p/my app")),
+            "sh '.dent/actions/my script'"
+        );
+        assert_eq!(
+            command("test", "/p/my app", Some("/elsewhere")),
+            "(cd '/p/my app' && sh .dent/actions/test)"
+        );
         assert!(list(&d.join("nope")).is_empty());
     }
 }

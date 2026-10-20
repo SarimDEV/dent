@@ -123,6 +123,17 @@ pub(super) fn prs() -> Vec<(f32, Act)> {
                 10.,
             ),
         ),
+        (
+            0.1,
+            Until(
+                "failing checks put the session in Needs you, saying why in the list",
+                |d, _| {
+                    status_is(d, Status::Needs)
+                        && current(d).is_some_and(|s| s.detail == "PR #12 · Checks failing")
+                },
+                5.,
+            ),
+        ),
         (0.3, Shot("pr-failing")),
         (0.2, Click("git-action")),
         (
@@ -176,7 +187,12 @@ pub(super) fn prs() -> Vec<(f32, Act)> {
         (0.2, Click("skip-question")),
         (
             0.1,
-            Until("and finishes", |d, _| status_is(d, Status::Done), 15.),
+            // Its turn ends; the review still asks for changes, so it needs you.
+            Until(
+                "and finishes, still needing you while the review stands",
+                |d, _| current(d).is_some_and(|s| !s.running()) && status_is(d, Status::Needs),
+                15.,
+            ),
         ),
         (0.1, Call(|_, _, _| gh_state(MERGED))),
         (
@@ -316,5 +332,29 @@ pub(super) fn scripts() -> Vec<(f32, Act)> {
             ),
         ),
         (0.6, Shot("scripts-ran")),
+        // Something running in the terminal: a script isn't typed into it.
+        (
+            0.2,
+            Call(|d, _, _| {
+                if let Some(sh) = current(d).and_then(|s| d.shells.get(&s.id)) {
+                    sh.type_bytes(b"sleep 30\r".to_vec());
+                }
+            }),
+        ),
+        (1.0, Click("chip-actions")),
+        (0.3, Click("m-action-test")),
+        (
+            0.1,
+            Until(
+                "with something running there, it says so instead of typing into it",
+                |d, _| {
+                    d.toast
+                        .as_ref()
+                        .is_some_and(|t| t.text.contains("running in your terminal"))
+                },
+                5.,
+            ),
+        ),
+        (0.3, Shot("scripts-busy")),
     ]
 }

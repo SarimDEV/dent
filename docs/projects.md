@@ -43,11 +43,11 @@ The session header's Git button is the branch's next step, worked out from where
 - Commit messages are written from the diff, and pull requests' title and body from the branch's commits, by the same quick model as titles.
 - Pull requests use the GitHub CLI (`gh`), signed in; without it, the button stops at pushing.
 - A push to the remote's default branch asks for a second press ("Push to main?"); the question goes after five seconds unanswered.
-- Once pushed, the session's pull request shows in its header ("#12 · Checks failing"), kept up to date after Git actions, after each turn and every two minutes ([0054](decisions/0054-project-defaults-prs-and-scripts.md)). Failing checks make the button **Fix checks** (the agent gets which failed and the log's end); a review asking for changes makes it **Address review**. Either is news: the session is marked unread and you're notified. A merge is a label, "Merged · PR #12"; the session stays until you close it.
+- Once pushed, the session's pull request shows in its header ("#12 · Checks failing"), kept up to date after Git actions, after each turn and every two minutes ([0054](decisions/0054-project-defaults-prs-and-scripts.md)). Failing checks make the button **Fix checks** (the agent gets which failed and the log's end); a review asking for changes makes it **Address review**. Either is news (you're notified once), and a finished session in that state sits in **Needs you**, as [0036](decisions/0036-sessions-as-an-inbox.md) has a failed check, saying why in the list ("PR #12 · Checks failing"). A merge is a label, "Merged · PR #12"; the session stays until you close it. When GitHub can't be asked (offline, signed out), what was last known stands.
 
 ## Project scripts
 
-Each file in a repository's `.dent/actions/` is a script: its name is the file's, and its first comment says what it does (`# Run the tests`). The session header's **Run** menu lists them, and choosing one runs it in your terminal, in the session's folder. Commit them, and every worktree has them.
+Each file in a repository's `.dent/actions/` is a script: its name is the file's, and its first comment says what it does (`# Run the tests`). The session header's **Run** menu lists them, and choosing one runs it in your terminal, in the session's folder (from elsewhere, in a subshell that goes there). A terminal just opened takes it once its shell has started; one with something running in front (a dev server, an editor) is left alone, and dent says so. Commit them, and every worktree has them.
 
 ## Defaults per project
 

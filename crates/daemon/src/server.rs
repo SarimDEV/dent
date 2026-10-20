@@ -324,7 +324,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
                 .context("this needs the GitHub CLI (gh), signed in")?;
             let text = tokio::task::spawn_blocking(move || {
                 let dir = Path::new(&cwd);
-                let pr = crate::ship::pull_request(dir, &gh)
+                let pr = crate::ship::pull_request(dir, &gh)?
                     .ok_or_else(|| "the branch has no pull request".to_string())?;
                 match about {
                     dent_protocol::PrBrief::Checks => {

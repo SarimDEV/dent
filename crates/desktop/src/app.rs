@@ -3166,9 +3166,37 @@ impl Dent {
         if self.selected.as_deref() != Some(id) {
             return;
         }
+        let Some(cwd) = self.session(id).map(|s| s.cwd.clone()) else {
+            return;
+        };
+        let fresh = !self.shells.get(id).is_some_and(|sh| !sh.exited);
+        if !fresh && self.shells.get(id).is_some_and(|sh| sh.busy()) {
+            // Typing would go to what's running there, not to the shell.
+            self.toast(
+                ToastAction::Info,
+                "Something is running in your terminal; stop it first".into(),
+            );
+            cx.notify();
+            return;
+        }
         self.open_shell(window, cx);
-        if let Some(sh) = self.shells.get(id) {
-            sh.type_bytes(format!("{}\r", crate::actions::command(name)).into_bytes());
+        // A terminal just opened starts in the session's folder.
+        let here = if fresh {
+            Some(cwd.clone())
+        } else {
+            self.shells.get(id).and_then(|sh| sh.cwd())
+        };
+        // The same folder however it's spelled (`/var` or `/private/var`).
+        let real = |p: &str| std::fs::canonicalize(p).ok();
+        let here = here.filter(|h| real(h) == real(&cwd)).map(|_| cwd.clone());
+        let line = format!("{}\r", crate::actions::command(name, &cwd, here.as_deref()));
+        if let Some(sh) = self.shells.get_mut(id) {
+            if fresh {
+                // Typed once the shell has started, not into its login.
+                sh.pending = Some(line);
+            } else {
+                sh.type_bytes(line.into_bytes());
+            }
         }
         cx.notify();
     }
@@ -4714,9 +4742,11 @@ impl Dent {
         // Tell the person when something needs them or is done, unless
         // they're already looking at it.
         let looking = self.window_active && self.selected.as_deref() == Some(id);
+        // News of its pull request says itself, once (below).
+        let pr_said = dent_client_core::pr_news(old_pr.as_ref(), s.pr.as_ref());
         if self.core.live && !looking && old_status.is_some() && old_status != Some(s.status) {
             match s.status {
-                Status::Needs => {
+                Status::Needs if !pr_said => {
                     crate::notify::post("Needs you", &format!("{} · {}", s.title, s.detail), id)
                 }
                 // After the turn and anything it left running in the background.
@@ -4730,7 +4760,7 @@ impl Dent {
         if self.core.live
             && !looking
             && old_status.is_some()
-            && dent_client_core::pr_news(old_pr.as_ref(), s.pr.as_ref())
+            && pr_said
             && let Some(pr) = &s.pr
         {
             crate::notify::post(

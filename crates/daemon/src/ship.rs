@@ -68,7 +68,7 @@ pub fn status(dir: &Path, gh: Option<&Path>) -> Option<GitStatus> {
         (0, n)
     };
     let pr = match (gh, &branch, remote) {
-        (Some(gh), Some(_), true) => pull_request(dir, gh),
+        (Some(gh), Some(_), true) => pull_request(dir, gh).ok().flatten(),
         _ => None,
     };
     Some(GitStatus {
@@ -119,11 +119,39 @@ fn fetch_now_and_then(dir: &Path) {
     let _ = git.status();
 }
 
-/// The latest pull request for the branch checked out, if GitHub has one:
-/// its state, checks and review.
-pub fn pull_request(dir: &Path, gh: &Path) -> Option<PullRequest> {
-    let out = gh_in(dir, gh, &["pr", "view", "--json", PR_FIELDS]).ok()?;
-    parse_pr(&out)
+/// The latest pull request for the branch checked out: `Ok(None)` when
+/// GitHub has none, `Err` when it couldn't be asked (offline, signed out,
+/// a limit), which must not read as the pull request having gone.
+pub fn pull_request(dir: &Path, gh: &Path) -> Result<Option<PullRequest>, String> {
+    match gh_in(dir, gh, &["pr", "view", "--json", PR_FIELDS]) {
+        Ok(out) => parse_pr(&out)
+            .map(Some)
+            .ok_or_else(|| "gh answered something unreadable".to_string()),
+        Err(e) if e.contains("no pull requests found") => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// A check's verdict, from a check run's conclusion or a commit status's
+/// state; empty while it runs.
+fn verdict(c: &serde_json::Value) -> &str {
+    c["conclusion"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| c["state"].as_str())
+        .unwrap_or_default()
+}
+
+/// What a verdict counts as: one place, so the badge and the brief agree.
+fn failed(verdict: &str) -> Option<bool> {
+    match verdict {
+        "SUCCESS" | "NEUTRAL" | "SKIPPED" => Some(false),
+        "FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => {
+            Some(true)
+        }
+        // Running, queued, or a state this doesn't know yet.
+        _ => None,
+    }
 }
 
 const PR_FIELDS: &str = "number,url,state,reviewDecision,statusCheckRollup";
@@ -139,17 +167,10 @@ fn parse_pr(json: &str) -> Option<PullRequest> {
     };
     let mut checks = Checks::default();
     for c in v["statusCheckRollup"].as_array().into_iter().flatten() {
-        // Check runs have a status and a conclusion; commit statuses a state.
-        let verdict = c["conclusion"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .or_else(|| c["state"].as_str())
-            .unwrap_or_default();
-        match verdict {
-            "SUCCESS" | "NEUTRAL" | "SKIPPED" => checks.passed += 1,
-            "FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED"
-            | "STARTUP_FAILURE" => checks.failed += 1,
-            _ => checks.pending += 1,
+        match failed(verdict(c)) {
+            Some(false) => checks.passed += 1,
+            Some(true) => checks.failed += 1,
+            None => checks.pending += 1,
         }
     }
     let review = match v["reviewDecision"].as_str() {
@@ -182,11 +203,23 @@ fn gh_in(dir: &Path, gh: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-/// The lines of a log worth an agent's reading: the last `n`.
+/// The lines of a log worth an agent's reading: the last `n`, and no more
+/// than `LOG_CAP` bytes of them (minified output makes long lines).
 fn tail(text: &str, n: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
-    lines[lines.len().saturating_sub(n)..].join("\n")
+    let kept = lines[lines.len().saturating_sub(n)..].join("\n");
+    if kept.len() <= LOG_CAP {
+        return kept;
+    }
+    let mut start = kept.len() - LOG_CAP;
+    while !kept.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("… (cut short)\n{}", &kept[start..])
 }
+
+/// The most of a failing check's log a brief carries.
+const LOG_CAP: usize = 8 * 1024;
 
 /// A message for the agent about pull request `pr`'s failing checks: which
 /// failed, and the end of the first failure's log.
@@ -194,22 +227,15 @@ pub fn checks_brief(dir: &Path, gh: &Path, pr: u64) -> Result<String, String> {
     let n = pr.to_string();
     let rollup = gh_in(dir, gh, &["pr", "view", &n, "--json", "statusCheckRollup"])?;
     let v: serde_json::Value = serde_json::from_str(&rollup).map_err(|e| e.to_string())?;
-    let mut failed = Vec::new();
+    let mut names = Vec::new();
     let mut run = None;
     for c in v["statusCheckRollup"].as_array().into_iter().flatten() {
-        let verdict = c["conclusion"]
-            .as_str()
-            .or_else(|| c["state"].as_str())
-            .unwrap_or_default();
-        if matches!(
-            verdict,
-            "FAILURE" | "ERROR" | "TIMED_OUT" | "STARTUP_FAILURE"
-        ) {
+        if failed(verdict(c)) == Some(true) {
             let name = c["name"]
                 .as_str()
                 .or_else(|| c["context"].as_str())
                 .unwrap_or("a check");
-            failed.push(format!("- {name}"));
+            names.push(format!("- {name}"));
             let url = c["detailsUrl"]
                 .as_str()
                 .or_else(|| c["targetUrl"].as_str())
@@ -224,20 +250,23 @@ pub fn checks_brief(dir: &Path, gh: &Path, pr: u64) -> Result<String, String> {
             }
         }
     }
-    if failed.is_empty() {
+    if names.is_empty() {
         return Err(format!("no checks are failing on pull request #{pr}"));
     }
     let mut text = format!(
         "The CI checks on pull request #{pr} failed:\n{}\n\nFind out why, fix it, and push.",
-        failed.join("\n")
+        names.join("\n")
     );
     if let Some(run) = run
         && let Ok(log) = gh_in(dir, gh, &["run", "view", &run, "--log-failed"])
         && !log.trim().is_empty()
     {
+        // Indented, not fenced: a message shown folded never stops on a
+        // bare fence.
+        let indented: Vec<String> = tail(&log, 80).lines().map(|l| format!("    {l}")).collect();
         text.push_str(&format!(
-            "\n\nThe end of the first failure's log:\n\n```\n{}\n```",
-            tail(&log, 80)
+            "\n\nThe end of the first failure's log:\n\n{}",
+            indented.join("\n")
         ));
     }
     Ok(text)
@@ -252,7 +281,8 @@ pub fn review_brief(dir: &Path, gh: &Path, pr: u64) -> Result<String, String> {
     let mut said = Vec::new();
     for r in v["reviews"].as_array().into_iter().flatten() {
         let body = r["body"].as_str().unwrap_or_default().trim();
-        if !body.is_empty() {
+        // An approval's words aren't something to change.
+        if !body.is_empty() && r["state"] != "APPROVED" && r["state"] != "DISMISSED" {
             let who = r["author"]["login"].as_str().unwrap_or("A reviewer");
             said.push(format!("{who}: {body}"));
         }
@@ -262,9 +292,12 @@ pub fn review_brief(dir: &Path, gh: &Path, pr: u64) -> Result<String, String> {
         gh,
         &[
             "api",
+            "--paginate",
             &format!("repos/{{owner}}/{{repo}}/pulls/{pr}/comments"),
             "--jq",
-            r#".[] | "\(.path):\(.line // .original_line) \(.user.login): \(.body)""#,
+            // Comments on lines the branch has since changed are outdated
+            // (no position): already dealt with, or no longer apply.
+            r#".[] | select(.position != null) | "\(.path):\(.line // .original_line) \(.user.login): \(.body)""#,
         ],
     )
     .unwrap_or_default();
@@ -453,6 +486,23 @@ mod tests {
             parse_pr(r#"{"number":3,"url":"u","state":"MERGED","statusCheckRollup":[]}"#).unwrap();
         assert_eq!((merged.state, merged.review), (PrState::Merged, None));
         assert!(parse_pr("no pull requests found").is_none());
+        // Cancelled and action-required count as failing, for the badge
+        // and the brief alike.
+        let odd = parse_pr(
+            r#"{"number":4,"url":"u","state":"OPEN","statusCheckRollup":[
+            {"name":"a","conclusion":"CANCELLED"},{"name":"b","conclusion":"ACTION_REQUIRED"},
+            {"context":"c","state":"PENDING"}]}"#,
+        )
+        .unwrap();
+        assert_eq!((odd.checks.failed, odd.checks.pending), (2, 1));
+    }
+
+    #[test]
+    fn a_long_log_is_cut_to_its_end() {
+        let log = "x".repeat(LOG_CAP * 3);
+        let t = tail(&log, 80);
+        assert!(t.len() <= LOG_CAP + 20 && t.starts_with("… (cut short)"));
+        assert_eq!(tail("a\nb\nc", 2), "b\nc");
     }
 
     #[test]
