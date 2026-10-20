@@ -28,6 +28,12 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 
 ## Open
 
+### A scroll fix patched one view before the cause was searched
+- Seen: 2026-10-20, trackpad drift in the diff. The first PR fixed only the diff and text views; the owner asked again to search the whole codebase for the cause. The same cause (GPUI giving each nested scroller its share of a swipe) was in chat code blocks, wide and tall tables, and every vertical-only scroller.
+- Cost: one extra review round and a second build-and-walk pass (~15 min).
+- Fix: one rule in `swipe.rs`, with a unit test that fails on any scroller left out ([0057](decisions/0057-one-swipe-one-axis.md)). Before a fix, grep for every instance of the mechanism, not the symptom.
+- Check: the next owner-reported UI bug's first PR covers every instance.
+
 ### A reference checkout compared against was out of date
 - Seen: 2026-10-19, the projects and worktrees audit. The local reference checkout used for comparison was 60 commits behind its remote; the owner asked whether it was current before anything was built on it. None of the 60 touched the parts compared, but that was luck.
 - Cost: one owner correction, and a comparison that could have been wrong.

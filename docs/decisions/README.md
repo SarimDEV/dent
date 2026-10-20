@@ -56,3 +56,4 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0054. Each project keeps its own defaults; a session shows its pull request; projects have scripts](0054-project-defaults-prs-and-scripts.md)
 - [0055. Every agent sits behind one driver; sessions keep their agent; clients offer what it can do](0055-agent-layer.md)
 - [0056. Settings and the first-run welcome share one list; the daemon says how things stand](0056-settings-and-onboarding.md)
+- [0057. One swipe moves one axis, in every scroller](0057-one-swipe-one-axis.md)

@@ -1604,6 +1604,8 @@ fn hscroll(md: &Md, key: &str, child: impl IntoElement, bg: Hsla, ink: Hsla) -> 
     div()
         .relative()
         .w_full()
+        // A sideways swipe moves the block and never the chat.
+        .child(crate::swipe::lock(None, Some(handle.clone())))
         .child(
             div()
                 .id(SharedString::from(format!("h-{key}")))
@@ -1719,6 +1721,7 @@ fn code_frame_with(
 ) -> Div {
     let text = body.to_string();
     let copy = copy_button(format!("copy-{key}"), "Copy", move || text.clone(), t, r);
+    let side = r.md.hscroll_handle(&format!("code-{key}"));
     div()
         .rounded(px(radius::LG))
         .border_1()
@@ -1747,69 +1750,79 @@ fn code_frame_with(
         )
         .child(
             div()
-                .id(SharedString::from(format!("code-{key}")))
-                .overflow_x_scroll()
-                .restrict_scroll_to_axis()
-                .px(px(space::S3))
-                .py(px(space::S2))
-                .ty(CODE)
-                .text_color(t.ink)
-                .children({
-                    // Highlighted once per block, line by line, then cached.
-                    // Lines copy one to a line, blank ones kept, each with
-                    // the block's prefix (inside a list or quote).
-                    let prefix = COPY_PREFIX.with(|p| p.borrow().clone());
-                    let mut first = Some(crate::select::take_lead().to_string());
-                    let mut blanks = String::new();
-                    body.split('\n')
-                        .enumerate()
-                        .map(|(n, l)| {
-                            // A blank line still selects, so the drag can
-                            // cross it; it copies as a lead on the next.
-                            if l.is_empty() {
-                                if first.is_none() {
-                                    blanks = format!("{blanks}{}\n", prefix.trim_end());
-                                }
-                                return div().child(
-                                    crate::select::text(
-                                        SharedString::from(format!("code-{key}-{n}")),
-                                        " ",
-                                        t,
+                .relative()
+                .child(crate::swipe::lock(None, Some(side.clone())))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("code-{key}")))
+                        .track_scroll(&side)
+                        .overflow_x_scroll()
+                        .restrict_scroll_to_axis()
+                        .px(px(space::S3))
+                        .py(px(space::S2))
+                        .ty(CODE)
+                        .text_color(t.ink)
+                        .children({
+                            // Highlighted once per block, line by line, then cached.
+                            // Lines copy one to a line, blank ones kept, each with
+                            // the block's prefix (inside a list or quote).
+                            let prefix = COPY_PREFIX.with(|p| p.borrow().clone());
+                            let mut first = Some(crate::select::take_lead().to_string());
+                            let mut blanks = String::new();
+                            body.split('\n')
+                                .enumerate()
+                                .map(|(n, l)| {
+                                    // A blank line still selects, so the drag can
+                                    // cross it; it copies as a lead on the next.
+                                    if l.is_empty() {
+                                        if first.is_none() {
+                                            blanks = format!("{blanks}{}\n", prefix.trim_end());
+                                        }
+                                        return div().child(
+                                            crate::select::text(
+                                                SharedString::from(format!("code-{key}-{n}")),
+                                                " ",
+                                                t,
+                                            )
+                                            .lead(""),
+                                        );
+                                    }
+                                    let lead = first.take().unwrap_or_else(|| {
+                                        format!("{}{prefix}", std::mem::take(&mut blanks))
+                                    });
+                                    let runs: Vec<TextRun> = lines
+                                        .get(n)
+                                        .cloned()
+                                        .unwrap_or_default()
+                                        .into_iter()
+                                        .map(|(len, tag)| {
+                                            let mut f = font(theme::mono());
+                                            if tag == Some(crate::highlight::Tag::Keyword) {
+                                                f.weight = FontWeight::BOLD;
+                                            }
+                                            if tag == Some(crate::highlight::Tag::Comment) {
+                                                f.style = FontStyle::Italic;
+                                            }
+                                            plain_run(
+                                                len,
+                                                f,
+                                                tag.map(|g| g.color(t)).unwrap_or(t.ink),
+                                            )
+                                        })
+                                        .collect();
+                                    div().whitespace_nowrap().child(
+                                        crate::select::styled(
+                                            SharedString::from(format!("code-{key}-{n}")),
+                                            l.to_string(),
+                                            runs,
+                                            t,
+                                        )
+                                        .lead(lead),
                                     )
-                                    .lead(""),
-                                );
-                            }
-                            let lead = first.take().unwrap_or_else(|| {
-                                format!("{}{prefix}", std::mem::take(&mut blanks))
-                            });
-                            let runs: Vec<TextRun> = lines
-                                .get(n)
-                                .cloned()
-                                .unwrap_or_default()
-                                .into_iter()
-                                .map(|(len, tag)| {
-                                    let mut f = font(theme::mono());
-                                    if tag == Some(crate::highlight::Tag::Keyword) {
-                                        f.weight = FontWeight::BOLD;
-                                    }
-                                    if tag == Some(crate::highlight::Tag::Comment) {
-                                        f.style = FontStyle::Italic;
-                                    }
-                                    plain_run(len, f, tag.map(|g| g.color(t)).unwrap_or(t.ink))
                                 })
-                                .collect();
-                            div().whitespace_nowrap().child(
-                                crate::select::styled(
-                                    SharedString::from(format!("code-{key}-{n}")),
-                                    l.to_string(),
-                                    runs,
-                                    t,
-                                )
-                                .lead(lead),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                }),
+                                .collect::<Vec<_>>()
+                        }),
+                ),
         )
 }
 
@@ -2220,60 +2233,6 @@ fn row(
         .children(out)
 }
 
-/// Scroll handoff for a list nested in the scrolling chat. GPUI lets every
-/// scroller under the pointer take the wheel, so without this the table and
-/// the chat would scroll together. In the capture phase we note whether the
-/// list can still move in the wheel's direction; in the bubble phase, after
-/// the list has scrolled, we stop the event there. At either end the event
-/// carries on to the chat.
-///
-/// Must be painted before the list so its bubble handler runs after the list's.
-fn handoff(state: ListState) -> impl IntoElement {
-    canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _| {
-            let state = state.clone();
-            let inner = Rc::new(std::cell::Cell::new(false));
-            window.on_mouse_event(move |e: &ScrollWheelEvent, phase, _, cx| {
-                if !bounds.contains(&e.position) {
-                    return;
-                }
-                match phase {
-                    DispatchPhase::Capture => {
-                        let d = e.delta.pixel_delta(px(20.));
-                        // GPUI's list merges a frame's wheel deltas by sign, and
-                        // 0.0 counts as positive: the zero-delta event that ends a
-                        // trackpad gesture would cancel that frame's scrolling.
-                        if d.x.as_f32() == 0. && d.y.as_f32() == 0. {
-                            cx.stop_propagation();
-                            return;
-                        }
-                        let dy = d.y.as_f32();
-                        let top = -state.scroll_px_offset_for_scrollbar().y.as_f32();
-                        let max = state.max_offset_for_scrollbar().y.as_f32();
-                        inner.set(if dy < 0. {
-                            top < max - 0.5
-                        } else if dy > 0. {
-                            top > 0.5
-                        } else {
-                            false
-                        });
-                    }
-                    DispatchPhase::Bubble => {
-                        if inner.get() {
-                            cx.stop_propagation();
-                        }
-                    }
-                }
-            });
-        },
-    )
-    .absolute()
-    .top_0()
-    .left_0()
-    .size_full()
-}
-
 /// A scrollbar that is always visible while there is more to see, so a
 /// capped table reads as scrollable before anyone touches it.
 fn scrollbar(state: ListState, t: &Theme) -> impl IntoElement {
@@ -2451,7 +2410,7 @@ fn table_block(table: &std::sync::Arc<Table>, t: &Theme, key: &str, r: &mut R) -
         div()
             .relative()
             .h(px(h))
-            .child(handoff(state.clone()))
+            .child(crate::swipe::lock(Some(state.clone()), None))
             .child(
                 list(state.clone(), move |ix, window, _| {
                     let _place = slot.enter(ix);

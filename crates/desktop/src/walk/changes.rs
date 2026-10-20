@@ -129,3 +129,93 @@ pub(super) fn turn_changes() -> Vec<(f32, Act)> {
     ]);
     v
 }
+
+thread_local! {
+    /// Where the diff stood before the sideways swipe.
+    static SWIPE_TOP: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
+}
+
+/// A diagonal swipe over a wide diff moves it one way only: mostly down
+/// scrolls down and not sideways, mostly sideways scrolls sideways and not
+/// down.
+pub(super) fn diff_swipe() -> Vec<(f32, Act)> {
+    let mut v = new_session("hello");
+    v.extend([
+        (
+            0.1,
+            Until("the turn ends", |d, _| status_is(d, Status::Done), 10.),
+        ),
+        (
+            0.2,
+            Call(|d, _, cx| {
+                let wide: String = (1..=200)
+                    .map(|i| format!("{i} {}\n", "word ".repeat(60)))
+                    .collect();
+                let _ = std::fs::write(in_project("wide.txt"), &wide);
+                git_in_project(&["add", "wide.txt"]);
+                git_in_project(&["commit", "-qm", "wide"]);
+                let _ = std::fs::write(in_project("wide.txt"), wide.replace("word", "WORD"));
+                let sid = d.selected.clone().unwrap_or_default();
+                d.review_turn(&sid, None, Some("wide.txt".into()), cx);
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "the wide diff is open",
+                |d, _| {
+                    diff_paths(d).contains(&"wide.txt".to_string()) && drawn(d, "diff").is_some()
+                },
+                5.,
+            ),
+        ),
+        (0.3, Shot("swipe-0")),
+        (0.3, Wheel("diff", -200.)),
+        (
+            0.3,
+            Until(
+                "a mouse wheel scrolls down, not sideways",
+                |d, _| {
+                    d.diff_list.scroll_px_offset_for_scrollbar().y < px(0.)
+                        && d.diff_side.offset().x == px(0.)
+                },
+                1.,
+            ),
+        ),
+        (0.3, Swipe("diff", -40., -400.)),
+        (0.3, Shot("swipe-1")),
+        (
+            0.3,
+            Until(
+                "a swipe mostly down scrolls down and not sideways",
+                |d, _| {
+                    d.diff_list.logical_scroll_top().item_ix > 0 && d.diff_side.offset().x == px(0.)
+                },
+                1.,
+            ),
+        ),
+        (
+            0.1,
+            Call(|d, _, _| {
+                SWIPE_TOP.set(Some(
+                    d.diff_list.scroll_px_offset_for_scrollbar().y.as_f32(),
+                ))
+            }),
+        ),
+        (0.3, Swipe("diff", -400., 40.)),
+        (0.3, Shot("swipe-2")),
+        (
+            0.3,
+            Until(
+                "a swipe mostly sideways scrolls sideways and not up",
+                |d, _| {
+                    d.diff_side.offset().x < px(0.)
+                        && SWIPE_TOP.get()
+                            == Some(d.diff_list.scroll_px_offset_for_scrollbar().y.as_f32())
+                },
+                1.,
+            ),
+        ),
+    ]);
+    v
+}
