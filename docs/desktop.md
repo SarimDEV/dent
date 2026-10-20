@@ -77,6 +77,17 @@ Cmd/Ctrl+N opens an empty chat with the cursor in the composer: you start by typ
 
 Behind the page you can choose an ambient background (View › Ambient Background): a live picture of your sessions in one of thirteen styles, None by default. It runs only while this page shows and stops the moment a session starts ([ambient.md](ambient.md), [0049](decisions/0049-ambient-backgrounds.md)).
 
+## Settings and the first launch
+
+Settings (⌘, or dent › Settings…) and the first launch's welcome share their rows ([0056](decisions/0056-settings-and-onboarding.md)), drawn as every list of things you act on is ([design system](design-system.md#lists-of-things-you-act-on)). Both ask the daemon again how things stand when they open, and **Check again** asks once more.
+
+- **Agents:** each agent the daemon drives, with its version (and the one dent was tested with, when they differ), how it's signed in (who, which plan, an API key, signed out) and the command dent runs, its path keeping its end. One not installed offers **How to install**, which opens its setup page. One signed out offers **Sign in**, which runs its sign-in (`claude auth login`) in Terminal. With more than one ready, **Use for new sessions** picks the one new sessions run.
+- **This Mac:** Git's version, who commits are by (or the two `git config` lines to set it), the GitHub CLI (signed in as whom, or **Sign in** / **How to install**), Start at login (a switch; off and saying why in a build that can't, such as one run from a folder macOS guards, or with a home folder of its own), and whether notifications are allowed (**Open Settings** when they're not; a `cargo run` build can't say).
+- **dent:** appearance, the notification sound, keeping the Mac awake while agents work, the new-session shortcut, and the keyboard shortcuts sheet. Each does exactly what its menu item does.
+- **The welcome** opens on the very first launch, after the daemon answers: the agents, this Mac, and the shortcut and keep-awake choices, with **Get started**. It never opens again, and installs from before it existed count as seen. Per-project choices stay where they are, remembered by starting a session ([0054](decisions/0054-project-defaults-prs-and-scripts.md)).
+- **When the agent can't work:** while the default agent isn't installed or is signed out, the new-session page says so under its title ("Claude Code is signed out"), with Sign in or How to install, and Check again.
+- **More than one agent:** a chip before the model's on the new-session box picks the agent, shown only when more than one is installed and signed in. Picking one clears the model, so the one chosen is one it has.
+
 ## Viewer
 
 The viewer shows, as tabs, everything the open session made or changed ([0037](decisions/0037-viewer-system-web-view.md)). Every viewable file an agent writes becomes a card in the chat that opens it here. Writing the same file again adds a version; nothing is replaced. A card for an older version says what replaced it. Tabs share their strip: names give up letters from the middle first, and when that's not enough the files not showing are their icon alone (their path in the tooltip), so no tab is cut off at an edge; past that the strip scrolls, a fading edge saying there's more.
@@ -208,6 +219,7 @@ Every action has a command, and every command can be bound in a keymap file. The
 | Toggle the viewer | Cmd/Ctrl+\\ |
 | Viewer: first artifact / changes / terminal | Cmd/Ctrl+1 / 2 / 3 |
 | Every shortcut on one sheet | Cmd+/ (or ? with no text field in use) |
+| Settings: agents, this Mac, dent's own choices | Cmd+, |
 
 **Text fields keep the Mac's editing keys.** In every field (the reply box, a new session, ⌘F, ⌘K, the project search, renaming, comments, side chat) ⌘A, ⌘C, ⌘X, ⌘V, ⌘Z and ⇧⌘Z, the ⌥ and ⌘ arrows, ⌥⌫ and ⌘⌫, and the Control keys (⌃A, ⌃E, ⌃B, ⌃F, ⌃N, ⌃P, ⌃D, ⌃H, ⌃K) do what they do anywhere on the Mac; a shortcut of dent's never takes one of them from a field. ⌘A and ⌘C go where you last were: to text selected in the chat or viewer if that was the last thing you pressed, else to the field; pressing a field, its taking the keyboard, or typing in it makes it the field's turn again. ⌘C or ⌘X with nothing selected leaves the clipboard as it was. Characters typed in a field are always text: the number keys pick a question's answer and ? opens the shortcuts only outside one. In your terminal ⌘A selects everything in it. Text dent puts in the reply box or a new session's field for you (a suggested command, a task from ⌘K, a message brought back) never wipes what you'd typed for good: it goes after your draft (which stays as it was, its folded pastes still chips), or replaces it as an edit ⌘Z undoes.
 

@@ -1,0 +1,322 @@
+use super::*;
+
+use crate::settings::Pane;
+
+/// Pages and Terminal runs pressed for so far, as one line to search.
+fn opened(d: &Dent) -> String {
+    d.opened_outside.join("\n")
+}
+
+/// Settings (⌘,): every agent and this Mac say how they stand, and a
+/// preference does what its menu item does.
+pub(super) fn settings() -> Vec<(f32, Act)> {
+    let mut v = vec![
+        (0.3, Key("cmd-n")),
+        (0.2, Key("cmd-,")),
+        (
+            0.1,
+            Until(
+                "⌘, opens Settings",
+                |d, _| d.pane == Some(Pane::Settings) && drawn(d, "pane-settings").is_some(),
+                3.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "the agent says its version and who it's signed in as",
+                |d, _| {
+                    d.agents_known
+                        && d.agents.first().is_some_and(|a| {
+                            crate::agents::version_line(a) == "2.1.301"
+                                && crate::agents::account_line(a).contains("walk@example.com")
+                        })
+                        && drawn(d, "row-agent-claude").is_some()
+                },
+                15.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "this Mac says how Git and GitHub stand",
+                |d, _| {
+                    d.machine_check.as_ref().is_some_and(|m| {
+                        m.git.is_some()
+                            && m.git_user.as_deref() == Some("walk <walk@example.com>")
+                            && matches!(&m.gh, dent_protocol::Gh::SignedIn { user: Some(u) } if u == "walk")
+                    }) && drawn(d, "row-gh").is_some()
+                        && drawn(d, "row-login-item").is_some()
+                },
+                15.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "a scratch home never offers to start at login",
+                |d, _| {
+                    d.machine_check
+                        .as_ref()
+                        .is_some_and(|m| m.login_item_blocked.is_some())
+                        && drawn(d, "login-item-switch").is_none()
+                },
+                2.,
+            ),
+        ),
+    ];
+    both_themes(&mut v, "settings");
+    v.extend([
+        (0.1, Click("sound-switch")),
+        (
+            0.1,
+            Until(
+                "the sound switch does what the menu does",
+                |_, _| !crate::notify::SOUND.load(std::sync::atomic::Ordering::Relaxed),
+                2.,
+            ),
+        ),
+        (0.2, Click("sound-switch")),
+        (
+            0.1,
+            Until(
+                "and back",
+                |_, _| crate::notify::SOUND.load(std::sync::atomic::Ordering::Relaxed),
+                2.,
+            ),
+        ),
+        (0.2, Key("escape")),
+        (0.1, Until("Esc closes it", |d, _| d.pane.is_none(), 2.)),
+    ]);
+    v
+}
+
+/// The first launch's welcome: what dent needs, then out of the way.
+pub(super) fn welcome() -> Vec<(f32, Act)> {
+    let mut v = vec![
+        (0.3, Key("cmd-n")),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                d.onboarded = false;
+                d.open_pane(Pane::Welcome, cx);
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "the welcome says how the agent and this Mac stand",
+                |d, _| {
+                    drawn(d, "pane-welcome").is_some()
+                        && d.agents_known
+                        && d.machine_check.is_some()
+                        && drawn(d, "welcome-done").is_some()
+                },
+                15.,
+            ),
+        ),
+    ];
+    both_themes(&mut v, "welcome");
+    v.extend([
+        (0.2, Click("welcome-done")),
+        (
+            0.1,
+            Until(
+                "Get started closes it for good",
+                |d, _| d.pane.is_none() && d.onboarded,
+                2.,
+            ),
+        ),
+    ]);
+    v
+}
+
+/// Claude Code signed out (`FAKE_CLAUDE_SIGNED_OUT`): the new-session page
+/// says so, and Sign in runs its sign-in in Terminal.
+pub(super) fn signed_out() -> Vec<(f32, Act)> {
+    let mut v = vec![
+        (0.3, Key("cmd-n")),
+        (
+            0.1,
+            Until(
+                "the new-session page says it's signed out",
+                |d, _| drawn(d, "agent-banner").is_some() && drawn(d, "banner-sign-in").is_some(),
+                15.,
+            ),
+        ),
+    ];
+    both_themes(&mut v, "signed-out");
+    v.extend([
+        (0.2, Click("banner-sign-in")),
+        (
+            0.1,
+            Until(
+                "Sign in runs its sign-in in Terminal",
+                |d, _| opened(d).contains("terminal: ") && opened(d).contains("auth login"),
+                2.,
+            ),
+        ),
+        (0.2, Key("cmd-,")),
+        (
+            0.1,
+            Until(
+                "Settings offers it too",
+                |d, _| drawn(d, "sign-in-claude").is_some(),
+                10.,
+            ),
+        ),
+        (0.3, Shot("settings-signed-out")),
+        (0.2, Key("escape")),
+    ]);
+    v
+}
+
+/// Claude Code not installed (`DENT_CLAUDE` names nothing): the page says
+/// so, with where to read how.
+pub(super) fn missing() -> Vec<(f32, Act)> {
+    vec![
+        (0.3, Key("cmd-n")),
+        (
+            0.1,
+            Until(
+                "the new-session page says it isn't installed",
+                |d, _| drawn(d, "agent-banner").is_some() && drawn(d, "banner-install").is_some(),
+                15.,
+            ),
+        ),
+        (0.4, Shot("missing")),
+        (0.2, Click("banner-install")),
+        (
+            0.1,
+            Until(
+                "How to install opens its setup page",
+                |d, _| opened(d).contains("code.claude.com/docs/en/setup"),
+                2.,
+            ),
+        ),
+    ]
+}
+
+/// An agent that can do less (`DENT_CAPS_OFF`): what it can't do isn't
+/// offered, and asking says why instead of failing.
+pub(super) fn limited() -> Vec<(f32, Act)> {
+    // A message sent mid-turn waits rather than steering.
+    let mut v = new_session("a long answer please");
+    v.extend([
+        (
+            0.1,
+            Until(
+                "the session knows what its agent can't do",
+                |d, _| {
+                    d.current()
+                        .is_some_and(|s| !s.caps.steer && !s.caps.stop_task)
+                },
+                10.,
+            ),
+        ),
+        (0.1, Until("it streams", |d, _| streaming(d), 10.)),
+        (0.1, Type(Field::Composer, "steer this in")),
+        (0.1, Key("cmd-enter")),
+        (
+            0.1,
+            Until(
+                "⌘↩ says it can't steer, and the message waits",
+                |d, _| {
+                    d.toast
+                        .as_ref()
+                        .is_some_and(|t| t.text.contains("can't take a message mid-turn"))
+                        && queued_now(d)
+                },
+                5.,
+            ),
+        ),
+        (0.3, Shot("limited-steer")),
+        (
+            0.1,
+            Until(
+                "the waiting message has no Send now",
+                |d, _| {
+                    let q = queued_ids(d);
+                    !q.is_empty()
+                        && drawn(d, &format!("steer-{}", q[0].0)).is_none()
+                        && drawn(d, &format!("unqueue-{}", q[0].0)).is_some()
+                },
+                3.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "both turns finish",
+                |d, _| status_is(d, Status::Done) && !queued_now(d),
+                40.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "no Try again or Fork where it can't go back",
+                |d, _| {
+                    drawn(d, "close").is_some()
+                        && drawn(d, "try-again").is_none()
+                        && drawn(d, "fork").is_none()
+                },
+                3.,
+            ),
+        ),
+    ]);
+    // Background work it can't stop piece by piece has no Stop.
+    v.extend(new_session("keep watching the app and the tests"));
+    v.extend([
+        (
+            0.1,
+            Until(
+                "background work shows with no Stop",
+                |d, _| {
+                    drawn(d, "background-strip").is_some()
+                        && d.current().is_some_and(|s| {
+                            !s.background.is_empty()
+                                && s.background
+                                    .iter()
+                                    .all(|t| drawn(d, &format!("bg-stop-{}", t.id)).is_none())
+                        })
+                },
+                20.,
+            ),
+        ),
+        (0.3, Shot("limited-background")),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                // From Ask, ⇧Tab steps to Edits and back, past the Plan
+                // mode it doesn't take.
+                d.set_permission(dent_protocol::Permission::Ask, cx);
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "⇧Tab steps only through modes it takes",
+                |d, _| {
+                    d.current().is_some_and(|s| {
+                        crate::app::next_permission(&s.caps, dent_protocol::Permission::Edits)
+                            == dent_protocol::Permission::Ask
+                    })
+                },
+                2.,
+            ),
+        ),
+        (0.2, Click("chip-sessionpermission")),
+        (
+            0.1,
+            Until(
+                "and its menu leaves Plan out",
+                |d, _| drawn(d, "m-edits").is_some() && drawn(d, "m-plan").is_none(),
+                3.,
+            ),
+        ),
+        (0.3, Shot("limited-modes")),
+        (0.2, Key("escape")),
+    ]);
+    v
+}

@@ -197,6 +197,8 @@ pub fn agent_info(agents: &[dent_protocol::AgentInfo], id: &str) -> dent_protoco
         } else {
             dent_protocol::Caps::default()
         },
+        install_url: String::new(),
+        sign_in: None,
     }
 }
 
@@ -568,6 +570,7 @@ pub fn session(
             agent.short,
             model_name(cx.models, v.model.as_deref())
         ),
+        agent_id: agent.id.clone(),
         agent_name: agent.name.clone(),
         agent_short: agent.short.clone(),
         caps: agent.caps.clone(),

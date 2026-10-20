@@ -17,6 +17,7 @@ mod escapes;
 mod git;
 mod holder;
 mod login;
+mod machine;
 mod paths;
 mod plan_tool;
 mod projects;

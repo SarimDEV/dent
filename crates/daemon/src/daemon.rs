@@ -290,11 +290,20 @@ impl Daemon {
             .unwrap_or_else(crate::agent::default)
     }
 
+    /// How this machine stands for Git, GitHub and starting at login.
+    pub async fn machine(self: &Arc<Self>) -> dent_protocol::Machine {
+        let path = self.env().path.clone();
+        tokio::task::spawn_blocking(move || crate::machine::check(&path))
+            .await
+            .unwrap_or_default()
+    }
+
     /// The agents this machine can drive and how each stands, asked of
-    /// their CLIs at most once a minute.
-    pub async fn agents(self: &Arc<Self>) -> Vec<dent_protocol::AgentInfo> {
+    /// their CLIs at most once a minute (`fresh`: now).
+    pub async fn agents(self: &Arc<Self>, fresh: bool) -> Vec<dent_protocol::AgentInfo> {
         let mut cached = self.agents.lock().await;
         if let Some((a, at)) = cached.as_ref()
+            && !fresh
             && now_ms().saturating_sub(*at) < 60_000
         {
             return a.clone();

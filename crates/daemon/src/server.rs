@@ -421,10 +421,23 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
                 warning: None,
             }
         }
-        Request::Agents => Reply::Agents {
-            agents: d.agents().await,
+        Request::Agents { fresh } => Reply::Agents {
+            agents: d.agents(fresh).await,
             default: crate::agent::default().id().into(),
         },
+        Request::Machine => Reply::Machine {
+            machine: d.machine().await,
+        },
+        Request::SetLoginItem { on } => {
+            if on && let Some(why) = crate::login::blocked() {
+                bail!("{why}");
+            }
+            let state = d.paths.state.clone();
+            tokio::task::spawn_blocking(move || crate::login::set(on, &state)).await??;
+            Reply::Machine {
+                machine: d.machine().await,
+            }
+        }
         Request::Models { agent } => Reply::Models {
             models: d.models(crate::agent::named(agent.as_deref())?.id()),
         },

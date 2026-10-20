@@ -5,6 +5,7 @@
 //! starts the daemon beside it when none is running.
 
 mod actions;
+mod agents;
 mod ambient;
 mod anim;
 mod ansi;
@@ -40,6 +41,7 @@ mod picker;
 mod popout;
 mod prefs;
 mod select;
+mod settings;
 mod shell;
 mod sidebar;
 mod skills;
@@ -271,9 +273,15 @@ impl Render for Dent {
             Some(w) => w,
             None if self
                 .current()
-                .is_some_and(|s| s.status == theme::Status::Working) =>
+                .is_some_and(|s| s.status == theme::Status::Working && s.caps.steer) =>
             {
                 "Queue a message, or steer with ⌘ ↩"
+            }
+            None if self
+                .current()
+                .is_some_and(|s| s.status == theme::Status::Working) =>
+            {
+                "Queue a message"
             }
             None => "Reply",
         };
@@ -639,6 +647,7 @@ impl Render for Dent {
                 // to the inbox, where arrows move and Enter opens.
                 if this.switch_cancel(cx)
                     || std::mem::take(&mut this.keys_open)
+                    || this.close_pane(cx)
                     || this.close_lightbox(cx)
                     || this.context.take().is_some()
                     || !std::mem::take(&mut this.picked).is_empty()
@@ -707,6 +716,13 @@ impl Render for Dent {
                 this.set_appearance(prefs::Appearance::Dark, window, cx)
             }))
             .on_action(cx.listener(|this, _: &app::ShowKeys, _, cx| this.toggle_keys(cx)))
+            .on_action(cx.listener(|this, _: &app::OpenSettings, _, cx| {
+                if this.pane == Some(settings::Pane::Settings) {
+                    this.close_pane(cx);
+                } else {
+                    this.open_pane(settings::Pane::Settings, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &app::SwitchNext, _, cx| this.switch_step(false, cx)))
             .on_action(cx.listener(|this, _: &app::SwitchPrev, _, cx| this.switch_step(true, cx)))
             // Letting go of Ctrl opens what Ctrl+Tab lit.
@@ -878,6 +894,7 @@ impl Render for Dent {
             .children(self.palette.map(|at| self.palette_view(at, window, cx)))
             .children(self.switcher_view(cx))
             .children(self.keys_view(cx))
+            .children(self.pane_view(cx))
             .children(self.context_view(window, cx))
             .children(self.github_card(cx))
             // Over everything, menus painted late included.

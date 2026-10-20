@@ -25,7 +25,7 @@ pub(super) fn failures() -> Vec<(f32, Act)> {
                 "a used-up limit says which and when it resets, and Try again waits for it",
                 |d, _| {
                     !current(d).is_some_and(|s| s.running())
-                        && d.limit_hit().is_some_and(|(w, _)| w == "5-hour limit")
+                        && d.limit_hit("").is_some_and(|(w, _)| w == "5-hour limit")
                         && has(d, |i| {
                             matches!(
                                 i,

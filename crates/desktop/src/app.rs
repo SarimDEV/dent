@@ -62,6 +62,7 @@ actions!(
         LookLight,
         LookDark,
         ShowKeys,
+        OpenSettings,
         Quit,
         Hide,
         HideOthers,
@@ -104,6 +105,8 @@ pub fn refresh_menus(cx: &mut App) {
             name: "dent".into(),
             items: vec![
                 MenuItem::action("About dent", About),
+                MenuItem::separator(),
+                MenuItem::action("Settings…", OpenSettings),
                 MenuItem::separator(),
                 MenuItem::action("Notification Sound", NotifySound).checked(sound),
                 MenuItem::action("Keep Mac Awake While Working", KeepAwake).checked(awake),
@@ -352,6 +355,8 @@ pub enum Menu {
     Pickup,
     /// Drafts put aside with ⌘S, to bring one back.
     Stash,
+    /// The agent a new session runs, when more than one is ready.
+    Agent,
 }
 
 impl Menu {
@@ -581,11 +586,14 @@ pub struct Completion {
 
 /// What a request's reply is for.
 pub enum Waiting {
-    Models,
+    /// An agent's models.
+    Models(String),
+    /// An agent's usage.
+    Usage(String),
     Agents,
+    Machine,
     Files(String),
     Recent,
-    Usage,
     Commands(String),
     Projects,
     /// A session's changes: all of them, or one turn's.
@@ -719,6 +727,19 @@ pub struct Dent {
     pub switcher: Option<crate::switcher::Switcher>,
     /// The keyboard shortcuts sheet is up.
     pub keys_open: bool,
+    /// Settings or the first-run welcome is open.
+    pub pane: Option<crate::settings::Pane>,
+    /// The welcome was seen (or dent was in use before it existed).
+    pub onboarded: bool,
+    /// How this Mac stands for Git, GitHub and starting at login, as the
+    /// daemon last said.
+    pub machine_check: Option<dent_protocol::Machine>,
+    /// The agents' standing has been asked and not yet answered.
+    pub checking: bool,
+    /// The daemon has said how its agents stand (not only what they are).
+    pub agents_known: bool,
+    /// Pages and Terminal runs a walkthrough pressed for, not opened.
+    pub opened_outside: Vec<String>,
     pub project_mode: crate::picker::Mode,
     /// A project being made or cloned, said in the picker meanwhile.
     pub project_busy: Option<String>,
@@ -749,8 +770,8 @@ pub struct Dent {
     pub ambient: Rc<RefCell<crate::ambient::State>>,
     /// Times the connection dropped, for the walkthrough.
     pub drops: u32,
-    /// The default agent's models.
-    pub models: Vec<Model>,
+    /// Each agent's models, as it last said, by agent id.
+    pub models: HashMap<String, Vec<Model>>,
     /// The agents the daemon drives, the default first, as its welcome
     /// described them and the last `Agents` reply said they stand.
     pub agents: Vec<dent_protocol::AgentInfo>,
@@ -776,8 +797,9 @@ pub struct Dent {
     pub composer_keyed: bool,
     /// Sessions started in a terminal that could carry on here.
     pub recent: Vec<RecentSession>,
-    /// The account's usage, as the provider last reported it, and when.
-    pub usage: Option<(Vec<dent_protocol::Window>, u64)>,
+    /// Each agent's account usage, as the provider last reported it, and
+    /// when, by agent id.
+    pub usage: HashMap<String, (Vec<dent_protocol::Window>, u64)>,
     /// Each session's files, for @ mentions.
     pub files: HashMap<String, Rc<Vec<String>>>,
     /// Slash commands the agent offers, by session; under `EVERY`, the ones
@@ -1419,6 +1441,12 @@ impl Dent {
             lately: Vec::new(),
             switcher: None,
             keys_open: false,
+            pane: None,
+            onboarded: prefs.onboarded,
+            machine_check: None,
+            checking: false,
+            agents_known: false,
+            opened_outside: Vec::new(),
             lightbox: None,
             project_mode: crate::picker::Mode::Pick,
             project_busy: None,
@@ -1477,7 +1505,7 @@ impl Dent {
             window_active: true,
             window_visible: true,
             ambient: Rc::default(),
-            models: Vec::new(),
+            models: HashMap::new(),
             agents: Vec::new(),
             projects: Vec::new(),
             waiting: HashMap::new(),
@@ -1488,7 +1516,7 @@ impl Dent {
             rewinding: None,
             commands: HashMap::new(),
             files: HashMap::new(),
-            usage: None,
+            usage: HashMap::new(),
             recent: Vec::new(),
             slash_ix: 0,
             ran_own: HashMap::new(),
@@ -2432,15 +2460,23 @@ impl Dent {
                         self.agents = agents;
                         changed.extend(self.core.list.keys().cloned());
                     }
-                    self.waiting
-                        .insert(self.live.send(Request::Agents), Waiting::Agents);
+                    // The first launch shows what dent needs; a walkthrough
+                    // opens it itself.
+                    if !self.onboarded && self.walk.is_none() && self.pane.is_none() {
+                        self.pane = Some(crate::settings::Pane::Welcome);
+                    }
+                    if self.pane.is_some() {
+                        self.check_again();
+                    } else {
+                        self.waiting.insert(
+                            self.live.send(Request::Agents { fresh: false }),
+                            Waiting::Agents,
+                        );
+                    }
                     self.live.send(Request::KeepAwake {
                         on: crate::notify::AWAKE.load(std::sync::atomic::Ordering::Relaxed),
                     });
-                    self.waiting.insert(
-                        self.live.send(Request::Models { agent: None }),
-                        Waiting::Models,
-                    );
+                    self.fetch_models();
                     self.waiting
                         .insert(self.live.send(Request::Projects), Waiting::Projects);
                     self.fetch_usage();
@@ -2508,11 +2544,9 @@ impl Dent {
                     {
                         self.acted(session, command, act, url.as_deref(), error.as_deref(), cx);
                     }
-                    // Only the default agent's models are kept so far.
-                    if let Out::Models { models, agent } = &out
-                        && (agent.is_empty() || Some(agent) == self.agents.first().map(|a| &a.id))
-                    {
-                        self.models = models.clone();
+                    if let Out::Models { models, agent } = &out {
+                        let agent = self.agent_id(Some(agent));
+                        self.models.insert(agent, models.clone());
                         changed.extend(self.core.list.keys().cloned());
                     }
                     let first = !self.core.live;
@@ -2601,12 +2635,12 @@ impl Dent {
         };
         match (w, out) {
             (
-                Waiting::Models,
+                Waiting::Models(agent),
                 Out::Reply {
                     reply: Reply::Models { models },
                 },
             ) => {
-                self.models = models;
+                self.models.insert(agent, models);
                 let ids: Vec<String> = self.core.list.keys().cloned().collect();
                 for id in ids {
                     self.rebuild(&id);
@@ -2619,6 +2653,8 @@ impl Dent {
                 },
             ) => {
                 self.agents = agents;
+                self.agents_known = true;
+                self.checking = false;
                 let ids: Vec<String> = self.core.list.keys().cloned().collect();
                 for id in ids {
                     self.rebuild(&id);
@@ -2651,13 +2687,13 @@ impl Dent {
                     .insert(id, Rc::new(complete::with_folders(paths)));
             }
             (
-                Waiting::Usage,
+                Waiting::Usage(agent),
                 Out::Reply {
                     reply: Reply::Usage { windows, at },
                 },
             ) => {
                 if !windows.is_empty() {
-                    self.usage = Some((windows, at));
+                    self.usage.insert(agent, (windows, at));
                 }
                 // The usage reading also learns the commands every session
                 // starts with.
@@ -2784,7 +2820,13 @@ impl Dent {
             (Waiting::Requeue, _) => {}
             // A daemon too old to say how its agents stand: the welcome's
             // list stands.
-            (Waiting::Agents, Out::Error { .. }) => {}
+            (Waiting::Agents, Out::Error { .. }) => self.checking = false,
+            (
+                Waiting::Machine,
+                Out::Reply {
+                    reply: Reply::Machine { machine },
+                },
+            ) => self.machine_check = Some(machine),
             (
                 Waiting::Repo(dir),
                 Out::Reply {
@@ -3421,7 +3463,11 @@ impl Dent {
                     self.defaults.effort.clone(),
                 ),
             };
-            let steps = self.effort_steps(&model, now.as_deref());
+            let models = match &session {
+                Some(s) => self.models_for(Some(&s.agent_id)).to_vec(),
+                None => self.new_models().to_vec(),
+            };
+            let steps = self.effort_steps(&models, &model, now.as_deref());
             let at = steps.iter().position(|e| *e == now.as_deref()).unwrap_or(0);
             let next = steps.get((at + 1) % steps.len().max(1)).copied().flatten();
             let next = next.map(str::to_string);
@@ -4128,20 +4174,47 @@ impl Dent {
         cx.notify();
     }
 
-    /// Ask the daemon for the account's usage.
+    /// The agents to show: the daemon's, the default first, or for one
+    /// too old to say, the one it drives.
+    pub fn agent_ids(&self) -> Vec<String> {
+        if self.agents.is_empty() {
+            return vec![dent_protocol::DEFAULT_AGENT.into()];
+        }
+        self.agents.iter().map(|a| a.id.clone()).collect()
+    }
+
+    /// Ask the daemon for each agent's account usage.
     pub fn fetch_usage(&mut self) {
-        let n = self.live.send(Request::Usage { agent: None });
-        self.waiting.insert(n, Waiting::Usage);
+        for agent in self.agent_ids() {
+            let info = crate::bridge::agent_info(&self.agents, &agent);
+            if !info.caps.usage {
+                continue;
+            }
+            let n = self.live.send(Request::Usage {
+                agent: Some(agent.clone()),
+            });
+            self.waiting.insert(n, Waiting::Usage(agent));
+        }
+    }
+
+    /// Ask each agent for its models.
+    pub fn fetch_models(&mut self) {
+        for agent in self.agent_ids() {
+            let n = self.live.send(Request::Models {
+                agent: Some(agent.clone()),
+            });
+            self.waiting.insert(n, Waiting::Models(agent));
+        }
     }
 
     /// The newest usage reading, from the provider or a session's stream.
     /// A usage limit that's used up: what it's called and when it starts
     /// over (Unix seconds). With several, the one that ends last.
-    pub fn limit_hit(&self) -> Option<(&'static str, i64)> {
+    pub fn limit_hit(&self, agent: &str) -> Option<(&'static str, i64)> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
-        self.limits()
+        self.limits(agent)
             .iter()
             .filter(|w| w.used >= 0.995 && w.resets_at > now)
             .max_by_key(|w| w.resets_at)
@@ -4161,9 +4234,12 @@ impl Dent {
             })
     }
 
-    pub fn limits(&self) -> Vec<dent_protocol::Window> {
-        let stream = self.core.limits.as_ref();
-        match (&self.usage, stream) {
+    /// Agent `agent`'s usage windows: the newest of the provider's reading
+    /// and what its sessions last streamed.
+    pub fn limits(&self, agent: &str) -> Vec<dent_protocol::Window> {
+        let agent = self.agent_id(Some(agent));
+        let stream = self.core.limits.get(&agent);
+        match (self.usage.get(&agent), stream) {
             (Some((w, at)), Some((sw, sat))) => {
                 if at >= sat {
                     w.clone()
@@ -4233,9 +4309,13 @@ impl Dent {
                     .as_ref()
                     .and_then(|s| self.commands.get(s))
                     .or_else(|| self.commands.get(EVERY));
+                let caps = self
+                    .current_rc()
+                    .map_or_else(|| self.new_caps(), |s| s.caps.clone());
                 let all = complete::offered(
                     agent.map(Vec::as_slice).unwrap_or_default(),
                     self.current_rc().is_some(),
+                    &caps,
                 );
                 let rows = complete::commands(&all, &token.query)
                     .into_iter()
@@ -4653,6 +4733,7 @@ impl Dent {
         if let Some(i) = prev {
             self.sessions[i] = Rc::new(Session::placeholder(id));
         }
+        let models = self.models_for(Some(&self.core.list[id].agent)).to_vec();
         let first = !self.built.contains_key(id);
         let built = self.built.entry(id.to_string()).or_default();
         let v = &self.core.list[id];
@@ -4660,7 +4741,7 @@ impl Dent {
             v,
             crate::bridge::Context {
                 machine: &self.machine,
-                models: &self.models,
+                models: &models,
                 agents: &self.agents,
                 diff: self.changes.get(id).cloned(),
                 now_ms,
@@ -4678,7 +4759,7 @@ impl Dent {
                 &old,
                 crate::bridge::Context {
                     machine: &self.machine,
-                    models: &self.models,
+                    models: &models,
                     agents: &self.agents,
                     diff: None,
                     now_ms,
@@ -4991,6 +5072,7 @@ impl Dent {
         let p = crate::prefs::Prefs {
             version: crate::prefs::VERSION,
             agent: self.defaults.agent.clone(),
+            onboarded: self.onboarded,
             project: self.defaults.project.clone(),
             model: self.defaults.model.clone(),
             permission: self.defaults.permission,
@@ -5059,9 +5141,38 @@ impl Dent {
         (std::path::Path::new(cwd) != crate::scratch_dir()).then(|| cwd.to_string())
     }
 
-    /// Models to offer: the agent's own list, from the daemon.
-    pub fn models_or_default(&self) -> Vec<Model> {
-        self.models.clone()
+    /// An agent's id as given, or the default agent's for none.
+    pub fn agent_id(&self, agent: Option<&str>) -> String {
+        match agent.filter(|a| !a.is_empty()) {
+            Some(a) => a.to_string(),
+            None => self
+                .agents
+                .first()
+                .map_or(dent_protocol::DEFAULT_AGENT.into(), |a| a.id.clone()),
+        }
+    }
+
+    /// Agent `agent`'s models, as it last said (none: the default agent's).
+    pub fn models_for(&self, agent: Option<&str>) -> &[Model] {
+        self.models
+            .get(&self.agent_id(agent))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// The models a new session's agent offers.
+    pub fn new_models(&self) -> &[Model] {
+        self.models_for(self.new_agent().as_deref())
+    }
+
+    /// Models to offer in `which` menu: a new session's agent's, or the
+    /// open session's agent's.
+    pub fn models_or_default(&self, which: Menu) -> Vec<Model> {
+        match (which, self.current()) {
+            (Menu::SessionModel | Menu::SessionEffort, Some(s)) => {
+                self.models_for(Some(&s.agent_id)).to_vec()
+            }
+            _ => self.new_models().to_vec(),
+        }
     }
 
     pub fn project_name(path: &str) -> String {
@@ -6540,6 +6651,16 @@ impl Dent {
         crate::bridge::agent_info(&self.agents, self.new_agent().as_deref().unwrap_or("")).caps
     }
 
+    /// The agents a new session can be started with: installed and signed
+    /// in. The picker only shows with more than one.
+    pub fn pickable_agents(&self) -> Vec<dent_protocol::AgentInfo> {
+        self.agents
+            .iter()
+            .filter(|a| crate::agents::standing(a) == crate::agents::Standing::Ready)
+            .cloned()
+            .collect()
+    }
+
     /// The agent a new session asks for: the one chosen, while the daemon
     /// drives it; else its default.
     pub fn new_agent(&self) -> Option<String> {
@@ -6606,9 +6727,13 @@ impl Dent {
     /// The effort levels `model` takes, in order from Default up: the
     /// effort menu's rows, and what Tab steps through. `current` stays in
     /// even if the model doesn't list it.
-    pub fn effort_steps(&self, model: &str, current: Option<&str>) -> Vec<Option<&'static str>> {
-        let takes = self
-            .models
+    pub fn effort_steps(
+        &self,
+        models: &[Model],
+        model: &str,
+        current: Option<&str>,
+    ) -> Vec<Option<&'static str>> {
+        let takes = models
             .iter()
             .find(|m| m.id == model)
             .map(|m| m.efforts.clone())

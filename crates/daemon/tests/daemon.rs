@@ -433,7 +433,7 @@ fn agents_say_how_they_stand_and_sessions_keep_theirs() {
     let w = World::new(&[]);
     let mut c = w.client();
     c.subscribe(0);
-    match c.call(Request::Agents).unwrap() {
+    match c.call(Request::Agents { fresh: true }).unwrap() {
         Out::Reply {
             reply: dent_protocol::Reply::Agents { agents, default },
         } => {
@@ -497,6 +497,115 @@ fn agents_say_how_they_stand_and_sessions_keep_theirs() {
         })
         .is_err()
     );
+}
+
+#[test]
+fn an_agent_that_can_do_less_is_never_asked_to() {
+    let w = World::new(&[(
+        "DENT_CAPS_OFF",
+        "steer,rewind,fork,effort,restart,stop_task,set_model,mode:plan",
+    )]);
+    let mut c = w.client();
+    c.subscribe(0);
+    // What it can't do says so where clients look.
+    match c.call(Request::Agents { fresh: false }).unwrap() {
+        Out::Reply {
+            reply: dent_protocol::Reply::Agents { agents, .. },
+        } => {
+            let caps = &agents[0].caps;
+            assert!(!caps.steer && !caps.rewind && !caps.fork && caps.aside);
+            assert!(!caps.permissions.contains(&Permission::Plan));
+        }
+        other => panic!("{other:?}"),
+    }
+    let s = c.create(&w.cwd(), Permission::Ask, "a long answer please");
+    c.wait(&s, "the turn to start", |b| matches!(b, Body::TurnStarted));
+    // A steer waits for the turn to end, as any message sent meanwhile.
+    c.say(&s, "st", "steer this in", true);
+    c.wait(
+        &s,
+        "it waits",
+        |b| matches!(b, Body::User { id, queued: true, steer: false, .. } if id == "st"),
+    );
+    // A model change it can't take as it runs is kept for the next process.
+    c.call(Request::SetModel {
+        session: s.clone(),
+        model: "haiku".into(),
+    })
+    .unwrap();
+    c.wait(
+        &s,
+        "the model is kept",
+        |b| matches!(b, Body::Settings { model: Some(m), .. } if m == "haiku"),
+    );
+    c.wait_turns(&s, 2);
+    let refused = |r: Result<Out, String>, why: &str| match r {
+        Err(e) => assert!(e.contains(why), "{e}"),
+        other => panic!("{why}: {other:?}"),
+    };
+    let first = c
+        .events(&s)
+        .iter()
+        .find_map(|b| match b {
+            Body::User { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    refused(
+        c.call(Request::Rewind {
+            session: s.clone(),
+            to: first,
+            files: false,
+        }),
+        "can't go back",
+    );
+    refused(
+        c.call(Request::Fork {
+            session: s.clone(),
+            before: None,
+            until: None,
+            id: None,
+        }),
+        "can't carry a conversation on",
+    );
+    refused(
+        c.call(Request::SetEffort {
+            session: s.clone(),
+            effort: "high".into(),
+        }),
+        "no effort levels",
+    );
+    refused(
+        c.call(Request::RestartAgent { session: s.clone() }),
+        "can't start again",
+    );
+    refused(
+        c.call(Request::SetPermission {
+            session: s.clone(),
+            permission: Permission::Plan,
+        }),
+        "no Plan mode",
+    );
+    refused(
+        c.call(Request::StopTask {
+            session: s.clone(),
+            task: "t".into(),
+        }),
+        "can't stop one piece",
+    );
+    // What it can do still works.
+    c.call(Request::SetPermission {
+        session: s.clone(),
+        permission: Permission::Edits,
+    })
+    .unwrap();
+    // And the machine says how it stands for Git and GitHub.
+    match c.call(Request::Machine).unwrap() {
+        Out::Reply {
+            reply: dent_protocol::Reply::Machine { machine },
+        } => assert!(machine.git.is_some(), "{machine:?}"),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]

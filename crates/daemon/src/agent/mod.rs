@@ -59,7 +59,23 @@ pub trait Driver: Send + Sync {
     fn short(&self) -> &'static str;
     /// The CLI version this dent was tested against.
     fn tested(&self) -> &'static str;
-    fn caps(&self) -> Caps;
+    /// What it can do. Every use goes through [`Driver::caps`].
+    fn own_caps(&self) -> Caps;
+    /// What it can do, less what `DENT_CAPS_OFF` turns off: how tests and
+    /// walkthroughs see dent with an agent that can do less, without a
+    /// second agent ([`masked`]).
+    fn caps(&self) -> Caps {
+        masked(
+            self.own_caps(),
+            std::env::var("DENT_CAPS_OFF").ok().as_deref().unwrap_or(""),
+        )
+    }
+    /// Where to read how to install it.
+    fn install_url(&self) -> &'static str;
+    /// What to run in a terminal to sign in, when it signs in that way.
+    fn sign_in(&self) -> Option<String> {
+        None
+    }
 
     /// The command that runs it: an override from the environment
     /// (`DENT_CLAUDE`), or its usual name on the PATH.
@@ -449,6 +465,39 @@ pub struct ToolResult {
     pub images: Vec<Value>,
 }
 
+/// `word` as one word for a shell: as it is when that's safe, else in
+/// single quotes.
+pub fn shell_word(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+:@%=".contains(c));
+    if plain {
+        word.to_string()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
+    }
+}
+
+/// `caps` less the ones named in `off`, a comma-separated list of field
+/// names (`steer,rewind`) and permission modes (`mode:full`). A name that
+/// isn't one is passed over.
+pub fn masked(caps: Caps, off: &str) -> Caps {
+    let Ok(Value::Object(mut v)) = serde_json::to_value(&caps) else {
+        return caps;
+    };
+    for name in off.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        if let Some(mode) = name.strip_prefix("mode:") {
+            if let Some(Value::Array(modes)) = v.get_mut("permissions") {
+                modes.retain(|m| m.as_str() != Some(mode));
+            }
+        } else if let Some(b @ Value::Bool(_)) = v.get_mut(name) {
+            *b = Value::Bool(false);
+        }
+    }
+    serde_json::from_value(Value::Object(v)).unwrap_or(caps)
+}
+
 /// What agent `d` is, without asking its CLI how it stands.
 pub fn brief(d: &dyn Driver) -> AgentInfo {
     AgentInfo {
@@ -461,6 +510,8 @@ pub fn brief(d: &dyn Driver) -> AgentInfo {
         tested: d.tested().into(),
         account: Account::Unknown,
         caps: d.caps(),
+        install_url: d.install_url().into(),
+        sign_in: d.sign_in(),
     }
 }
 
@@ -543,6 +594,25 @@ mod tests {
             }
         }
         assert!(bad.is_empty(), "reaches into a driver: {bad:?}");
+    }
+
+    #[test]
+    fn a_shell_word_survives_spaces_and_quotes() {
+        assert_eq!(shell_word("claude"), "claude");
+        assert_eq!(shell_word("/a b/claude"), "'/a b/claude'");
+        assert_eq!(shell_word("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn caps_can_be_turned_off_for_tests() {
+        let all = Caps::everything();
+        assert_eq!(masked(all.clone(), ""), all);
+        let less = masked(all.clone(), "steer, rewind,mode:full,no_such_thing");
+        assert!(!less.steer && !less.rewind && less.fork);
+        assert_eq!(
+            less.permissions,
+            vec![Permission::Ask, Permission::Edits, Permission::Plan]
+        );
     }
 
     #[test]

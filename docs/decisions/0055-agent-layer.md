@@ -35,10 +35,12 @@ The session's state machine (turns, queue and steer, stop, idle, rewind, restart
 
 The spec always said "nothing above the driver knows which agent it is talking to" ([daemon.md](../daemon.md)). The code had grown the other way: the session task called Claude Code's wire format directly, and Claude Code's name was written into notices. The owner asked (2026-10-20) for the groundwork for more agents to be built before any second agent. That way, adding Codex is one module, not a rewrite of the session.
 
+**Seeing dent with an agent that can do less, without another agent.** `DENT_CAPS_OFF` (a list like `steer,rewind,mode:plan`) turns capabilities off for every driver, through `Driver::caps`, which every use goes through. The daemon tests and the `limited` walkthrough use it.
+
 ## Consequences
 
 - Adding an agent means one new module beside `claude/` and one entry in `DRIVERS`. Nothing else in the daemon changes.
-- There is no agent picker in the new-session box yet. `Request::Create` takes `agent`, and the desktop sends its `Defaults::agent` (kept in prefs), which nothing sets until a second agent ships. The picker should only show when more than one agent is installed.
-- The desktop keeps only the default agent's models for its menus. Per-agent model menus come with the second agent.
-- Usage in the status bar is still the default agent's.
-- `just verify` covers the layering with `agent::tests::only_drivers_name_their_agent`.
+- Every request that needs a capability is refused by the daemon too, so a CLI or another client can't ask for what fails. A steer to an agent that can't be steered queues instead, and a model change it can't take live is kept for its next process.
+- The desktop keeps each agent's models and usage. A session's menus offer its own agent's models, and the status bar shows each agent with readings, the default's first.
+- The new-session box has an agent chip, shown only with more than one agent ready ([0056](0056-settings-and-onboarding.md)).
+- `just verify` covers the layering with `agent::tests::only_drivers_name_their_agent`, and the "can't" paths with `an_agent_that_can_do_less_is_never_asked_to`.

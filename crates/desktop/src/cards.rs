@@ -359,7 +359,12 @@ impl Dent {
             .child(probe(&self.probes, "context-gauge"));
         let popover = open.then(|| {
             let who = &s.agent_short;
-            let (label, off): (&str, Option<String>) = if compacting {
+            let (label, off): (&str, Option<String>) = if !s.caps.compact {
+                (
+                    "Compact now",
+                    Some(format!("{} can't be asked to compact", s.agent_name)),
+                )
+            } else if compacting {
                 ("Compacting…", Some(format!("{who} is compacting now")))
             } else if busy {
                 (
@@ -690,7 +695,7 @@ fn doing(act: &Act) -> String {
 
 /// The colour of a row's mark. Working rows have none: only what's off
 /// or wants attention is marked.
-fn mark_color(mark: Mark, t: &Theme) -> Option<Option<Hsla>> {
+pub(crate) fn mark_color(mark: Mark, t: &Theme) -> Option<Option<Hsla>> {
     match mark {
         Mark::Good => None,
         Mark::Off => Some(None),
@@ -701,8 +706,8 @@ fn mark_color(mark: Mark, t: &Theme) -> Option<Option<Hsla>> {
 
 /// Smaller interface text, for what sits under a row's name, and its
 /// line.
-const SMALL: f32 = 12.;
-const SMALL_LINE: f32 = 16.;
+pub(crate) const SMALL: f32 = 12.;
+pub(crate) const SMALL_LINE: f32 = 16.;
 
 /// A line of interface text, to line marks and controls up with a name.
 const LINE: f32 = crate::ds::size::LINE;
@@ -722,7 +727,7 @@ fn elide_middle(s: &str, max: usize) -> String {
 }
 
 /// `s` cut to about `max` characters from the start: `…/proj/site`.
-fn elide_start(s: &str, max: usize) -> String {
+pub(crate) fn elide_start(s: &str, max: usize) -> String {
     let n = s.chars().count();
     if n <= max.max(8) {
         return s.to_string();

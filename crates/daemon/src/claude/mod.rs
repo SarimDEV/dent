@@ -495,7 +495,7 @@ impl Driver for Claude {
         "2.1.301"
     }
 
-    fn caps(&self) -> Caps {
+    fn own_caps(&self) -> Caps {
         Caps {
             steer: true,
             rewind: true,
@@ -516,6 +516,17 @@ impl Driver for Claude {
             usage: true,
             restart: true,
         }
+    }
+
+    fn install_url(&self) -> &'static str {
+        "https://code.claude.com/docs/en/setup"
+    }
+
+    fn sign_in(&self) -> Option<String> {
+        Some(format!(
+            "{} auth login",
+            crate::agent::shell_word(&self.command())
+        ))
     }
 
     fn command(&self) -> String {

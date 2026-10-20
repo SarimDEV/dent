@@ -137,10 +137,10 @@ macro_rules! to {
 use crate::app::{
     AttachFiles, ChatBottom, ChatPageDown, ChatPageUp, ChatTop, ClearTerminal, CloseSession,
     Escape, FindInSession, FindMine, FindNext, FindPrev, FullScreen, Hide, HideOthers, InboxDown,
-    InboxOpen, InboxUp, Minimize, NewSession, NextNeedsYou, Quit, Search, SelectNext, SelectPrev,
-    SendAndNew, ShowChanges, ShowFirst, ShowKeys, ShowTerminal, SideChat, StartAside, SteerSend,
-    StopSession, SwitchNext, SwitchPrev, TextActual, TextBigger, TextSmaller, TogglePanel,
-    ToggleSidebar, UndoClose,
+    InboxOpen, InboxUp, Minimize, NewSession, NextNeedsYou, OpenSettings, Quit, Search, SelectNext,
+    SelectPrev, SendAndNew, ShowChanges, ShowFirst, ShowKeys, ShowTerminal, SideChat, StartAside,
+    SteerSend, StopSession, SwitchNext, SwitchPrev, TextActual, TextBigger, TextSmaller,
+    TogglePanel, ToggleSidebar, UndoClose,
 };
 use Section::*;
 use When::*;
@@ -358,6 +358,10 @@ pub const KEYS: &[Key] = &[
             "Cmd+/ (or ? with no text field in use)",
         ),
     key("?", NoField, "this sheet"),
+    key("cmd-,", Anywhere, "settings")
+        .bound(to!(OpenSettings))
+        .sheet(Panels, "Settings", "⌘ ,")
+        .doc("Settings: agents, this Mac, dent's own choices", "Cmd+,"),
     // The app and window.
     key("cmd-q", Anywhere, "quit").bound(to!(Quit)),
     key("cmd-h", Anywhere, "hide").bound(to!(Hide)),

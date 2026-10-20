@@ -678,6 +678,46 @@ pub struct AgentInfo {
     #[serde(default)]
     pub account: Account,
     pub caps: Caps,
+    /// Where to read how to install it.
+    #[serde(default)]
+    pub install_url: String,
+    /// What to run in a terminal to sign in, when it signs in that way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<String>,
+}
+
+/// How this machine is set up for what dent does besides agents: Git for
+/// worktrees and commits, the GitHub CLI for pull requests, and starting
+/// at login so sessions resume after a restart.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct Machine {
+    /// `git --version`'s answer; `None` when there's no Git.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<String>,
+    /// Who commits are by ("Ada <ada@example.com>"); `None` when Git has
+    /// no name or email to use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_user: Option<String>,
+    pub gh: Gh,
+    /// The daemon starts at login.
+    pub login_item: bool,
+    /// Why it can't be made to, when it can't (a build run from a folder
+    /// macOS guards from background programs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_item_blocked: Option<String>,
+}
+
+/// The GitHub CLI, as pull requests need it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Gh {
+    #[default]
+    Missing,
+    SignedOut,
+    SignedIn {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user: Option<String>,
+    },
 }
 
 impl AgentInfo {
@@ -1169,8 +1209,18 @@ pub enum Request {
         id: String,
     },
     Projects,
-    /// The agents this machine can drive, and how each stands.
-    Agents,
+    /// The agents this machine can drive, and how each stands. With
+    /// `fresh`, asked again now rather than from the last minute's answer.
+    Agents {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        fresh: bool,
+    },
+    /// How this machine stands for Git, GitHub and starting at login.
+    Machine,
+    /// Start the daemon at login, or stop; replies with the machine.
+    SetLoginItem {
+        on: bool,
+    },
     /// An agent's models (none: the default agent's).
     Models {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1414,6 +1464,9 @@ pub enum Reply {
         /// The agent a new session gets when none is asked for.
         default: String,
     },
+    Machine {
+        machine: Machine,
+    },
     Commands {
         commands: Vec<Command>,
     },
@@ -1529,6 +1582,11 @@ mod tests {
     fn requests_from_before_agent_ids_still_parse() {
         let r = |s: &str| serde_json::from_str::<Request>(s).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(r(r#"{"op":"models"}"#), Request::Models { agent: None });
+        assert_eq!(r(r#"{"op":"agents"}"#), Request::Agents { fresh: false });
+        assert_eq!(
+            serde_json::to_string(&Request::Agents { fresh: false }).unwrap(),
+            r#"{"op":"agents"}"#
+        );
         assert_eq!(r(r#"{"op":"usage"}"#), Request::Usage { agent: None });
         assert!(matches!(
             r(r#"{"op":"adopt","agent_session":"a"}"#),
@@ -1552,6 +1610,8 @@ mod tests {
             tested: "2.1.301".into(),
             account: Account::Unknown,
             caps: Caps::default(),
+            install_url: String::new(),
+            sign_in: None,
         };
         assert!(!a.untested());
         a.version = Some("v2.2.0".into());
