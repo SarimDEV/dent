@@ -40,7 +40,7 @@ impl Dent {
         }
     }
 
-    fn header(&self, s: &Session, cx: &mut Context<Self>) -> Div {
+    fn header(&mut self, s: &Session, cx: &mut Context<Self>) -> Div {
         let t = self.t;
         let id = s.id.clone();
         let has_viewer = self.shows_panel(s);
@@ -66,15 +66,77 @@ impl Dent {
                     .on_press(cx.listener(move |this, _, _, cx| this.resume(&sid, cx))),
             );
         }
+        // The project's scripts, run into your terminal.
+        if !s.closed && self.actions.get(&s.id).is_some_and(|a| !a.is_empty()) {
+            let label = if tight { "" } else { "Run" };
+            actions = actions.child(self.chip(Menu::Actions, "play", label, false, cx));
+        }
+        // Its pull request, as GitHub has it: a click opens it.
+        if let Some(pr) = &s.pr {
+            use crate::gitbar::Tone;
+            let tone = crate::gitbar::pr_tone(pr);
+            let ink = match tone {
+                Tone::Trouble => t.needs.0,
+                Tone::Good => t.done.0,
+                Tone::Running => t.working.0,
+                Tone::Merged => t.spectrum[0],
+                Tone::Closed => t.removed,
+            };
+            let icon_name = match tone {
+                Tone::Merged => "git-merge",
+                Tone::Closed => "git-pull-request-closed",
+                _ => "git-pull-request",
+            };
+            let words = crate::gitbar::pr_words(pr);
+            let url = pr.url.clone();
+            let badge = div()
+                .id("pr-badge")
+                .relative()
+                .flex_none()
+                .h(px(size::CONTROL))
+                .px(px(space::S2))
+                .flex()
+                .items_center()
+                .gap(px(space::S1H))
+                .rounded(px(radius::MD))
+                .cursor_pointer()
+                .hover(|d| d.bg(t.hover()))
+                .active(|d| d.bg(t.press()))
+                .ty(UI)
+                .text_color(t.ink)
+                .child(icon(icon_name, 13., ink))
+                .child(format!("#{}", pr.number))
+                // Narrow, the state is its colour and its tooltip.
+                .when(!tight, |d| {
+                    d.child(div().text_color(t.quiet).child("·"))
+                        .child(div().text_color(t.quiet).child(words))
+                })
+                .with_tip(crate::ui::tip_owned(
+                    format!("Pull request #{} · {words}", pr.number),
+                    t,
+                ))
+                .on_press(cx.listener(move |_, _, _, cx| cx.open_url(&url)))
+                .child(probe(&self.probes, "pr-badge"));
+            actions = actions.child(badge);
+        }
         // The branch's next Git step, while the session is open.
+        // The pull request as last said live wins over the last status read.
+        let st = self.git.get(&s.id).map(|st| dent_protocol::GitStatus {
+            pr: s.pr.clone().or_else(|| st.pr.clone()),
+            ..st.clone()
+        });
         if !s.closed
-            && let Some(st) = self.git.get(&s.id)
+            && let Some(st) = st.as_ref()
             && let Some(q) = crate::gitbar::quick(st)
         {
             let sid = id.clone();
             let busy = self.git_busy.get(&s.id).copied();
             let confirming = self.git_confirming(&s.id);
             let label = match (busy, confirming) {
+                // Asking GitHub for a brief, not running Git.
+                (Some(_), _) if matches!(q.press, Some(crate::gitbar::Press::Brief(_))) => {
+                    "Gathering…".to_string()
+                }
                 (Some(a), _) => crate::gitbar::busy(a).to_string(),
                 (None, Some(_)) => crate::gitbar::confirm(st),
                 _ => q.label.clone(),
@@ -102,7 +164,7 @@ impl Dent {
                         ))
                         .on_press(cx.listener(move |this, _, _, cx| match &press {
                             crate::gitbar::Press::Run(a) => this.run_git(&sid, *a, cx),
-                            crate::gitbar::Press::Open(url) => cx.open_url(url),
+                            crate::gitbar::Press::Brief(b) => this.brief_agent(&sid, *b, cx),
                         }))
                     }
                     (None, None) => crate::ui::off_owned(b, q.tip.clone(), &t),
@@ -4482,6 +4544,36 @@ impl Dent {
         v
     }
 
+    /// The session's project scripts; choosing one runs it in your terminal.
+    fn action_entries(&self) -> Vec<Entry> {
+        let act = |f: Box<ActFn>| -> Option<Act> { Some(Rc::from(f)) };
+        let Some(s) = self.current() else {
+            return Vec::new();
+        };
+        let id = s.id.clone();
+        self.actions
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .map(|(name, about)| {
+                let (id, name2) = (id.clone(), name.clone());
+                Entry::row(
+                    format!("m-action-{name}"),
+                    name,
+                    Some(if about.is_empty() {
+                        crate::actions::command(name)
+                    } else {
+                        about.clone()
+                    }),
+                    false,
+                    act(Box::new(move |this, window, cx| {
+                        this.run_action(&id, &name2, window, cx);
+                    })),
+                )
+            })
+            .collect()
+    }
+
     /// The branches a new worktree can start from, most recently committed
     /// to first, narrowed by what's typed in the menu's field.
     pub fn base_entries(&self, cx: &App) -> Vec<Entry> {
@@ -4619,6 +4711,7 @@ impl Dent {
                                 Menu::Project => "Project".into(),
                                 Menu::Workspace => "Where it works".into(),
                                 Menu::Base => "The branch the worktree starts from".into(),
+                                Menu::Actions => "Run a project script in your terminal".into(),
                                 Menu::Pickup => "Pick up from terminal".into(),
                                 Menu::Stash => "Drafts put aside".into(),
                             },
@@ -4705,6 +4798,7 @@ impl Dent {
             Menu::Project => self.project_entries(cx),
             Menu::Workspace => self.workspace_entries(),
             Menu::Base => self.base_entries(cx),
+            Menu::Actions => self.action_entries(),
             Menu::Pickup => self.pickup_entries(),
             Menu::Stash => self.stash_entries(),
             Menu::Model | Menu::SessionModel => {

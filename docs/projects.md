@@ -43,6 +43,15 @@ The session header's Git button is the branch's next step, worked out from where
 - Commit messages are written from the diff, and pull requests' title and body from the branch's commits, by the same quick model as titles.
 - Pull requests use the GitHub CLI (`gh`), signed in; without it, the button stops at pushing.
 - A push to the remote's default branch asks for a second press ("Push to main?"); the question goes after five seconds unanswered.
+- Once pushed, the session's pull request shows in its header ("#12 · Checks failing"), kept up to date after Git actions, after each turn and every two minutes ([0054](decisions/0054-project-defaults-prs-and-scripts.md)). Failing checks make the button **Fix checks** (the agent gets which failed and the log's end); a review asking for changes makes it **Address review**. Either is news: the session is marked unread and you're notified. A merge is a label, "Merged · PR #12"; the session stays until you close it.
+
+## Project scripts
+
+Each file in a repository's `.dent/actions/` is a script: its name is the file's, and its first comment says what it does (`# Run the tests`). The session header's **Run** menu lists them, and choosing one runs it in your terminal, in the session's folder. Commit them, and every worktree has them.
+
+## Defaults per project
+
+Each project remembers what its last new session started with (model, permissions, effort, new worktree or not), and brings it back when chosen; one never started in keeps what's chosen ([0054](decisions/0054-project-defaults-prs-and-scripts.md)).
 - While the agent's turn runs, the button is off: it may be halfway through a file.
 - Where the branch stands is read with a fetch from `origin` at most every two minutes per repository, so a branch behind its remote offers Pull. The fetch never prompts: one that needs a password or passphrase is skipped.
 

@@ -432,6 +432,8 @@ pub struct Session {
     pub branch: Option<String>,
     /// In a linked worktree: the project's main checkout.
     pub root: Option<String>,
+    /// Its branch's pull request, as the daemon last said.
+    pub pr: Option<dent_protocol::PullRequest>,
     pub machine: String,
     /// "Claude · Opus", for the composer.
     pub agent: String,
@@ -518,6 +520,7 @@ impl Session {
             project: String::new(),
             branch: None,
             root: None,
+            pr: None,
             machine: String::new(),
             agent: String::new(),
             model: None,

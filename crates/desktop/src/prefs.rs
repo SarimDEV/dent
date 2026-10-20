@@ -56,6 +56,10 @@ pub struct Prefs {
     pub pastes: std::collections::BTreeMap<u32, String>,
     /// Drafts put aside with ⌘S, oldest first.
     pub stashes: Vec<Draft>,
+    /// What each project's last new session started with, by its folder
+    /// ("" for no project): a project brings these back when chosen.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub projects: std::collections::BTreeMap<String, ProjectPrefs>,
     /// Sessions kept at the top of the sidebar, in the order pinned.
     pub pinned: Vec<String>,
     /// The ambient background on the new-session page, by id; none when unset
@@ -119,6 +123,16 @@ pub fn load() -> Prefs {
         let _ = std::fs::write(&marker, "");
     }
     p
+}
+
+/// A project's own new-session choices.
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
+#[serde(default)]
+pub struct ProjectPrefs {
+    pub model: Option<String>,
+    pub permission: Permission,
+    pub effort: Option<String>,
+    pub worktree: bool,
 }
 
 /// Present once new sessions have been moved to Full access.

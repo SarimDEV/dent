@@ -516,6 +516,7 @@ pub fn session(
             .unwrap_or_else(|| v.cwd.clone()),
         branch: v.branch.clone(),
         root: v.root.clone(),
+        pr: v.pr.clone(),
         machine: cx.machine.to_string(),
         agent: format!("Claude · {}", model_name(cx.models, v.model.as_deref())),
         model: v.model.clone(),
@@ -762,6 +763,14 @@ fn preparing(tool: &str, what: Option<&str>) -> String {
 
 /// What it's doing or wants, for the inbox row and the working line.
 fn detail(v: &SessionView) -> String {
+    // Finished, with its pull request merged: that's the news.
+    if matches!(v.status, Wire::Done)
+        && let Some(pr) =
+            v.pr.as_ref()
+                .filter(|p| p.state == dent_protocol::PrState::Merged)
+    {
+        return format!("Merged · PR #{}", pr.number);
+    }
     // Waiting for a used-up limit to reset, to carry on by itself.
     if let Some(at) = v.resume_at {
         return format!("Carries on at {}", crate::data::clock(at * 1000));

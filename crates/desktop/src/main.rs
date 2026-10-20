@@ -4,6 +4,7 @@
 //! `cargo run -p dent-desktop -- [--dark] [--size WxH] [--reduce-motion] [--background]`
 //! starts the daemon beside it when none is running.
 
+mod actions;
 mod ambient;
 mod anim;
 mod ansi;

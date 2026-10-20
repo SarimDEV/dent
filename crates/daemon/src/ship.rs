@@ -8,15 +8,19 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use dent_protocol::{GitStatus, PullRequest};
+use dent_protocol::{Checks, GitStatus, PrState, PullRequest, Review};
 
 use crate::workspace::{branch, run};
 
 /// A diff longer than this is cut before a model reads it.
 const DIFF_CAP: usize = 12_000;
 
-/// The GitHub CLI on `path`, if it's installed.
+/// The GitHub CLI on `path`, if it's installed; `DENT_GH` names another
+/// (the walkthroughs' stand-in).
 pub fn gh(path: &str) -> Option<std::path::PathBuf> {
+    if let Some(p) = std::env::var_os("DENT_GH") {
+        return Some(p.into());
+    }
     std::env::split_paths(path)
         .map(|d| d.join("gh"))
         .find(|p| p.is_file())
@@ -64,7 +68,7 @@ pub fn status(dir: &Path, gh: Option<&Path>) -> Option<GitStatus> {
         (0, n)
     };
     let pr = match (gh, &branch, remote) {
-        (Some(gh), Some(_), true) => open_pr(dir, gh),
+        (Some(gh), Some(_), true) => pull_request(dir, gh),
         _ => None,
     };
     Some(GitStatus {
@@ -115,20 +119,170 @@ fn fetch_now_and_then(dir: &Path) {
     let _ = git.status();
 }
 
-/// The open pull request for the branch checked out, if GitHub has one.
-fn open_pr(dir: &Path, gh: &Path) -> Option<PullRequest> {
+/// The latest pull request for the branch checked out, if GitHub has one:
+/// its state, checks and review.
+pub fn pull_request(dir: &Path, gh: &Path) -> Option<PullRequest> {
+    let out = gh_in(dir, gh, &["pr", "view", "--json", PR_FIELDS]).ok()?;
+    parse_pr(&out)
+}
+
+const PR_FIELDS: &str = "number,url,state,reviewDecision,statusCheckRollup";
+
+/// A pull request from `gh pr view --json` with [`PR_FIELDS`].
+fn parse_pr(json: &str) -> Option<PullRequest> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let number = v["number"].as_u64()?;
+    let state = match v["state"].as_str()? {
+        "MERGED" => PrState::Merged,
+        "CLOSED" => PrState::Closed,
+        _ => PrState::Open,
+    };
+    let mut checks = Checks::default();
+    for c in v["statusCheckRollup"].as_array().into_iter().flatten() {
+        // Check runs have a status and a conclusion; commit statuses a state.
+        let verdict = c["conclusion"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .or_else(|| c["state"].as_str())
+            .unwrap_or_default();
+        match verdict {
+            "SUCCESS" | "NEUTRAL" | "SKIPPED" => checks.passed += 1,
+            "FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED"
+            | "STARTUP_FAILURE" => checks.failed += 1,
+            _ => checks.pending += 1,
+        }
+    }
+    let review = match v["reviewDecision"].as_str() {
+        Some("APPROVED") => Some(Review::Approved),
+        Some("CHANGES_REQUESTED") => Some(Review::ChangesRequested),
+        _ => None,
+    };
+    Some(PullRequest {
+        number,
+        url: v["url"].as_str().unwrap_or_default().to_string(),
+        state,
+        checks,
+        review,
+    })
+}
+
+/// Run the GitHub CLI in `dir`, never prompting: its output or why not.
+fn gh_in(dir: &Path, gh: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new(gh)
-        .args(["pr", "view", "--json", "number,url,state"])
+        .args(args)
         .current_dir(dir)
         .env("GH_PROMPT_DISABLED", "1")
         .stdin(Stdio::null())
         .output()
-        .ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    (v["state"] == "OPEN").then(|| PullRequest {
-        number: v["number"].as_u64().unwrap_or(0),
-        url: v["url"].as_str().unwrap_or_default().to_string(),
-    })
+        .map_err(|e| format!("couldn't run gh: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// The lines of a log worth an agent's reading: the last `n`.
+fn tail(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
+}
+
+/// A message for the agent about pull request `pr`'s failing checks: which
+/// failed, and the end of the first failure's log.
+pub fn checks_brief(dir: &Path, gh: &Path, pr: u64) -> Result<String, String> {
+    let n = pr.to_string();
+    let rollup = gh_in(dir, gh, &["pr", "view", &n, "--json", "statusCheckRollup"])?;
+    let v: serde_json::Value = serde_json::from_str(&rollup).map_err(|e| e.to_string())?;
+    let mut failed = Vec::new();
+    let mut run = None;
+    for c in v["statusCheckRollup"].as_array().into_iter().flatten() {
+        let verdict = c["conclusion"]
+            .as_str()
+            .or_else(|| c["state"].as_str())
+            .unwrap_or_default();
+        if matches!(
+            verdict,
+            "FAILURE" | "ERROR" | "TIMED_OUT" | "STARTUP_FAILURE"
+        ) {
+            let name = c["name"]
+                .as_str()
+                .or_else(|| c["context"].as_str())
+                .unwrap_or("a check");
+            failed.push(format!("- {name}"));
+            let url = c["detailsUrl"]
+                .as_str()
+                .or_else(|| c["targetUrl"].as_str())
+                .unwrap_or_default();
+            if run.is_none() {
+                run = url
+                    .split("/runs/")
+                    .nth(1)
+                    .and_then(|r| r.split('/').next())
+                    .filter(|r| r.chars().all(|c| c.is_ascii_digit()) && !r.is_empty())
+                    .map(str::to_owned);
+            }
+        }
+    }
+    if failed.is_empty() {
+        return Err(format!("no checks are failing on pull request #{pr}"));
+    }
+    let mut text = format!(
+        "The CI checks on pull request #{pr} failed:\n{}\n\nFind out why, fix it, and push.",
+        failed.join("\n")
+    );
+    if let Some(run) = run
+        && let Ok(log) = gh_in(dir, gh, &["run", "view", &run, "--log-failed"])
+        && !log.trim().is_empty()
+    {
+        text.push_str(&format!(
+            "\n\nThe end of the first failure's log:\n\n```\n{}\n```",
+            tail(&log, 80)
+        ));
+    }
+    Ok(text)
+}
+
+/// A message for the agent about pull request `pr`'s review: the changes
+/// asked for and the comments on lines.
+pub fn review_brief(dir: &Path, gh: &Path, pr: u64) -> Result<String, String> {
+    let n = pr.to_string();
+    let reviews = gh_in(dir, gh, &["pr", "view", &n, "--json", "reviews"])?;
+    let v: serde_json::Value = serde_json::from_str(&reviews).map_err(|e| e.to_string())?;
+    let mut said = Vec::new();
+    for r in v["reviews"].as_array().into_iter().flatten() {
+        let body = r["body"].as_str().unwrap_or_default().trim();
+        if !body.is_empty() {
+            let who = r["author"]["login"].as_str().unwrap_or("A reviewer");
+            said.push(format!("{who}: {body}"));
+        }
+    }
+    let lines = gh_in(
+        dir,
+        gh,
+        &[
+            "api",
+            &format!("repos/{{owner}}/{{repo}}/pulls/{pr}/comments"),
+            "--jq",
+            r#".[] | "\(.path):\(.line // .original_line) \(.user.login): \(.body)""#,
+        ],
+    )
+    .unwrap_or_default();
+    said.extend(
+        lines
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(str::to_owned),
+    );
+    if said.is_empty() {
+        return Err(format!(
+            "pull request #{pr} has no review comments to answer"
+        ));
+    }
+    Ok(format!(
+        "Pull request #{pr} has review comments:\n\n{}\n\nMake the changes asked for, reply where you disagree, and push.",
+        said.join("\n\n")
+    ))
 }
 
 /// What a commit would hold, for a model to write its message: the files
@@ -277,6 +431,28 @@ mod tests {
         assert_eq!(status(&d, None).unwrap().behind, 1);
         pull(&d).unwrap();
         assert_eq!(status(&d, None).unwrap().behind, 0);
+    }
+
+    #[test]
+    fn a_pull_request_reads_its_state_checks_and_review() {
+        let json = r#"{"number":12,"url":"https://github.com/o/r/pull/12","state":"OPEN",
+            "reviewDecision":"CHANGES_REQUESTED","statusCheckRollup":[
+            {"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"FAILURE"},
+            {"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS"},
+            {"__typename":"CheckRun","name":"build","status":"IN_PROGRESS","conclusion":""},
+            {"__typename":"StatusContext","context":"deploy","state":"SUCCESS"}]}"#;
+        let pr = parse_pr(json).unwrap();
+        assert_eq!(pr.number, 12);
+        assert_eq!(pr.state, PrState::Open);
+        assert_eq!(
+            (pr.checks.passed, pr.checks.failed, pr.checks.pending),
+            (2, 1, 1)
+        );
+        assert_eq!(pr.review, Some(Review::ChangesRequested));
+        let merged =
+            parse_pr(r#"{"number":3,"url":"u","state":"MERGED","statusCheckRollup":[]}"#).unwrap();
+        assert_eq!((merged.state, merged.review), (PrState::Merged, None));
+        assert!(parse_pr("no pull requests found").is_none());
     }
 
     #[test]

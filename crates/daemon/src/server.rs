@@ -315,7 +315,29 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             let cwd = cwd_of(d, &session)?;
             let (summary, url) = d.git(&cwd, action, message).await?;
             d.note_workspace(&session, &cwd).await;
+            d.note_pr(&session, &cwd).await;
             Reply::GitDone { summary, url }
+        }
+        Request::PrBrief { session, about } => {
+            let cwd = cwd_of(d, &session)?;
+            let gh = crate::ship::gh(&d.env().path)
+                .context("this needs the GitHub CLI (gh), signed in")?;
+            let text = tokio::task::spawn_blocking(move || {
+                let dir = Path::new(&cwd);
+                let pr = crate::ship::pull_request(dir, &gh)
+                    .ok_or_else(|| "the branch has no pull request".to_string())?;
+                match about {
+                    dent_protocol::PrBrief::Checks => {
+                        crate::ship::checks_brief(dir, &gh, pr.number)
+                    }
+                    dent_protocol::PrBrief::Review => {
+                        crate::ship::review_brief(dir, &gh, pr.number)
+                    }
+                }
+            })
+            .await?
+            .map_err(|e| anyhow::anyhow!(e))?;
+            Reply::PrBrief { text }
         }
         Request::Retitle { session } => {
             let d = d.clone();

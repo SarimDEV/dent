@@ -29,6 +29,8 @@ pub struct SessionView {
     pub branch: Option<String>,
     /// In a linked worktree: the project's main checkout.
     pub root: Option<String>,
+    /// Its branch's pull request, as the daemon last said.
+    pub pr: Option<dent_protocol::PullRequest>,
     pub agent: String,
     pub model: Option<String>,
     pub permission: Permission,
@@ -1010,6 +1012,14 @@ impl SessionView {
                 note: Note::Info,
                 text: text.clone(),
             }),
+            Body::PullRequest { pr } => {
+                // What you'd want to know of: checks starting to fail,
+                // changes asked for, a merge. It counts as news.
+                if pr_news(self.pr.as_ref(), pr.as_ref()) {
+                    self.news = e.seq;
+                }
+                self.pr = pr.clone();
+            }
             Body::Workspace { branch, root } => {
                 self.branch = branch.clone();
                 self.root = root.clone();
@@ -1291,6 +1301,27 @@ fn apply_edit(text: &str, old: &str, new: &str, all: bool) -> Option<String> {
     } else {
         text.replacen(old, new, 1)
     })
+}
+
+/// Whether a pull request's change is something you'd want to know of:
+/// its checks starting to fail, changes asked for, or a merge.
+pub fn pr_news(
+    was: Option<&dent_protocol::PullRequest>,
+    now: Option<&dent_protocol::PullRequest>,
+) -> bool {
+    use dent_protocol::{PrState, Review};
+    let Some(now) = now else { return false };
+    let failing = |p: Option<&dent_protocol::PullRequest>| p.is_some_and(|p| p.checks.failed > 0);
+    let asked = |p: Option<&dent_protocol::PullRequest>| {
+        p.is_some_and(|p| p.review == Some(Review::ChangesRequested))
+    };
+    let merged =
+        |p: Option<&dent_protocol::PullRequest>| p.is_some_and(|p| p.state == PrState::Merged);
+    let same = was.is_some_and(|w| w.number == now.number);
+    let was = was.filter(|_| same);
+    (failing(Some(now)) && !failing(was))
+        || (asked(Some(now)) && !asked(was))
+        || (merged(Some(now)) && !merged(was))
 }
 
 #[cfg(test)]
@@ -1855,5 +1886,45 @@ mod tests {
         assert_eq!(v.news, v.seen);
         // Looking isn't activity: the session's time stays its last event's.
         assert_eq!(v.updated, 2);
+    }
+}
+
+#[cfg(test)]
+mod pr_news_tests {
+    use super::pr_news;
+    use dent_protocol::{Checks, PrState, PullRequest, Review};
+
+    fn pr(failed: u32, review: Option<Review>, state: PrState) -> PullRequest {
+        PullRequest {
+            number: 7,
+            url: "u".into(),
+            state,
+            checks: Checks {
+                passed: 1,
+                failed,
+                pending: 0,
+            },
+            review,
+        }
+    }
+
+    #[test]
+    fn only_new_trouble_and_merges_are_news() {
+        let open = pr(0, None, PrState::Open);
+        let failing = pr(1, None, PrState::Open);
+        assert!(!pr_news(None, Some(&open)));
+        assert!(pr_news(Some(&open), Some(&failing)));
+        // Still failing: said once, not again.
+        assert!(!pr_news(Some(&failing), Some(&failing)));
+        assert!(pr_news(
+            Some(&open),
+            Some(&pr(0, Some(Review::ChangesRequested), PrState::Open))
+        ));
+        assert!(!pr_news(
+            Some(&open),
+            Some(&pr(0, Some(Review::Approved), PrState::Open))
+        ));
+        assert!(pr_news(Some(&open), Some(&pr(0, None, PrState::Merged))));
+        assert!(!pr_news(Some(&open), None));
     }
 }

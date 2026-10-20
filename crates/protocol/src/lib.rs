@@ -211,6 +211,12 @@ pub enum Body {
     Notice {
         text: String,
     },
+    /// The session's pull request, said when it's first seen and whenever
+    /// its state, checks or review change; `None` when it no longer has one.
+    PullRequest {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pr: Option<PullRequest>,
+    },
     /// Where the session works in Git terms, said when it starts and
     /// whenever its branch changes.
     Workspace {
@@ -764,15 +770,63 @@ pub struct GitStatus {
     pub behind: u32,
     /// The GitHub CLI is there and signed in, so pull requests can be made.
     pub gh: bool,
-    /// The branch's open pull request, when there is one.
+    /// The branch's latest pull request, open or not, when there is one.
     #[serde(default)]
     pub pr: Option<PullRequest>,
 }
 
+/// A branch's pull request as GitHub has it.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PullRequest {
     pub number: u64,
     pub url: String,
+    #[serde(default)]
+    pub state: PrState,
+    #[serde(default)]
+    pub checks: Checks,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<Review>,
+}
+
+impl PullRequest {
+    pub fn open(&self) -> bool {
+        self.state == PrState::Open
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PrState {
+    #[default]
+    Open,
+    Merged,
+    Closed,
+}
+
+/// Its CI checks, counted.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Checks {
+    pub passed: u32,
+    pub failed: u32,
+    pub pending: u32,
+}
+
+/// What its reviewers decided, when they have.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Review {
+    Approved,
+    ChangesRequested,
+}
+
+/// What of a pull request to brief the agent on.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrBrief {
+    /// The failing checks, with the end of their logs.
+    Checks,
+    /// The review's requested changes and comments on lines.
+    Review,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -1054,6 +1108,12 @@ pub enum Request {
     GitStatus {
         session: SessionId,
     },
+    /// What the agent needs to fix a pull request's failing checks or
+    /// answer its review, as a message to send it.
+    PrBrief {
+        session: SessionId,
+        about: PrBrief,
+    },
     /// Commit, push, open a pull request or pull, in the session's folder.
     /// A commit with no `message` gets one written from the diff.
     Git {
@@ -1205,6 +1265,9 @@ pub enum Reply {
     /// `None` when the session's folder isn't in a Git repository.
     GitStatus {
         status: Option<GitStatus>,
+    },
+    PrBrief {
+        text: String,
     },
     /// A Git action done: what happened, in a line, and the pull request's
     /// address when there is one.

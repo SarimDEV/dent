@@ -2173,6 +2173,7 @@ impl Session {
             let (d, id, cwd) = (self.d.clone(), self.id.clone(), self.cwd.clone());
             tokio::spawn(async move {
                 d.note_workspace(&id, &cwd).await;
+                d.note_pr(&id, &cwd).await;
                 if let Err(e) = d.title_session(&id, false).await {
                     eprintln!("dent-daemon: {id}: couldn't title it: {e:#}");
                 }

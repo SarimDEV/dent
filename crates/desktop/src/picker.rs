@@ -201,7 +201,7 @@ impl Dent {
                 Some("A scratch folder, ~/dent/scratch".into()),
                 d.project.is_none(),
                 act(Box::new(|this, _, _| {
-                    this.defaults.project = None;
+                    this.set_project(None);
                 })),
             ));
         }
@@ -409,7 +409,7 @@ impl Dent {
             },
             Waiting::Projects,
         );
-        self.defaults.project = Some(path.to_string());
+        self.set_project(Some(path.to_string()));
     }
 
     /// Take a project off the list, or put it back (Undo).
@@ -425,7 +425,7 @@ impl Dent {
             // Gone from the list now, not when the daemon answers.
             self.projects.retain(|p| p.path != path);
             if self.defaults.project.as_deref() == Some(path) {
-                self.defaults.project = None;
+                self.set_project(None);
             }
             let name = crate::app::Dent::project_name(path);
             self.toast(

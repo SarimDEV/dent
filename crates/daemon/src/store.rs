@@ -136,6 +136,17 @@ impl Store {
         Ok(())
     }
 
+    /// The sessions not closed: their ids and folders.
+    pub fn open_sessions(&self) -> Result<Vec<(String, String)>> {
+        let mut st = self
+            .db
+            .prepare("SELECT id, cwd FROM sessions WHERE closed = 0 ORDER BY updated DESC")?;
+        let rows = st
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     pub fn sessions(&self) -> Result<Vec<Row>> {
         let mut st = self.db.prepare(
             "SELECT id, cwd, model, permission, agent_session, status, proc, proc_off, updated

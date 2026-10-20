@@ -88,6 +88,7 @@ fn main() -> Result<()> {
             d.paths.state.display()
         );
         d.restore().await?;
+        d.watch_prs();
         {
             let d = d.clone();
             tokio::spawn(async move {

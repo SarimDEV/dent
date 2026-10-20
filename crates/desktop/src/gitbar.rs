@@ -1,14 +1,14 @@
 //! The session header's Git button: the one next step for its branch
 //! (commit, push, open a pull request, pull), from where the branch stands.
 
-use dent_protocol::{GitAction, GitStatus};
+use dent_protocol::{GitAction, GitStatus, PrBrief, PrState, PullRequest, Review};
 
 /// What the button does when pressed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Press {
     Run(GitAction),
-    /// Open the branch's pull request.
-    Open(String),
+    /// Send the agent what it needs about the pull request.
+    Brief(PrBrief),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -25,7 +25,8 @@ pub fn quick(st: &GitStatus) -> Option<Quick> {
     use GitAction as A;
     let branch = st.branch.as_deref()?;
     let on_default = st.default_branch.as_deref() == Some(branch);
-    let pr_open = st.pr.is_some();
+    let open_pr = st.pr.as_ref().filter(|p| p.open());
+    let pr_open = open_pr.is_some();
     // A pull request for a branch that isn't the default, when one can be
     // made and there isn't one already.
     let can_pr = st.gh && st.remote && !on_default && !pr_open;
@@ -101,12 +102,63 @@ pub fn quick(st: &GitStatus) -> Option<Quick> {
             )
         };
     }
-    st.pr.as_ref().map(|pr| Quick {
-        label: format!("PR #{}", pr.number),
-        icon: "git-pull-request",
-        press: Some(Press::Open(pr.url.clone())),
-        tip: "Open the pull request".into(),
+    // Nothing of yours to send: what the pull request needs, if anything.
+    let pr = open_pr?;
+    if pr.checks.failed > 0 {
+        return Some(Quick {
+            label: "Fix checks".into(),
+            icon: "wrench",
+            press: Some(Press::Brief(PrBrief::Checks)),
+            tip: format!(
+                "Send the agent the failing check{} on #{} and the end of the log",
+                plural(pr.checks.failed),
+                pr.number
+            ),
+        });
+    }
+    (pr.review == Some(Review::ChangesRequested)).then(|| Quick {
+        label: "Address review".into(),
+        icon: "message-square",
+        press: Some(Press::Brief(PrBrief::Review)),
+        tip: format!(
+            "Send the agent the review on #{} and its comments",
+            pr.number
+        ),
     })
+}
+
+/// A pull request's state in a few words, the most pressing first.
+pub fn pr_words(pr: &PullRequest) -> &'static str {
+    match pr.state {
+        PrState::Merged => "Merged",
+        PrState::Closed => "Closed",
+        PrState::Open if pr.checks.failed > 0 => "Checks failing",
+        PrState::Open if pr.review == Some(Review::ChangesRequested) => "Changes requested",
+        PrState::Open if pr.checks.pending > 0 => "Checks running",
+        PrState::Open if pr.review == Some(Review::Approved) => "Approved",
+        PrState::Open if pr.checks.passed > 0 => "Checks passed",
+        PrState::Open => "Open",
+    }
+}
+
+/// How a pull request's state is marked: needs you, fine, running, or done.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Tone {
+    Trouble,
+    Good,
+    Running,
+    Merged,
+    Closed,
+}
+
+pub fn pr_tone(pr: &PullRequest) -> Tone {
+    match pr.state {
+        PrState::Merged => Tone::Merged,
+        PrState::Closed => Tone::Closed,
+        _ if pr.checks.failed > 0 || pr.review == Some(Review::ChangesRequested) => Tone::Trouble,
+        _ if pr.checks.pending > 0 => Tone::Running,
+        _ => Tone::Good,
+    }
 }
 
 /// The button's words while an action runs.
@@ -131,7 +183,6 @@ fn plural(n: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dent_protocol::PullRequest;
 
     fn st() -> GitStatus {
         GitStatus {
@@ -172,13 +223,31 @@ mod tests {
         s.pr = Some(PullRequest {
             number: 7,
             url: "https://example.com/7".into(),
+            state: PrState::Open,
+            checks: Default::default(),
+            review: None,
         });
         assert_eq!(label(&s).as_deref(), Some("Push"));
         s.ahead = 0;
         s.upstream = true;
-        let q = quick(&s).unwrap();
-        assert_eq!(q.label, "PR #7");
-        assert_eq!(q.press, Some(Press::Open("https://example.com/7".into())));
+        // Pushed, its pull request fine: nothing to do here.
+        assert_eq!(quick(&s), None);
+        // Failing checks, then a review asking for changes: the agent hears.
+        s.pr.as_mut().unwrap().checks.failed = 1;
+        assert_eq!(
+            quick(&s).unwrap().press,
+            Some(Press::Brief(PrBrief::Checks))
+        );
+        s.pr.as_mut().unwrap().checks.failed = 0;
+        s.pr.as_mut().unwrap().review = Some(Review::ChangesRequested);
+        assert_eq!(label(&s).as_deref(), Some("Address review"));
+        // Merged: a new commit goes up for a new pull request.
+        let pr = s.pr.as_mut().unwrap();
+        pr.state = PrState::Merged;
+        pr.review = None;
+        s.ahead = 1;
+        assert_eq!(label(&s).as_deref(), Some("Push & PR"));
+        assert_eq!(pr_words(s.pr.as_ref().unwrap()), "Merged");
     }
 
     #[test]
