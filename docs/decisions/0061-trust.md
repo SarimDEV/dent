@@ -1,6 +1,6 @@
 # 0061. Trust: a pinned key from pairing, or a strict live Tailscale check; only authenticated removal
 
-Status: proposed (2026-10-20) · confirmed by [R-B1–B9](../remote-tests.md#b-trust-and-identity) · Builds on [0033](0033-direct-websocket-hub-on-hold.md), [spike 05](../spikes/05-direct-links.md) · Plan: [remote-plan.md](../remote-plan.md)
+Status: proposed (2026-10-20) · R-B1 and R-B2 passed ([spike 10](../spikes/10-tailscale-trust.md)); still to confirm: [R-B3–B9](../remote-tests.md#b-trust-and-identity) · Builds on [0033](0033-direct-websocket-hub-on-hold.md), [spike 05](../spikes/05-direct-links.md) · Plan: [remote-plan.md](../remote-plan.md)
 
 ## Decision
 
@@ -20,7 +20,7 @@ Checked live, on every connection, and never saved as trust. All of these must h
 - The connection arrived on the Tailscale interface, and its source address is one Tailscale lists as a peer. Never loopback: Serve, Funnel and SSH forwards arrive from 127.0.0.1.
 - `whois` for that address succeeds through Tailscale's **LocalAPI**:
   - on Linux, the tailscaled socket;
-  - on macOS, the standalone app's LocalAPI.
+  - on macOS, the standalone app's LocalAPI on `127.0.0.1`, with the port from `/Library/Tailscale/ipnport` and the token from `sameuserproof-<port>`. Only admin users can read that token ([spike 10](../spikes/10-tailscale-trust.md)).
 
   The CLI is never spawned on a connection path. Where the LocalAPI isn't reachable (for example, the App Store build's sandbox), account trust is unavailable and pairing is offered.
 - The peer is owned by a user, not by tags. A tagged node has no user, and two tagged nodes must never compare as the same account.
