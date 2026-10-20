@@ -1,6 +1,6 @@
 # 0064. Moving a session: a new id on the target, a guarded move, the real transcript, git in a bundle
 
-Status: proposed (2026-10-20) · confirmed by [R-D1–D5](../remote-tests.md#d-moving-sessions) · Supersedes the steps in [daemon.md](../daemon.md#moving-sessions-between-machines) · Plan: [remote-plan.md](../remote-plan.md)
+Status: proposed (2026-10-20) · R-D1 passed ([spike 09](../spikes/09-moving-sessions.md)); still to confirm: [R-D2–D5](../remote-tests.md#d-moving-sessions) · Supersedes the steps in [daemon.md](../daemon.md#moving-sessions-between-machines) · Plan: [remote-plan.md](../remote-plan.md)
 
 ## Decision
 
@@ -41,7 +41,7 @@ Each daemon numbers its own events and machines share nothing ([0058](0058-indep
 
 Read-only; nothing stops. It checks:
 - the target daemon's version and capabilities;
-- the target's agent CLI is at least the source's version (or the versions R-D1 proves safe);
+- the target's agent CLI is inside the driver's tested version range. Older-from-newer resumed fine in spike 09, so this is a range check with a warning, not "target ≥ source";
 - the secrets, tools and MCP servers the session used are present on the target;
 - the repository can be reached on the target, and the branch hasn't diverged or been checked out elsewhere there;
 - there are no nested repositories or dirty submodules;
@@ -68,7 +68,7 @@ In this order:
 
 ### Resuming
 
-`--resume` from the new worktree, with a first message naming the move and the old and new paths. If resume fails, the session starts fresh with a summary built from dent's event log. That log has tool calls, not just text. The session says so, and records the delivery so a retry never sends the history twice.
+The transcript is re-keyed to the new session's agent id, then `--resume` runs from the new worktree. The first message always names the move and the old and new roots, and says the old ones don't exist here. Without it, a moved agent reaches for the old paths first ([spike 09](../spikes/09-moving-sessions.md)). If resume fails, the session starts fresh with a summary built from dent's event log. That log has tool calls, not just text. The session says so, and records the delivery so a retry never sends the history twice.
 
 ### What doesn't move
 

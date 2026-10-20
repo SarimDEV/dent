@@ -74,7 +74,7 @@ Tests marked **(owner)** need the owner's hands: the Mac's lid, the Mac's Wi-Fi,
 | R-D2 | Git snapshot | Worktree with commits, staged edits, unstaged edits, untracked files, a deleted file, a rename, a mode change, a binary and a force-added ignored file; pack on studio and apply on the VM | `git status` and `git diff` on the VM match the source, except that staged becomes unstaged (and is noted). The bundle excludes what the VM's origin already has |
 | R-D3 | Interrupted at every step | Kill the source daemon, the target daemon or the link at each step in [0064](decisions/0064-moving-sessions.md#interruption-points) | Exactly one live copy every time. A retry with the same move id finishes; Continue here releases the source with its warning |
 | R-D4 | Refusals | Target branch diverged; branch checked out elsewhere on the target; a nested repository; a dirty submodule; bundle over the cap | Each is refused before anything stops, with what to do |
-| R-D5 | A real move mid-task | Start a multi-step task on studio, move it to the VM after the first turn, and let it finish there | The work finishes on the VM with no repeated steps. The tombstone on studio links to it |
+| R-D5 | A real move mid-task | Start a multi-step task on studio, move it to the VM after the first turn, and let it finish there. Then move a session between two folders that both exist on one machine | The work finishes on the VM with no repeated steps. The tombstone on studio links to it. In the same-machine move, nothing touches the old folder |
 
 ## E. Install, service and updates
 

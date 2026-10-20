@@ -12,3 +12,4 @@ Each spike is a small crate under `spikes/` plus a findings note here.
 | 06 | [The session holder surviving a daemon upgrade](06-session-holder.md) | Done |
 | 07 | [The client core built for iOS and WebAssembly, and dent-push](07-client-core.md) | Done |
 | 08 | [Desktop concepts: the inbox, starting by typing, and the viewer](08-desktop-concepts.md) | Done |
+| 09 | [Does a Claude session resume on another machine? (remote stage 0, R-D1)](09-moving-sessions.md) | Done |
