@@ -1418,6 +1418,8 @@ impl Dent {
                     .flex_1()
                     .min_h_0()
                     .overflow_scroll()
+                    // A swipe pans one way at a time, as `axis_lock`.
+                    .restrict_scroll_to_axis()
                     .p(px(space::S6))
                     .flex()
                     .when(!actual, |d| d.items_center().justify_center())
@@ -1814,11 +1816,17 @@ impl Dent {
                                         div()
                                             .relative()
                                             .size_full()
+                                            .child(axis_lock(
+                                                lines.clone(),
+                                                self.diff_side.clone(),
+                                                self.swipe.clone(),
+                                            ))
                                             .child(
                                                 div()
                                                     .id("diff")
                                                     .size_full()
                                                     .overflow_x_scroll()
+                                                    .track_scroll(&self.diff_side)
                                                     .child(
                                                         div()
                                                             .h_full()
@@ -2006,11 +2014,17 @@ impl Dent {
                     .relative()
                     .flex_1()
                     .min_h_0()
+                    .child(axis_lock(
+                        scroll.clone(),
+                        self.text_side.clone(),
+                        self.swipe.clone(),
+                    ))
                     .child(
                         div()
                             .id(SharedString::from(format!("text-{id}")))
                             .size_full()
                             .overflow_x_scroll()
+                            .track_scroll(&self.text_side)
                             .child(
                                 div()
                                     .h_full()
@@ -2660,3 +2674,51 @@ const TAB_STRIP_CHROME: f32 = 56.;
 const TAB_CHROME: f32 = 56.;
 /// About how wide a letter of a tab's name is.
 const TAB_LETTER: f32 = 7.;
+
+/// One swipe moves a list nested in a sideways scroll along one axis.
+/// GPUI hands every scroller under the pointer the whole wheel event, so the
+/// list took a diagonal swipe's y while the scroll around it took its x:
+/// scrolling down drifted right. Like macOS scroll views and VS Code, the
+/// swipe locks to the axis it starts along and only unlocks once it clearly
+/// turns; a mouse wheel moves whichever way it moved most. Laid under what it
+/// covers so its capture handler runs first, it takes the wheel from both
+/// scrollers and moves them itself.
+fn axis_lock(
+    lines: ListState,
+    side: ScrollHandle,
+    swipe: Rc<std::cell::RefCell<OngoingScroll>>,
+) -> impl IntoElement {
+    canvas(
+        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+        move |_, hitbox, window, _| {
+            window.on_mouse_event(move |e: &ScrollWheelEvent, phase, window, cx| {
+                if phase != DispatchPhase::Capture || !hitbox.should_handle_scroll(window) {
+                    return;
+                }
+                cx.stop_propagation();
+                let mut d = e.delta.pixel_delta(window.line_height());
+                if e.delta.precise() {
+                    swipe.borrow_mut().filter(&mut d, e.touch_phase);
+                } else if d.x.abs() > d.y.abs() {
+                    d.y = px(0.);
+                } else {
+                    d.x = px(0.);
+                }
+                if d.y != px(0.) {
+                    lines.scroll_by(-d.y);
+                }
+                if d.x != px(0.) {
+                    let (o, max) = (side.offset(), side.max_offset());
+                    side.set_offset(point((o.x + d.x).clamp(-max.x, px(0.)), o.y));
+                }
+                if d != Point::default() {
+                    window.refresh();
+                }
+            });
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
