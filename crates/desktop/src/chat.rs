@@ -4125,34 +4125,37 @@ impl Dent {
             };
             self.chip(Menu::Pickup, "square-terminal", label, true, cx)
         });
-        // Two lines, each its own kind of choice, each wrapping on its own:
-        // where it runs (project, worktree, branch; terminal sessions to
-        // pick up at the end), then how (model, permissions, effort). One
-        // line of everything broke wherever the width ran out.
-        let row = || div().flex().flex_wrap().items_center().gap(px(space::S1));
-        let place = row()
-            .child(self.chip(Menu::Project, "folder", &project, d.project.is_none(), cx))
-            .children(self.workspace_chips(cx))
-            // Last, at the line's end: it wraps with the rest and keeps its
-            // whole label.
-            .children(pickup.map(|p| div().flex_none().ml_auto().child(p)));
-        let how = row()
-            .child(self.chip(Menu::Model, "claude", &model, false, cx))
-            .child(self.chip(Menu::Permission, "shield", d.permission.label(), false, cx))
-            .child(self.chip(
-                Menu::Effort,
-                "gauge",
-                effort_label(d.effort.as_deref()),
-                false,
-                cx,
-            ));
-        let chips = div()
-            .flex()
-            .flex_col()
-            .gap(px(space::S1))
-            .mx(px(-space::S2))
-            .child(place)
-            .child(how);
+        // How it runs sits in the box, as in a session's composer: words
+        // give way (model's "Default ·", effort's, then permission's) before
+        // the row ever wraps; each chip keeps its icon and says itself on
+        // hover. Where it runs is a tray tucked under the box, one line.
+        let column = self.chat_w.min(size::COLUMN + space::S8 * 2.) - space::S8 * 2.;
+        let room = column - space::S4 * 2. + space::S2 - size::CONTROL - space::S1 - START_W;
+        let fit = fit_footer(
+            room,
+            [
+                (
+                    model.clone(),
+                    model.trim_start_matches("Default · ").to_string(),
+                ),
+                (d.permission.label().to_string(), String::new()),
+                (
+                    effort_label(d.effort.as_deref()).to_string(),
+                    match d.effort.as_deref() {
+                        None => "Effort".to_string(),
+                        e => effort_name(e).to_string(),
+                    },
+                ),
+            ],
+            false,
+            "",
+        );
+        let how = [
+            self.chip(Menu::Model, "claude", &fit.labels[0], false, cx),
+            self.chip(Menu::Permission, "shield", &fit.labels[1], false, cx),
+            self.chip(Menu::Effort, "gauge", &fit.labels[2], false, cx),
+        ];
+        let tray = self.where_tray(&project, d.project.is_none(), pickup, column, cx);
         let ready = if self.creating() {
             Ready::No("Starting the session…")
         } else if empty {
@@ -4256,9 +4259,11 @@ impl Dent {
                                 div()
                                     .flex()
                                     .items_center()
-                                    .justify_between()
+                                    .gap(px(space::S1))
                                     .ml(px(-space::S2))
                                     .child(self.attach_button(cx))
+                                    .children(how.into_iter().map(|c| keep(true, c)))
+                                    .child(div().flex_1())
                                     .child(start),
                             )
                             .child(probe(&self.probes, "starter"))
@@ -4281,7 +4286,7 @@ impl Dent {
                         div()
                             .w_full()
                             .relative()
-                            .child(chips)
+                            .child(tray)
                             .child(probe(&self.probes, "ambient-chips")),
                     ),
             )
@@ -4291,9 +4296,78 @@ impl Dent {
             .into_any_element()
     }
 
+    /// Where the session runs, in a tray tucked under the box: the project,
+    /// in a repository the worktree and the branch it starts from, and the
+    /// terminal sessions to pick up at the end. One line at any width: the
+    /// pick-up and the worktree give up their words first, then the branch
+    /// gives up letters.
+    fn where_tray(
+        &mut self,
+        project: &str,
+        no_project: bool,
+        pickup: Option<AnyElement>,
+        column: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.t;
+        let text = |s: &str| s.chars().count() as f32 * 7.2 + 52.;
+        let room = column - space::S4 * 2. - space::S2 * 2.;
+        let pickup_w = if pickup.is_some() {
+            text("Pick up from terminal")
+        } else {
+            0.
+        };
+        let fresh = self.new_worktree();
+        let full = text(project)
+            + if self.repo_now().is_some() {
+                text("Current checkout") + if fresh { text("from main") } else { 0. }
+            } else {
+                0.
+            };
+        // Least loss first: the pick-up's words, then the worktree's.
+        let pickup_bare = full + pickup_w > room;
+        let worktree_bare = pickup_bare && full + 44. > room;
+        let pickup = pickup.map(|p| div().flex_none().ml_auto().child(p).into_any_element());
+        let pickup = if pickup_bare {
+            (!self.recent.is_empty()).then(|| {
+                div()
+                    .flex_none()
+                    .ml_auto()
+                    .child(self.chip(Menu::Pickup, "square-terminal", "", true, cx))
+                    .into_any_element()
+            })
+        } else {
+            pickup
+        };
+        div()
+            .mx(px(space::S4))
+            .mt(px(-space::S3))
+            .px(px(space::S2))
+            .pt(px(space::S1))
+            .pb(px(space::S1))
+            .flex()
+            .items_center()
+            .gap(px(space::S1))
+            .min_w_0()
+            .overflow_hidden()
+            .bg(t.tint())
+            .border_1()
+            .border_t_0()
+            .border_color(t.hairline)
+            .rounded_b(px(radius::LG))
+            .child(keep(
+                true,
+                self.chip(Menu::Project, "folder", project, no_project, cx),
+            ))
+            .children(self.workspace_chips(worktree_bare, cx))
+            .children(pickup)
+            .into_any_element()
+    }
+
     /// In a repository: where the session works, and for a new worktree
-    /// the branch it starts from (decision 0053).
-    fn workspace_chips(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// the branch it starts from (decision 0053). `bare`: the worktree chip
+    /// is its icon alone; the branch chip always takes what room is left.
+    fn workspace_chips(&mut self, bare: bool, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let Some(repo) = self.repo_now().cloned() else {
             return Vec::new();
         };
@@ -4315,15 +4389,28 @@ impl Dent {
             None if self.new_worktree() => ("git-branch-plus", "New worktree".to_string()),
             None => ("folder-git", "Current checkout".to_string()),
         };
-        v.push(self.chip(Menu::Workspace, icon_name, &label, false, cx));
+        let label = if bare { String::new() } else { label };
+        v.push(keep(
+            true,
+            self.chip(Menu::Workspace, icon_name, &label, false, cx),
+        ));
         if self.new_worktree() {
             let from = d
                 .base
                 .clone()
                 .or(repo.current.clone())
                 .unwrap_or_else(|| "HEAD".into());
-            let from = crate::viewer::middle_ellipsis(&from, CHIP_BRANCH);
-            v.push(self.chip(Menu::Base, "git-branch", &format!("from {from}"), false, cx));
+            // Tight, "from" goes (the icon says it's a branch) and the name
+            // gives up letters from the middle, where long names differ least.
+            let label = if bare {
+                crate::viewer::middle_ellipsis(&from, 12)
+            } else {
+                format!(
+                    "from {}",
+                    crate::viewer::middle_ellipsis(&from, CHIP_BRANCH)
+                )
+            };
+            v.push(self.chip(Menu::Base, "git-branch", &label, false, cx));
         }
         v
     }
@@ -6296,3 +6383,6 @@ const CRAMPED: f32 = 480.;
 /// from the middle (where long names differ least).
 const CHIP_BRANCH: usize = 28;
 const MENU_BRANCH: usize = 40;
+
+/// About how wide the new-session page's Start button is, with its key.
+const START_W: f32 = 88.;
