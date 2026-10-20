@@ -2095,6 +2095,7 @@ impl Dent {
                                 .max_h(px(320.))
                                 .id(SharedString::from(format!("ask-{ask}")))
                                 .overflow_y_scroll()
+                                .restrict_scroll_to_axis()
                                 .child(code_lines(
                                     format!("ask-text-{ask}"),
                                     command.clone(),
@@ -3859,6 +3860,7 @@ impl Dent {
                 .gap(px(space::S1H))
                 .max_h(px(rows * size::CONTROL_SM + (rows - 1.) * space::S1H))
                 .overflow_y_scroll()
+                .restrict_scroll_to_axis()
                 .children(chips)
                 .into_any_element()
         })
@@ -4130,6 +4132,7 @@ impl Dent {
                             .flex_col()
                             .max_h(px(size::ROW * 8.))
                             .overflow_y_scroll()
+                            .restrict_scroll_to_axis()
                             .track_scroll(&self.slash_scroll)
                             .children(rows),
                     )
@@ -5124,6 +5127,7 @@ impl Dent {
                     // The field above takes its share of the room.
                     .max_h(px(if which.searches() { max_h - 40. } else { max_h }))
                     .overflow_y_scroll()
+                    .restrict_scroll_to_axis()
                     .track_scroll(&self.menu_scroll)
                     .py(px(space::S1))
                     .flex()

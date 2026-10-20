@@ -43,6 +43,7 @@ mod select;
 mod shell;
 mod sidebar;
 mod skills;
+mod swipe;
 mod switcher;
 mod theme;
 mod ui;

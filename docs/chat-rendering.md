@@ -56,7 +56,7 @@ The reading column is 720 pt wide at most and shrinks with the window down to 36
   - Column alignment from the Markdown is honoured.
   - **Tall tables scroll inside the chat.** Past 13 body rows, a table shows its header and 10½ rows. The half row peeking out signals more, along with an always-visible scrollbar, a fade on whichever edge has more, and a row count in the footer.
   - The header stays put while the body scrolls. Only the rows in view are drawn, so a 5,000-row table costs no more than a short one once it has finished.
-  - **Scroll handoff:** the wheel scrolls the table until it reaches an end, then carries on to the chat. A sideways swipe moves wide content and never the chat. Vertical wheel motion is never turned into sideways scrolling.
+  - **Scroll handoff:** the wheel scrolls the table until it reaches an end, then carries on to the chat. A sideways swipe moves wide content and never the chat, and a swipe locks to the axis it starts along, so a diagonal one doesn't move both ([0057](decisions/0057-one-swipe-one-axis.md)). Vertical wheel motion is never turned into sideways scrolling.
   - **While rows stream in,** a capped table keeps its height and the chat below it never moves. The count in the footer goes up.
   - **Open** shows the whole table in a side panel, with every row reachable. In-app search reaches rows the cap keeps out of view, and scrolls both the chat and the table to the match.
 - **Code never wraps.** Long lines scroll inside the block.

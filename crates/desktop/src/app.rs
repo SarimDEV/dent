@@ -944,11 +944,9 @@ pub struct Dent {
     pub diff_list: ListState,
     /// A text file's lines, and which file and version they're for.
     pub text_list: ListState,
-    /// The sideways scroll around each of those lists, and the swipe
-    /// moving them, locked to one axis (`viewer::axis_lock`).
+    /// The sideways scroll around each of those lists (`swipe::lock`).
     pub diff_side: ScrollHandle,
     pub text_side: ScrollHandle,
-    pub swipe: Rc<std::cell::RefCell<OngoingScroll>>,
     pub text_key: Option<(&'static str, usize, usize)>,
     /// The line a link pointed at in each text file.
     pub marked_line: HashMap<&'static str, u32>,
@@ -1559,7 +1557,6 @@ impl Dent {
             text_list: ListState::new(0, ListAlignment::Top, px(400.)),
             diff_side: ScrollHandle::new(),
             text_side: ScrollHandle::new(),
-            swipe: Rc::default(),
             text_key: None,
             marked_line: HashMap::new(),
             aside_scroll: ScrollHandle::new(),

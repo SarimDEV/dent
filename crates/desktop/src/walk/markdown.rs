@@ -71,6 +71,15 @@ pub(super) fn rich_reply() -> Vec<(f32, Act)> {
         ),
         (0.3, Shot("table")),
         (0.1, Call(save_scroll)),
+        (0.1, Swipe("md-table-body", -300., 40.)),
+        (
+            0.2,
+            Until(
+                "a sideways swipe over a table moves neither it nor the chat up or down",
+                |d, _| table_top(d) < 0.5 && chat_still(d),
+                1.,
+            ),
+        ),
         (0.1, Wheel("md-table-body", -90.)),
         (0.1, Wheel("md-table-body", -90.)),
         (
