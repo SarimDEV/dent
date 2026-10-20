@@ -4125,13 +4125,18 @@ impl Dent {
             };
             self.chip(Menu::Pickup, "square-terminal", label, true, cx)
         });
-        let chips = div()
-            .flex()
-            .flex_wrap()
-            .gap(px(space::S1))
-            .mx(px(-space::S2))
+        // Two lines, each its own kind of choice, each wrapping on its own:
+        // where it runs (project, worktree, branch; terminal sessions to
+        // pick up at the end), then how (model, permissions, effort). One
+        // line of everything broke wherever the width ran out.
+        let row = || div().flex().flex_wrap().items_center().gap(px(space::S1));
+        let place = row()
             .child(self.chip(Menu::Project, "folder", &project, d.project.is_none(), cx))
             .children(self.workspace_chips(cx))
+            // Last, at the line's end: it wraps with the rest and keeps its
+            // whole label.
+            .children(pickup.map(|p| div().flex_none().ml_auto().child(p)));
+        let how = row()
             .child(self.chip(Menu::Model, "claude", &model, false, cx))
             .child(self.chip(Menu::Permission, "shield", d.permission.label(), false, cx))
             .child(self.chip(
@@ -4141,9 +4146,13 @@ impl Dent {
                 false,
                 cx,
             ));
-        // Last, at the row's end: it wraps with the rest and keeps its
-        // whole label.
-        let chips = chips.children(pickup.map(|p| div().flex_none().ml_auto().child(p)));
+        let chips = div()
+            .flex()
+            .flex_col()
+            .gap(px(space::S1))
+            .mx(px(-space::S2))
+            .child(place)
+            .child(how);
         let ready = if self.creating() {
             Ready::No("Starting the session…")
         } else if empty {
@@ -4270,7 +4279,7 @@ impl Dent {
                     )
                     .child(
                         div()
-                            .self_start()
+                            .w_full()
                             .relative()
                             .child(chips)
                             .child(probe(&self.probes, "ambient-chips")),
