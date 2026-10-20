@@ -1,6 +1,8 @@
 # Hub, sync and networking
 
 > **On hold** ([0033](decisions/0033-direct-websocket-hub-on-hold.md)). For now clients connect straight to each daemon over Tailscale or the LAN. This file describes where the hub fits once it returns.
+>
+> **Superseded in part (2026-10-20):** machines share no state ([0058](decisions/0058-independent-machines.md)), so the "shared state" rows below no longer apply, and prompts for an away machine wait on the device instead of being refused ([0063](decisions/0063-queued-prompts.md)). The plan for many machines is [remote-plan.md](remote-plan.md).
 
 **Three ways to connect.** The first two work today, without the hub ([spike 05](spikes/05-direct-links.md)):
 1. **LAN:** found with Bonjour, paired once with a 6-digit code shown on the other machine.

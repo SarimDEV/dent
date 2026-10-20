@@ -153,6 +153,8 @@ A goal is a session told to keep working until a stated outcome is met, using ea
 
 ## Moving sessions between machines
 
+> Being replaced by [0064](decisions/0064-moving-sessions.md) (proposed): a new id on the target, a guarded move, and git as a snapshot commit in a bundle rather than a patch.
+
 Any session can move to another machine, for example from the laptop to the EC2 box before closing the lid.
 
 1. The source daemon pauses the session at a turn boundary.

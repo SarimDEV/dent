@@ -8,7 +8,7 @@ Everything in this spec gets built; the order only decides what you can use dail
    - Exit: you use it instead of the Claude Code terminal for a week.
 3. **More agents and status.** Codex and ACP drivers, usage limits in the status bar, goals with budgets and auto-resume, multiple accounts, overview board, desktop notifications, approvals.
    - Exit: both agents run side by side with limits always visible.
-4. **Many machines.** Direct connections over Tailscale and the LAN, device pairing, shared state, client cache, projects, quick capture with project routing, environment and secrets, search, honest liveness, sharing links, the CLI and MCP server.
+4. **Many machines** (detailed in [remote-plan.md](remote-plan.md); stage 0 spikes come first). Direct connections over Tailscale and the LAN, device pairing, shared state, client cache, projects, quick capture with project routing, environment and secrets, search, honest liveness, sharing links, the CLI and MCP server.
    - Exit: from a coffee shop on Tailscale, the laptop drives agents on the Mac server, and a restart of anything loses nothing.
    - The hub (sign-in, encryption of shared state, relays) is on hold ([0033](decisions/0033-direct-websocket-hub-on-hold.md)). Phone push doesn't wait for it: dent-push ships with the iPhone phase ([0035](decisions/0035-dent-push.md)).
 5. **Review.** Diffs, staging, small edits, commit and push, inline comments sent to the agent, PR and CI status, auto-archive.
