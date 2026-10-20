@@ -73,6 +73,7 @@ async fn main() -> Result<()> {
                 spike_link::edges::run().await
             }
         },
+        Some("remote") => spike_link::remote::run(&args[1..]).await,
         Some("tailscale") => {
             use tailnet::Tailnet;
             let t = tailnet::Cli;

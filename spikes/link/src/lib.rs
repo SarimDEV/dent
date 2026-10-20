@@ -13,4 +13,5 @@ pub mod info;
 pub mod pair;
 pub mod proto;
 pub mod proxy;
+pub mod remote;
 pub mod tailnet;

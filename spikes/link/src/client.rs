@@ -280,6 +280,69 @@ pub struct Tally {
     pub dups: u64,
     pub gaps: u64,
     pub reconnects: u64,
+    /// Connection attempts, successful or not.
+    pub dials: u64,
+}
+
+/// How a follower judges liveness and backs off. `spike()` is spike 05's
+/// numbers; `plan()` is decision 0062's.
+#[derive(Debug, Clone)]
+pub struct Rules {
+    pub name: &'static str,
+    /// Send a ping this often.
+    pub ping: Duration,
+    /// No frame of any kind for this long tears the link down.
+    pub silence: Duration,
+    /// The first waits after a drop, in order.
+    pub quick: Vec<Duration>,
+    /// Then doubling from the last quick wait up to this, each wait random
+    /// in the upper half of its step (no jitter when `jitter` is off).
+    pub cap: Duration,
+    pub jitter: bool,
+    /// Only a link that stayed up this long resets the ladder.
+    pub reset_after: Duration,
+}
+
+impl Rules {
+    pub fn spike() -> Self {
+        Rules {
+            name: "spike",
+            ping: Duration::from_secs(1),
+            silence: SILENCE,
+            quick: vec![Duration::from_millis(100)],
+            cap: Duration::from_secs(2),
+            jitter: false,
+            reset_after: Duration::ZERO,
+        }
+    }
+
+    pub fn plan() -> Self {
+        Rules {
+            name: "plan",
+            ping: Duration::from_secs(2),
+            silence: Duration::from_secs(15),
+            quick: [100, 250, 500, 1000].map(Duration::from_millis).to_vec(),
+            cap: Duration::from_secs(60),
+            jitter: true,
+            reset_after: Duration::from_secs(30),
+        }
+    }
+
+    /// The wait before attempt `n` (0-based) after a drop.
+    pub fn wait(&self, n: usize) -> Duration {
+        if let Some(d) = self.quick.get(n) {
+            return *d;
+        }
+        let last = self.quick.last().copied().unwrap_or(Duration::from_secs(1));
+        let steps = (n + 1 - self.quick.len()).min(16) as u32;
+        let ceiling = (last * 2u32.pow(steps)).min(self.cap);
+        if self.jitter {
+            let half = ceiling / 2;
+            half + half.mul_f64(rand::random::<f64>())
+        } else {
+            ceiling
+        }
+    }
 }
 
 pub type Resolve = Arc<dyn Fn() -> Vec<SocketAddr> + Send + Sync>;
@@ -300,9 +363,24 @@ pub fn follow(
     tally: Arc<Mutex<Tally>>,
     out: mpsc::UnboundedSender<Note>,
 ) -> tokio::task::JoinHandle<()> {
+    follow_with(Rules::spike(), me, key, resolve, session, after, tally, out)
+}
+
+/// [`follow`] under the given rules.
+#[allow(clippy::too_many_arguments)]
+pub fn follow_with(
+    rules: Rules,
+    me: Identity,
+    key: Vec<u8>,
+    resolve: Resolve,
+    session: String,
+    after: u64,
+    tally: Arc<Mutex<Tally>>,
+    out: mpsc::UnboundedSender<Note>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         tally.lock().await.last = after;
-        let mut backoff = Duration::from_millis(100);
+        let mut attempt = 0usize;
         let mut first = true;
         loop {
             let addrs = {
@@ -312,7 +390,14 @@ pub fn follow(
                     .unwrap_or_default()
             };
             let mut wait = None;
-            let reason = match link(&me, &key, &addrs, &session, &tally, &out, first).await {
+            tally.lock().await.dials += 1;
+            let started = std::time::Instant::now();
+            let result = link(&rules, &me, &key, &addrs, &session, &tally, &out, first).await;
+            // A link that stayed up long enough starts the ladder again.
+            if matches!(result, Ok(Ended::Lost(_))) && started.elapsed() >= rules.reset_after {
+                attempt = 0;
+            }
+            let reason = match result {
                 Ok(Ended::Denied) => return,
                 Ok(Ended::Incompatible) => {
                     // Nothing will change until one side updates.
@@ -321,19 +406,17 @@ pub fn follow(
                 }
                 Ok(Ended::Lost(r)) => {
                     // After a goodbye it won't be back in a moment.
-                    backoff = if r.starts_with("said goodbye") {
-                        Duration::from_secs(1)
-                    } else {
-                        Duration::from_millis(100)
-                    };
+                    if r.starts_with("said goodbye") {
+                        wait = Some(Duration::from_secs(1));
+                    }
                     first = false;
                     r
                 }
                 Err(e) => format!("{e:#}"),
             };
             let _ = out.send(Note::Down { reason });
-            tokio::time::sleep(wait.unwrap_or(backoff)).await;
-            backoff = (backoff * 2).min(Duration::from_secs(2));
+            tokio::time::sleep(wait.unwrap_or_else(|| rules.wait(attempt))).await;
+            attempt += 1;
         }
     })
 }
@@ -344,7 +427,9 @@ enum Ended {
     Incompatible,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn link(
+    rules: &Rules,
     me: &Identity,
     key: &[u8],
     addrs: &[SocketAddr],
@@ -389,9 +474,10 @@ async fn link(
         .await?;
     let pinger = {
         let tx = tx.clone();
+        let every = rules.ping;
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                tokio::time::sleep(every).await;
                 if tx
                     .lock()
                     .await
@@ -405,8 +491,8 @@ async fn link(
         })
     };
     let ended = loop {
-        match tokio::time::timeout(SILENCE, rx.recv::<Down>()).await {
-            Err(_) => break Ended::Lost("silent for 3 s".into()),
+        match tokio::time::timeout(rules.silence, rx.recv::<Down>()).await {
+            Err(_) => break Ended::Lost(format!("silent for {} s", rules.silence.as_secs())),
             Ok(Err(e)) => break Ended::Lost(format!("{e:#}")),
             Ok(Ok(Down::Event(ev))) => {
                 let mut t = tally.lock().await;
