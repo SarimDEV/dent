@@ -53,14 +53,14 @@ Each stage ends with something used for real, as in [build-order.md](build-order
 
 The test rig is the owner's Mac plus `dent-linux`, a Lima VM on it. The VM is on the LAN at its own address and on the tailnet under the owner's account; [remote-tests.md](remote-tests.md#the-rig) has the details. The iPhone comes later, but every rule below is written so the phone can follow it.
 
-1. **Can a Claude session move between machines and resume?** Copy a real transcript from the Mac (Claude Code 2.1.301) to the VM (2.1.305) under a different path, then `--resume`. Then the reverse, newer to older. This decides door 7, so it runs first. (R-D1)
+1. **Can a Claude session move between machines and resume?** Copy a real transcript from the Mac (Claude Code 2.1.301) to the VM (2.1.305) under a different path, then `--resume`. Then the reverse, newer to older. This decides door 7, so it runs first. (R-D1: **done**, [spike 09](spikes/09-moving-sessions.md))
 2. **Tailscale trust for real.**
    - Read `whois` through the LocalAPI on the Mac's standalone Tailscale and on Linux.
    - Check a machine shared in from another account.
    - Check a tagged machine.
    - Check a connection arriving through `tailscale serve` from loopback.
 
-   This decides door 4. (R-B1–B4)
+   This decides door 4. (R-B1–B4: B1 and B2 **done**, [spike 10](spikes/10-tailscale-trust.md))
 3. **The link under a bad network.** Extend `spikes/link` with the new liveness, backoff and route rules, then run it between the Mac and the VM:
    - packet loss and reordering;
    - added latency;
@@ -76,7 +76,7 @@ The test rig is the owner's Mac plus `dent-linux`, a Lima VM on it. The VM is on
    - binaries, deletions, renames and file modes;
    - staged, untracked and force-added ignored files.
 
-   It must also refuse diverged branches, nested repositories and dirty submodules. (R-D2, D4)
+   It must also refuse diverged branches, nested repositories and dirty submodules. (R-D2, D4: **done**, [spike 11](spikes/11-moving-git.md))
 5. **A daemon under a service manager.**
    - A systemd user service in the VM: linger, surviving SSH logout, the agent PATH, one agent running out of memory.
    - A launcher prototype that trials an update with a failing migration and rolls back. (R-E1–E6)
