@@ -42,6 +42,8 @@ pub struct Config {
     pub agent_style: String,
     /// dent-push, for phone notifications when a reply finishes.
     pub push_url: Option<String>,
+    /// A connection is dropped after this long without hearing from it.
+    pub idle: Duration,
 }
 
 struct Session {
@@ -63,6 +65,7 @@ struct Window {
 }
 
 struct Daemon {
+    idle: Duration,
     me: Identity,
     info: std::sync::Mutex<Info>,
     state: PathBuf,
@@ -106,8 +109,8 @@ impl Drop for Slot {
     }
 }
 
-/// A connection is dropped after this long without hearing from it.
-const IDLE: Duration = Duration::from_secs(10);
+/// The default for [`Config::idle`]: spike 05's 10 s.
+pub const IDLE: Duration = Duration::from_secs(10);
 /// Time allowed from accepting a socket to knowing who it is.
 const HANDSHAKE: Duration = Duration::from_secs(5);
 /// Unauthenticated connections held at once, from one address and in all;
@@ -130,6 +133,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         proto: cfg.proto,
         pair_ttl: cfg.pair_ttl,
         agent_ms: cfg.agent_ms,
+        idle: cfg.idle,
         agent_style: cfg.agent_style.clone(),
         push: push::Push::new(cfg.push_url.clone(), &cfg.state),
         window: Mutex::new(None),
@@ -511,7 +515,7 @@ impl Daemon {
         let mut tasks = Vec::new();
         let result = loop {
             let msg = tokio::select! {
-                m = tokio::time::timeout(IDLE, rx.recv::<Up>()) => match m {
+                m = tokio::time::timeout(self.idle, rx.recv::<Up>()) => match m {
                     Ok(Ok(m)) => m,
                     Ok(Err(e)) => break Err(e),
                     Err(_) => break Ok(()),

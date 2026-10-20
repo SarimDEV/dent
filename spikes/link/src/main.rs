@@ -48,6 +48,10 @@ async fn main() -> Result<()> {
                 version: get("--version"),
                 agent_style: get("--agent-style").unwrap_or_else(|| "plain".into()),
                 push_url: get("--push-url"),
+                idle: get("--idle")
+                    .and_then(|s| s.parse().ok())
+                    .map(std::time::Duration::from_secs)
+                    .unwrap_or(daemon::IDLE),
             })
             .await
         }

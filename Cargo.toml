@@ -1,8 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "spikes/*"]
-# The phone concepts are an Xcode project, not a crate.
-exclude = ["spikes/phone-concepts"]
+# The phone concepts are an Xcode project and move-git a shell script, not crates.
+exclude = ["spikes/phone-concepts", "spikes/move-git"]
 default-members = ["crates/*"]
 
 [workspace.package]
