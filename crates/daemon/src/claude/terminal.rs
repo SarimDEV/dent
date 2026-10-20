@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use dent_protocol::{Body, Outcome, RecentSession};
 use serde_json::Value;
 
-use crate::claude::{self, wire};
+use crate::agent::{Imported, log};
+use crate::claude::wire;
 
 fn store() -> PathBuf {
     crate::paths::home().join(".claude/projects")
@@ -216,6 +217,7 @@ fn summary(path: &Path, id: &str, updated: u64) -> Option<RecentSession> {
             }
         });
     Some(RecentSession {
+        agent: "claude".into(),
         agent_session: id.to_string(),
         cwd,
         title,
@@ -248,13 +250,6 @@ fn one_line(s: &str) -> String {
     out
 }
 
-/// A terminal session's history, ready to become a dent session.
-pub struct Imported {
-    pub cwd: String,
-    pub title: String,
-    pub bodies: Vec<Body>,
-}
-
 /// Find a terminal session's transcript.
 pub fn find(agent_session: &str) -> Option<PathBuf> {
     std::fs::read_dir(store())
@@ -273,7 +268,7 @@ pub fn import(path: &Path, media: &Path) -> Option<Imported> {
     // Each prompt opens a turn; the next one, or the end, closes it.
     let mut open = false;
     // Calls that run a subagent: their result is its report, kept longer.
-    let mut reports = claude::Reports::default();
+    let mut reports = log::Reports::default();
     let close = |bodies: &mut Vec<Body>, open: &mut bool, outcome: Outcome| {
         if std::mem::take(open) {
             bodies.push(Body::TurnEnded { outcome });
@@ -384,7 +379,7 @@ pub fn import(path: &Path, media: &Path) -> Option<Imported> {
                 ..
             }) => {
                 let uuid = uuid.or_else(|| v["uuid"].as_str().map(str::to_owned));
-                bodies.extend(claude::assistant_bodies(
+                bodies.extend(log::assistant_bodies(
                     None,
                     uuid,
                     blocks,
@@ -393,12 +388,7 @@ pub fn import(path: &Path, media: &Path) -> Option<Imported> {
                 ));
             }
             Ok(wire::Inbound::ToolResults { results, .. }) => {
-                bodies.extend(claude::result_bodies(
-                    None,
-                    results,
-                    &mut reports,
-                    Some(media),
-                ));
+                bodies.extend(log::result_bodies(None, results, &mut reports, Some(media)));
             }
             _ => {}
         }
@@ -439,7 +429,7 @@ fn said(v: &Value, media: &Path, pictures: &mut usize) -> Said {
                 match p["type"].as_str() {
                     Some("text") => texts.push(s(p, "text")),
                     Some("image") => {
-                        if let Some(path) = claude::save_picture(
+                        if let Some(path) = log::save_picture(
                             &p["source"],
                             media,
                             &format!("picture-{}", *pictures + 1),
@@ -547,6 +537,56 @@ fn between<'a>(t: &'a str, open: &str, close: &str) -> Option<&'a str> {
 
 fn s(v: &Value, k: &str) -> String {
     v[k].as_str().unwrap_or_default().to_string()
+}
+
+/// The folders Claude Code has worked in from the terminal, from
+/// `~/.claude.json`, each with when it last wrote a transcript there.
+pub fn projects() -> Vec<(String, u64)> {
+    claude_projects()
+        .into_iter()
+        .map(|p| {
+            let used = terminal_used(&p);
+            (p, used)
+        })
+        .collect()
+}
+
+/// When Claude Code last wrote a transcript for a project in the terminal,
+/// in Unix milliseconds; 0 if never. It keeps them in
+/// `~/.claude/projects/<the path, every other character than a letter or
+/// digit made a dash>`.
+fn terminal_used(path: &str) -> u64 {
+    let dir: String = path
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let Ok(entries) = std::fs::read_dir(crate::paths::home().join(".claude/projects").join(dir))
+    else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+        .filter_map(|e| e.metadata().ok()?.modified().ok())
+        .filter_map(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .max()
+        .unwrap_or(0)
+}
+
+/// The project paths in `~/.claude.json`. Only the keys are read.
+fn claude_projects() -> Vec<String> {
+    let path = crate::paths::home().join(".claude.json");
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Vec::new();
+    };
+    v["projects"]
+        .as_object()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

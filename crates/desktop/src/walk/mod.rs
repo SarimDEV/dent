@@ -44,6 +44,7 @@ mod queue;
 mod real;
 mod recall;
 mod reply;
+mod setup;
 mod stills;
 mod sweep;
 mod switching;
@@ -56,7 +57,8 @@ use {
     ambient::*, attaching::*, changes::*, checks::*, common::*, composing::*, demo::*, edges::*,
     failures::*, find::*, finish::*, keys::*, look::*, markdown::*, motion::*, narration::*,
     parity::*, pickup::*, pins::*, polish::*, prs::*, queue::*, real::*, recall::*, reply::*,
-    stills::*, sweep::*, switching::*, typing::*, view::*, visuals::*, worktrees::*, zoom::*,
+    setup::*, stills::*, sweep::*, switching::*, typing::*, view::*, visuals::*, worktrees::*,
+    zoom::*,
 };
 
 type Pred = fn(&Dent, &App) -> bool;
@@ -235,6 +237,12 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("look-pr", &[look_pr]),
     ("project-defaults", &[project_defaults]),
     ("scripts", &[scripts]),
+    ("settings", &[settings]),
+    ("welcome", &[welcome]),
+    // These three need the agent set up so (walk.sh does it by name).
+    ("signed-out", &[signed_out]),
+    ("missing", &[missing]),
+    ("limited", &[limited]),
 ];
 
 /// Scenes that start on their own: no daemon, the real agent, or a

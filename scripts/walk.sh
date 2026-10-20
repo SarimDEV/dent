@@ -5,6 +5,7 @@
 #   scripts/walk.sh find+keys ...   (scenes joined with +: only what a change touched; names in crates/desktop/src/walk/mod.rs)
 #   scripts/walk.sh stills --shots DIR [--dark] [--size WxH]
 #   scripts/walk.sh pickup --shots DIR [--dark] [--size WxH]   (the new-session page with many terminal sessions)
+#   scripts/walk.sh signed-out|missing|limited [--shots DIR]   (the agent signed out, not installed, or able to do less)
 #   scripts/walk.sh finish [--shots DIR] [--dark] [--size WxH]   (thinking, background work, limits, crashes, MCP, versions, tables)
 #   scripts/walk.sh polish [--shots DIR] [--dark] [--size WxH]   (a tool's picture, thinking and call times, the sidebar's marks)
 #   scripts/walk.sh pictures [--shots DIR] [--dark] [--size WxH]   (six pictures from one group of calls, and the large view)
@@ -54,6 +55,13 @@ JSONL
     touch -t 20260101000$i "$root/home/.claude/projects/-proj/4444444$i-3333-4444-8555-666666666666.jsonl"
   done
 fi
+# Scenes about how the agent stands set it up so: signed out, not there,
+# or able to do less.
+case "$name" in
+  signed-out) export FAKE_CLAUDE_SIGNED_OUT=1 ;;
+  missing) walk_claude="$root/no-such-claude" ;;
+  limited) export DENT_CAPS_OFF="steer,stop_task,rewind,fork,mode:plan" ;;
+esac
 # A locked or sleeping screen draws no windows, so a walk would stop dead
 # with nothing to say why: say so now. While it runs, the display stays awake.
 if [[ "$(uname)" == Darwin ]]; then
@@ -99,6 +107,7 @@ case "$1 $2" in
     echo "https://github.com/walk/proj/pull/12" ;;
   "run view") echo "test footer_on_mobile ... FAILED"; echo "assertion failed: left == right" ;;
   "api "*) echo "src/footer.rs:12 reviewer: Use the theme colour here" ;;
+  "auth status") echo "github.com"; echo "  ✓ Logged in to github.com account walk (keyring)" ;;
   *) exit 1 ;;
 esac
 GH
@@ -109,7 +118,7 @@ GIT_AUTHOR_NAME=walk GIT_AUTHOR_EMAIL=walk@example.com \
 GIT_COMMITTER_NAME=walk GIT_COMMITTER_EMAIL=walk@example.com \
 DENT_STATE="$root/state" \
 DENT_HOLDER_ORPHAN_MS=10000 \
-DENT_CLAUDE="$bin/dent-fake-claude" \
+DENT_CLAUDE="${walk_claude:-$bin/dent-fake-claude}" \
 DENT_WALK_PROJECT="$root/proj" \
 DENT_WALK_OUTSIDE="$root/outside" \
 FAKE_CLAUDE_SPEED="${FAKE_CLAUDE_SPEED:-0.3}" \

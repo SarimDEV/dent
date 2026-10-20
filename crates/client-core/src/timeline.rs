@@ -14,8 +14,9 @@ pub struct Sessions {
     /// The last event applied; subscribe from here after a reconnect.
     pub last_seq: u64,
     pub list: BTreeMap<String, SessionView>,
-    /// The newest usage reading from any session, with when it arrived.
-    pub limits: Option<(Vec<Window>, u64)>,
+    /// The newest usage reading from any session of each agent (by its
+    /// id), with when it arrived.
+    pub limits: BTreeMap<String, (Vec<Window>, u64)>,
     /// Catch-up is over and what arrives is live.
     pub live: bool,
 }
@@ -620,9 +621,17 @@ impl Sessions {
         // An empty reading (an older daemon logged them) says nothing.
         if let Body::Limits { windows } = &e.body
             && !windows.is_empty()
-            && self.limits.as_ref().is_none_or(|(_, at)| *at <= e.at)
         {
-            self.limits = Some((windows.clone(), e.at));
+            let agent = self
+                .list
+                .get(&e.session)
+                .map(|s| s.agent.clone())
+                .filter(|a| !a.is_empty())
+                .unwrap_or_else(|| dent_protocol::DEFAULT_AGENT.into());
+            let newer = self.limits.get(&agent).is_none_or(|(_, at)| *at <= e.at);
+            if newer {
+                self.limits.insert(agent, (windows.clone(), e.at));
+            }
         }
         let s = self
             .list
@@ -1374,7 +1383,7 @@ mod tests {
                 windows: Vec::new(),
             },
         ]);
-        assert_eq!(s.limits.map(|(w, _)| w), Some(vec![w]));
+        assert_eq!(s.limits.get("claude").map(|(w, _)| w), Some(&vec![w]));
     }
 
     #[test]

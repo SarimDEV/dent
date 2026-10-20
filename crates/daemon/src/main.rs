@@ -5,11 +5,11 @@
 //! when it isn't running; it keeps going after they quit.
 //! `dent-daemon login-item on|off` starts it at login, or stops doing so.
 //! `dent-daemon check-transcripts [DIR] [--into STATE]` checks the import of
-//! Claude Code transcripts (see [`check`]).
+//! Claude Code transcripts (see [`claude::check`]).
 //! `dent-daemon plan-tool` serves the agent's plan tool to a session (see
 //! [`plan_tool`]).
 
-mod check;
+mod agent;
 mod claude;
 mod daemon;
 mod env;
@@ -17,6 +17,7 @@ mod escapes;
 mod git;
 mod holder;
 mod login;
+mod machine;
 mod paths;
 mod plan_tool;
 mod projects;
@@ -25,8 +26,6 @@ mod server;
 mod session;
 mod ship;
 mod store;
-mod terminal;
-mod usage;
 mod workspace;
 
 use std::os::unix::fs::PermissionsExt;
@@ -53,7 +52,7 @@ fn main() -> Result<()> {
         return login::set(on, &paths.state);
     }
     if args.first().map(String::as_str) == Some("check-transcripts") {
-        return check::run(&args[1..]);
+        return claude::check::run(&args[1..]);
     }
     if args.first().map(String::as_str) == Some("plan-tool") {
         return plan_tool::run();

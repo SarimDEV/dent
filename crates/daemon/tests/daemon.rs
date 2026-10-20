@@ -262,6 +262,7 @@ impl Client {
 
     fn create(&mut self, cwd: &str, permission: Permission, text: &str) -> String {
         match self.call(Request::Create {
+            agent: None,
             cwd: cwd.into(),
             worktree: None,
             model: None,
@@ -425,6 +426,186 @@ fn a_reply_streams_is_kept_and_catches_up_from_any_point() {
     let got = e.events.lock().unwrap().clone();
     assert!(got.iter().all(|x| x.seq > mid));
     assert_eq!(got.len(), all.iter().filter(|x| x.seq > mid).count());
+}
+
+#[test]
+fn agents_say_how_they_stand_and_sessions_keep_theirs() {
+    let w = World::new(&[]);
+    let mut c = w.client();
+    c.subscribe(0);
+    match c.call(Request::Agents { fresh: true }).unwrap() {
+        Out::Reply {
+            reply: dent_protocol::Reply::Agents { agents, default },
+        } => {
+            assert_eq!(default, "claude");
+            let a = agents.iter().find(|a| a.id == "claude").expect("claude");
+            assert!(a.installed, "{a:?}");
+            assert_eq!(a.version.as_deref(), Some("2.1.301 (Claude Code)"));
+            assert!(!a.untested(), "{a:?}");
+            assert!(matches!(
+                &a.account,
+                dent_protocol::Account::SignedIn { plan: Some(p), .. } if p == "max"
+            ));
+            assert!(a.caps.steer && a.caps.rewind && !a.caps.permissions.is_empty());
+        }
+        other => panic!("{other:?}"),
+    }
+    // A session names its agent, and one this machine has no driver for
+    // is refused before anything is made.
+    let made = c.call(Request::Create {
+        agent: Some("no-such-agent".into()),
+        cwd: w.cwd(),
+        worktree: None,
+        model: None,
+        permission: Permission::Ask,
+        effort: None,
+        id: "m-nobody".into(),
+        text: "hello".into(),
+        attachments: Vec::new(),
+    });
+    assert!(
+        matches!(&made, Err(e) if e.contains("no agent called no-such-agent")),
+        "{made:?}"
+    );
+    let s = match c.call(Request::Create {
+        agent: Some("claude".into()),
+        cwd: w.cwd(),
+        worktree: None,
+        model: None,
+        permission: Permission::Ask,
+        effort: None,
+        id: "m-named".into(),
+        text: "hello by name".into(),
+        attachments: Vec::new(),
+    }) {
+        Ok(Out::Reply {
+            reply: dent_protocol::Reply::Created { session },
+        }) => session,
+        other => panic!("create: {other:?}"),
+    };
+    c.wait(&s, "the turn to end", is_done);
+    assert_eq!(
+        c.count(
+            &s,
+            |b| matches!(b, Body::Created { agent, .. } if agent == "claude")
+        ),
+        1
+    );
+    assert!(
+        c.call(Request::Models {
+            agent: Some("no-such-agent".into()),
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn an_agent_that_can_do_less_is_never_asked_to() {
+    let w = World::new(&[(
+        "DENT_CAPS_OFF",
+        "steer,rewind,fork,effort,restart,stop_task,set_model,mode:plan",
+    )]);
+    let mut c = w.client();
+    c.subscribe(0);
+    // What it can't do says so where clients look.
+    match c.call(Request::Agents { fresh: false }).unwrap() {
+        Out::Reply {
+            reply: dent_protocol::Reply::Agents { agents, .. },
+        } => {
+            let caps = &agents[0].caps;
+            assert!(!caps.steer && !caps.rewind && !caps.fork && caps.aside);
+            assert!(!caps.permissions.contains(&Permission::Plan));
+        }
+        other => panic!("{other:?}"),
+    }
+    let s = c.create(&w.cwd(), Permission::Ask, "a long answer please");
+    c.wait(&s, "the turn to start", |b| matches!(b, Body::TurnStarted));
+    // A steer waits for the turn to end, as any message sent meanwhile.
+    c.say(&s, "st", "steer this in", true);
+    c.wait(
+        &s,
+        "it waits",
+        |b| matches!(b, Body::User { id, queued: true, steer: false, .. } if id == "st"),
+    );
+    // A model change it can't take as it runs is kept for the next process.
+    c.call(Request::SetModel {
+        session: s.clone(),
+        model: "haiku".into(),
+    })
+    .unwrap();
+    c.wait(
+        &s,
+        "the model is kept",
+        |b| matches!(b, Body::Settings { model: Some(m), .. } if m == "haiku"),
+    );
+    c.wait_turns(&s, 2);
+    let refused = |r: Result<Out, String>, why: &str| match r {
+        Err(e) => assert!(e.contains(why), "{e}"),
+        other => panic!("{why}: {other:?}"),
+    };
+    let first = c
+        .events(&s)
+        .iter()
+        .find_map(|b| match b {
+            Body::User { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    refused(
+        c.call(Request::Rewind {
+            session: s.clone(),
+            to: first,
+            files: false,
+        }),
+        "can't go back",
+    );
+    refused(
+        c.call(Request::Fork {
+            session: s.clone(),
+            before: None,
+            until: None,
+            id: None,
+        }),
+        "can't carry a conversation on",
+    );
+    refused(
+        c.call(Request::SetEffort {
+            session: s.clone(),
+            effort: "high".into(),
+        }),
+        "no effort levels",
+    );
+    refused(
+        c.call(Request::RestartAgent { session: s.clone() }),
+        "can't start again",
+    );
+    refused(
+        c.call(Request::SetPermission {
+            session: s.clone(),
+            permission: Permission::Plan,
+        }),
+        "no Plan mode",
+    );
+    refused(
+        c.call(Request::StopTask {
+            session: s.clone(),
+            task: "t".into(),
+        }),
+        "can't stop one piece",
+    );
+    // What it can do still works.
+    c.call(Request::SetPermission {
+        session: s.clone(),
+        permission: Permission::Edits,
+    })
+    .unwrap();
+    // And the machine says how it stands for Git and GitHub.
+    match c.call(Request::Machine).unwrap() {
+        Out::Reply {
+            reply: dent_protocol::Reply::Machine { machine },
+        } => assert!(machine.git.is_some(), "{machine:?}"),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]
@@ -938,7 +1119,7 @@ fn changes_files_and_settings() {
         } => assert!(projects.iter().any(|p| p.path == w.cwd())),
         other => panic!("{other:?}"),
     }
-    match c.call(Request::Usage).unwrap() {
+    match c.call(Request::Usage { agent: None }).unwrap() {
         Out::Reply {
             reply: dent_protocol::Reply::Usage { windows, .. },
         } => {
@@ -947,7 +1128,7 @@ fn changes_files_and_settings() {
         }
         other => panic!("{other:?}"),
     }
-    match c.call(Request::Models).unwrap() {
+    match c.call(Request::Models { agent: None }).unwrap() {
         Out::Reply {
             reply: dent_protocol::Reply::Models { models },
         } => assert!(models.iter().any(|m| m.id == "haiku")),
@@ -1104,6 +1285,7 @@ fn effort_reaches_the_agent_and_changing_it_starts_a_new_process() {
     let mut c = w.client();
     c.subscribe(0);
     let s = match c.call(Request::Create {
+        agent: None,
         cwd: w.cwd(),
         worktree: None,
         model: None,
@@ -1258,6 +1440,7 @@ fn terminal_sessions_are_listed_and_carried_on_with_their_history() {
     assert_eq!(listed.len(), 1, "{listed:?}");
     assert_eq!(listed[0].title, "Make the parser faster");
     let s = match c.call(Request::Adopt {
+        agent: None,
         agent_session: id.into(),
     }) {
         Ok(Out::Reply {
@@ -1281,6 +1464,7 @@ fn terminal_sessions_are_listed_and_carried_on_with_their_history() {
     }
     assert!(
         c.call(Request::Adopt {
+            agent: None,
             agent_session: id.into()
         })
         .is_err()
@@ -1769,6 +1953,7 @@ fn resent_creates_forks_and_rewinds_happen_once() {
     let mut c = w.client();
     c.subscribe(0);
     let create = Request::Create {
+        agent: None,
         cwd: w.cwd(),
         worktree: None,
         model: None,
@@ -1870,6 +2055,7 @@ fn messages_sent_while_a_new_worktree_is_set_up_wait_and_go_in_order() {
     let mut c = w.client();
     c.subscribe(0);
     let s = match c.call(Request::Create {
+        agent: None,
         cwd: w.cwd(),
         worktree: Some(dent_protocol::NewWorktree::default()),
         model: None,

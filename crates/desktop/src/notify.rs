@@ -97,6 +97,26 @@ pub fn badge(needs: usize) {
     let _ = needs;
 }
 
+/// Whether dent may notify, as last read: 0 not known (an unbundled
+/// build, or not read yet), 1 allowed, 2 not.
+static ALLOWED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Whether dent may notify, as last read; `None` when it can't be known
+/// (a `cargo run` build) or hasn't been read yet.
+pub fn allowed() -> Option<bool> {
+    match ALLOWED.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
+}
+
+/// Read again whether dent may notify; [`allowed`] has it shortly after.
+pub fn read_allowed() {
+    #[cfg(target_os = "macos")]
+    mac::read_allowed();
+}
+
 /// Ask once, at start, whether dent may notify.
 pub fn init() {
     #[cfg(target_os = "macos")]
@@ -129,9 +149,9 @@ mod mac {
     use objc2::{AnyThread, define_class, msg_send};
     use objc2_foundation::{NSBundle, NSError, NSString};
     use objc2_user_notifications::{
-        UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest,
-        UNNotificationResponse, UNNotificationSound, UNUserNotificationCenter,
-        UNUserNotificationCenterDelegate,
+        UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent,
+        UNNotificationRequest, UNNotificationResponse, UNNotificationSettings, UNNotificationSound,
+        UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
 
     pub static CLICKED: Mutex<Option<String>> = Mutex::new(None);
@@ -189,6 +209,30 @@ mod mac {
             UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
             &done,
         );
+    }
+
+    pub fn read_allowed() {
+        if !bundled() {
+            return;
+        }
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        let done = RcBlock::new(|settings: std::ptr::NonNull<UNNotificationSettings>| {
+            // SAFETY: the center hands the block a live settings object.
+            let status = unsafe { settings.as_ref() }.authorizationStatus();
+            let ok = matches!(
+                status,
+                UNAuthorizationStatus::Authorized
+                    | UNAuthorizationStatus::Provisional
+                    | UNAuthorizationStatus::Ephemeral
+            );
+            let v = match (ok, status == UNAuthorizationStatus::NotDetermined) {
+                (true, _) => 1,
+                (false, true) => 0,
+                (false, false) => 2,
+            };
+            super::ALLOWED.store(v, std::sync::atomic::Ordering::Relaxed);
+        });
+        center.getNotificationSettingsWithCompletionHandler(&done);
     }
 
     pub fn post(title: &str, body: &str, thread: &str) {

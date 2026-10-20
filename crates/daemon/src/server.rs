@@ -96,6 +96,10 @@ async fn conn(d: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                         machine: d.machine.clone(),
                         home: crate::paths::home().display().to_string(),
                         build: d.build.clone(),
+                        agents: crate::agent::DRIVERS
+                            .iter()
+                            .map(|a| crate::agent::brief(*a))
+                            .collect(),
                     })
                 }
             }
@@ -138,6 +142,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             Reply::Ok
         }
         Request::Create {
+            agent,
             cwd,
             worktree,
             model,
@@ -149,6 +154,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
         } => Reply::Created {
             session: d
                 .create(crate::daemon::NewSession {
+                    agent,
                     cwd,
                     worktree,
                     model,
@@ -313,7 +319,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             message,
         } => {
             let cwd = cwd_of(d, &session)?;
-            let (summary, url) = d.git(&cwd, action, message).await?;
+            let (summary, url) = d.git(d.agent_of(&session), &cwd, action, message).await?;
             d.note_workspace(&session, &cwd).await;
             d.note_pr(&session, &cwd).await;
             Reply::GitDone { summary, url }
@@ -415,7 +421,26 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
                 warning: None,
             }
         }
-        Request::Models => Reply::Models { models: d.models() },
+        Request::Agents { fresh } => Reply::Agents {
+            agents: d.agents(fresh).await,
+            default: crate::agent::default().id().into(),
+        },
+        Request::Machine => Reply::Machine {
+            machine: d.machine().await,
+        },
+        Request::SetLoginItem { on } => {
+            if on && let Some(why) = crate::login::blocked() {
+                bail!("{why}");
+            }
+            let state = d.paths.state.clone();
+            tokio::task::spawn_blocking(move || crate::login::set(on, &state)).await??;
+            Reply::Machine {
+                machine: d.machine().await,
+            }
+        }
+        Request::Models { agent } => Reply::Models {
+            models: d.models(crate::agent::named(agent.as_deref())?.id()),
+        },
         Request::Recent => {
             let owned: std::collections::HashSet<String> = d
                 .store()
@@ -423,15 +448,28 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
                 .into_iter()
                 .filter_map(|r| r.agent_session)
                 .collect();
-            let sessions =
-                tokio::task::spawn_blocking(move || crate::terminal::recent(&owned, 12)).await?;
+            // Every agent's, newest first.
+            let sessions = tokio::task::spawn_blocking(move || {
+                let mut all: Vec<_> = crate::agent::DRIVERS
+                    .iter()
+                    .filter(|d| d.caps().adopt)
+                    .flat_map(|d| d.recent(&owned, 12))
+                    .collect();
+                all.sort_by_key(|r| std::cmp::Reverse(r.updated));
+                all.truncate(12);
+                all
+            })
+            .await?;
             Reply::Recent { sessions }
         }
-        Request::Adopt { agent_session } => Reply::Created {
-            session: d.adopt(&agent_session).await?,
+        Request::Adopt {
+            agent_session,
+            agent,
+        } => Reply::Created {
+            session: d.adopt(agent.as_deref(), &agent_session).await?,
         },
-        Request::Usage => {
-            let (windows, at) = d.usage().await;
+        Request::Usage { agent } => {
+            let (windows, at) = d.usage(crate::agent::named(agent.as_deref())?).await;
             Reply::Usage { windows, at }
         }
         Request::Commands { session } => Reply::Commands {
@@ -699,8 +737,9 @@ async fn subscribe(
                                 events: vec![e.clone()],
                             }
                         }
-                        Live::Models(models) => Out::Models {
+                        Live::Models(agent, models) => Out::Models {
                             models: models.clone(),
+                            agent: agent.clone(),
                         },
                         Live::Delta { n, .. } if *n <= snapshot => continue,
                         Live::Delta {

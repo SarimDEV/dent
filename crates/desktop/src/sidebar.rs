@@ -499,6 +499,7 @@ impl Dent {
             }))
             .on_mouse_down(MouseButton::Right, {
                 let (sid, cwd, closed) = (s.id.clone(), s.cwd.clone(), s.closed);
+                let (can_fork, can_restart) = (s.caps.fork, s.caps.restart);
                 let resume = s.resume_command();
                 cx.listener(move |this, e: &MouseDownEvent, _, cx| {
                     use crate::context::Do;
@@ -523,9 +524,12 @@ impl Dent {
                     let mut items = vec![
                         ("Rename", Do::Rename(sid.clone())),
                         ("Regenerate Title", Do::Retitle(sid.clone())),
-                        ("Fork", Do::Fork(sid.clone())),
                     ];
-                    if !closed {
+                    // Only what its agent can do.
+                    if can_fork {
+                        items.push(("Fork", Do::Fork(sid.clone())));
+                    }
+                    if !closed && can_restart {
                         items.push(("Restart Agent", Do::Restart(sid.clone())));
                     }
                     if !closed {
@@ -600,10 +604,11 @@ impl Dent {
             .into_any_element()
     }
 
-    pub fn status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// One agent's usage in the status bar: its mark, then each window
+    /// used. Nothing when it hasn't said.
+    fn usage_group(&self, agent: &str) -> Option<AnyElement> {
         let t = self.t;
-        let needs = self.needs().len();
-        let limits = self.limits();
+        let limits = self.limits(agent);
         let window = |name: &str| {
             limits
                 .iter()
@@ -611,6 +616,9 @@ impl Dent {
                 .map(|w| format!("{:.0}%", w.used * 100.))
         };
         let (five, week) = (window("five_hour"), window("seven_day"));
+        if five.is_none() && week.is_none() {
+            return None;
+        }
         let both = five.is_some() && week.is_some();
         // When each window starts over, for the tooltip.
         let now = std::time::SystemTime::now()
@@ -622,14 +630,52 @@ impl Dent {
                 .find(|w| w.name == name && w.resets_at > now)
                 .map(|w| crate::data::span((w.resets_at - now) as u64))
         };
+        let who = crate::bridge::agent_info(&self.agents, agent).short;
         let usage_tip = match (resets("five_hour"), resets("seven_day")) {
             (Some(a), Some(b)) => {
-                format!("Claude usage. The 5-hour window resets in {a}, the week in {b}.")
+                format!("{who} usage. The 5-hour window resets in {a}, the week in {b}.")
             }
-            (Some(a), None) => format!("Claude usage. The 5-hour window resets in {a}."),
-            (None, Some(b)) => format!("Claude usage. The week resets in {b}."),
-            (None, None) => "Claude usage across every way you use your account".to_string(),
+            (Some(a), None) => format!("{who} usage. The 5-hour window resets in {a}."),
+            (None, Some(b)) => format!("{who} usage. The week resets in {b}."),
+            (None, None) => format!("{who} usage across every way you use your account"),
         };
+        let (mark, color) = crate::agents::mark(agent);
+        // The default agent's is `usage`, as walkthroughs know it.
+        let id = if self.agent_id(None) == agent {
+            "usage".to_string()
+        } else {
+            format!("usage-{agent}")
+        };
+        Some(
+            div()
+                .id(SharedString::from(id))
+                .flex()
+                .items_center()
+                .gap(px(space::S1H))
+                .with_tip(crate::ui::tip_owned(usage_tip, t))
+                .child(icon(mark, 12., color.unwrap_or(t.quiet)))
+                .when_some(five, |d, v| {
+                    d.child(div().text_color(t.ink).child(v))
+                        .child("of 5-hour limit")
+                })
+                .when(both, |d| d.child(div().text_color(t.faint).child("·")))
+                .when_some(week, |d, v| {
+                    d.child(div().text_color(t.ink).child(v))
+                        .child("of weekly limit")
+                })
+                .into_any_element(),
+        )
+    }
+
+    pub fn status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let t = self.t;
+        let needs = self.needs().len();
+        // Each agent's usage, the default's first.
+        let usage: Vec<AnyElement> = self
+            .agent_ids()
+            .into_iter()
+            .filter_map(|agent| self.usage_group(&agent))
+            .collect();
         let machine = crate::data::machine_shown(&self.machine);
         let (link, link_tip) = match &self.connection {
             Ok(()) => (
@@ -650,26 +696,7 @@ impl Dent {
             .border_color(t.hairline)
             .ty(LABEL)
             .text_color(t.quiet)
-            .when(five.is_some() || week.is_some(), |d| {
-                d.child(
-                    div()
-                        .id("usage")
-                        .flex()
-                        .items_center()
-                        .gap(px(space::S1H))
-                        .with_tip(crate::ui::tip_owned(usage_tip, t))
-                        .child(icon("claude", 12., crate::theme::CLAUDE))
-                        .when_some(five, |d, v| {
-                            d.child(div().text_color(t.ink).child(v))
-                                .child("of 5-hour limit")
-                        })
-                        .when(both, |d| d.child(div().text_color(t.faint).child("·")))
-                        .when_some(week, |d, v| {
-                            d.child(div().text_color(t.ink).child(v))
-                                .child("of weekly limit")
-                        }),
-                )
-            })
+            .children(usage)
             .child(div().flex_1())
             .child(
                 div()

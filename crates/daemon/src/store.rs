@@ -20,6 +20,8 @@ pub struct Store {
 #[derive(Debug, Clone)]
 pub struct Row {
     pub id: String,
+    /// The agent it runs ([`crate::agent::Driver::id`]).
+    pub agent: String,
     pub cwd: String,
     pub model: Option<String>,
     pub permission: Permission,
@@ -67,6 +69,19 @@ impl Store {
              );
              CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         )?;
+        // Sessions from before agents had ids ran the default one.
+        let has_agent = db
+            .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'agent'")?
+            .exists([])?;
+        if !has_agent {
+            db.execute(
+                &format!(
+                    "ALTER TABLE sessions ADD COLUMN agent TEXT NOT NULL DEFAULT '{}'",
+                    dent_protocol::DEFAULT_AGENT
+                ),
+                [],
+            )?;
+        }
         Ok(Self { db })
     }
 
@@ -149,7 +164,8 @@ impl Store {
 
     pub fn sessions(&self) -> Result<Vec<Row>> {
         let mut st = self.db.prepare(
-            "SELECT id, cwd, model, permission, agent_session, status, proc, proc_off, updated
+            "SELECT id, cwd, model, permission, agent_session, status, proc, proc_off, updated,
+                    agent
              FROM sessions ORDER BY updated DESC",
         )?;
         let rows = st
@@ -164,6 +180,7 @@ impl Store {
                     proc: r.get(6)?,
                     proc_off: r.get::<_, i64>(7)? as u64,
                     updated: r.get::<_, i64>(8)? as u64,
+                    agent: r.get(9)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -292,15 +309,16 @@ fn from_text<T: serde::de::DeserializeOwned + Default>(s: &str) -> T {
 fn project(tx: &rusqlite::Transaction<'_>, session: &str, at: u64, body: &Body) -> Result<()> {
     match body {
         Body::Created {
+            agent,
             cwd,
             model,
             permission,
             title,
-            ..
         } => {
             tx.execute(
-                "INSERT INTO sessions (id, cwd, model, permission, title, status, created, updated)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                "INSERT INTO sessions (id, cwd, model, permission, title, status, created, updated,
+                                       agent)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)",
                 params![
                     session,
                     cwd,
@@ -308,7 +326,8 @@ fn project(tx: &rusqlite::Transaction<'_>, session: &str, at: u64, body: &Body) 
                     to_text(permission),
                     title,
                     to_text(&Status::New),
-                    at as i64
+                    at as i64,
+                    agent
                 ],
             )?;
         }
@@ -406,6 +425,7 @@ mod tests {
         assert_eq!(row.status, Status::Working);
         assert_eq!(row.proc.as_deref(), Some("a-1"));
         assert_eq!(row.proc_off, 120);
+        assert_eq!(row.agent, "claude");
         assert_eq!(s.after(1, 1 << 20).unwrap().0.len(), 2);
         assert_eq!(s.after(0, 1).unwrap().0.len(), 1);
         // A row this daemon can't read is passed over, not the end.
@@ -425,6 +445,49 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.after(5, 1 << 20).unwrap(), (Vec::new(), 6));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_store_from_before_agent_ids_runs_the_default_agent() {
+        let dir = std::env::temp_dir().join(format!("dent-store-old-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dent.db");
+        {
+            // The sessions table as it was, with a session in it.
+            let db = Connection::open(&path).unwrap();
+            db.execute_batch(
+                "CREATE TABLE sessions (
+                   id TEXT PRIMARY KEY, cwd TEXT NOT NULL, model TEXT,
+                   permission TEXT NOT NULL, title TEXT NOT NULL, agent_session TEXT,
+                   status TEXT NOT NULL, closed INTEGER NOT NULL DEFAULT 0,
+                   created INTEGER NOT NULL, updated INTEGER NOT NULL, proc TEXT,
+                   proc_off INTEGER NOT NULL DEFAULT 0, procs INTEGER NOT NULL DEFAULT 0);
+                 INSERT INTO sessions (id, cwd, permission, title, status, created, updated)
+                   VALUES ('old', '/tmp', 'ask', 't', 'done', 1, 1);",
+            )
+            .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(s.session("old").unwrap().unwrap().agent, "claude");
+        // Opening again doesn't add the column twice.
+        drop(s);
+        let mut s = Store::open(&path).unwrap();
+        s.append(
+            "new",
+            2,
+            &Body::Created {
+                agent: "other".into(),
+                cwd: "/tmp".into(),
+                model: None,
+                permission: Permission::Ask,
+                title: "t".into(),
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(s.session("new").unwrap().unwrap().agent, "other");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

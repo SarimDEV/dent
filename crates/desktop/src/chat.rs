@@ -186,11 +186,14 @@ impl Dent {
                     t,
                 ))
             };
-            actions = actions.child(
-                fork.relative()
-                    .on_press(cx.listener(move |this, _, _, cx| this.fork(&sid, None, cx)))
-                    .child(probe(&self.probes, "fork")),
-            );
+            // Only where the agent can carry a conversation on.
+            if s.caps.fork {
+                actions = actions.child(
+                    fork.relative()
+                        .on_press(cx.listener(move |this, _, _, cx| this.fork(&sid, None, cx)))
+                        .child(probe(&self.probes, "fork")),
+                );
+            }
         }
         // Close is always there; while it works or waits on you, it's off and
         // says why. The shortcut is in its tooltip and the menu bar.
@@ -226,7 +229,7 @@ impl Dent {
                     .child(probe(&self.probes, "terminal")),
             );
         }
-        if !cramped && !s.items.is_empty() {
+        if !cramped && !s.items.is_empty() && s.caps.aside {
             actions = actions.child(
                 icon_button("side-chat", "message-circle-question-mark", &t)
                     .relative()
@@ -766,7 +769,7 @@ impl Dent {
                 }
             )
         });
-        let can_try = latest && !errored && !s.closed && !s.running() && start > 0;
+        let can_try = latest && !errored && !s.closed && !s.running() && start > 0 && s.caps.rewind;
         let asking = can_try && self.trying_again.as_deref() == Some(s.id.as_str());
         let when = if took >= 1000 {
             format!(
@@ -1607,7 +1610,7 @@ impl Dent {
                                             }),
                                         )
                                     })
-                                    .child(
+                                    .when(s.caps.fork, |d| d.child(
                                         ghost(
                                             SharedString::from(format!("fork-from-{ix}")),
                                             "Fork from here",
@@ -1618,8 +1621,8 @@ impl Dent {
                                             this.fork(&fsid, Some(fmsg.clone()), cx)
                                         }))
                                         .child(probe(&self.probes, format!("fork-from-{ix}"))),
-                                    )
-                                    .child(
+                                    ))
+                                    .when(s.caps.rewind, |d| d.child(
                                         ghost(
                                             SharedString::from(format!("edit-from-{ix}")),
                                             "Edit from here",
@@ -1631,7 +1634,7 @@ impl Dent {
                                             cx.notify();
                                         }))
                                         .child(probe(&self.probes, format!("edit-from-{ix}"))),
-                                    ),
+                                    )),
                             )
                         }
                     })
@@ -2137,20 +2140,22 @@ impl Dent {
                                 )
                                 .relative()
                                 .child(probe(&self.probes, "allow-project"));
-                                if *keeps {
+                                if *keeps && s.caps.project_rules {
                                     let (a3, k4) = (s.id.clone(), ask.clone());
-                                    el.with_tip(tip(
-                                        "Saved to the project's own settings, where Claude Code keeps its rules",
-                                        None,
+                                    el.with_tip(tip_owned(
+                                        format!(
+                                            "Saved to the project's own settings, where {} keeps its rules",
+                                            s.agent_name
+                                        ),
                                         t,
                                     ))
                                     .on_press(cx.listener(move |this, _, _, cx| {
                                         this.allow(&a3, Some(&k4), Scope::Project, cx)
                                     }))
                                 } else {
-                                    crate::ui::off(
+                                    crate::ui::off_owned(
                                         el,
-                                        "Claude Code has no rule it can save for this",
+                                        format!("{} has no rule it can save for this", s.agent_name),
                                         &t,
                                     )
                                 }
@@ -2468,7 +2473,7 @@ impl Dent {
                 let (sid, no) = (s.id.clone(), ask.clone());
                 needs_card(&t)
                     .id(SharedString::from(format!("ask-{ask}")))
-                    .child(needs_title("Claude asks for a secret", &t))
+                    .child(needs_title(&format!("{} asks for a secret", s.agent_short), &t))
                     .child(
                         div()
                             .flex()
@@ -2529,7 +2534,10 @@ impl Dent {
                             ),
                     )
                     .child(div().ty(LABEL).text_color(t.faint).child(
-                        "Kept on this Mac where you choose. Claude is told where it is, never what it is.",
+                        format!(
+                            "Kept on this Mac where you choose. {} is told where it is, never what it is.",
+                            s.agent_short
+                        ),
                     ))
                     .into_any_element()
             }
@@ -2542,20 +2550,19 @@ impl Dent {
                     && !s.items[ix + 1..]
                         .iter()
                         .any(|i| matches!(i, Item::User { .. }));
-                let limit =
-                    latest_failure
-                        .then(|| self.limit_hit())
-                        .flatten()
-                        .map(|(which, at)| {
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map_or(0, |d| d.as_secs() as i64);
-                            format!(
-                                "Your {which} is used up. It resets at {}, in {}.",
-                                crate::data::clock(at as u64 * 1000),
-                                crate::data::span((at - now).max(0) as u64)
-                            )
-                        });
+                let limit = latest_failure
+                    .then(|| self.limit_hit(&s.agent_id))
+                    .flatten()
+                    .map(|(which, at)| {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_secs() as i64);
+                        format!(
+                            "Your {which} is used up. It resets at {}, in {}.",
+                            crate::data::clock(at as u64 * 1000),
+                            crate::data::span((at - now).max(0) as u64)
+                        )
+                    });
                 div()
                     .flex()
                     .items_start()
@@ -2617,7 +2624,7 @@ impl Dent {
                                 ghost(SharedString::from(format!("retry-{ix}")), "Try again", &t)
                                     .relative()
                                     .child(probe(&self.probes, format!("retry-{ix}")));
-                            match self.limit_hit() {
+                            match self.limit_hit(&s.agent_id) {
                                 Some((which, at)) => {
                                     let at = at.max(0) as u64;
                                     let when = crate::data::clock(at * 1000);
@@ -2714,7 +2721,7 @@ impl Dent {
                 auto,
                 before,
                 after,
-            } => self.compacted_line(ix, *auto, *before, *after),
+            } => self.compacted_line(ix, &s.agent_short, *auto, *before, *after),
             Item::Command {
                 name,
                 args,
@@ -2889,10 +2896,12 @@ impl Dent {
                                     // Nothing runs to send it into while the
                                     // worktree is set up: it goes first then.
                                     .children(
-                                        (!matches!(
-                                            s.activity,
-                                            Some(dent_protocol::Activity::SettingUp { .. })
-                                        ))
+                                        // Nor into an agent that can't be steered.
+                                        (s.caps.steer
+                                            && !matches!(
+                                                s.activity,
+                                                Some(dent_protocol::Activity::SettingUp { .. })
+                                            ))
                                         .then(|| {
                                             ghost(
                                                 SharedString::from(format!("steer-{ix}")),
@@ -3341,8 +3350,10 @@ impl Dent {
                     _ => None,
                 })
                 .unwrap_or("↩ send")
-        } else if working {
+        } else if working && s.caps.steer {
             "↩ queue · ⌘ ↩ steer"
+        } else if working {
+            "↩ queue"
         } else {
             "↩ send"
         };
@@ -3422,7 +3433,13 @@ impl Dent {
                             .child(self.attach_button(cx))
                             .child(keep(
                                 !fit.fits,
-                                self.chip(Menu::SessionModel, "claude", &labels[0], false, cx),
+                                self.chip(
+                                    Menu::SessionModel,
+                                    crate::agents::mark(&s.agent_id).0,
+                                    &labels[0],
+                                    false,
+                                    cx,
+                                ),
                             ))
                             .child(keep(
                                 !fit.fits,
@@ -3636,6 +3653,7 @@ impl Dent {
         }
         let t = self.t;
         let n = s.background.len();
+        let stoppable = s.caps.stop_task;
         let rows = s.background.iter().map(|task| {
             let kind = match task.kind.as_str() {
                 "local_bash" => "shell",
@@ -3682,21 +3700,24 @@ impl Dent {
                         .on_press(cx.listener(move |this, _, _, cx| this.open_file(&path, cx))),
                     )
                 })
-                .child(
-                    ghost(
-                        SharedString::from(format!("bg-stop-{}", task.id)),
-                        "Stop",
-                        &t,
+                // Only where the agent can stop one piece on its own.
+                .when(stoppable, |d| {
+                    d.child(
+                        ghost(
+                            SharedString::from(format!("bg-stop-{}", task.id)),
+                            "Stop",
+                            &t,
+                        )
+                        .child(probe(&self.probes, format!("bg-stop-{}", task.id)))
+                        .on_press(cx.listener(move |this, _, _, cx| {
+                            this.live.send(dent_protocol::Request::StopTask {
+                                session: sid.clone(),
+                                task: tid.clone(),
+                            });
+                            cx.notify();
+                        })),
                     )
-                    .child(probe(&self.probes, format!("bg-stop-{}", task.id)))
-                    .on_press(cx.listener(move |this, _, _, cx| {
-                        this.live.send(dent_protocol::Request::StopTask {
-                            session: sid.clone(),
-                            task: tid.clone(),
-                        });
-                        cx.notify();
-                    })),
-                )
+                })
         });
         let all: Vec<String> = s.background.iter().map(|t| t.id.clone()).collect();
         let sid = s.id.clone();
@@ -3726,7 +3747,7 @@ impl Dent {
                         } else {
                             format!("Running in the background · {n}")
                         }))
-                        .when(n > 1, |d| {
+                        .when(n > 1 && stoppable, |d| {
                             d.child(ghost("bg-stop-all", "Stop all", &t).on_press(cx.listener(
                                 move |this, _, _, cx| {
                                     for task in &all {
@@ -4092,7 +4113,7 @@ impl Dent {
             "Esc to close"
         } else if c.loading {
             // dent's own commands are here; the agent's are on their way.
-            "Looking up Claude's commands…"
+            "Looking up the agent's commands…"
         } else {
             "↑↓ choose · ↩ or Tab to pick · Esc to close"
         };
@@ -4178,7 +4199,7 @@ impl Dent {
             .as_deref()
             .map(Self::project_name)
             .unwrap_or_else(|| "No project".into());
-        let model = crate::bridge::model_name(&self.models, d.model.as_deref());
+        let model = crate::bridge::model_name(self.new_models(), d.model.as_deref());
         // Everything is already chosen; each choice is one click to change.
         // Sessions from a terminal wait behind one chip at the row's end;
         // its menu floats, so opening it moves nothing.
@@ -4195,7 +4216,14 @@ impl Dent {
         // the row ever wraps; each chip keeps its icon and says itself on
         // hover. Where it runs is a tray tucked under the box, one line.
         let column = self.chat_w.min(size::COLUMN + space::S8 * 2.) - space::S8 * 2.;
-        let room = column - space::S4 * 2. + space::S2 - size::CONTROL - space::S1 - START_W;
+        // With more than one agent ready, which one runs comes first.
+        let pick = self.pickable_agents().len() > 1;
+        let agent =
+            crate::bridge::agent_info(&self.agents, self.new_agent().as_deref().unwrap_or(""));
+        let mut room = column - space::S4 * 2. + space::S2 - size::CONTROL - space::S1 - START_W;
+        if pick {
+            room -= AGENT_CHIP_W;
+        }
         let fit = fit_footer(
             room,
             [
@@ -4215,8 +4243,23 @@ impl Dent {
             false,
             "",
         );
+        let agent_chip = pick.then(|| {
+            self.chip(
+                Menu::Agent,
+                crate::agents::mark(&agent.id).0,
+                &agent.short,
+                false,
+                cx,
+            )
+        });
         let how = [
-            self.chip(Menu::Model, "claude", &fit.labels[0], false, cx),
+            self.chip(
+                Menu::Model,
+                crate::agents::mark(&agent.id).0,
+                &fit.labels[0],
+                false,
+                cx,
+            ),
             self.chip(Menu::Permission, "shield", &fit.labels[1], false, cx),
             self.chip(Menu::Effort, "gauge", &fit.labels[2], false, cx),
         ];
@@ -4305,6 +4348,7 @@ impl Dent {
                             .child("New session")
                             .child(probe(&self.probes, "ambient-title")),
                     )
+                    .children(self.agent_banner(cx))
                     .child(
                         div()
                             .relative()
@@ -4327,6 +4371,7 @@ impl Dent {
                                     .gap(px(space::S1))
                                     .ml(px(-space::S2))
                                     .child(self.attach_button(cx))
+                                    .children(agent_chip.map(|c| keep(true, c)))
                                     .children(how.into_iter().map(|c| keep(true, c)))
                                     .child(div().flex_1())
                                     .child(start),
@@ -4717,6 +4762,7 @@ impl Dent {
                                 Menu::Actions => "Run a project script in your terminal".into(),
                                 Menu::Pickup => "Pick up from terminal".into(),
                                 Menu::Stash => "Drafts put aside".into(),
+                                Menu::Agent => "The agent it runs".into(),
                             },
                             t,
                         ))
@@ -4804,9 +4850,31 @@ impl Dent {
             Menu::Actions => self.action_entries(),
             Menu::Pickup => self.pickup_entries(),
             Menu::Stash => self.stash_entries(),
+            Menu::Agent => {
+                let current = self.agent_id(self.new_agent().as_deref());
+                self.pickable_agents()
+                    .into_iter()
+                    .map(|a| {
+                        let id = a.id.clone();
+                        Entry::row(
+                            format!("agent-{}", a.id),
+                            &a.name,
+                            Some(crate::agents::version_line(&a)),
+                            current == a.id,
+                            act(Box::new(move |this, _, cx| {
+                                this.defaults.agent = Some(id.clone());
+                                // Its own models, so the model chosen is one it has.
+                                this.defaults.model = None;
+                                this.prefs_changed();
+                                cx.notify();
+                            })),
+                        )
+                    })
+                    .collect()
+            }
             Menu::Model | Menu::SessionModel => {
                 let current = self.menu_model(which, cx);
-                let all = self.models_or_default();
+                let all = self.models_or_default(which);
                 // Aliases follow the newest version; pinned versions are
                 // full model ids, and wait behind "Older versions", in the
                 // same family order as the list above.
@@ -4850,7 +4918,7 @@ impl Dent {
                 };
                 let mut v: Vec<Entry> = latest.iter().map(row).collect();
                 if v.is_empty() {
-                    v.push(Entry::note("Asking Claude Code for its models…"));
+                    v.push(Entry::note("Asking the agent for its models…"));
                 }
                 if !older.is_empty() {
                     let at = v.len();
@@ -4875,13 +4943,15 @@ impl Dent {
                 v
             }
             Menu::Permission | Menu::SessionPermission => {
-                let current = if which == Menu::Permission {
-                    d.permission
-                } else {
-                    self.current().map(|s| s.permission).unwrap_or_default()
+                let (current, caps) = match (which, self.current()) {
+                    (Menu::SessionPermission, Some(s)) => (s.permission, s.caps.clone()),
+                    (Menu::SessionPermission, None) => (Permission::default(), self.new_caps()),
+                    _ => (d.permission, self.new_caps()),
                 };
+                // Only the modes the agent takes.
                 Permission::ALL
                     .iter()
+                    .filter(|p| caps.permissions.contains(p))
                     .map(|p| {
                         let p = *p;
                         Entry::row(
@@ -4916,7 +4986,8 @@ impl Dent {
                 );
                 // A level the model doesn't take isn't offered, unless it's
                 // the one already chosen.
-                let steps = self.effort_steps(&model, current.as_deref());
+                let models = self.models_or_default(which);
+                let steps = self.effort_steps(&models, &model, current.as_deref());
                 EFFORTS
                     .iter()
                     .filter(|(value, _)| steps.contains(value))
@@ -5394,7 +5465,7 @@ const FADE: f32 = 48.;
 
 /// Effort levels, with what each is for.
 pub const EFFORTS: [(Option<&str>, &str); 6] = [
-    (None, "Whatever Claude Code picks for the model"),
+    (None, "Whatever the agent picks for the model"),
     (Some("low"), "Fastest; for quick questions"),
     (Some("medium"), "Balanced"),
     (Some("high"), "Thinks harder before acting"),
@@ -6484,3 +6555,6 @@ const MENU_BRANCH: usize = 40;
 
 /// About how wide the new-session page's Start button is, with its key.
 const START_W: f32 = 88.;
+/// About what the agent chip takes, its icon and a short name, for the
+/// row's fitting.
+const AGENT_CHIP_W: f32 = 96.;

@@ -91,8 +91,12 @@ impl Dent {
                 self.start_rename(&id, &title, window, cx);
             }
             Do::Restart(id) => {
-                self.live
-                    .send(dent_protocol::Request::RestartAgent { session: id });
+                if self.can(&id, "can't start again on the same conversation", |c| {
+                    c.restart
+                }) {
+                    self.live
+                        .send(dent_protocol::Request::RestartAgent { session: id });
+                }
             }
             Do::Retitle(id) => {
                 self.live

@@ -21,6 +21,9 @@ pub enum Incoming {
     /// Connected (again): the daemon's welcome.
     Up {
         machine: String,
+        /// The agents it drives, the default first; empty from a daemon
+        /// older than agent ids.
+        agents: Vec<dent_protocol::AgentInfo>,
     },
     Down(String),
     Out {
@@ -147,7 +150,13 @@ fn run(
                 }
                 let msg = match out {
                     Out::Reply {
-                        reply: Reply::Welcome { machine, build, .. },
+                        reply:
+                            Reply::Welcome {
+                                machine,
+                                build,
+                                agents,
+                                ..
+                            },
                     } if req == 1 => {
                         // A daemon older than the one installed beside the app
                         // makes way for it; agents keep running in the holder.
@@ -159,7 +168,7 @@ fn run(
                         if !installed.is_empty() && installed != build {
                             let _ = restart_tx.send(());
                         }
-                        Incoming::Up { machine }
+                        Incoming::Up { machine, agents }
                     }
                     Out::Error { message } if req == 1 => Incoming::Down(message),
                     out => Incoming::Out { req, out },

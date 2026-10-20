@@ -243,7 +243,7 @@ pub const OWN: [(&str, &str, bool); 5] = [
     ("rename", "Rename this session", true),
     (
         "restart",
-        "Start Claude Code again, to load new skills, plugins and settings",
+        "Start the agent again, to load new skills, plugins and settings",
         true,
     ),
     ("clear", "Start a new session in this project", true),
@@ -267,15 +267,22 @@ const HIDDEN: [&str; 12] = [
 ];
 
 /// What `/` offers: dent's own commands, then the agent's that work here.
-pub fn offered(agent: &[Command], in_session: bool) -> Vec<Command> {
-    let own =
-        OWN.iter()
-            .filter(|(_, _, needs)| in_session || !needs)
-            .map(|(name, description, _)| Command {
-                name: (*name).into(),
-                description: (*description).into(),
-                ..Default::default()
-            });
+pub fn offered(agent: &[Command], in_session: bool, caps: &dent_protocol::Caps) -> Vec<Command> {
+    // dent's own, less what this agent can't do.
+    let can = |name: &str| match name {
+        "effort" => caps.effort,
+        "restart" => caps.restart,
+        _ => true,
+    };
+    let own = OWN
+        .iter()
+        .filter(|(_, _, needs)| in_session || !needs)
+        .filter(|(name, ..)| can(name))
+        .map(|(name, description, _)| Command {
+            name: (*name).into(),
+            description: (*description).into(),
+            ..Default::default()
+        });
     let theirs = agent.iter().filter(|c| {
         // Internal ones start with `__`; ours replace theirs.
         !c.name.starts_with("__")
@@ -496,11 +503,28 @@ mod tests {
             cmd("color", ""),
             cmd("__x", ""),
         ];
-        let names = |s| -> Vec<String> { offered(&agent, s).into_iter().map(|c| c.name).collect() };
+        let all = dent_protocol::Caps::everything();
+        let names = |s| -> Vec<String> {
+            offered(&agent, s, &all)
+                .into_iter()
+                .map(|c| c.name)
+                .collect()
+        };
         assert_eq!(
             names(true),
             ["model", "effort", "rename", "restart", "clear", "compact"]
         );
+        // An agent that can't restart or take an effort isn't offered either.
+        let less = dent_protocol::Caps {
+            effort: false,
+            restart: false,
+            ..dent_protocol::Caps::everything()
+        };
+        let got: Vec<String> = offered(&agent, true, &less)
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(got, ["model", "rename", "clear", "compact"]);
         assert_eq!(names(false), ["model", "effort", "compact"]);
     }
 

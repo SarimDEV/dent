@@ -23,6 +23,8 @@ pub(super) fn checks() -> Vec<(f32, Act)> {
         ),
     )];
     v.extend(typing());
+    v.extend(settings());
+    v.extend(welcome());
     v.extend([
         (0.3, Key("cmd-n")),
         (
@@ -30,9 +32,9 @@ pub(super) fn checks() -> Vec<(f32, Act)> {
             Until(
                 "the model menu names versions before any session starts",
                 |d, _| {
-                    crate::bridge::model_name(&d.models, d.defaults.model.as_deref())
+                    crate::bridge::model_name(d.new_models(), d.defaults.model.as_deref())
                         == "Default · Sonnet 5.5"
-                        && d.models.iter().any(|m| m.name == "Fable 5.1")
+                        && d.new_models().iter().any(|m| m.name == "Fable 5.1")
                 },
                 25.,
             ),

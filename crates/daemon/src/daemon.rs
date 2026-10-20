@@ -14,15 +14,28 @@ use crate::paths::Paths;
 use crate::session::{self, Cmd, Op};
 use crate::store::{Source, Store};
 
-/// The key for the commands every session starts with, read by the usage
-/// probe before any session has.
-const EVERY: &str = "";
+/// The key for the commands every session of `agent` starts with, read by
+/// the usage probe before any session has.
+fn every(agent: &str) -> String {
+    format!("*{agent}")
+}
+
+/// Where an agent's models are kept between starts: the default agent's
+/// where they were before there were others.
+fn models_key(agent: &str) -> String {
+    if agent == dent_protocol::DEFAULT_AGENT {
+        "models".into()
+    } else {
+        format!("models.{agent}")
+    }
+}
 
 /// Something every subscribed client should hear about now.
 #[derive(Debug, Clone)]
 pub enum Live {
     Event(Event),
-    Models(Vec<Model>),
+    /// An agent's models changed.
+    Models(String, Vec<Model>),
     Delta {
         session: String,
         text: String,
@@ -57,17 +70,22 @@ pub struct Daemon {
     store: Mutex<Store>,
     pub live: broadcast::Sender<Arc<Live>>,
     sessions: Mutex<HashMap<String, mpsc::UnboundedSender<Cmd>>>,
+    /// The agent each running session drives.
+    session_agents: Mutex<HashMap<String, &'static dyn crate::agent::Driver>>,
     holder: tokio::sync::Mutex<Option<Arc<Holder>>>,
     /// Each session's reply so far, for clients that subscribe mid-stream.
     partials: Mutex<Partials>,
-    models: Mutex<Vec<Model>>,
-    /// The last usage reading and when it was taken.
-    usage: tokio::sync::Mutex<Option<(Vec<dent_protocol::Window>, u64)>>,
+    /// Each agent's models, as it last said.
+    models: Mutex<HashMap<String, Vec<Model>>>,
+    /// Each agent's last usage reading and when it was taken.
+    usage: tokio::sync::Mutex<HashMap<String, (Vec<dent_protocol::Window>, u64)>>,
+    /// How each agent stands on this machine, and when that was asked.
+    agents: tokio::sync::Mutex<Option<(Vec<dent_protocol::AgentInfo>, u64)>>,
     /// Slash commands by session, as each agent reported them.
     commands: Mutex<HashMap<String, Vec<dent_protocol::Command>>>,
-    /// What each session's agent knows that fills commands in; `EVERY`
-    /// holds what the usage probe read (the `/config` settings).
-    catalogs: Mutex<HashMap<String, crate::claude::commands::Catalog>>,
+    /// What each session's agent knows that fills commands in; `every`
+    /// holds what each agent's usage probe read (its settings).
+    catalogs: Mutex<HashMap<String, crate::agent::Catalog>>,
     /// What each session's agent is doing besides talking.
     activities: Mutex<HashMap<String, dent_protocol::Activity>>,
     awake: Mutex<Awake>,
@@ -106,12 +124,14 @@ pub fn now_ms() -> u64 {
 
 impl Daemon {
     pub fn new(paths: Paths, env: AgentEnv, store: Store) -> Arc<Self> {
-        let models = store
-            .get("models")
-            .ok()
-            .flatten()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let models = crate::agent::DRIVERS
+            .iter()
+            .filter_map(|d| {
+                let m: Vec<Model> =
+                    serde_json::from_str(&store.get(&models_key(d.id())).ok()??).ok()?;
+                Some((d.id().to_string(), m))
+            })
+            .collect();
         let (live, _) = broadcast::channel(4096);
         Arc::new(Self {
             paths,
@@ -125,13 +145,15 @@ impl Daemon {
             store: Mutex::new(store),
             live,
             sessions: Mutex::new(HashMap::new()),
+            session_agents: Mutex::new(HashMap::new()),
             holder: tokio::sync::Mutex::new(None),
             partials: Mutex::new(Partials::default()),
             models: Mutex::new(models),
             commands: Mutex::new(HashMap::new()),
             catalogs: Mutex::new(HashMap::new()),
             activities: Mutex::new(HashMap::new()),
-            usage: tokio::sync::Mutex::new(None),
+            usage: tokio::sync::Mutex::new(HashMap::new()),
+            agents: tokio::sync::Mutex::new(None),
             awake: Mutex::new(Awake {
                 busy: Default::default(),
                 on: true,
@@ -238,24 +260,65 @@ impl Daemon {
         (text, p.n)
     }
 
-    pub fn models(&self) -> Vec<Model> {
-        let m = lock(&self.models).clone();
-        if m.is_empty() {
-            crate::claude::default_models()
-        } else {
-            m
+    /// Agent `agent`'s models, as it last said, or the ones it offers
+    /// before saying.
+    pub fn models(&self, agent: &str) -> Vec<Model> {
+        match lock(&self.models).get(agent).filter(|m| !m.is_empty()) {
+            Some(m) => m.clone(),
+            None => crate::agent::driver(agent)
+                .map(|d| d.default_models())
+                .unwrap_or_default(),
         }
     }
 
-    pub fn set_models(&self, models: Vec<Model>) {
-        if models.is_empty() || *lock(&self.models) == models {
+    pub fn set_models(&self, agent: &str, models: Vec<Model>) {
+        if models.is_empty() || lock(&self.models).get(agent) == Some(&models) {
             return;
         }
         if let Ok(s) = serde_json::to_string(&models) {
-            let _ = self.store().put("models", &s);
+            let _ = self.store().put(&models_key(agent), &s);
         }
-        *lock(&self.models) = models.clone();
-        let _ = self.live.send(Arc::new(Live::Models(models)));
+        lock(&self.models).insert(agent.into(), models.clone());
+        let _ = self.live.send(Arc::new(Live::Models(agent.into(), models)));
+    }
+
+    /// The agent session `id` runs; the default for one not known.
+    pub fn agent_of(&self, session: &str) -> &'static dyn crate::agent::Driver {
+        lock(&self.session_agents)
+            .get(session)
+            .copied()
+            .unwrap_or_else(crate::agent::default)
+    }
+
+    /// How this machine stands for Git, GitHub and starting at login.
+    pub async fn machine(self: &Arc<Self>) -> dent_protocol::Machine {
+        let path = self.env().path.clone();
+        tokio::task::spawn_blocking(move || crate::machine::check(&path))
+            .await
+            .unwrap_or_default()
+    }
+
+    /// The agents this machine can drive and how each stands, asked of
+    /// their CLIs at most once a minute (`fresh`: now).
+    pub async fn agents(self: &Arc<Self>, fresh: bool) -> Vec<dent_protocol::AgentInfo> {
+        let mut cached = self.agents.lock().await;
+        if let Some((a, at)) = cached.as_ref()
+            && !fresh
+            && now_ms().saturating_sub(*at) < 60_000
+        {
+            return a.clone();
+        }
+        let env = self.env();
+        let infos = tokio::task::spawn_blocking(move || {
+            crate::agent::DRIVERS
+                .iter()
+                .map(|d| crate::agent::info(*d, &env))
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default();
+        *cached = Some((infos.clone(), now_ms()));
+        infos
     }
 
     pub fn set_commands(&self, session: &str, commands: Vec<dent_protocol::Command>) {
@@ -279,7 +342,7 @@ impl Daemon {
     }
 
     /// Change what a session's agent is known to offer.
-    pub fn catalog(&self, session: &str, f: impl FnOnce(&mut crate::claude::commands::Catalog)) {
+    pub fn catalog(&self, session: &str, f: impl FnOnce(&mut crate::agent::Catalog)) {
         f(lock(&self.catalogs).entry(session.into()).or_default());
     }
 
@@ -287,18 +350,31 @@ impl Daemon {
     /// started, the ones every session starts with (from the usage probe),
     /// or another session's.
     pub fn commands(&self, session: Option<&str>) -> Vec<dent_protocol::Command> {
+        let agent = match session {
+            Some(s) => self.agent_of(s),
+            None => crate::agent::default(),
+        };
+        let every = every(agent.id());
         let raw = {
             let all = lock(&self.commands);
+            // Before its agent has said: what every session of that agent
+            // starts with, else another of its sessions' list.
+            let same = || {
+                let agents = lock(&self.session_agents);
+                all.iter()
+                    .find(|(s, _)| agents.get(*s).is_some_and(|a| a.id() == agent.id()))
+                    .map(|(_, c)| c)
+            };
             session
                 .and_then(|s| all.get(s))
-                .or_else(|| all.get(EVERY))
-                .or_else(|| all.values().next())
+                .or_else(|| all.get(&every))
+                .or_else(same)
                 .cloned()
                 .unwrap_or_default()
         };
         let cat = {
             let cats = lock(&self.catalogs);
-            let every = cats.get(EVERY).cloned().unwrap_or_default();
+            let every = cats.get(&every).cloned().unwrap_or_default();
             let mut cat = session
                 .and_then(|s| cats.get(s))
                 .cloned()
@@ -313,10 +389,10 @@ impl Daemon {
             if !cat.effective.is_object() {
                 cat.effective = every.effective;
             }
-            cat.models = self.models();
+            cat.models = self.models(agent.id());
             cat
         };
-        crate::claude::commands::typed(&raw, &cat)
+        agent.typed(&raw, &cat)
     }
 
     /// What a session's agent is doing besides talking, for every client.
@@ -343,35 +419,36 @@ impl Daemon {
             .collect()
     }
 
-    /// Account usage, read at most once a minute however many ask.
-    pub async fn usage(self: &Arc<Self>) -> (Vec<dent_protocol::Window>, u64) {
+    /// An agent's account usage, read at most once a minute however many
+    /// ask. The same read learns its models and the commands every session
+    /// starts with.
+    pub async fn usage(
+        self: &Arc<Self>,
+        agent: &'static dyn crate::agent::Driver,
+    ) -> (Vec<dent_protocol::Window>, u64) {
         let mut cached = self.usage.lock().await;
-        if let Some((w, at)) = cached.as_ref()
+        if let Some((w, at)) = cached.get(agent.id())
             && now_ms().saturating_sub(*at) < 60_000
         {
             return (w.clone(), *at);
         }
-        let me = self.clone();
-        let read = tokio::task::spawn_blocking({
-            let me = me.clone();
-            move || crate::usage::probe(&me.env())
-        })
-        .await
-        .ok();
-        let (windows, models, commands, catalog) = read
-            .map(|p| (p.windows, p.models, p.commands, p.catalog))
+        let env = self.env();
+        let p = tokio::task::spawn_blocking(move || agent.probe(&env))
+            .await
             .unwrap_or_default();
-        me.set_models(models);
-        me.set_commands(EVERY, commands);
-        if !catalog.settings.is_empty() {
-            me.catalog(EVERY, |c| *c = catalog);
+        let id = agent.id();
+        self.set_models(id, p.models);
+        self.set_commands(&every(id), p.commands);
+        if !p.catalog.settings.is_empty() {
+            let catalog = p.catalog;
+            self.catalog(&every(id), |c| *c = catalog);
         }
-        let reading = (windows.unwrap_or_default(), now_ms());
-        *cached = Some(reading.clone());
+        let reading = (p.windows.unwrap_or_default(), now_ms());
+        cached.insert(id.into(), reading.clone());
         reading
     }
 
-    /// The holder, connecting (and starting it) on first use.
+    /// What agents run with: the login shell's PATH.
     pub fn env(&self) -> Arc<AgentEnv> {
         lock(&self.env).clone()
     }
@@ -385,6 +462,7 @@ impl Daemon {
         });
     }
 
+    /// The holder, connecting (and starting it) on first use.
     pub async fn holder(self: &Arc<Self>) -> Result<Arc<Holder>> {
         let mut h = self.holder.lock().await;
         if let Some(h) = h.as_ref() {
@@ -456,8 +534,14 @@ impl Daemon {
         }
     }
 
-    pub fn register(&self, id: &str, tx: mpsc::UnboundedSender<Cmd>) {
+    pub fn register(
+        &self,
+        id: &str,
+        tx: mpsc::UnboundedSender<Cmd>,
+        agent: &'static dyn crate::agent::Driver,
+    ) {
         lock(&self.sessions).insert(id.into(), tx);
+        lock(&self.session_agents).insert(id.into(), agent);
     }
 
     /// Run `op` on a session and wait for it to be accepted.
@@ -525,6 +609,7 @@ impl Daemon {
     /// Start a session and send its first message.
     pub async fn create(self: &Arc<Self>, new: NewSession) -> Result<String> {
         let NewSession {
+            agent,
             cwd,
             worktree,
             model,
@@ -537,6 +622,7 @@ impl Daemon {
         if !std::path::Path::new(&cwd).is_dir() {
             bail!("{cwd} isn't a folder");
         }
+        let agent = crate::agent::named(agent.as_deref())?;
         let key = (!id.is_empty()).then(|| format!("create.{id}"));
         let (session, made) = self.made_once(key.as_deref())?;
         if made {
@@ -575,7 +661,7 @@ impl Daemon {
         self.append(
             &session,
             Body::Created {
-                agent: "claude".into(),
+                agent: agent.id().into(),
                 cwd: cwd.clone(),
                 model,
                 permission,
@@ -630,7 +716,7 @@ impl Daemon {
         {
             let (d, session, path) = (self.clone(), session.clone(), path.clone());
             tokio::spawn(async move {
-                if let Err(e) = d.name_branch(&session, &path, &branch, &text).await {
+                if let Err(e) = d.name_branch(agent, &session, &path, &branch, &text).await {
                     eprintln!("dent-daemon: {session}: couldn't name its branch: {e:#}");
                 }
             });
@@ -706,6 +792,7 @@ impl Daemon {
     /// Name a new worktree's placeholder branch after the task.
     async fn name_branch(
         self: &Arc<Self>,
+        agent: &'static dyn crate::agent::Driver,
         session: &str,
         worktree: &std::path::Path,
         placeholder: &str,
@@ -713,11 +800,14 @@ impl Daemon {
     ) -> Result<()> {
         let task: String = task.chars().take(2000).collect();
         let answer = self
-            .ask(&format!(
-                "Name a Git branch for this task given to a coding agent: two to four \
+            .ask(
+                agent,
+                &format!(
+                    "Name a Git branch for this task given to a coding agent: two to four \
                  lowercase words joined by hyphens, like fix-footer-on-mobile. Reply with the \
                  name only.\n\nTask: {task}"
-            ))
+                ),
+            )
             .await?;
         let Some(wanted) = crate::workspace::branch_name(&answer) else {
             return Ok(());
@@ -840,15 +930,18 @@ impl Daemon {
         (s("branch"), s("root"))
     }
 
-    /// One question to a small, quick model, run in dent's own folder so
-    /// it leaves nothing in a project's history: its answer.
-    pub async fn ask(self: &Arc<Self>, prompt: &str) -> Result<String> {
-        let env = self.env();
-        let argv = crate::claude::ask_argv(&env.claude, &env.path, prompt);
+    /// One question to a small, quick model of `agent`'s, run in dent's own
+    /// folder so it leaves nothing in a project's history: its answer.
+    pub async fn ask(
+        self: &Arc<Self>,
+        agent: &'static dyn crate::agent::Driver,
+        prompt: &str,
+    ) -> Result<String> {
+        let argv = agent.ask(&self.env(), prompt);
         let dir = self.paths.state.join("titles");
         std::fs::create_dir_all(&dir)?;
         let dir = dir.display().to_string();
-        let got = tokio::task::spawn_blocking(move || run_aside(&argv, &dir))
+        let got = tokio::task::spawn_blocking(move || run_aside(agent, &argv, &dir))
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?
             .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -859,6 +952,7 @@ impl Daemon {
     /// what happened in a line, and the pull request's address.
     pub async fn git(
         self: &Arc<Self>,
+        agent: &'static dyn crate::agent::Driver,
         cwd: &str,
         action: dent_protocol::GitAction,
         message: Option<String>,
@@ -893,13 +987,14 @@ impl Daemon {
             if !st.changes {
                 bail!("there's nothing to commit");
             }
-            let message = match message.filter(|m| !m.trim().is_empty()) {
-                Some(m) => m,
-                None => {
-                    let d = dir.clone();
-                    let pending = blocking(Box::new(move || Ok(ship::pending(&d)))).await?;
-                    let answer = self
-                        .ask(&format!(
+            let message =
+                match message.filter(|m| !m.trim().is_empty()) {
+                    Some(m) => m,
+                    None => {
+                        let d = dir.clone();
+                        let pending = blocking(Box::new(move || Ok(ship::pending(&d)))).await?;
+                        let answer = self
+                        .ask(agent, &format!(
                             "Write a Git commit message for these changes: a subject line in \
                              the imperative, at most 60 characters, then, only if it helps, a \
                              blank line and a few short lines on why. No quotes or code fences. \
@@ -907,9 +1002,9 @@ impl Daemon {
                         ))
                         .await
                         .unwrap_or_default();
-                    ship::message(&answer).unwrap_or_else(|| "Update files".into())
-                }
-            };
+                        ship::message(&answer).unwrap_or_else(|| "Update files".into())
+                    }
+                };
             let (d, m) = (dir.clone(), message.clone());
             blocking(Box::new(move || {
                 ship::commit(&d, &m).map(|_| String::new())
@@ -935,7 +1030,7 @@ impl Daemon {
                 let d = dir.clone();
                 let since = blocking(Box::new(move || Ok(ship::since(&d, &base)))).await?;
                 let answer = self
-                    .ask(&format!(
+                    .ask(agent, &format!(
                         "Write a GitHub pull request for this branch: a title on the first line \
                          (at most 70 characters, no prefix), then a blank line and a short body \
                          in Markdown saying what changed and why. Reply with those only.\n\n{since}"
@@ -1052,6 +1147,13 @@ impl Daemon {
         key: Option<&str>,
     ) -> Result<String> {
         let row = self.store().session(parent)?.context("no such session")?;
+        let driver = crate::agent::named(Some(&row.agent))?;
+        if !driver.caps().fork {
+            bail!(
+                "{} can't carry a conversation on in a new session",
+                driver.name()
+            );
+        }
         let events = self.store().session_events(parent)?;
         let cut = match cut {
             Cut::Before(b) => events
@@ -1081,7 +1183,7 @@ impl Daemon {
         self.append(
             &session,
             Body::Created {
-                agent: "claude".into(),
+                agent: row.agent.clone(),
                 cwd: row.cwd.clone(),
                 model: row.model.clone(),
                 permission: row.permission,
@@ -1222,17 +1324,14 @@ impl Daemon {
             },
             None,
         )?;
-        let env = self.env();
-        let argv = crate::claude::aside_argv(
-            &env.claude,
-            &env.path,
-            row.model.as_deref(),
-            &agent,
-            question,
-        );
+        let driver = crate::agent::named(Some(&row.agent))?;
+        if !driver.caps().aside {
+            bail!("{} can't answer side questions", driver.name());
+        }
+        let argv = driver.aside(&self.env(), row.model.as_deref(), &agent, question);
         let (me, session, id, cwd) = (self.clone(), session.to_string(), id.to_string(), row.cwd);
         tokio::spawn(async move {
-            let got = tokio::task::spawn_blocking(move || run_aside(&argv, &cwd))
+            let got = tokio::task::spawn_blocking(move || run_aside(driver, &argv, &cwd))
                 .await
                 .unwrap_or_else(|e| Err(e.to_string()));
             let body = match got {
@@ -1256,7 +1355,12 @@ impl Daemon {
 
     /// Carry on a session started in a terminal: its history comes in, and
     /// its agent resumes it.
-    pub async fn adopt(self: &Arc<Self>, agent_session: &str) -> Result<String> {
+    pub async fn adopt(
+        self: &Arc<Self>,
+        agent: Option<&str>,
+        agent_session: &str,
+    ) -> Result<String> {
+        let driver = crate::agent::named(agent)?;
         if self
             .store()
             .sessions()?
@@ -1265,22 +1369,20 @@ impl Daemon {
         {
             bail!("that session is already in dent");
         }
-        if crate::terminal::is_open(agent_session) {
+        if driver.is_open(agent_session) {
             bail!("it's still open in a terminal; close it there first, so it doesn't run twice");
         }
         let session = new_id();
         let id = agent_session.to_string();
         let media = self.paths.state.join("attachments").join(&session);
-        let crate::terminal::Imported { cwd, title, bodies } =
-            tokio::task::spawn_blocking(move || {
-                crate::terminal::import(&crate::terminal::find(&id)?, &media)
-            })
-            .await?
-            .context("couldn't read that session")?;
+        let crate::agent::Imported { cwd, title, bodies } =
+            tokio::task::spawn_blocking(move || driver.import(&id, &media))
+                .await?
+                .context("couldn't read that session")?;
         self.append(
             &session,
             Body::Created {
-                agent: "claude".into(),
+                agent: driver.id().into(),
                 cwd,
                 model: None,
                 permission: Permission::Ask,
@@ -1377,7 +1479,7 @@ impl Daemon {
             said
         };
         let answer = self
-            .ask(&crate::claude::title_prompt(&keep.join("\n\n")))
+            .ask(self.agent_of(session), &title_prompt(&keep.join("\n\n")))
             .await?;
         let t = clean_title(&answer);
         if !t.is_empty() {
@@ -1536,8 +1638,20 @@ fn pr_every() -> std::time::Duration {
 /// Set once every session older than seen marks has one.
 const SEEN_MARKS: &str = "seen-marks";
 
+/// What a small model is asked to title a conversation (through
+/// [`Daemon::ask`]: one turn, no tools).
+fn title_prompt(conversation: &str) -> String {
+    format!(
+        "Title this conversation between a person and a coding agent. The title is at most \
+         5 words, like a short task name (\"Fix the footer on mobile\"), sentence case, with no \
+         colon, quotes or full stop. Reply with the title only.\n\n{conversation}"
+    )
+}
+
 /// What a new session starts with.
 pub struct NewSession {
+    /// Which agent runs it; none means the default.
+    pub agent: Option<String>,
     pub cwd: String,
     /// Work in a new worktree of `cwd`'s repository.
     pub worktree: Option<dent_protocol::NewWorktree>,
@@ -1567,11 +1681,17 @@ pub fn title(text: &str) -> String {
 /// names append `-n`).
 /// Run a side question to the end: its answer and the agent conversation
 /// that holds it. Gives up after three minutes.
-fn run_aside(argv: &[String], cwd: &str) -> std::result::Result<(String, Option<String>), String> {
+fn run_aside(
+    agent: &dyn crate::agent::Driver,
+    argv: &[String],
+    cwd: &str,
+) -> std::result::Result<(String, Option<String>), String> {
+    use crate::agent::OneOff;
     use std::io::BufRead;
     if !std::path::Path::new(cwd).is_dir() {
         return Err(format!("The session's folder {cwd} no longer exists"));
     }
+    let name = agent.name();
     let mut child = std::process::Command::new(&argv[0])
         .args(&argv[1..])
         .current_dir(cwd)
@@ -1579,7 +1699,7 @@ fn run_aside(argv: &[String], cwd: &str) -> std::result::Result<(String, Option<
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Couldn't start Claude Code: {e}"))?;
+        .map_err(|e| format!("Couldn't start {name}: {e}"))?;
     // Stopped after three minutes, unless it has finished (and been waited
     // for, so its pid can't belong to anything else yet) by then.
     let pid = child.id();
@@ -1594,30 +1714,13 @@ fn run_aside(argv: &[String], cwd: &str) -> std::result::Result<(String, Option<
         }
     });
     let out = child.stdout.take().ok_or("no output")?;
-    let (mut texts, mut agent, mut failed) = (Vec::new(), None, None);
+    let (mut texts, mut session, mut failed) = (Vec::new(), None, None);
     for line in std::io::BufReader::new(out).lines().map_while(|l| l.ok()) {
-        match crate::claude::wire::parse(line.as_bytes()) {
-            Ok(crate::claude::wire::Inbound::Init { session_id, .. }) => agent = Some(session_id),
-            Ok(crate::claude::wire::Inbound::Assistant {
-                parent: None,
-                blocks,
-                synthetic: false,
-                ..
-            }) => {
-                for b in blocks {
-                    if let crate::claude::wire::AssistantBlock::Text(t) = b
-                        && !t.trim().is_empty()
-                    {
-                        texts.push(t);
-                    }
-                }
-            }
-            Ok(crate::claude::wire::Inbound::Result {
-                is_error: true,
-                text,
-                ..
-            }) => failed = Some(text.unwrap_or_else(|| "The side question failed".into())),
-            _ => {}
+        match agent.one_off(line.as_bytes()) {
+            OneOff::Session(s) => session = Some(s),
+            OneOff::Text(t) => texts.push(t),
+            OneOff::Failed(why) => failed = Some(why),
+            OneOff::Other => {}
         }
     }
     // The watchdog must not fire once the child is reaped.
@@ -1637,12 +1740,12 @@ fn run_aside(argv: &[String], cwd: &str) -> std::result::Result<(String, Option<
             .find(|l| !l.trim().is_empty())
             .unwrap_or("");
         return Err(if last.is_empty() {
-            format!("Claude Code gave no answer ({status})")
+            format!("{name} gave no answer ({status})")
         } else {
-            format!("Claude Code gave no answer: {last}")
+            format!("{name} gave no answer: {last}")
         });
     }
-    Ok((texts.join("\n\n"), agent))
+    Ok((texts.join("\n\n"), session))
 }
 
 pub fn new_id() -> String {

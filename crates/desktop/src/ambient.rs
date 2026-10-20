@@ -657,7 +657,7 @@ impl Feed {
             (Some(p), Some(f)) => self.lines.get(p, f),
             _ => None,
         };
-        let limits = d.limits();
+        let limits = d.limits("");
         let mut h = std::hash::DefaultHasher::new();
         (
             now / 60_000,
