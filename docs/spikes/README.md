@@ -14,3 +14,4 @@ Each spike is a small crate under `spikes/` plus a findings note here.
 | 08 | [Desktop concepts: the inbox, starting by typing, and the viewer](08-desktop-concepts.md) | Done |
 | 09 | [Does a Claude session resume on another machine? (remote stage 0, R-D1)](09-moving-sessions.md) | Done |
 | 10 | [Tailscale trust through the LocalAPI (remote stage 0, R-B1/B2)](10-tailscale-trust.md) | Done |
+| 11 | [Moving a worktree's git state to another machine (remote stage 0, R-D2/D4)](11-moving-git.md) | Done |

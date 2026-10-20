@@ -1,6 +1,6 @@
 # 0064. Moving a session: a new id on the target, a guarded move, the real transcript, git in a bundle
 
-Status: proposed (2026-10-20) · R-D1 passed ([spike 09](../spikes/09-moving-sessions.md)); still to confirm: [R-D2–D5](../remote-tests.md#d-moving-sessions) · Supersedes the steps in [daemon.md](../daemon.md#moving-sessions-between-machines) · Plan: [remote-plan.md](../remote-plan.md)
+Status: proposed (2026-10-20) · R-D1 passed ([spike 09](../spikes/09-moving-sessions.md)), R-D2 and most of R-D4 passed ([spike 11](../spikes/11-moving-git.md)); still to confirm: [R-D3, R-D5](../remote-tests.md#d-moving-sessions) · Supersedes the steps in [daemon.md](../daemon.md#moving-sessions-between-machines) · Plan: [remote-plan.md](../remote-plan.md)
 
 ## Decision
 
@@ -52,7 +52,7 @@ The person also sees the list of ignored files that will be carried, `.env*` tic
 ### Packing
 
 The agent process exits at a turn boundary (through the holder), so its transcript is complete.
-- **Working tree:** a snapshot commit, built in a copy of the real index, so the person's staging, split index and fsmonitor are untouched. Same-second edits are re-checked, and untracked files are included.
+- **Working tree:** two commits on top of `HEAD`. One holds the working tree, built in a copy of the real index; the other holds the index itself, so even the staged/unstaged split travels ([spike 11](../spikes/11-moving-git.md)). The person's staging, split index and fsmonitor are untouched. Same-second edits are re-checked, and untracked files are included.
 - **Bundle:** contains only commits the target doesn't already have. The target reports what it has, so commits pushed only to a fork still travel. It is capped at 200 MiB; past that, "push the branch, then move".
 - **Conversation:** the agent's transcript and its side files (subagents, saved tool results, file history), dent's saved attachments, and dent's event log.
 - **Manifest:** hashes of each part. It is written with fsync.
@@ -73,7 +73,6 @@ The transcript is re-keyed to the new session's agent id, then `--resume` runs f
 ### What doesn't move
 
 - Ignored files outside the carry list.
-- The split between staged and unstaged changes (everything arrives unstaged, and the move says so).
 - Running terminals and dev servers.
 
 ### Interruption points
