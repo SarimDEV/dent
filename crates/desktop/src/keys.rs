@@ -490,6 +490,7 @@ impl Dent {
                         .max_w(relative(0.92))
                         .max_h(relative(0.86))
                         .overflow_y_scroll()
+                        .restrict_scroll_to_axis()
                         .rounded(px(radius::XL))
                         .p(px(space::S6))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())

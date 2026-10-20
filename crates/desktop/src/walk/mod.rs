@@ -101,6 +101,9 @@ pub enum Act {
     /// A trackpad swipe over a probe: one movement of `dy` points (negative
     /// moves on through the content), then the gesture's zero-movement end.
     Wheel(&'static str, f32),
+    /// A trackpad swipe over a probe that isn't straight: `dx`, `dy` points
+    /// spread over ten movements, then the gesture's zero-movement end.
+    Swipe(&'static str, f32, f32),
     /// Open every session in turn, timing each, and report.
     Sweep,
     /// Press the mouse at a point in a probe, given as fractions of its size.
@@ -219,7 +222,7 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("pins", &[pins]),
     ("fail", &[failures]),
     ("queue", &[queue_order]),
-    ("changes", &[turn_changes]),
+    ("changes", &[turn_changes, diff_swipe]),
     ("recall", &[recall]),
     ("visuals", &[visuals]),
     ("composing", &[composing]),
@@ -438,6 +441,41 @@ pub fn tick(me: Entity<Dent>, window: &mut Window, cx: &mut App) {
                 &me,
                 cx,
                 leak(format!("wheel target “{name}” on screen")),
+                false,
+            ),
+        },
+        Swipe(name, dx, dy) => match center(&me, name, cx) {
+            Some(at) => {
+                window.dispatch_event(
+                    PlatformInput::MouseMove(MouseMoveEvent {
+                        position: at,
+                        pressed_button: None,
+                        modifiers: Modifiers::default(),
+                    }),
+                    cx,
+                );
+                let moves = std::iter::once((dx / 10., dy / 10., TouchPhase::Started))
+                    .chain(std::iter::repeat_n(
+                        (dx / 10., dy / 10., TouchPhase::Moved),
+                        9,
+                    ))
+                    .chain([(0., 0., TouchPhase::Ended)]);
+                for (x, y, phase) in moves {
+                    window.dispatch_event(
+                        PlatformInput::ScrollWheel(ScrollWheelEvent {
+                            position: at,
+                            delta: ScrollDelta::Pixels(point(px(x), px(y))),
+                            modifiers: Modifiers::default(),
+                            touch_phase: phase,
+                        }),
+                        cx,
+                    );
+                }
+            }
+            None => note(
+                &me,
+                cx,
+                leak(format!("swipe target “{name}” on screen")),
                 false,
             ),
         },

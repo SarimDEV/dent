@@ -54,3 +54,4 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0052. Media plays from disk in the web view; visuals and secrets go through dent's own tools](0052-media-visuals-and-secrets.md)
 - [0053. A project is a repository; dent makes a session's worktree](0053-projects-are-repos.md)
 - [0054. Each project keeps its own defaults; a session shows its pull request; projects have scripts](0054-project-defaults-prs-and-scripts.md)
+- [0057. One swipe moves one axis, in every scroller](0057-one-swipe-one-axis.md)

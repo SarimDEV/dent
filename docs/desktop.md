@@ -131,6 +131,7 @@ The goal is VS Code's Source Control flow, at native speed.
 - The modified side is editable for small fixes, saved straight to the working tree on the daemon's machine.
 - A commit box with commit and amend, plus push, for the times the agent does not. For now, the session header's Git button does the next step in one press: commit with a written message, push, open a pull request or pull ([projects.md](projects.md#getting-work-out)).
 - Diffs are computed on the daemon and streamed per file; very large files render lazily.
+- A diff or text file's long lines scroll sideways. A trackpad swipe moves it one way at a time: it locks to the direction it starts in and only turns once it clearly changes direction, as macOS scroll views do, so scrolling down never drifts sideways. A mouse wheel scrolls down; Shift with the wheel scrolls sideways. Every scroller in the app follows the same rule ([0057](decisions/0057-one-swipe-one-axis.md)).
 - Status updates live as agents edit, without stealing focus or scroll.
 
 ## Review loop

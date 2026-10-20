@@ -276,6 +276,8 @@ impl Dent {
                             .flex()
                             .items_center()
                             .gap(px(space::S1))
+                            // swipe: a mouse wheel scrolls the tabs sideways,
+                            // as there's nothing else here for it to move.
                             .overflow_x_scroll()
                             .track_scroll(&self.tab_scroll)
                             .children(tabs.into_iter().map(|(which, name, ic, path)| {
@@ -1342,6 +1344,7 @@ impl Dent {
                             .flex_1()
                             .min_h_0()
                             .overflow_y_scroll()
+                            .restrict_scroll_to_axis()
                             .track_scroll(&scroll)
                             .child(
                                 div()
@@ -1418,6 +1421,7 @@ impl Dent {
                     .flex_1()
                     .min_h_0()
                     .overflow_scroll()
+                    .restrict_scroll_to_axis()
                     .p(px(space::S6))
                     .flex()
                     .when(!actual, |d| d.items_center().justify_center())
@@ -1814,11 +1818,17 @@ impl Dent {
                                         div()
                                             .relative()
                                             .size_full()
+                                            .child(crate::swipe::lock(
+                                                Some(lines.clone()),
+                                                Some(self.diff_side.clone()),
+                                            ))
                                             .child(
                                                 div()
                                                     .id("diff")
                                                     .size_full()
                                                     .overflow_x_scroll()
+                                                    .track_scroll(&self.diff_side)
+                                                    .restrict_scroll_to_axis()
                                                     .child(
                                                         div()
                                                             .h_full()
@@ -2006,11 +2016,17 @@ impl Dent {
                     .relative()
                     .flex_1()
                     .min_h_0()
+                    .child(crate::swipe::lock(
+                        Some(scroll.clone()),
+                        Some(self.text_side.clone()),
+                    ))
                     .child(
                         div()
                             .id(SharedString::from(format!("text-{id}")))
                             .size_full()
                             .overflow_x_scroll()
+                            .track_scroll(&self.text_side)
+                            .restrict_scroll_to_axis()
                             .child(
                                 div()
                                     .h_full()
@@ -2265,6 +2281,7 @@ impl Dent {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .restrict_scroll_to_axis()
             .track_scroll(&self.aside_scroll)
             .p(px(space::S4))
             .flex()
