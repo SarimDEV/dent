@@ -10,4 +10,6 @@
 
 pub mod timeline;
 
-pub use timeline::{Aside, Branch, Call, Entry, Made, Note, SessionView, Sessions, Version};
+pub use timeline::{
+    Aside, Branch, Call, Entry, Made, Note, SessionView, Sessions, Version, pr_news,
+};

@@ -39,6 +39,7 @@ mod parity;
 mod pickup;
 mod pins;
 mod polish;
+mod prs;
 mod queue;
 mod real;
 mod recall;
@@ -54,8 +55,8 @@ mod zoom;
 use {
     ambient::*, attaching::*, changes::*, checks::*, common::*, composing::*, demo::*, edges::*,
     failures::*, find::*, finish::*, keys::*, look::*, markdown::*, motion::*, narration::*,
-    parity::*, pickup::*, pins::*, polish::*, queue::*, real::*, recall::*, reply::*, stills::*,
-    sweep::*, switching::*, typing::*, view::*, visuals::*, worktrees::*, zoom::*,
+    parity::*, pickup::*, pins::*, polish::*, prs::*, queue::*, real::*, recall::*, reply::*,
+    stills::*, sweep::*, switching::*, typing::*, view::*, visuals::*, worktrees::*, zoom::*,
 };
 
 type Pred = fn(&Dent, &App) -> bool;
@@ -227,6 +228,10 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("zoom-links", &[zoom_links]),
     ("worktrees", &[worktrees]),
     ("worktree-edges", &[worktree_edges]),
+    ("prs", &[prs]),
+    ("look-pr", &[look_pr]),
+    ("project-defaults", &[project_defaults]),
+    ("scripts", &[scripts]),
 ];
 
 /// Scenes that start on their own: no daemon, the real agent, or a

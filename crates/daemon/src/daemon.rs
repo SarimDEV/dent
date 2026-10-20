@@ -766,6 +766,67 @@ impl Daemon {
         }
     }
 
+    /// Say the session's pull request if its state, checks or review
+    /// changed since last said. Only a pushed branch is asked about.
+    pub async fn note_pr(self: &Arc<Self>, session: &str, cwd: &str) {
+        let Some(gh) = crate::ship::gh(&self.env().path) else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(cwd);
+        if !dir.is_dir() {
+            return;
+        }
+        let key = format!("{PR}{session}");
+        let said = self.store().get(&key).ok().flatten();
+        let asked = tokio::task::spawn_blocking(move || {
+            let run =
+                |args: &[&str]| crate::workspace::run(&dir, args).map(|s| s.trim().to_string());
+            // Pushed, and not the default branch, which has no pull request.
+            let Ok(upstream) = run(&["rev-parse", "--abbrev-ref", "-q", "@{u}"]) else {
+                return Ok(None);
+            };
+            let default = run(&["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"]);
+            if default.is_ok_and(|d| d == upstream) {
+                return Ok(None);
+            }
+            crate::ship::pull_request(&dir, &gh)
+        })
+        .await;
+        // GitHub couldn't be asked: what was said stands.
+        let Ok(Ok(pr)) = asked else {
+            return;
+        };
+        // Never had one: nothing to say until there is.
+        if said.is_none() && pr.is_none() {
+            return;
+        }
+        let now = serde_json::to_string(&pr).unwrap_or_default();
+        if said.as_deref() == Some(now.as_str()) {
+            return;
+        }
+        if let Err(e) = self
+            .append(session, Body::PullRequest { pr }, None)
+            .and_then(|_| self.store().put(&key, &now))
+        {
+            eprintln!("dent-daemon: {session}: {e:#}");
+        }
+    }
+
+    /// Every couple of minutes, look again at the pull requests of the
+    /// sessions that are open, so checks, reviews and merges show.
+    pub fn watch_prs(self: &Arc<Self>) {
+        let d = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(pr_every()).await;
+                let open = d.store().open_sessions().unwrap_or_default();
+                for (id, cwd) in open {
+                    d.note_pr(&id, &cwd).await;
+                }
+            }
+        });
+    }
+
     /// The branch and main checkout last said for a session.
     pub fn workspace_of(&self, session: &str) -> (Option<String>, Option<String>) {
         let v: serde_json::Value = self
@@ -866,7 +927,7 @@ impl Daemon {
         }
         let mut url = None;
         if opens {
-            if let Some(pr) = &st.pr {
+            if let Some(pr) = st.pr.as_ref().filter(|p| p.open()) {
                 url = Some(pr.url.clone());
                 done.push(format!("pull request #{} is open", pr.number));
             } else {
@@ -1460,6 +1521,17 @@ fn clean_title(answer: &str) -> String {
 
 /// Each session's branch and main checkout as last said, as JSON.
 const WORKSPACE: &str = "workspace.";
+/// Each session's pull request as last said, as JSON.
+const PR: &str = "pr.";
+/// How often open sessions' pull requests are looked at again: two
+/// minutes, or `DENT_PR_EVERY` seconds (the walkthroughs').
+fn pr_every() -> std::time::Duration {
+    let secs = std::env::var("DENT_PR_EVERY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(120);
+    std::time::Duration::from_secs(secs)
+}
 
 /// Set once every session older than seen marks has one.
 const SEEN_MARKS: &str = "seen-marks";

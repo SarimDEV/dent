@@ -339,6 +339,8 @@ pub enum Menu {
     Workspace,
     /// The branch a new worktree starts from.
     Base,
+    /// The project's scripts, from the session's header.
+    Actions,
     Model,
     Permission,
     Effort,
@@ -370,7 +372,7 @@ impl Menu {
     /// Menus from a chip at the row's end line up with its right edge.
     #[allow(clippy::wrong_self_convention)] // reads as "opens from the end"
     pub fn from_end(self) -> bool {
-        self == Menu::Pickup
+        matches!(self, Menu::Pickup | Menu::Actions)
     }
 
     /// Menus under the composer open upward.
@@ -609,6 +611,8 @@ pub enum Waiting {
     Repo(String),
     /// Where a session's branch stands.
     GitStatus(String),
+    /// A brief on a pull request, to send to this session's agent.
+    PrBrief(String),
     /// A Git action in this session.
     Git(String),
     /// Taking away a closed session's worktree; `true` when forced.
@@ -673,9 +677,13 @@ pub struct Dent {
     /// shown as it came back: ↑ and ↓ step on through them.
     pub recall: Option<Recall>,
     pub defaults: Defaults,
+    /// Each project's last new-session choices, by folder ("" for none).
+    pub project_prefs: std::collections::BTreeMap<String, crate::prefs::ProjectPrefs>,
     /// The new session's project as a repository: the folder asked about,
     /// and once the daemon says, what it is (`None` inside: not a repo).
     pub repo: Option<(String, Option<Option<dent_protocol::Repo>>)>,
+    /// Each session's project scripts: name and what it does.
+    pub actions: HashMap<String, Vec<(String, String)>>,
     /// Where each session's branch stands, for the Git actions.
     pub git: HashMap<String, dent_protocol::GitStatus>,
     /// The Git action running in each session.
@@ -1373,6 +1381,7 @@ impl Dent {
             pastes: Rc::new(prefs.pastes.clone()),
             appearance: prefs.appearance,
             pinned: prefs.pinned.clone(),
+            project_prefs: prefs.projects.clone(),
             forced_dark: forced,
             recall: None,
             defaults: Defaults {
@@ -1386,6 +1395,7 @@ impl Dent {
             },
             repo: None,
             git: HashMap::new(),
+            actions: HashMap::new(),
             git_busy: HashMap::new(),
             git_confirm: None,
             worktree_force: Default::default(),
@@ -2045,7 +2055,8 @@ impl Dent {
         if id.is_none()
             && let Some(s) = self.current_rc()
         {
-            self.defaults.project = self.project_for(s.root.as_deref().unwrap_or(&s.cwd));
+            let p = self.project_for(s.root.as_deref().unwrap_or(&s.cwd));
+            self.set_project(p);
         }
         if let Some(id) = &id {
             self.used(id);
@@ -2433,6 +2444,13 @@ impl Dent {
                                 }
                                 _ => {}
                             }
+                            // A pull request changing (checks, review, merge)
+                            // changes what the Git button offers.
+                            if matches!(e.body, dent_protocol::Body::PullRequest { .. })
+                                && self.core.live
+                            {
+                                self.fetch_git(&e.session);
+                            }
                             if matches!(e.body, dent_protocol::Body::TurnEnded { .. })
                                 && self.core.live
                             {
@@ -2637,7 +2655,7 @@ impl Dent {
                 },
             ) => {
                 self.project_busy = None;
-                self.defaults.project = Some(path);
+                self.set_project(Some(path));
                 self.menu = None;
                 self.waiting
                     .insert(self.live.send(Request::Projects), Waiting::Projects);
@@ -2766,6 +2784,19 @@ impl Dent {
                 }
             },
             (Waiting::GitStatus(_), Out::Error { .. }) => {}
+            (
+                Waiting::PrBrief(id),
+                Out::Reply {
+                    reply: Reply::PrBrief { text },
+                },
+            ) => {
+                self.git_busy.remove(&id);
+                self.send_draft(&id, &Draft::words(&text), false);
+            }
+            (Waiting::PrBrief(id), Out::Error { message }) => {
+                self.git_busy.remove(&id);
+                self.toast(ToastAction::Info, message);
+            }
             (
                 Waiting::Git(id),
                 Out::Reply {
@@ -3009,6 +3040,11 @@ impl Dent {
     /// Ask where a session's branch stands, unless a Git action there is
     /// about to say.
     pub fn fetch_git(&mut self, id: &str) {
+        // The project's scripts, read again with everything else.
+        if let Some(cwd) = self.session(id).map(|s| s.cwd.clone()) {
+            let found = crate::actions::list(std::path::Path::new(&cwd));
+            self.actions.insert(id.to_string(), found);
+        }
         if self.git_busy.contains_key(id) {
             return;
         }
@@ -3036,6 +3072,25 @@ impl Dent {
         }
         self.repo = Some((dir.clone(), None));
         self.ask(Request::Repo { dir: dir.clone() }, Waiting::Repo(dir));
+    }
+
+    /// Make `project` the new session's project, bringing back what its
+    /// last new session started with (decision 0054); one never started
+    /// in keeps what's chosen now.
+    pub fn set_project(&mut self, project: Option<String>) {
+        if self.defaults.project == project {
+            return;
+        }
+        if let Some(p) = self
+            .project_prefs
+            .get(project.as_deref().unwrap_or_default())
+        {
+            self.defaults.model = p.model.clone();
+            self.defaults.permission = p.permission;
+            self.defaults.effort = p.effort.clone();
+            self.defaults.worktree = p.worktree;
+        }
+        self.defaults.project = project;
     }
 
     /// Whether the next session gets a new worktree: chosen, and the
@@ -3095,6 +3150,72 @@ impl Dent {
                 message: None,
             },
             Waiting::Git(id.to_string()),
+        );
+        cx.notify();
+    }
+
+    /// Run one of the project's scripts in session `id`'s terminal, opening
+    /// it first if it isn't.
+    pub fn run_action(
+        &mut self,
+        id: &str,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected.as_deref() != Some(id) {
+            return;
+        }
+        let Some(cwd) = self.session(id).map(|s| s.cwd.clone()) else {
+            return;
+        };
+        let fresh = !self.shells.get(id).is_some_and(|sh| !sh.exited);
+        if !fresh && self.shells.get(id).is_some_and(|sh| sh.busy()) {
+            // Typing would go to what's running there, not to the shell.
+            self.toast(
+                ToastAction::Info,
+                "Something is running in your terminal; stop it first".into(),
+            );
+            cx.notify();
+            return;
+        }
+        self.open_shell(window, cx);
+        // A terminal just opened starts in the session's folder.
+        let here = if fresh {
+            Some(cwd.clone())
+        } else {
+            self.shells.get(id).and_then(|sh| sh.cwd())
+        };
+        // The same folder however it's spelled (`/var` or `/private/var`).
+        let real = |p: &str| std::fs::canonicalize(p).ok();
+        let here = here.filter(|h| real(h) == real(&cwd)).map(|_| cwd.clone());
+        let line = format!("{}\r", crate::actions::command(name, &cwd, here.as_deref()));
+        if let Some(sh) = self.shells.get_mut(id) {
+            if fresh {
+                // Typed once the shell has started, not into its login.
+                sh.pending = Some(line);
+            } else {
+                sh.type_bytes(line.into_bytes());
+            }
+        }
+        cx.notify();
+    }
+
+    /// Send the agent what it needs to fix the pull request's failing
+    /// checks or answer its review, as your message.
+    pub fn brief_agent(&mut self, id: &str, about: dent_protocol::PrBrief, cx: &mut Context<Self>) {
+        if self.git_busy.contains_key(id) {
+            return;
+        }
+        // Shown as busy while GitHub is asked; nothing pushes meanwhile.
+        self.git_busy
+            .insert(id.to_string(), dent_protocol::GitAction::Pull);
+        self.ask(
+            Request::PrBrief {
+                session: id.to_string(),
+                about,
+            },
+            Waiting::PrBrief(id.to_string()),
         );
         cx.notify();
     }
@@ -4476,7 +4597,7 @@ impl Dent {
         // Drop the old drawing's hold on the items so they extend in place.
         let old = prev.map(|i| {
             let old = &self.sessions[i];
-            (old.status, old.items.len(), old.made_sig)
+            (old.status, old.items.len(), old.made_sig, old.pr.clone())
         });
         if let Some(i) = prev {
             self.sessions[i] = Rc::new(Session::placeholder(id));
@@ -4516,7 +4637,7 @@ impl Dent {
             s.versions = crate::bridge::versions(v, Some(b));
             s.old = Some(v.branches[b].seq);
         }
-        let made_changed = old.is_none_or(|(_, _, sig)| sig != s.made_sig);
+        let made_changed = old.as_ref().is_none_or(|(_, _, sig, _)| *sig != s.made_sig);
         let partial_len = v.partial.len();
         let partial_now = v.partial.clone();
         let arts = if made_changed {
@@ -4611,7 +4732,8 @@ impl Dent {
         } else if len == 0 {
             self.births.remove(id);
         }
-        let old_status = old.map(|o| o.0);
+        let old_status = old.as_ref().map(|o| o.0);
+        let old_pr = old.as_ref().and_then(|o| o.3.clone());
         // Once stopped, the next turn can be stopped at once: the guard
         // against a second Stop is only for while the first is landing.
         if !s.running() {
@@ -4620,9 +4742,11 @@ impl Dent {
         // Tell the person when something needs them or is done, unless
         // they're already looking at it.
         let looking = self.window_active && self.selected.as_deref() == Some(id);
+        // News of its pull request says itself, once (below).
+        let pr_said = dent_client_core::pr_news(old_pr.as_ref(), s.pr.as_ref());
         if self.core.live && !looking && old_status.is_some() && old_status != Some(s.status) {
             match s.status {
-                Status::Needs => {
+                Status::Needs if !pr_said => {
                     crate::notify::post("Needs you", &format!("{} · {}", s.title, s.detail), id)
                 }
                 // After the turn and anything it left running in the background.
@@ -4631,6 +4755,19 @@ impl Dent {
                 }
                 _ => {}
             }
+        }
+        // Its pull request's checks failing, changes asked for, a merge.
+        if self.core.live
+            && !looking
+            && old_status.is_some()
+            && pr_said
+            && let Some(pr) = &s.pr
+        {
+            crate::notify::post(
+                &format!("PR #{}: {}", pr.number, crate::gitbar::pr_words(pr)),
+                &s.title,
+                id,
+            );
         }
         if old_status != Some(s.status) {
             match s.status {
@@ -4854,6 +4991,7 @@ impl Dent {
                 .map(|(n, full)| (*n, full.clone()))
                 .collect(),
             stashes: self.stashes.iter().map(saved).collect(),
+            projects: self.project_prefs.clone(),
         };
         if self.saved_prefs.as_ref() != Some(&p) {
             crate::prefs::save(&p);
@@ -5012,6 +5150,16 @@ impl Dent {
         self.ambient.borrow_mut().submit();
         let d = self.defaults.clone();
         let (cwd, worktree) = d.place(d.project.clone(), self.new_worktree());
+        // The project keeps what it was started with, for next time.
+        self.project_prefs.insert(
+            d.project.clone().unwrap_or_default(),
+            crate::prefs::ProjectPrefs {
+                model: d.model.clone(),
+                permission: d.permission,
+                effort: d.effort.clone(),
+                worktree: d.worktree,
+            },
+        );
         // An existing worktree is for this session only.
         self.defaults.into = None;
         self.attachments.clear();

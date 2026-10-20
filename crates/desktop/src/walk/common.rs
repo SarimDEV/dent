@@ -27,7 +27,7 @@ pub(super) fn streaming(d: &Dent) -> bool {
 
 /// The scratch project the walk script made.
 pub(super) fn use_project(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
-    d.defaults.project = std::env::var("DENT_WALK_PROJECT").ok();
+    d.set_project(std::env::var("DENT_WALK_PROJECT").ok());
     cx.notify();
 }
 

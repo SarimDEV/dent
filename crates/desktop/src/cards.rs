@@ -326,10 +326,13 @@ impl Dent {
         let pct = used as f32 / max as f32 * 100.;
         let near = s.compacts_at.is_some_and(|c| used as f64 >= c as f64 * 0.9) || pct > 90.;
         let open = self.meter_open;
-        let busy = matches!(
-            s.status,
-            crate::theme::Status::Working | crate::theme::Status::Needs
-        );
+        // Working, or waiting on an answer; a pull request needing you
+        // leaves the agent free.
+        let busy = s.status == crate::theme::Status::Working
+            || (s.status == crate::theme::Status::Needs
+                && !s.pr.as_ref().is_some_and(|p| {
+                    p.open() && crate::gitbar::pr_tone(p) == crate::gitbar::Tone::Trouble
+                }));
         let compacting = matches!(s.activity, Some(Activity::Compacting { .. }));
         let sid = s.id.clone();
         let gauge = div()
