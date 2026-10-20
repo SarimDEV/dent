@@ -89,6 +89,8 @@ cat > "$root/home/.claude/projects/-proj/33333333-4444-4555-8666-777777777777.js
 {"type":"assistant","uuid":"o2","timestamp":"$now","message":{"content":[{"type":"text","text":"Looking at the startup path now."}]}}
 JSONL
 HOME="$root/home" \
+GIT_AUTHOR_NAME=walk GIT_AUTHOR_EMAIL=walk@example.com \
+GIT_COMMITTER_NAME=walk GIT_COMMITTER_EMAIL=walk@example.com \
 DENT_STATE="$root/state" \
 DENT_HOLDER_ORPHAN_MS=10000 \
 DENT_CLAUDE="$bin/dent-fake-claude" \

@@ -28,6 +28,12 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 
 ## Open
 
+### A reference checkout compared against was out of date
+- Seen: 2026-10-19, the projects and worktrees audit. The local reference checkout used for comparison was 60 commits behind its remote; the owner asked whether it was current before anything was built on it. None of the 60 touched the parts compared, but that was luck.
+- Cost: one owner correction, and a comparison that could have been wrong.
+- Fix: fetch a reference checkout (`git fetch` and compare with `origin/HEAD`) before reading it, and say which commit was read.
+- Check: no audit or comparison that names a stale commit.
+
 ### A daemon test fails now and then under load
 - Seen: 2026-10-18. `clients_joining_mid_reply_see_it_once_and_events_never_skip` failed once in `just verify` (daemon.rs:1528, the late client's partial text), passed 5 of 5 alone and on the next full run. Nothing in the batch touched streaming.
 - Cost: one re-run of `just verify` (~15 s) and a few minutes checking it wasn't the change.

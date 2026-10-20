@@ -25,6 +25,10 @@ pub struct SessionView {
     pub id: String,
     pub title: String,
     pub cwd: String,
+    /// The branch it works on, as the daemon last said.
+    pub branch: Option<String>,
+    /// In a linked worktree: the project's main checkout.
+    pub root: Option<String>,
     pub agent: String,
     pub model: Option<String>,
     pub permission: Permission,
@@ -1006,6 +1010,10 @@ impl SessionView {
                 note: Note::Info,
                 text: text.clone(),
             }),
+            Body::Workspace { branch, root } => {
+                self.branch = branch.clone();
+                self.root = root.clone();
+            }
             Body::Checkpoint { id, .. } => {
                 self.checkpoints.insert(id.clone());
             }

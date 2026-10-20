@@ -263,6 +263,7 @@ impl Client {
     fn create(&mut self, cwd: &str, permission: Permission, text: &str) -> String {
         match self.call(Request::Create {
             cwd: cwd.into(),
+            worktree: None,
             model: None,
             permission,
             effort: None,
@@ -1104,6 +1105,7 @@ fn effort_reaches_the_agent_and_changing_it_starts_a_new_process() {
     c.subscribe(0);
     let s = match c.call(Request::Create {
         cwd: w.cwd(),
+        worktree: None,
         model: None,
         permission: Permission::Ask,
         effort: Some("low".into()),
@@ -1768,6 +1770,7 @@ fn resent_creates_forks_and_rewinds_happen_once() {
     c.subscribe(0);
     let create = Request::Create {
         cwd: w.cwd(),
+        worktree: None,
         model: None,
         permission: Permission::Edits,
         effort: None,

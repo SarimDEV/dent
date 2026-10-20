@@ -63,6 +63,51 @@ impl Dent {
                     .on_press(cx.listener(move |this, _, _, cx| this.resume(&sid, cx))),
             );
         }
+        // The branch's next Git step, while the session is open.
+        if !s.closed
+            && let Some(st) = self.git.get(&s.id)
+            && let Some(q) = crate::gitbar::quick(st)
+        {
+            let sid = id.clone();
+            let busy = self.git_busy.get(&s.id).copied();
+            let confirming = self
+                .git_confirm
+                .as_ref()
+                .filter(|(c, _)| *c == s.id)
+                .map(|(_, a)| *a);
+            let label = match (busy, confirming) {
+                (Some(a), _) => crate::gitbar::busy(a).to_string(),
+                (None, Some(_)) => crate::gitbar::confirm(st),
+                _ => q.label.clone(),
+            };
+            let b = if tight && busy.is_none() && confirming.is_none() {
+                icon_button("git-action", q.icon, &t)
+            } else {
+                button("git-action", &label, confirming.is_some(), &t)
+            };
+            let b = b.relative().child(probe(&self.probes, "git-action"));
+            let b =
+                match (&q.press, busy) {
+                    (Some(press), None) => {
+                        let press = press.clone();
+                        b.with_tip(crate::ui::tip_owned(
+                            if tight {
+                                format!("{label}: {}", q.tip)
+                            } else {
+                                q.tip.clone()
+                            },
+                            t,
+                        ))
+                        .on_press(cx.listener(move |this, _, _, cx| match &press {
+                            crate::gitbar::Press::Run(a) => this.run_git(&sid, *a, cx),
+                            crate::gitbar::Press::Open(url) => cx.open_url(url),
+                        }))
+                    }
+                    (_, Some(_)) => crate::ui::off(b, "Working on it", &t),
+                    (None, None) => crate::ui::off_owned(b, q.tip.clone(), &t),
+                };
+            actions = actions.child(b);
+        }
         {
             let sid = id.clone();
             let fork = if tight {
@@ -1013,8 +1058,33 @@ impl Dent {
                         .items_center()
                         .gap(px(space::S3))
                         .child(icon("archive", 15., t.quiet))
-                        .child(div().flex_1().ty(UI).text_color(t.quiet).child("Closed. It stays searchable, and reopening puts it back in your inbox."))
-                        .child(button("reopen", "Reopen", true, &t).on_press(cx.listener(move |this, _, window, cx| {
+                        // The words wrap; the buttons beside them stay whole.
+                        .child(div().flex_1().min_w_0().ty(UI).text_color(t.quiet).child("Closed. It stays searchable, and reopening puts it back in your inbox."))
+                        // Its worktree is cleaned up only when you say;
+                        // reopening brings one back on its branch.
+                        .children((s.root.is_some() && std::path::Path::new(&s.cwd).exists()).then(|| {
+                            let sid = s.id.clone();
+                            let force = self.worktree_force.contains(&s.id);
+                            button(
+                                "remove-worktree",
+                                if force { "Remove anyway" } else { "Remove worktree" },
+                                false,
+                                &t,
+                            )
+                            .relative()
+                            .with_tip(tip(
+                                if force {
+                                    "Its changes that aren't committed go too; the branch stays"
+                                } else {
+                                    "Take away its folder; the branch and its commits stay"
+                                },
+                                None,
+                                t,
+                            ))
+                            .on_press(cx.listener(move |this, _, _, cx| this.remove_worktree(&sid, cx)))
+                            .child(probe(&self.probes, "remove-worktree"))
+                        }))
+                        .child(button("reopen", "Reopen", true, &t).relative().child(probe(&self.probes, "reopen")).on_press(cx.listener(move |this, _, window, cx| {
                             this.reopen(&id, cx);
                             this.composer.update(cx, |c, cx| c.focus_field(window, cx));
                         }))),
@@ -1078,6 +1148,7 @@ impl Dent {
         let kind = match &s.activity {
             Some(dent_protocol::Activity::Compacting { .. }) => "compacting",
             Some(dent_protocol::Activity::Retrying { .. }) => "retrying",
+            Some(dent_protocol::Activity::SettingUp { .. }) => "setting-up",
             Some(dent_protocol::Activity::Preparing { .. })
             | Some(dent_protocol::Activity::Thinking { .. })
             | None => "working",
@@ -3284,6 +3355,35 @@ impl Dent {
                         ),
                     ),
             )
+            // Where it works, under the box: the branch, and a worktree's
+            // folder when it has one of its own.
+            .children(s.branch.clone().map(|b| {
+                let worktree = s.root.is_some();
+                div()
+                    .relative()
+                    .mt(px(space::S2))
+                    .px(px(space::S2))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S1H))
+                    .ty(LABEL)
+                    .text_color(t.quiet)
+                    .child(icon(
+                        if worktree {
+                            "folder-git-2"
+                        } else {
+                            "git-branch"
+                        },
+                        12.,
+                        t.quiet,
+                    ))
+                    .child(div().min_w_0().truncate().child(b))
+                    .when(worktree, |d| {
+                        d.child(div().text_color(t.faint).child("·"))
+                            .child(div().flex_none().text_color(t.faint).child("Worktree"))
+                    })
+                    .child(probe(&self.probes, "branch-strip"))
+            }))
     }
 
     /// Opens the system's file picker; what you pick rides along with the
@@ -3960,6 +4060,7 @@ impl Dent {
     }
 
     fn starter_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.want_repo();
         let t = self.t;
         let text = self.starter.read(cx).value();
         let empty = text.trim().is_empty() && self.attachments.is_empty();
@@ -3987,6 +4088,7 @@ impl Dent {
             .gap(px(space::S1))
             .mx(px(-space::S2))
             .child(self.chip(Menu::Project, "folder", &project, d.project.is_none(), cx))
+            .children(self.workspace_chips(cx))
             .child(self.chip(Menu::Model, "claude", &model, false, cx))
             .child(self.chip(Menu::Permission, "shield", d.permission.label(), false, cx))
             .child(self.chip(
@@ -4137,6 +4239,130 @@ impl Dent {
             .into_any_element()
     }
 
+    /// In a repository: where the session works, and for a new worktree
+    /// the branch it starts from (decision 0053).
+    fn workspace_chips(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(repo) = self.repo_now().cloned() else {
+            return Vec::new();
+        };
+        let d = self.defaults.clone();
+        let mut v = Vec::new();
+        let (icon_name, label) = match &d.into {
+            Some(path) => (
+                "folder-git-2",
+                repo.worktrees
+                    .iter()
+                    .find(|w| w.path == *path)
+                    .and_then(|w| w.branch.clone())
+                    .unwrap_or_else(|| Self::project_name(path)),
+            ),
+            None if d.worktree => ("git-branch-plus", "New worktree".to_string()),
+            None => ("folder-git", "Current checkout".to_string()),
+        };
+        v.push(self.chip(Menu::Workspace, icon_name, &label, false, cx));
+        if d.worktree && d.into.is_none() {
+            let from = d
+                .base
+                .clone()
+                .or(repo.current.clone())
+                .unwrap_or_else(|| "HEAD".into());
+            v.push(self.chip(Menu::Base, "git-branch", &format!("from {from}"), false, cx));
+        }
+        v
+    }
+
+    fn workspace_entries(&self) -> Vec<Entry> {
+        let act = |f: Box<ActFn>| -> Option<Act> { Some(Rc::from(f)) };
+        let Some(repo) = self.repo_now() else {
+            return vec![Entry::note("Not a Git repository")];
+        };
+        let d = &self.defaults;
+        let name = Self::project_name(&repo.root);
+        let here = match &repo.current {
+            Some(b) => format!("Works in {name}, on {b}"),
+            None => format!("Works in {name}"),
+        };
+        let fresh = if repo.setup {
+            "A folder and branch of its own; runs .dent/setup".to_string()
+        } else {
+            "A folder and branch of its own".to_string()
+        };
+        let mut v = vec![
+            Entry::row(
+                "m-here".into(),
+                "Current checkout",
+                Some(here),
+                !d.worktree && d.into.is_none(),
+                act(Box::new(|this, _, _| {
+                    this.defaults.worktree = false;
+                    this.defaults.into = None;
+                })),
+            ),
+            Entry::row(
+                "m-worktree".into(),
+                "New worktree",
+                Some(fresh),
+                d.worktree && d.into.is_none(),
+                act(Box::new(|this, _, _| {
+                    this.defaults.worktree = true;
+                    this.defaults.into = None;
+                })),
+            ),
+        ];
+        if !repo.worktrees.is_empty() {
+            v.push(Entry::of("m-sep".into(), "", EntryKind::Separator));
+            v.push(Entry::note("Carry on in a worktree"));
+            let home = crate::app::home();
+            for (i, w) in repo.worktrees.iter().take(8).enumerate() {
+                let path = w.path.clone();
+                let shown = match path.strip_prefix(&home) {
+                    Some(rest) if !home.is_empty() => format!("~{rest}"),
+                    _ => path.clone(),
+                };
+                v.push(Entry::row(
+                    format!("m-wt-{i}"),
+                    w.branch.as_deref().unwrap_or("Detached"),
+                    Some(shown),
+                    d.into.as_deref() == Some(path.as_str()),
+                    act(Box::new(move |this, _, _| {
+                        this.defaults.into = Some(path.clone());
+                    })),
+                ));
+            }
+        }
+        v
+    }
+
+    fn base_entries(&self) -> Vec<Entry> {
+        let act = |f: Box<ActFn>| -> Option<Act> { Some(Rc::from(f)) };
+        let Some(repo) = self.repo_now() else {
+            return Vec::new();
+        };
+        let chosen = self.defaults.base.clone().or(repo.current.clone());
+        let current = repo.current.clone();
+        let mut v: Vec<Entry> = repo
+            .branches
+            .iter()
+            .map(|b| {
+                let (b2, cur) = (b.clone(), current.clone());
+                Entry::row(
+                    format!("m-base-{b}"),
+                    b,
+                    (current.as_deref() == Some(b.as_str())).then(|| "Checked out".to_string()),
+                    chosen.as_deref() == Some(b.as_str()),
+                    act(Box::new(move |this, _, _| {
+                        this.defaults.base =
+                            (cur.as_deref() != Some(b2.as_str())).then(|| b2.clone());
+                    })),
+                )
+            })
+            .collect();
+        if v.is_empty() {
+            v.push(Entry::note("No branches yet"));
+        }
+        v
+    }
+
     /// One remembered choice; a click opens its menu.
     fn chip(
         &mut self,
@@ -4222,6 +4448,8 @@ impl Dent {
                                 ),
                                 Menu::Model | Menu::SessionModel => "Model".into(),
                                 Menu::Project => "Project".into(),
+                                Menu::Workspace => "Where it works".into(),
+                                Menu::Base => "The branch the worktree starts from".into(),
                                 Menu::Pickup => "Pick up from terminal".into(),
                                 Menu::Stash => "Drafts put aside".into(),
                             },
@@ -4306,6 +4534,8 @@ impl Dent {
         let act = |f: Box<ActFn>| -> Option<Act> { Some(Rc::from(f)) };
         match which {
             Menu::Project => self.project_entries(cx),
+            Menu::Workspace => self.workspace_entries(),
+            Menu::Base => self.base_entries(),
             Menu::Pickup => self.pickup_entries(),
             Menu::Stash => self.stash_entries(),
             Menu::Model | Menu::SessionModel => {

@@ -335,6 +335,10 @@ impl Viewport {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Menu {
     Project,
+    /// The project's own checkout, a new worktree, or one already made.
+    Workspace,
+    /// The branch a new worktree starts from.
+    Base,
     Model,
     Permission,
     Effort,
@@ -356,7 +360,10 @@ impl Menu {
 
     /// Menus with longer rows: paths, session titles.
     pub fn wide(self) -> bool {
-        matches!(self, Menu::Project | Menu::Pickup | Menu::Stash)
+        matches!(
+            self,
+            Menu::Project | Menu::Workspace | Menu::Pickup | Menu::Stash
+        )
     }
 
     /// Menus from a chip at the row's end line up with its right edge.
@@ -387,6 +394,8 @@ pub enum ToastAction {
         back: Draft,
         place: Option<String>,
     },
+    /// Open an address: a pull request just made.
+    Open(String),
     /// Just a message, like a request the daemon refused.
     Info,
 }
@@ -470,6 +479,36 @@ pub struct Defaults {
     pub permission: Permission,
     /// The agent's effort level; `None` is its default.
     pub effort: Option<String>,
+    /// A new worktree for each session, or the project's own checkout:
+    /// what you used last (decision 0053).
+    pub worktree: bool,
+    /// The branch a new worktree starts from; `None` is the one checked out.
+    /// Forgotten when the project changes.
+    pub base: Option<String>,
+    /// An existing worktree to work in instead, for the next session only.
+    pub into: Option<String>,
+}
+
+impl Defaults {
+    /// Where a new session goes in `project` (a folder, or `None` for the
+    /// scratch folder): its folder, and the worktree to make there, if any.
+    pub fn place(&self, project: Option<String>) -> (String, Option<dent_protocol::NewWorktree>) {
+        let Some(dir) = project else {
+            let scratch = crate::scratch_dir();
+            let _ = std::fs::create_dir_all(&scratch);
+            return (scratch.display().to_string(), None);
+        };
+        match &self.into {
+            Some(w) => (w.clone(), None),
+            None if self.worktree => (
+                dir,
+                Some(dent_protocol::NewWorktree {
+                    base: self.base.clone(),
+                }),
+            ),
+            None => (dir, None),
+        }
+    }
 }
 
 /// A dev server's address as the web view can load it. WebKit won't load
@@ -561,6 +600,14 @@ pub enum Waiting {
     /// went at once instead (the turn ended meanwhile), there's no place
     /// to keep and nothing to say.
     Requeue,
+    /// A folder's repository, for the new session's worktree choices.
+    Repo(String),
+    /// Where a session's branch stands.
+    GitStatus(String),
+    /// A Git action in this session.
+    Git(String),
+    /// Taking away a closed session's worktree; `true` when forced.
+    RemoveWorktree(String, bool),
 }
 
 /// The home folder, as a path string.
@@ -618,6 +665,18 @@ pub struct Dent {
     /// shown as it came back: ↑ and ↓ step on through them.
     pub recall: Option<Recall>,
     pub defaults: Defaults,
+    /// The new session's project as a repository: the folder asked about,
+    /// and once the daemon says, what it is (`None` inside: not a repo).
+    pub repo: Option<(String, Option<Option<dent_protocol::Repo>>)>,
+    /// Where each session's branch stands, for the Git actions.
+    pub git: HashMap<String, dent_protocol::GitStatus>,
+    /// The Git action running in each session.
+    pub git_busy: HashMap<String, dent_protocol::GitAction>,
+    /// A push to the default branch waiting for a second press.
+    pub git_confirm: Option<(String, dent_protocol::GitAction)>,
+    /// Closed sessions whose worktree has uncommitted changes: the next
+    /// press removes it anyway.
+    pub worktree_force: std::collections::HashSet<String>,
     pub menu: Option<Menu>,
     /// The model menu shows pinned older versions.
     pub older_models: bool,
@@ -1295,7 +1354,15 @@ impl Dent {
                 model: prefs.model.clone(),
                 permission: prefs.permission,
                 effort: prefs.effort.clone(),
+                worktree: prefs.worktree,
+                base: None,
+                into: None,
             },
+            repo: None,
+            git: HashMap::new(),
+            git_busy: HashMap::new(),
+            git_confirm: None,
+            worktree_force: Default::default(),
             menu: None,
             older_models: false,
             window_h: 800.,
@@ -1951,7 +2018,7 @@ impl Dent {
         if id.is_none()
             && let Some(s) = self.current_rc()
         {
-            self.defaults.project = self.project_for(&s.cwd);
+            self.defaults.project = self.project_for(s.root.as_deref().unwrap_or(&s.cwd));
         }
         if let Some(id) = &id {
             self.used(id);
@@ -2262,6 +2329,7 @@ impl Dent {
                 }
             }
             ToastAction::Resume(id) => self.resume(&id, cx),
+            ToastAction::Open(url) => cx.open_url(&url),
             ToastAction::UnhideProject(path) => self.hide_project(&path, false, cx),
             // Back in the queue where it waited (or, the turn over
             // meanwhile, sent as the next message would be).
@@ -2627,6 +2695,87 @@ impl Dent {
             (Waiting::Discard(id), Out::Reply { .. }) => self.fetch_changes(&id),
             (Waiting::Discard(_), Out::Error { message }) => self.toast(ToastAction::Info, message),
             (Waiting::Requeue, _) => {}
+            (
+                Waiting::Repo(dir),
+                Out::Reply {
+                    reply: Reply::Repo { repo },
+                },
+            ) => {
+                if self.repo.as_ref().is_some_and(|(d, _)| *d == dir) {
+                    // A worktree that's gone, or a branch that is, isn't
+                    // offered any more.
+                    if let Some(r) = &repo {
+                        if let Some(w) = &self.defaults.into
+                            && !r.worktrees.iter().any(|x| x.path == *w)
+                        {
+                            self.defaults.into = None;
+                        }
+                        if let Some(b) = &self.defaults.base
+                            && !r.branches.contains(b)
+                        {
+                            self.defaults.base = None;
+                        }
+                    }
+                    self.repo = Some((dir, Some(repo)));
+                }
+            }
+            // Not knowing is the same as not a repository: no choices.
+            (Waiting::Repo(dir), Out::Error { .. }) => {
+                if self.repo.as_ref().is_some_and(|(d, _)| *d == dir) {
+                    self.repo = Some((dir, Some(None)));
+                }
+            }
+            (
+                Waiting::GitStatus(id),
+                Out::Reply {
+                    reply: Reply::GitStatus { status },
+                },
+            ) => match status {
+                Some(st) => {
+                    self.git.insert(id, st);
+                }
+                None => {
+                    self.git.remove(&id);
+                }
+            },
+            (Waiting::GitStatus(_), Out::Error { .. }) => {}
+            (
+                Waiting::Git(id),
+                Out::Reply {
+                    reply: Reply::GitDone { summary, url },
+                },
+            ) => {
+                self.git_busy.remove(&id);
+                self.fetch_changes(&id);
+                match url {
+                    Some(u) => self.toast(ToastAction::Open(u), summary),
+                    None => self.toast(ToastAction::Info, summary),
+                }
+            }
+            (Waiting::Git(id), Out::Error { message }) => {
+                self.git_busy.remove(&id);
+                self.fetch_git(&id);
+                self.toast(ToastAction::Info, message);
+            }
+            (Waiting::RemoveWorktree(id, _), Out::Reply { .. }) => {
+                self.worktree_force.remove(&id);
+                self.toast(
+                    ToastAction::Info,
+                    "Worktree removed; its branch stays".into(),
+                );
+            }
+            (Waiting::RemoveWorktree(id, force), Out::Error { message }) => {
+                // Changes not committed: the next press removes it anyway.
+                if !force && message.contains("committed") {
+                    self.worktree_force.insert(id);
+                    self.toast(
+                        ToastAction::Info,
+                        "Its worktree has changes that aren't committed".into(),
+                    );
+                } else {
+                    self.toast(ToastAction::Info, message);
+                }
+            }
             // Going back failed: nothing is sent again.
             (Waiting::Rewind(id), Out::Error { message }) => {
                 if self.resend.as_ref().is_some_and(|r| r.0 == id) {
@@ -2827,6 +2976,90 @@ impl Dent {
         });
         self.waiting
             .insert(n, Waiting::Changes(id.to_string(), turn));
+        self.fetch_git(id);
+    }
+
+    /// Ask where a session's branch stands, unless a Git action there is
+    /// about to say.
+    pub fn fetch_git(&mut self, id: &str) {
+        if self.git_busy.contains_key(id) {
+            return;
+        }
+        self.ask(
+            Request::GitStatus {
+                session: id.to_string(),
+            },
+            Waiting::GitStatus(id.to_string()),
+        );
+    }
+
+    /// The new session's project as a repository, asked once per folder.
+    pub fn want_repo(&mut self) {
+        let Some(dir) = self.defaults.project.clone() else {
+            self.repo = None;
+            return;
+        };
+        if self.repo.as_ref().is_some_and(|(d, _)| *d == dir) || self.connection.is_err() {
+            return;
+        }
+        // Another project: its branches, not the last one's.
+        if self.repo.is_some() {
+            self.defaults.base = None;
+            self.defaults.into = None;
+        }
+        self.repo = Some((dir.clone(), None));
+        self.ask(Request::Repo { dir: dir.clone() }, Waiting::Repo(dir));
+    }
+
+    /// The new session's project as a repository, once known.
+    pub fn repo_now(&self) -> Option<&dent_protocol::Repo> {
+        let (dir, repo) = self.repo.as_ref()?;
+        (self.defaults.project.as_ref() == Some(dir))
+            .then_some(repo.as_ref()?.as_ref())
+            .flatten()
+    }
+
+    /// Commit, push, open a pull request or pull in a session. A push to
+    /// the default branch asks for a second press first.
+    pub fn run_git(&mut self, id: &str, action: dent_protocol::GitAction, cx: &mut Context<Self>) {
+        use dent_protocol::GitAction as A;
+        if self.git_busy.contains_key(id) {
+            return;
+        }
+        let on_default = self
+            .git
+            .get(id)
+            .is_some_and(|st| st.branch.is_some() && st.branch == st.default_branch);
+        let pushes = matches!(action, A::CommitPush | A::CommitPushPr | A::Push | A::Pr);
+        if on_default && pushes && self.git_confirm != Some((id.to_string(), action)) {
+            self.git_confirm = Some((id.to_string(), action));
+            cx.notify();
+            return;
+        }
+        self.git_confirm = None;
+        self.git_busy.insert(id.to_string(), action);
+        self.ask(
+            Request::Git {
+                session: id.to_string(),
+                action,
+                message: None,
+            },
+            Waiting::Git(id.to_string()),
+        );
+        cx.notify();
+    }
+
+    /// Take away a closed session's worktree; its branch stays.
+    pub fn remove_worktree(&mut self, id: &str, cx: &mut Context<Self>) {
+        let force = self.worktree_force.contains(id);
+        self.ask(
+            Request::RemoveWorktree {
+                session: id.to_string(),
+                force,
+            },
+            Waiting::RemoveWorktree(id.to_string(), force),
+        );
+        cx.notify();
     }
 
     /// Review one turn's changes (its message's id), or with `None` all of
@@ -4133,6 +4366,12 @@ impl Dent {
     /// that searches with its field empty and the keyboard in it.
     pub fn open_menu(&mut self, which: Menu, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_scroll = ScrollHandle::new();
+        // Branches and worktrees made since are offered too.
+        if matches!(which, Menu::Workspace | Menu::Base)
+            && let Some((dir, _)) = self.repo.clone()
+        {
+            self.ask(Request::Repo { dir: dir.clone() }, Waiting::Repo(dir));
+        }
         if which.searches() {
             self.open_project_picker(window, cx);
         }
@@ -4500,6 +4739,7 @@ impl Dent {
             model: self.defaults.model.clone(),
             permission: self.defaults.permission,
             effort: self.defaults.effort.clone(),
+            worktree: self.defaults.worktree,
             panel_width: Some(self.panel_width),
             sidebar_width: Some(self.sidebar_w),
             sidebar_off: self.sidebar_off,
@@ -4706,17 +4946,13 @@ impl Dent {
         }
         self.ambient.borrow_mut().submit();
         let d = self.defaults.clone();
-        let cwd = match d.project {
-            Some(p) => p,
-            None => {
-                let scratch = crate::scratch_dir();
-                let _ = std::fs::create_dir_all(&scratch);
-                scratch.display().to_string()
-            }
-        };
+        let (cwd, worktree) = d.place(d.project.clone());
+        // An existing worktree is for this session only.
+        self.defaults.into = None;
         self.attachments.clear();
         let n = self.live.send(Request::Create {
             cwd,
+            worktree,
             model: d.model,
             permission: d.permission,
             effort: d.effort,
@@ -4841,21 +5077,22 @@ impl Dent {
             return;
         }
         let from = self.selected.clone();
-        let d = self.defaults.clone();
-        let cwd = match from.as_deref().and_then(|id| self.session(id)) {
-            Some(s) => s.cwd.clone(),
-            None => match d.project.clone() {
-                Some(p) => p,
-                None => {
-                    let scratch = crate::scratch_dir();
-                    let _ = std::fs::create_dir_all(&scratch);
-                    scratch.display().to_string()
-                }
-            },
+        let mut d = self.defaults.clone();
+        // From a session: its project, with the worktree choice as for any
+        // new session.
+        let project = match from.as_deref().and_then(|id| self.session(id)) {
+            Some(s) => {
+                d.base = None;
+                self.project_for(s.root.as_deref().unwrap_or(&s.cwd))
+            }
+            None => d.project.clone(),
         };
+        let (cwd, worktree) = d.place(project);
+        self.defaults.into = None;
         self.attachments.clear();
         let n = self.live.send(Request::Create {
             cwd,
+            worktree,
             model: d.model,
             permission: d.permission,
             effort: d.effort,

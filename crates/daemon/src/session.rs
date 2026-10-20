@@ -1292,6 +1292,17 @@ impl Session {
                     && crate::secrets::tracked(cwd, &file)
                     && crate::secrets::ignore(cwd, ".env").is_ok();
                 crate::secrets::save(&file, &name, &value)?;
+                // In a worktree, the main checkout keeps it too, so the
+                // next worktree starts with it (they're copied over).
+                if place == SecretPlace::Project
+                    && let Some(root) = crate::workspace::main_checkout(cwd)
+                {
+                    let main = root.join(".env");
+                    if crate::secrets::tracked(&root, &main) {
+                        let _ = crate::secrets::ignore(&root, ".env");
+                    }
+                    crate::secrets::save(&main, &name, &value)?;
+                }
                 (
                     serde_json::json!({"saved": file.display().to_string(), "ignored": ignored_now}),
                     Answer::Secret {
@@ -2127,10 +2138,12 @@ impl Session {
             None if was || self.status != self.settled => self.log(body),
             None => {}
         }
-        // After its first turn, a session is titled from what it's about.
+        // After its first turn, a session is titled from what it's about;
+        // after any, a branch the agent switched to is noted.
         if was {
-            let (d, id) = (self.d.clone(), self.id.clone());
+            let (d, id, cwd) = (self.d.clone(), self.id.clone(), self.cwd.clone());
             tokio::spawn(async move {
+                d.note_workspace(&id, &cwd).await;
                 if let Err(e) = d.title_session(&id, false).await {
                     eprintln!("dent-daemon: {id}: couldn't title it: {e:#}");
                 }

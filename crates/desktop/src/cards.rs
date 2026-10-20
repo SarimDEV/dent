@@ -44,6 +44,17 @@ fn trim(s: String) -> String {
 pub fn activity_line(a: &Activity, now_ms: u64) -> Option<(String, String)> {
     Some(match a {
         Activity::Preparing { .. } | Activity::Thinking { .. } => return None,
+        Activity::SettingUp { since, what } => {
+            let secs = now_ms.saturating_sub(*since) / 1000;
+            (
+                if secs >= 1 {
+                    format!("Setting up for {}", crate::chat::duration(secs))
+                } else {
+                    "Setting up".into()
+                },
+                format!("{what} in the new worktree"),
+            )
+        }
         Activity::Compacting { since } => {
             let secs = now_ms.saturating_sub(*since) / 1000;
             (

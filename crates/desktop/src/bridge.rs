@@ -496,10 +496,17 @@ pub fn session(
         id: v.id.clone(),
         title: v.title.clone(),
         cwd: v.cwd.clone(),
-        project: cwd
+        // A session in a worktree belongs to its repository's project.
+        project: v
+            .root
+            .as_deref()
+            .map(Path::new)
+            .unwrap_or(cwd)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| v.cwd.clone()),
+        branch: v.branch.clone(),
+        root: v.root.clone(),
         machine: cx.machine.to_string(),
         agent: format!("Claude · {}", model_name(cx.models, v.model.as_deref())),
         model: v.model.clone(),
@@ -770,6 +777,9 @@ fn detail(v: &SessionView) -> String {
                 }
                 Some(dent_protocol::Activity::Retrying { error, .. }) => {
                     return format!("Retrying · {error}");
+                }
+                Some(dent_protocol::Activity::SettingUp { what, .. }) => {
+                    return format!("Setting up the worktree · {what}");
                 }
                 Some(dent_protocol::Activity::Preparing { tool, what }) => {
                     return preparing(tool, what.as_deref());

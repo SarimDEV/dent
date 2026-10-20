@@ -20,6 +20,8 @@ pub struct Prefs {
     /// another, which then sticks (decision 0048).
     pub permission: Permission,
     pub effort: Option<String>,
+    /// New sessions get a worktree of their own (decision 0053).
+    pub worktree: bool,
     pub panel_width: Option<f32>,
     pub sidebar_width: Option<f32>,
     /// You hid the sidebar (View › Hide Sidebar, ⌃⌘S); it stays hidden.
