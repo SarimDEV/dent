@@ -476,6 +476,10 @@ pub struct TakingBack {
     pub back: Draft,
     pub then: Then,
     pub at: Instant,
+    /// Already with the agent, stopped before its reply: it comes back only
+    /// if the daemon takes it back (`Body::Withdrawn`), and otherwise stays
+    /// sent once the turn ends, never in the box as well.
+    pub sent: bool,
 }
 
 pub use crate::draft::{Attachment, Draft, Place};
@@ -995,9 +999,9 @@ pub struct Dent {
     pub box_place: Option<String>,
     /// Drafts put aside with ⌘S, oldest first; kept across launches.
     pub stashes: Vec<Draft>,
-    /// Messages sent from here with folded pastes, by id, as they were in
-    /// the box: a queued one shows its chips, and one coming back to the
-    /// box (Edit, Stop, Undo, ↑) comes back with them.
+    /// Messages sent from here, by id, as they were in the box: a queued
+    /// one shows its chips, and one coming back to the box (Edit, Stop,
+    /// Undo, ↑) comes back as it was, even before the daemon has echoed it.
     pub sent_drafts: crate::lru::Lru<String, Draft>,
     /// Something kept in the prefs changed since they were last written.
     prefs_dirty: bool,
@@ -1178,12 +1182,15 @@ pub struct Dent {
     pub resend: Option<(String, String, String, Vec<String>)>,
     /// A session the daemon just created, to open once its events arrive.
     pub pending_select: Option<String>,
-    /// Waiting messages being taken back out of the queue, by message id.
+    /// Messages being taken back, by message id: waiting ones out of the
+    /// queue, and on Stop those with no reply yet (see `TakingBack::sent`).
     pub taking_back: HashMap<String, TakingBack>,
     /// Messages to put back in a prompt at the next draw (which has the
     /// window): the session (`None`: the new-session page), the words and
-    /// what they carried. Nothing is put over a draft; it's added after.
-    pub restores: Vec<(Option<String>, Draft)>,
+    /// what they carried, and whether they go before what's typed (a
+    /// message stopped before its reply, which what you type next
+    /// carries on). Nothing is put over a draft; it's added after.
+    pub restores: Vec<(Option<String>, Draft, bool)>,
     /// A scripted walkthrough, when running one.
     pub walk: Option<crate::walk::Walk>,
     pub last_frame: Instant,
@@ -3201,12 +3208,33 @@ impl Dent {
                             // be brought there): back in the reply box, once,
                             // though it's read again on catching up.
                             let d = self.back_draft(id, &r.text, &r.attachments);
-                            self.restores.push((Some(e.session.clone()), d));
+                            self.restores.push((Some(e.session.clone()), d, false));
                         }
                     }
-                    dent_protocol::Body::Delivered { id } => {
-                        self.taking_back.remove(id);
+                    // Stopped before a reply: back to the box, first
+                    // message first, ahead of what's typed.
+                    dent_protocol::Body::Withdrawn { ids } => {
+                        for id in ids.iter().rev() {
+                            if let Some(tb) = self.taking_back.remove(id) {
+                                self.took_back(tb);
+                            }
+                        }
                     }
+                    // A reply came first: those stay sent.
+                    dent_protocol::Body::TurnEnded { .. } => {
+                        self.taking_back
+                            .retain(|_, tb| !(tb.sent && tb.session == e.session));
+                    }
+                    // Gone to the agent first: it isn't sent twice or
+                    // steered. One coming back to the box now waits like a
+                    // sent one: a stop before its reply still brings it back.
+                    dent_protocol::Body::Delivered { id } => match self.taking_back.get_mut(id) {
+                        Some(tb) if tb.then == Then::Restore => tb.sent = true,
+                        Some(_) => {
+                            self.taking_back.remove(id);
+                        }
+                        None => {}
+                    },
                     // A message that waited for its machine got there.
                     dent_protocol::Body::User { id, .. }
                         if self.outbox.iter().any(|o| o.id == *id) =>
@@ -3338,8 +3366,11 @@ impl Dent {
                 .iter()
                 .map(|path| Attachment::File { path: path.clone() })
                 .collect();
-            self.restores
-                .push((Some(o.session.clone()), Draft::with(o.text.clone(), atts)));
+            self.restores.push((
+                Some(o.session.clone()),
+                Draft::with(o.text.clone(), atts),
+                false,
+            ));
         }
         let Some(w) = self.waiting.remove(&req) else {
             if let Out::Error { message } = out {
@@ -3659,7 +3690,7 @@ impl Dent {
                 );
             }
             (Waiting::CreateAside(from, typed), Out::Error { message }) => {
-                self.restores.push((from, typed));
+                self.restores.push((from, typed, false));
                 self.toast(ToastAction::Info, create_refused(message));
             }
             (Waiting::Create(typed), Out::Error { message }) => {
@@ -3667,7 +3698,7 @@ impl Dent {
                 self.adopting = None;
                 // What you typed and attached comes back, to try again.
                 if let Some(d) = typed {
-                    self.restores.push((None, d));
+                    self.restores.push((None, d, false));
                 }
                 self.toast(ToastAction::Info, create_refused(message));
             }
@@ -3880,7 +3911,7 @@ impl Dent {
                 );
                 self.send_draft(&tb.session, &d, true);
             }
-            Then::Restore => self.restores.push((Some(tb.session), tb.back)),
+            Then::Restore => self.restores.push((Some(tb.session), tb.back, tb.sent)),
         }
     }
 
@@ -3901,7 +3932,22 @@ impl Dent {
         msgs: Vec<(String, String, Vec<String>, Option<String>)>,
         then: Then,
     ) {
+        self.taking_back_as(session, msgs, then, false);
+    }
+
+    /// As `take_back`; `sent` for messages already with the agent.
+    fn taking_back_as(
+        &mut self,
+        session: &str,
+        msgs: Vec<(String, String, Vec<String>, Option<String>)>,
+        then: Then,
+        sent: bool,
+    ) {
         for (msg, text, files, place) in msgs {
+            // Already coming back as waiting, which is what it is.
+            if sent && self.taking_back.contains_key(&msg) {
+                continue;
+            }
             let back = Draft {
                 place,
                 ..self.back_draft(&msg, &text, &files)
@@ -3915,6 +3961,7 @@ impl Dent {
                     back,
                     then,
                     at: Instant::now(),
+                    sent,
                 },
             );
         }
@@ -3943,6 +3990,10 @@ impl Dent {
             .collect();
         for id in stale {
             if let Some(mut tb) = self.taking_back.remove(&id) {
+                // Never taken back: it stays sent, as it shows.
+                if tb.sent {
+                    continue;
+                }
                 let delivered = self.core.list.get(&tb.session).is_some_and(|v| {
                     v.entries.iter().any(|e| {
                         matches!(e, dent_client_core::Entry::User { id: m, queued: false, .. } if *m == id)
@@ -3959,8 +4010,9 @@ impl Dent {
                 self.took_back(tb);
             }
         }
-        for (session, d) in std::mem::take(&mut self.restores) {
-            self.put_draft_in(session, Place::After, d, window, cx);
+        for (session, d, before) in std::mem::take(&mut self.restores) {
+            let place = if before { Place::Before } else { Place::After };
+            self.put_draft_in(session, place, d, window, cx);
         }
     }
 
@@ -6422,15 +6474,17 @@ impl Dent {
             crate::outbox::save(&self.outbox);
             self.rebuild(session);
         }
-        if !d.chips.is_empty() {
-            self.sent_drafts.insert(
-                msg.clone(),
-                Draft {
-                    place: None,
-                    ..d.clone()
-                },
-            );
-        }
+        // As it reads once sent: without the newline Return may leave.
+        let kept = d.text.trim_end().len();
+        self.sent_drafts.insert(
+            msg.clone(),
+            Draft {
+                text: d.text[..kept].to_string(),
+                chips: d.chips.iter().filter(|c| c.end <= kept).cloned().collect(),
+                atts: d.atts.clone(),
+                place: None,
+            },
+        );
         self.sent_at = Some((session.to_string(), msg.clone(), Instant::now()));
         let place = d.place.clone().filter(|next| {
             !steer
@@ -6721,7 +6775,7 @@ impl Dent {
             .as_ref()
             .filter(|(s, ..)| s == id)
             .map(|(_, m, _)| m.clone());
-        let turn = pending.or_else(|| {
+        let turn = pending.clone().or_else(|| {
             s.items.iter().rev().find_map(|i| match i {
                 Item::User { id, .. } => Some(id.clone()),
                 _ => None,
@@ -6746,6 +6800,23 @@ impl Dent {
             })
             .collect();
         self.take_back(id, waiting, Then::Restore);
+        // Messages with no reply yet come back too if the daemon finds
+        // nothing came back before the stop (Claude Code's own behaviour),
+        // ahead of what's typed, to change and send again.
+        let mut unanswered: Vec<_> = unanswered(&s.items)
+            .into_iter()
+            .map(|(id, text, files)| (id, text, files, None))
+            .collect();
+        // Sent a moment ago and not echoed yet: it comes back as it was in
+        // the box. (One waiting is already coming back as waiting.)
+        if let Some(m) = &pending
+            && !unanswered.iter().any(|(u, ..)| u == m)
+            && !self.taking_back.contains_key(m)
+            && self.sent_drafts.get(m).is_some()
+        {
+            unanswered.push((m.clone(), String::new(), Vec::new(), None));
+        }
+        self.taking_back_as(id, unanswered, Then::Restore, true);
         // The header offers Resume once it has stopped.
         self.live.send(Request::Interrupt {
             session: id.to_string(),
@@ -9635,4 +9706,23 @@ fn serve_copy(a: crate::web::FarAsk, path: &std::path::Path) {
         ),
         Err(_) => respond(404, Vec::new(), Vec::new()),
     }
+}
+
+/// Your messages in the turn still running, with their words and files:
+/// everything sent since the last turn ended. The daemon decides which (if
+/// any) come back on Stop; one listed here that doesn't simply stays sent.
+fn unanswered(items: &[Item]) -> Vec<(String, String, Vec<String>)> {
+    let from = items
+        .iter()
+        .rposition(|i| matches!(i, Item::TurnEnd { .. }))
+        .map_or(0, |i| i + 1);
+    items[from..]
+        .iter()
+        .filter_map(|i| match i {
+            Item::User {
+                id, text, files, ..
+            } => Some((id.clone(), text.clone(), files.clone())),
+            _ => None,
+        })
+        .collect()
 }

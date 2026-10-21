@@ -1474,7 +1474,25 @@ fn stop_stops_within_two_seconds_and_returns_held_messages() {
         ),
         1
     );
+    // Stopped before anything came back: the first message goes back too,
+    // and the session is as it was before it.
+    let first = c
+        .events(&s)
+        .iter()
+        .find_map(|b| match b {
+            Body::User { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        c.count(
+            &s,
+            |b| matches!(b, Body::Withdrawn { ids } if *ids == [first.clone()])
+        ),
+        1
+    );
     c.pump(Duration::from_millis(500));
+    // Nothing left of it: stopped, not a session still starting.
     assert_eq!(c.status(&s), Some(Status::Interrupted));
     assert_eq!(c.turns_done(&s), 0);
     c.say(&s, "again", "short one", false);
@@ -3289,4 +3307,199 @@ fn bb_the_lan_switch_wins_over_the_env_and_disk_matches_memory() {
             "round {round}: on before the restart was {memory}, after {disk}"
         );
     }
+}
+
+/// The id of the last reply in `s` so far.
+fn last_reply(c: &Client, s: &str) -> String {
+    c.events(s)
+        .iter()
+        .rev()
+        .find_map(|b| match b {
+            Body::Assistant {
+                parent: None,
+                uuid: Some(u),
+                ..
+            } => Some(u.clone()),
+            _ => None,
+        })
+        .expect("a reply with an id")
+}
+
+/// Wait for the `n`th event matching `f`.
+fn wait_nth(c: &mut Client, s: &str, n: usize, f: impl Fn(&Body) -> bool) {
+    let until = Instant::now() + Duration::from_secs(15);
+    while c.count(s, &f) < n {
+        assert!(Instant::now() < until, "waited; got {:#?}", c.events(s));
+        c.pump(Duration::from_millis(20));
+    }
+}
+
+fn stop(c: &mut Client, s: &str) {
+    let stopped = |b: &Body| {
+        matches!(
+            b,
+            Body::TurnEnded {
+                outcome: Outcome::Interrupted { .. }
+            }
+        )
+    };
+    let n = c.count(s, stopped);
+    c.call(Request::Interrupt {
+        session: s.into(),
+        by: Some("Esc".into()),
+    })
+    .unwrap();
+    wait_nth(c, s, n + 1, stopped);
+}
+
+#[test]
+fn a_stop_before_any_reply_takes_the_message_out_of_the_conversation() {
+    let mut w = World::new(&[("FAKE_CLAUDE_SPEED", "0.5")]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Full, "hi");
+    c.wait_turns(&s, 1);
+    let r1 = last_reply(&c, &s);
+    c.say(&s, "b", "a long answer please", false);
+    wait_nth(&mut c, &s, 2, |b| matches!(b, Body::TurnStarted));
+    stop(&mut c, &s);
+    assert_eq!(
+        c.count(
+            &s,
+            |b| matches!(b, Body::Withdrawn { ids } if *ids == ["b"])
+        ),
+        1,
+        "{:#?}",
+        c.events(&s)
+    );
+    // As it was before: the stop leaves no mark of its own.
+    c.pump(Duration::from_millis(300));
+    assert_eq!(c.status(&s), Some(Status::Done));
+    // The next agent carries on from the reply before it, in a copy, so
+    // the message is gone from the agent's conversation too.
+    c.say(&s, "c", "your args", false);
+    c.wait_turns(&s, 2);
+    let args = c.text(&s);
+    assert!(
+        args.contains(&format!("--resume-session-at {r1}")) && args.contains("--fork-session"),
+        "{args}"
+    );
+
+    // Taken back again, then dent restarts with the agent still running:
+    // the next message still starts one from before it.
+    let r2 = last_reply(&c, &s);
+    c.say(&s, "d", "a long answer please", false);
+    wait_nth(&mut c, &s, 4, |b| matches!(b, Body::TurnStarted));
+    stop(&mut c, &s);
+    assert_eq!(
+        c.count(
+            &s,
+            |b| matches!(b, Body::Withdrawn { ids } if *ids == ["d"])
+        ),
+        1
+    );
+    drop(c);
+    w.kill();
+    w.start();
+    let mut c = w.client();
+    c.subscribe(0);
+    c.pump(Duration::from_millis(300));
+    assert_eq!(c.status(&s), Some(Status::Done));
+    c.say(&s, "e", "your args again", false);
+    c.wait_turns(&s, 3);
+    let args = c.text(&s);
+    assert!(
+        args.contains(&format!("--resume-session-at {r2}")),
+        "{args}"
+    );
+}
+
+#[test]
+fn a_first_message_stopped_before_a_reply_starts_a_new_conversation() {
+    let w = World::new(&[("FAKE_CLAUDE_SPEED", "0.5")]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Full, "a long answer please");
+    c.wait(&s, "its turn", |b| matches!(b, Body::TurnStarted));
+    stop(&mut c, &s);
+    assert_eq!(c.count(&s, |b| matches!(b, Body::Withdrawn { .. })), 1);
+    c.pump(Duration::from_millis(300));
+    assert_eq!(c.status(&s), Some(Status::Interrupted));
+    let first = c
+        .events(&s)
+        .iter()
+        .find_map(|b| match b {
+            Body::Agent {
+                agent_session: Some(a),
+                ..
+            } => Some(a.clone()),
+            _ => None,
+        })
+        .unwrap();
+    c.say(&s, "b", "your args", false);
+    c.wait_turns(&s, 1);
+    let args = c.text(&s);
+    assert!(
+        args.contains("--session-id") && !args.contains(&first) && !args.contains("--resume"),
+        "{args}"
+    );
+}
+
+#[test]
+fn a_stop_after_something_came_back_keeps_the_message() {
+    let w = World::new(&[("FAKE_CLAUDE_SPEED", "0.5")]);
+    let mut c = w.client();
+    c.subscribe(0);
+    // A call waiting for approval.
+    let s = c.create(&w.cwd(), Permission::Ask, "run it");
+    c.wait(&s, "the approval", |b| matches!(b, Body::Asked { .. }));
+    stop(&mut c, &s);
+    assert_eq!(c.count(&s, |b| matches!(b, Body::Withdrawn { .. })), 0);
+    c.pump(Duration::from_millis(300));
+    assert_eq!(c.status(&s), Some(Status::Interrupted));
+    // A reply partway written.
+    c.say(&s, "b", "a long answer please", false);
+    wait_nth(&mut c, &s, 2, |b| matches!(b, Body::TurnStarted));
+    std::thread::sleep(Duration::from_millis(800));
+    stop(&mut c, &s);
+    assert_eq!(c.count(&s, |b| matches!(b, Body::Withdrawn { .. })), 0);
+    assert!(!c.text(&s).is_empty());
+}
+
+#[test]
+fn a_steer_sent_while_a_turn_stops_waits_for_it_to_end() {
+    // Nothing goes into a turn being stopped, so a stop before any reply
+    // never takes back a steer the person didn't stop.
+    let w = World::new(&[("FAKE_CLAUDE_SPEED", "0.5"), ("FAKE_CLAUDE_DEAF", "1")]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Full, "work quietly");
+    wait_nth(&mut c, &s, 1, |b| matches!(b, Body::TurnStarted));
+    c.call(Request::Interrupt {
+        session: s.clone(),
+        by: Some("Esc".into()),
+    })
+    .unwrap();
+    c.say(&s, "steer", "and this now", true);
+    wait_nth(
+        &mut c,
+        &s,
+        1,
+        |b| matches!(b, Body::User { id, .. } if id == "steer"),
+    );
+    assert_eq!(
+        c.count(
+            &s,
+            |b| matches!(b, Body::User { id, queued: true, .. } if id == "steer")
+        ),
+        1
+    );
+    wait_nth(&mut c, &s, 1, |b| matches!(b, Body::Withdrawn { .. }));
+    assert!(
+        c.count(
+            &s,
+            |b| matches!(b, Body::Withdrawn { ids } if ids.iter().any(|i| i == "steer"))
+        ) == 0
+    );
+    c.wait_turns(&s, 1);
 }

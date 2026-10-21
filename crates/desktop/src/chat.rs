@@ -56,10 +56,13 @@ impl Dent {
         // Very narrow, the helpers with keys of their own step out (⌥↑ ⌥↓,
         // ⌘;), so the title and the actions that are only here keep room.
         let cramped = self.chat_w < CRAMPED;
-        if !cramped && s.items.iter().any(|i| matches!(i, Item::User { .. })) {
+        // Nothing to step through or carry on from when its only message
+        // was taken back.
+        let said = s.items.iter().any(|i| matches!(i, Item::User { .. }));
+        if !cramped && said {
             actions = actions.child(self.message_arrows(s, cx));
         }
-        if s.stopped && !s.closed {
+        if s.stopped && !s.closed && said {
             let sid = id.clone();
             actions = actions.child(
                 button("resume", "Resume", false, &t)

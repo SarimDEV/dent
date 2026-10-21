@@ -104,6 +104,13 @@ pub enum Body {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         returned: Option<Returned>,
     },
+    /// Stopped before anything came back: these messages, in the order
+    /// sent, leave the conversation (the agent's too) and go back to the
+    /// person, as a waiting message taken back does. Logged just before the
+    /// turn's [`Body::TurnEnded`], which then marks nothing.
+    Withdrawn {
+        ids: Vec<String>,
+    },
     /// A held message moved in the queue: to just before held message
     /// `before`, or to the end.
     Requeued {
@@ -2017,6 +2024,19 @@ pub fn build_stamp(path: &std::path::Path) -> String {
 }
 
 /// One line of the wire format.
+/// A line from a daemon, read as the module docs promise: an event of a
+/// kind (or shape) this build doesn't know is left out, never the whole
+/// batch with it. Seq numbers only ever count up, so one left out is no gap.
+pub fn read_out(line: &[u8]) -> Option<Envelope<Out>> {
+    let mut v: serde_json::Value = serde_json::from_slice(line).ok()?;
+    if v["op"] == "events"
+        && let Some(events) = v.get_mut("events").and_then(|e| e.as_array_mut())
+    {
+        events.retain(|e| serde_json::from_value::<Event>(e.clone()).is_ok());
+    }
+    serde_json::from_value(v).ok()
+}
+
 pub fn encode<T: Serialize>(req: u64, body: &T) -> Vec<u8> {
     #[derive(Serialize)]
     struct Line<'a, T> {
@@ -2032,6 +2052,21 @@ pub fn encode<T: Serialize>(req: u64, body: &T) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_event_of_an_unknown_kind_is_left_out_not_its_batch() {
+        let line = br#"{"req":0,"op":"events","events":[
+            {"seq":1,"session":"s","at":0,"kind":"turn_started"},
+            {"seq":2,"session":"s","at":0,"kind":"something_new","x":1},
+            {"seq":3,"session":"s","at":0,"kind":"closed"}]}"#;
+        let env = read_out(line).unwrap();
+        let Out::Events { events } = env.body else {
+            panic!()
+        };
+        assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), [1, 3]);
+        assert!(read_out(br#"{"req":3,"op":"caught_up","seq":9}"#).is_some());
+        assert!(read_out(b"not json").is_none());
+    }
+
     use super::*;
 
     #[test]

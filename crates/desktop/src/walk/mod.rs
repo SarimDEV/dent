@@ -48,6 +48,7 @@ mod setup;
 mod stills;
 mod sweep;
 mod switching;
+mod takeback;
 mod typing;
 mod view;
 mod visuals;
@@ -57,8 +58,8 @@ use {
     ambient::*, attaching::*, changes::*, checks::*, common::*, composing::*, demo::*, edges::*,
     failures::*, find::*, finish::*, keys::*, look::*, markdown::*, motion::*, narration::*,
     parity::*, pickup::*, pins::*, polish::*, prs::*, queue::*, real::*, recall::*, reply::*,
-    setup::*, stills::*, sweep::*, switching::*, typing::*, view::*, visuals::*, worktrees::*,
-    zoom::*,
+    setup::*, stills::*, sweep::*, switching::*, takeback::*, typing::*, view::*, visuals::*,
+    worktrees::*, zoom::*,
 };
 
 type Pred = fn(&Dent, &App) -> bool;
@@ -224,6 +225,7 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("pins", &[pins]),
     ("fail", &[failures]),
     ("queue", &[queue_order]),
+    ("takeback", &[take_back]),
     ("changes", &[turn_changes, diff_swipe]),
     ("recall", &[recall]),
     ("visuals", &[visuals]),

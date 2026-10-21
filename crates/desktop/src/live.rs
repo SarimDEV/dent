@@ -145,11 +145,9 @@ fn run(
         let reading = std::thread::spawn(move || {
             for line in BufReader::new(reader).lines() {
                 let Ok(line) = line else { break };
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-                    continue;
-                };
-                let req = v["req"].as_u64().unwrap_or(0);
-                let Ok(out) = serde_json::from_value::<Out>(v) else {
+                let Some(dent_protocol::Envelope { req, body: out }) =
+                    dent_protocol::read_out(line.as_bytes())
+                else {
                     continue;
                 };
                 if req != 0 {

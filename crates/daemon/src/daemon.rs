@@ -1407,10 +1407,7 @@ impl Daemon {
         }
         let events = self.store().session_events(parent)?;
         let cut = match cut {
-            Cut::Before(b) => events
-                .iter()
-                .position(|e| matches!(&e.body, Body::User { id, .. } if *id == b))
-                .context("no such message")?,
+            Cut::Before(b) => crate::session::entered_at(&events, &b).context("no such message")?,
             Cut::Until(seq) => events
                 .iter()
                 .position(|e| e.seq >= seq)
@@ -1442,8 +1439,16 @@ impl Daemon {
             },
             None,
         )?;
-        for e in kept {
+        // Turns taken back were never part of the conversation: their
+        // messages, thinking and end are left out whole.
+        let withdrawn = crate::session::withdrawn_ids(kept);
+        let taken_back = crate::session::withdrawn_turns(kept);
+        for (ix, e) in kept.iter().enumerate() {
+            if taken_back.iter().any(|r| r.contains(&ix)) {
+                continue;
+            }
             let copy = match &e.body {
+                Body::User { id, .. } if withdrawn.contains(id) => continue,
                 // What the conversation said, not the old session's state.
                 Body::User { queued: true, .. }
                 | Body::Created { .. }
@@ -1454,6 +1459,7 @@ impl Daemon {
                 | Body::Checkpoint { .. }
                 | Body::Delivered { .. }
                 | Body::Unqueued { .. }
+                | Body::Withdrawn { .. }
                 | Body::Requeued { .. }
                 | Body::Background { .. }
                 | Body::Limits { .. }
@@ -1475,14 +1481,8 @@ impl Daemon {
             };
             self.append(&session, copy, None)?;
         }
-        let at = kept.iter().rev().find_map(|e| match &e.body {
-            Body::Assistant {
-                parent: None,
-                uuid: Some(u),
-                ..
-            } => Some(u.clone()),
-            _ => None,
-        });
+        let at = crate::session::conversation_at(kept, kept.len())
+            .unwrap_or_else(|| crate::session::resume_point(kept));
         if let Some((id, question, answer, agent)) = aside {
             // The side conversation already holds the question and answer:
             // carry it on as it is.
@@ -1700,8 +1700,10 @@ impl Daemon {
         let events = self.store().session_events(session)?;
         let clip = |t: &str, n: usize| -> String { t.chars().take(n).collect() };
         let mut said = Vec::new();
+        let withdrawn = crate::session::withdrawn_ids(&events);
         for e in &events {
             match &e.body {
+                Body::User { id, .. } if withdrawn.contains(id) => {}
                 Body::User { text, .. } => said.push(format!("Person: {}", clip(text, 1500))),
                 Body::Assistant {
                     parent: None,
