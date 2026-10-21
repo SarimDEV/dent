@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped when a change would break an older client. Adding fields or event
 /// kinds doesn't count.
-pub const PROTOCOL: u32 = 1;
+///
+/// 2: a message can carry its files (`Request::Send`'s `files`); a client
+/// sends files that way only to a daemon of 2 or later.
+pub const PROTOCOL: u32 = 2;
 /// The oldest protocol this build still speaks. Two sides talk when their
 /// ranges overlap ([decision 0060]).
 ///

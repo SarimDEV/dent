@@ -683,7 +683,8 @@ fn files_a_message_carries_are_written_here_and_attached() {
         attachments: Vec::new(),
         files: vec![
             file("../../escape.txt", b"one"),
-            file("a/escape.txt", b"two"),
+            file("a/Escape.txt", b"two"),
+            file(&format!("{}.png", "x".repeat(300)), b"three"),
         ],
     })
     .unwrap();
@@ -702,15 +703,18 @@ fn files_a_message_carries_are_written_here_and_attached() {
             _ => None,
         })
         .unwrap();
-    assert_eq!(paths.len(), 2, "{paths:?}");
+    assert_eq!(paths.len(), 3, "{paths:?}");
     // Kept to their message's folder, whatever the names say, and two
     // files of one name both kept.
     for p in &paths {
         assert!(p.contains("/attachments/carried/m-carry/"), "{p}");
     }
-    assert_ne!(paths[0], paths[1]);
+    assert!(!paths[0].eq_ignore_ascii_case(&paths[1]));
     assert_eq!(std::fs::read(&paths[0]).unwrap(), b"one");
     assert_eq!(std::fs::read(&paths[1]).unwrap(), b"two");
+    // A name too long for a disk is cut, keeping its extension.
+    assert!(paths[2].ends_with(".png"), "{}", paths[2]);
+    assert_eq!(std::fs::read(&paths[2]).unwrap(), b"three");
 }
 
 #[test]

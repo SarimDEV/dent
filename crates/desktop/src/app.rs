@@ -2742,6 +2742,23 @@ impl Dent {
         changed: &mut Vec<String>,
         cx: &mut Context<Self>,
     ) {
+        // Another machine's files, as its messages name them: put back to
+        // edit and sent again, they're named there, not carried.
+        if !machine.is_empty()
+            && let Out::Events { events } = &out
+        {
+            let theirs: Vec<String> = events
+                .iter()
+                .filter_map(|e| match &e.body {
+                    dent_protocol::Body::User { attachments, .. } => Some(attachments.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            if !theirs.is_empty() {
+                self.live.theirs(machine, theirs);
+            }
+        }
         if let Out::Events { events } = &out {
             // A finished turn may have changed files.
             for e in events {
@@ -2881,6 +2898,15 @@ impl Dent {
         {
             crate::outbox::save(&self.outbox);
             self.rebuild(&o.session);
+            // What was written comes back to its reply box, to fix and send
+            // again, rather than going with the toast.
+            let atts = o
+                .attachments
+                .iter()
+                .map(|path| Attachment::File { path: path.clone() })
+                .collect();
+            self.restores
+                .push((Some(o.session.clone()), Draft::with(o.text.clone(), atts)));
         }
         let Some(w) = self.waiting.remove(&req) else {
             if let Out::Error { message } = out {
@@ -2909,6 +2935,7 @@ impl Dent {
             ) => {
                 if let Some(m) = self.machines.iter_mut().find(|m| m.id == machine) {
                     m.agents = agents;
+                    m.agents_known = true;
                 }
                 let ids: Vec<String> = self
                     .core
@@ -6014,9 +6041,21 @@ impl Dent {
         } else {
             d.worktree && project.is_some()
         };
-        // From a session, on its machine; else where new sessions go.
+        // From a session, on its machine; else where new sessions go. The
+        // agent and model chosen are for where new sessions go: on another
+        // machine, one it doesn't have gives way to its default.
         if let Some(id) = from.as_deref() {
             d.machine = dent_client_core::fleet::split(id).0.to_string();
+        }
+        let agent = self.new_agent_on(&d.machine);
+        if d.machine != self.defaults.machine
+            && let Some(m) = &d.model
+            && !self
+                .models_on(&d.machine, agent.as_deref())
+                .iter()
+                .any(|x| x.id == *m)
+        {
+            d.model = None;
         }
         let (cwd, worktree) = d.place(project, fresh);
         self.defaults.into = None;
@@ -6024,7 +6063,7 @@ impl Dent {
         let n = self.live.send_to(
             &d.machine,
             Request::Create {
-                agent: self.new_agent(),
+                agent,
                 cwd,
                 worktree,
                 model: d.model,
@@ -7232,11 +7271,15 @@ impl Dent {
     /// machine it runs on drives it; else that machine's default. A machine
     /// set up with other agents would refuse one it doesn't have.
     pub fn new_agent(&self) -> Option<String> {
-        self.defaults.agent.clone().filter(|a| {
-            self.agents_on(&self.defaults.machine)
-                .iter()
-                .any(|x| x.id == *a)
-        })
+        self.new_agent_on(&self.defaults.machine)
+    }
+
+    /// The agent chosen for new sessions, if `machine` drives it.
+    pub fn new_agent_on(&self, machine: &str) -> Option<String> {
+        self.defaults
+            .agent
+            .clone()
+            .filter(|a| self.agents_on(machine).iter().any(|x| x.id == *a))
     }
 
     /// Whether session `id`'s agent can do something, by what the daemon

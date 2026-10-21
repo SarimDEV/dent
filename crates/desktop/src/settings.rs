@@ -184,16 +184,32 @@ impl Dent {
     /// The new-session page's line when the default agent can't work: not
     /// installed or signed out. `None` while it can, or before it's known.
     pub fn agent_banner(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let a = self.agents.first()?.clone();
+        // About the machine new sessions go to: its agents are its own.
+        let machine = self.defaults.machine.clone();
+        let a = self.agents_on(&machine).first()?.clone();
         // Before the daemon has said how it stands, nothing is known.
-        if !self.agents_known {
+        let known = if machine.is_empty() {
+            self.agents_known
+        } else {
+            self.machines
+                .iter()
+                .any(|m| m.id == machine && m.agents_known)
+        };
+        if !known {
             return None;
         }
+        let far = (!machine.is_empty()).then(|| {
+            self.machines
+                .iter()
+                .find(|m| m.id == machine)
+                .map_or_else(|| machine.clone(), |m| m.name().to_string())
+        });
+        let on = far.clone().unwrap_or_else(|| "this Mac".into());
         let t = self.t;
         let (said, action): (String, Option<(&str, AnyElement)>) = match standing(&a) {
             Standing::Ready => return None,
             Standing::Missing => (
-                format!("{} isn't installed on this Mac", a.name),
+                format!("{} isn't installed on {on}", a.name),
                 Some(("banner-install", {
                     let url = a.install_url.clone();
                     self.small_button(
@@ -205,8 +221,13 @@ impl Dent {
                 })),
             ),
             Standing::SignedOut => (
-                format!("{} is signed out", a.name),
-                a.sign_in.clone().map(|line| {
+                match &far {
+                    Some(name) => format!("{} is signed out on {name}: sign in there", a.name),
+                    None => format!("{} is signed out", a.name),
+                },
+                // Signing in runs in a terminal here, which reaches only
+                // this Mac.
+                a.sign_in.clone().filter(|_| far.is_none()).map(|line| {
                     (
                         "banner-sign-in",
                         self.small_button("banner-sign-in", "Sign in", cx, move |this, _, cx| {
@@ -216,9 +237,12 @@ impl Dent {
                 }),
             ),
         };
-        let again = self.small_button("banner-again", "Check again", cx, |this, _, cx| {
-            this.check_again();
-            cx.notify();
+        // Another machine's agents are asked again each time it connects.
+        let again = far.is_none().then(|| {
+            self.small_button("banner-again", "Check again", cx, |this, _, cx| {
+                this.check_again();
+                cx.notify();
+            })
         });
         Some(
             div()
@@ -232,7 +256,7 @@ impl Dent {
                 .child(ui::dot(Some(t.needs.0), &t))
                 .child(div().flex_1().min_w_0().child(said))
                 .children(action.map(|(_, el)| el))
-                .child(again)
+                .children(again)
                 .child(probe(&self.probes, "agent-banner"))
                 .into_any_element(),
         )
@@ -294,7 +318,8 @@ impl Dent {
             self.agents.clone()
         };
         let several = agents.iter().filter(|a| a.installed).count() > 1;
-        let chosen = self.agent_id(self.new_agent().as_deref());
+        // This Mac's agents: the one chosen, while this Mac drives it.
+        let chosen = self.agent_id(self.new_agent_on("").as_deref());
         agents
             .iter()
             .map(|a| {

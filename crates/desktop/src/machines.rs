@@ -21,6 +21,9 @@ pub struct MachineView {
     pub via: Option<(String, Trust)>,
     pub version: String,
     pub agents: Vec<AgentInfo>,
+    /// Its daemon has said how each agent stands (the welcome says only
+    /// what they are).
+    pub agents_known: bool,
     /// Why pairing failed, until the next try.
     pub pair_error: Option<String>,
     /// A known route answered with another machine.
@@ -37,6 +40,7 @@ impl MachineView {
             via: None,
             version: String::new(),
             agents: Vec::new(),
+            agents_known: false,
             pair_error: None,
             impostor: None,
         }

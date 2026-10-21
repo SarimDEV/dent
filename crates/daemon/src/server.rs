@@ -699,13 +699,10 @@ async fn carry(state: &Path, id: &str, files: Vec<dent_protocol::Carried>) -> Re
         for (n, f) in files.into_iter().enumerate() {
             let bytes = b64::decode(&f.bytes_b64)
                 .with_context(|| format!("{} didn't arrive whole", f.name))?;
-            // Two files can share a name (from different folders).
-            let name = match safe_name(&f.name) {
-                s if paths.iter().any(|p: &String| p.ends_with(&format!("/{s}"))) => {
-                    format!("{n}-{s}")
-                }
-                s => s,
-            };
+            // Each file gets its place in the message ahead of its name, so
+            // two of one name (from different folders, or differing only in
+            // case on a disk that ignores it) never land on one file.
+            let name = format!("{n}-{}", safe_name(&f.name));
             let path = dir.join(name);
             std::fs::write(&path, bytes)?;
             paths.push(path.display().to_string());
@@ -719,10 +716,24 @@ async fn carry(state: &Path, id: &str, files: Vec<dent_protocol::Carried>) -> Re
 /// never a path out of its folder.
 fn safe_name(name: &str) -> String {
     let last = name.rsplit(['/', '\\']).next().unwrap_or("");
-    match last.trim() {
-        "" | "." | ".." => "file".into(),
-        s => s.to_string(),
+    let last = match last.trim() {
+        "" | "." | ".." => "file",
+        s => s,
+    };
+    // Disks take names of up to 255 bytes: a longer one keeps its end (the
+    // extension) and as much of its start as fits.
+    if last.len() <= 200 {
+        return last.to_string();
     }
+    let ext = last
+        .rfind('.')
+        .filter(|&i| last.len() - i <= 16)
+        .map_or("", |i| &last[i..]);
+    let mut cut = 200 - ext.len();
+    while !last.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}{ext}", &last[..cut])
 }
 
 fn read_inside(cwd: &Path, path: &str) -> Result<Vec<u8>> {
