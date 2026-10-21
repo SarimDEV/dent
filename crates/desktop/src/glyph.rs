@@ -41,13 +41,38 @@ fn hash(s: &str) -> u64 {
 }
 
 /// A shape for each machine id.
+#[cfg(test)]
 pub fn assign<'a>(ids: impl IntoIterator<Item = &'a str>) -> HashMap<String, Shape> {
+    assign_kept(ids, &HashMap::new())
+}
+
+/// A shape for each machine id, keeping the ones `kept` already gave: a
+/// machine never changes shape because another was added. A new one takes
+/// the shape its id points to, or the next free one, so devices mostly
+/// agree.
+pub fn assign_kept<'a>(
+    ids: impl IntoIterator<Item = &'a str>,
+    kept: &HashMap<String, Shape>,
+) -> HashMap<String, Shape> {
     let mut ids: Vec<&str> = ids.into_iter().collect();
     ids.sort_unstable();
     ids.dedup();
     let mut out = HashMap::new();
     let mut taken = [false; 6];
-    for id in ids {
+    for id in &ids {
+        if let Some(sh) = kept.get(*id)
+            && let Some(ix) = SHAPES.iter().position(|s| s == sh)
+            && !taken[ix]
+        {
+            taken[ix] = true;
+            out.insert(id.to_string(), *sh);
+        }
+    }
+    let new: Vec<&str> = ids
+        .into_iter()
+        .filter(|id| !out.contains_key(*id))
+        .collect();
+    for id in new {
         let want = (hash(id) % 6) as usize;
         let ix = (0..6)
             .map(|k| (want + k) % 6)
@@ -158,5 +183,18 @@ mod tests {
         let mut rev = ids;
         rev.reverse();
         assert_eq!(assign(rev), a);
+    }
+
+    #[test]
+    fn a_machine_keeps_its_shape_when_another_is_added() {
+        let first = assign(["8e2e34085ddf", "this"]);
+        // Whatever the new one's id would have taken, the old ones stay.
+        for new in ["0000", "zzzz", "5e0d44b91a7c", "c27b19e4a0d2"] {
+            let after = assign_kept(["8e2e34085ddf", "this", new], &first);
+            assert_eq!(after["8e2e34085ddf"], first["8e2e34085ddf"]);
+            assert_eq!(after["this"], first["this"]);
+            assert_ne!(after[new], after["8e2e34085ddf"]);
+            assert_ne!(after[new], after["this"]);
+        }
     }
 }

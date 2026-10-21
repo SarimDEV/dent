@@ -244,6 +244,7 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("kept-live", &[kept_live]),
     ("files-live", &[files_live]),
     ("break-live", &[break_live]),
+    ("remote-happy-live", &[remote_happy_live]),
     ("away", &[away]),
     ("welcome", &[welcome]),
     // These three need the agent set up so (walk.sh does it by name).

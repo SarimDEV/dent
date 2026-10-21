@@ -1154,6 +1154,151 @@ pub(super) fn break_live() -> Vec<(f32, Act)> {
     v
 }
 
+/// What people do most, on the VM rather than this Mac: start a session
+/// there from the machine chip, approve a command, follow up, send while it
+/// works, stop it, answer a question, and start several in a row. Not in
+/// `checks`: it needs the VM.
+pub(super) fn remote_happy_live() -> Vec<(f32, Act)> {
+    fn far(d: &Dent) -> bool {
+        current(d).is_some_and(|s| !dent_client_core::fleet::split(&s.id).0.is_empty())
+    }
+    fn to_vm(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
+        if let Some(id) = d
+            .machines
+            .iter()
+            .find(|m| m.rtt.is_some())
+            .map(|m| m.id.clone())
+        {
+            d.set_machine(id, cx);
+        }
+    }
+    fn start(text: &'static str) -> Vec<(f32, Act)> {
+        vec![
+            (0.3, Key("cmd-n")),
+            (0.1, Call(to_vm)),
+            (0.2, Type(Field::Starter, text)),
+            (0.2, Click("start")),
+            (
+                0.1,
+                Until(
+                    leak(format!("“{text}” starts a session on the VM")),
+                    |d, _| far(d) && !d.creating,
+                    15.,
+                ),
+            ),
+        ]
+    }
+    let mut v = vec![(
+        0.1,
+        Until(
+            "the VM is online",
+            |d, _| d.machines.iter().any(|m| m.rtt.is_some()),
+            30.,
+        ),
+    )];
+    v.extend(start("please run it"));
+    v.extend([
+        (
+            0.1,
+            Until(
+                "an approval from the VM appears and the session needs you",
+                |d, _| {
+                    has(d, |i| matches!(i, Item::Approval { .. })) && status_is(d, Status::Needs)
+                },
+                15.,
+            ),
+        ),
+        (0.3, Shot("remote-approval-light")),
+        (0.2, Click("allow")),
+        (
+            0.1,
+            Until(
+                "allowing runs it there",
+                |d, _| done_saying(d, "Ran it"),
+                15.,
+            ),
+        ),
+        (0.2, Type(Field::Composer, "say: a follow up")),
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until(
+                "a follow up is answered",
+                |d, _| done_saying(d, "a follow up"),
+                15.,
+            ),
+        ),
+        (0.2, Type(Field::Composer, "a long answer please")),
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until("it streams from the VM", |d, _| streaming(d), 15.),
+        ),
+        (0.1, Type(Field::Composer, "and then this")),
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until(
+                "sent while it works, it waits below the reply",
+                |d, _| has(d, |i| matches!(i, Item::Queued { .. })),
+                10.,
+            ),
+        ),
+        (0.2, Shot("remote-queued-light")),
+        (
+            0.1,
+            Until(
+                "and goes after it",
+                |d, _| {
+                    done_saying(d, "and then this") && !has(d, |i| matches!(i, Item::Queued { .. }))
+                },
+                30.,
+            ),
+        ),
+        (0.2, Type(Field::Composer, "another long one")),
+        (0.1, Key("enter")),
+        (0.1, Until("it streams again", |d, _| streaming(d), 15.)),
+        (0.3, Key("cmd-.")),
+        (
+            0.1,
+            Until(
+                "⌘. stops it there",
+                |d, _| current(d).is_some_and(|s| s.status != Status::Working),
+                10.,
+            ),
+        ),
+    ]);
+    v.extend(start("ask me which cache"));
+    v.extend([
+        (
+            0.1,
+            Until(
+                "a question from the VM",
+                |d, _| has(d, |i| matches!(i, Item::Question { .. })),
+                15.,
+            ),
+        ),
+        (0.2, Click("opt-0-1")),
+        (
+            0.1,
+            Until("one click answers it", |d, _| done_saying(d, "Redis"), 15.),
+        ),
+    ]);
+    for text in ["say: quick one", "say: quick two", "say: quick three"] {
+        v.extend(start(text));
+        v.push((
+            0.1,
+            Until(
+                leak(format!("“{text}” is answered there")),
+                |d, _| answered(d),
+                15.,
+            ),
+        ));
+    }
+    v.push((0.3, Shot("remote-happy-end-light")));
+    v
+}
+
 /// Another machine asleep: its session says why under the header, a
 /// message written meanwhile waits on this Mac with Edit and Remove, and a
 /// new session can be started there from the machine chip. The machine

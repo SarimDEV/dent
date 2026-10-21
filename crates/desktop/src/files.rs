@@ -154,41 +154,84 @@ pub const CACHE_MAX: u64 = 2 << 30;
 /// Reads in flight to one machine.
 const WINDOW: usize = 4;
 
-/// How long a stat of this Mac's file, or an answer for another's while
-/// nothing says it changed, is trusted.
+/// How long a stat of this Mac's file is trusted.
 const LOCAL_FRESH: Duration = Duration::from_secs(3);
 
+/// A question to a machine with no answer in this long is asked again: the
+/// link it went on may be gone for good (a machine removed, replaced).
+const PATIENCE: Duration = Duration::from_secs(20);
+
 /// A file asked about, on another machine.
-#[derive(Default)]
 struct Far {
     /// The machine's last answer about it.
     stat: Option<FileStat>,
     /// It needs asking (new, or something says it changed).
     stale: bool,
-    asked: bool,
-    /// The copy here of the version the machine last gave.
+    /// Asked, and when.
+    asked_at: Option<Instant>,
+    /// The copy here of the version the machine last gave (or, before it
+    /// answers, the one kept from before).
     copy: Option<PathBuf>,
     /// How much of it is wanted whole, if any.
     want: u64,
-    fetch: Option<Fetch>,
-    /// A read failed: asked again after this.
+    /// Something failed: asked again after this.
     retry_at: Option<Instant>,
+    /// When it was last drawn: what's on screen is fetched first.
+    seen_at: Instant,
 }
 
+impl Far {
+    fn new(copy: Option<PathBuf>) -> Self {
+        Far {
+            stat: None,
+            stale: true,
+            asked_at: None,
+            copy,
+            want: 0,
+            retry_at: None,
+            seen_at: Instant::now(),
+        }
+    }
+
+    /// Where the copy of the version last answered is kept.
+    fn dest(&self, machine: &str) -> Option<PathBuf> {
+        match &self.stat {
+            Some(FileStat::File { path, stamp, .. }) => Some(place(machine, path, stamp)),
+            _ => None,
+        }
+    }
+}
+
+/// A copy being made: one per version of a file, whoever asked for it.
 struct Fetch {
+    machine: String,
+    /// Who asked first: its read names the file.
+    ask: Ask,
     stamp: Stamp,
-    real: String,
+    /// A name of its own, so no two copies ever write one file.
     tmp: PathBuf,
     got: u64,
     total: u64,
-    inflight: bool,
+    /// A read is out for it, since then.
+    sent_at: Option<Instant>,
+    /// Asked again no sooner than this, after a failed read.
+    wait_until: Option<Instant>,
+    seen_at: Instant,
 }
 
 /// A request the window should send for the files, and what to do with
 /// the reply.
 pub enum Send {
-    Stat { asks: Vec<Ask>, req: Request },
-    Read { ask: Ask, offset: u64, req: Request },
+    Stat {
+        asks: Vec<Ask>,
+        req: Request,
+    },
+    /// A range of the copy kept at `key`.
+    Read {
+        key: PathBuf,
+        offset: u64,
+        req: Request,
+    },
 }
 
 #[derive(Default)]
@@ -199,7 +242,8 @@ struct Files {
     online: HashSet<String>,
     /// Machines too old to share files.
     old: HashSet<String>,
-    reading: HashMap<String, usize>,
+    /// Copies being made, by where they'll be kept.
+    fetches: HashMap<PathBuf, Fetch>,
     /// What the window should send next.
     dirty: bool,
     /// Each machine's files as last answered, by what a session wrote, to
@@ -208,6 +252,8 @@ struct Files {
     index_dirty: HashSet<String>,
     /// Counts copies that came, for what's built from them to know.
     came: u64,
+    /// Numbers the copies' temporary names.
+    made: u64,
 }
 
 /// An index key: what a session wrote, where.
@@ -277,6 +323,12 @@ fn private_dirs(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// A file that changed while it was being opened there: asked again, not
+/// taken as unreadable.
+fn passing(s: &FileStat) -> bool {
+    matches!(s, FileStat::Unreadable { error, .. } if error.contains("changed while being opened"))
+}
+
 impl Files {
     fn near_stat(&mut self, a: &Ask) -> FileStat {
         let now = Instant::now();
@@ -287,7 +339,9 @@ impl Files {
         }
         let base = a.base.clone().unwrap_or_else(|| a.cwd.clone());
         let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-        let s = dent_files::stat(
+        // No picture size here: drawing asks every few seconds, and this
+        // Mac's pictures are measured as they're drawn.
+        let s = dent_files::stat_plain(
             &a.path,
             Path::new(&base),
             &home,
@@ -327,23 +381,10 @@ impl Files {
                     .unwrap_or_default()
             });
             let copy = index.get(&index_key(a)).filter(|p| p.is_file()).cloned();
-            self.far.insert(
-                a.clone(),
-                Far {
-                    stale: true,
-                    copy,
-                    ..Far::default()
-                },
-            );
+            self.far.insert(a.clone(), Far::new(copy));
         }
         let f = self.far.get_mut(a).expect("just made");
-        if let Some(t) = f.retry_at
-            && Instant::now() >= t
-        {
-            f.retry_at = None;
-            f.stale = true;
-            self.dirty = true;
-        }
+        f.seen_at = Instant::now();
         f
     }
 
@@ -379,14 +420,8 @@ impl Files {
         if m.is_empty() {
             let s = self.near_stat(a);
             return match &s {
-                FileStat::File { path, stamp, .. } if stamp.size <= cap => {
-                    Look::Here(PathBuf::from(path))
-                }
-                FileStat::File { path, stamp, .. } => Look::Gone(Gone {
-                    machine: m,
-                    checked: path.clone(),
-                    why: Why::TooBig(stamp.size),
-                }),
+                // This Mac's file is itself: nothing to copy, no cap.
+                FileStat::File { path, .. } => Look::Here(PathBuf::from(path)),
                 other => Look::Gone(Files::gone(a, other).expect("not a file")),
             };
         }
@@ -399,13 +434,11 @@ impl Files {
         }
         let f = self.far.get_mut(a).expect("made above");
         match stat {
-            Look::Gone(g) => {
+            Look::Gone(g) => match (&g.why, &f.copy) {
                 // Away, but a copy is kept: shown, marked.
-                match (&g.why, &f.copy) {
-                    (Why::Away, Some(c)) => Look::Stale(c.clone()),
-                    _ => Look::Gone(g),
-                }
-            }
+                (Why::Away, Some(c)) => Look::Stale(c.clone()),
+                _ => Look::Gone(g),
+            },
             // Being asked: the copy kept from before shows meanwhile.
             Look::Loading => match &f.copy {
                 Some(c) => Look::Stale(c.clone()),
@@ -434,7 +467,9 @@ impl Files {
     }
 
     /// The requests to send now: stats for what's unknown or changed, and
-    /// the next ranges of what's wanted whole, a few at a time per machine.
+    /// the next ranges of the copies wanted, what was drawn last first, a
+    /// few at a time per machine. Questions with no answer in a long while
+    /// are asked again.
     fn drain(&mut self) -> Vec<(String, Send)> {
         for m in std::mem::take(&mut self.index_dirty) {
             if let Some(index) = self.index.get(&m)
@@ -444,19 +479,45 @@ impl Files {
                 let _ = dent_remote::store::write_private(&index_path(&m), &json);
             }
         }
+        let now = Instant::now();
+        for f in self.far.values_mut() {
+            if f.retry_at.is_some_and(|t| now >= t) {
+                f.retry_at = None;
+                f.stale = true;
+                self.dirty = true;
+            }
+            if f.asked_at
+                .is_some_and(|t| now.duration_since(t) >= PATIENCE)
+            {
+                f.asked_at = None;
+                f.stale = true;
+                self.dirty = true;
+            }
+        }
+        for x in self.fetches.values_mut() {
+            if x.sent_at.is_some_and(|t| now.duration_since(t) >= PATIENCE) {
+                x.sent_at = None;
+                self.dirty = true;
+            }
+            if x.wait_until.is_some_and(|t| now >= t) {
+                x.wait_until = None;
+                self.dirty = true;
+            }
+        }
         if !self.dirty {
             return Vec::new();
         }
         self.dirty = false;
         let mut out = Vec::new();
+        // Stats, batched per machine.
         let mut stats: HashMap<String, Vec<Ask>> = HashMap::new();
         for (a, f) in self.far.iter_mut() {
             let m = a.machine();
             if !self.online.contains(m) || self.old.contains(m) || f.retry_at.is_some() {
                 continue;
             }
-            if f.stale && !f.asked {
-                f.asked = true;
+            if f.stale && f.asked_at.is_none() {
+                f.asked_at = Some(now);
                 stats.entry(m.to_string()).or_default().push(a.clone());
             }
         }
@@ -474,54 +535,92 @@ impl Files {
                 ));
             }
         }
-        // Next ranges, in no particular order beyond the window.
-        let mut asks: Vec<&Ask> = self.far.keys().collect();
-        asks.sort_by(|a, b| a.path.cmp(&b.path));
-        let asks: Vec<Ask> = asks.into_iter().cloned().collect();
-        for a in asks {
-            let m = a.machine().to_string();
-            if !self.online.contains(&m) {
-                continue;
-            }
-            let busy = self.reading.get(&m).copied().unwrap_or(0);
-            if busy >= WINDOW {
-                continue;
-            }
-            let f = self.far.get_mut(&a).expect("listed");
-            if f.stale || f.copy.is_some() || f.retry_at.is_some() {
+        // The copies wanted now, one per version whoever wants it.
+        let mut wanted: HashMap<PathBuf, (Ask, Stamp, Instant)> = HashMap::new();
+        for (a, f) in &self.far {
+            let m = a.machine();
+            if f.copy.is_some() && !f.stale {
                 continue;
             }
             let Some(FileStat::File { path, stamp, .. }) = &f.stat else {
                 continue;
             };
-            if stamp.size > f.want || f.want == 0 {
+            if f.want == 0 || stamp.size > f.want || f.retry_at.is_some() {
                 continue;
             }
-            let fetch = f.fetch.get_or_insert_with(|| Fetch {
-                stamp: *stamp,
-                real: path.clone(),
-                tmp: place(&m, path, stamp).with_extension("part"),
-                got: 0,
-                total: stamp.size,
-                inflight: false,
-            });
-            if fetch.inflight {
+            let dest = place(m, path, stamp);
+            if f.copy.as_ref() == Some(&dest) {
                 continue;
             }
-            fetch.inflight = true;
-            let offset = fetch.got;
+            let e = wanted.entry(dest).or_insert((a.clone(), *stamp, f.seen_at));
+            e.2 = e.2.max(f.seen_at);
+        }
+        // A copy no one wants any more (its file changed) stops.
+        self.fetches.retain(|k, x| {
+            let keep = wanted.contains_key(k);
+            if !keep {
+                let _ = std::fs::remove_file(&x.tmp);
+            }
+            keep
+        });
+        for (dest, (ask, stamp, seen)) in wanted {
+            match self.fetches.get_mut(&dest) {
+                Some(x) => x.seen_at = x.seen_at.max(seen),
+                None => {
+                    self.made += 1;
+                    let tmp =
+                        dest.with_extension(format!("part{}-{}", std::process::id(), self.made));
+                    self.fetches.insert(
+                        dest,
+                        Fetch {
+                            machine: ask.machine().to_string(),
+                            ask,
+                            stamp,
+                            tmp,
+                            got: 0,
+                            total: stamp.size,
+                            sent_at: None,
+                            wait_until: None,
+                            seen_at: seen,
+                        },
+                    );
+                }
+            }
+        }
+        let mut busy: HashMap<String, usize> = HashMap::new();
+        for x in self.fetches.values() {
+            if x.sent_at.is_some() {
+                *busy.entry(x.machine.clone()).or_default() += 1;
+            }
+        }
+        let mut next: Vec<(&PathBuf, &Fetch)> = self
+            .fetches
+            .iter()
+            .filter(|(_, x)| {
+                x.sent_at.is_none() && x.wait_until.is_none() && self.online.contains(&x.machine)
+            })
+            .collect();
+        next.sort_by_key(|x| std::cmp::Reverse(x.1.seen_at));
+        let next: Vec<PathBuf> = next.into_iter().map(|(k, _)| k.clone()).collect();
+        for key in next {
+            let x = self.fetches.get_mut(&key).expect("listed");
+            let n = busy.entry(x.machine.clone()).or_default();
+            if *n >= WINDOW {
+                continue;
+            }
+            *n += 1;
+            x.sent_at = Some(now);
             let req = Request::Read {
-                file: a.file_ref(),
-                offset,
+                file: x.ask.file_ref(),
+                offset: x.got,
                 len: READ_MAX,
-                expect: Some(fetch.stamp),
+                expect: Some(x.stamp),
             };
-            *self.reading.entry(m.clone()).or_default() += 1;
             out.push((
-                m,
+                x.machine.clone(),
                 Send::Read {
-                    ask: a,
-                    offset,
+                    key,
+                    offset: x.got,
                     req,
                 },
             ));
@@ -533,34 +632,36 @@ impl Files {
         self.dirty = true;
         for (a, s) in asks.into_iter().zip(stats) {
             let m = a.machine().to_string();
-            let f = self.far.entry(a.clone()).or_default();
-            f.asked = false;
+            let Some(f) = self.far.get_mut(&a) else {
+                continue;
+            };
+            f.asked_at = None;
+            if passing(&s) {
+                // Caught mid-rewrite there: asked again in a moment.
+                f.retry_at = Some(Instant::now() + Duration::from_secs(1));
+                continue;
+            }
             f.stale = false;
-            if let FileStat::File { path, stamp, .. } = &s {
-                let kept = place(&m, path, stamp);
-                f.copy = kept.is_file().then_some(kept.clone());
-                let key = index_key(&a);
-                let index = self.index.entry(m.clone()).or_default();
-                if index.get(&key) != Some(&kept) {
-                    index.insert(key, kept);
-                    self.index_dirty.insert(m.clone());
-                }
-                // A fetch of another version stops.
-                if f.fetch.as_ref().is_some_and(|x| x.stamp != *stamp) {
-                    if let Some(x) = f.fetch.take() {
-                        let _ = std::fs::remove_file(&x.tmp);
+            f.stat = Some(s);
+            match f.dest(&m) {
+                Some(dest) => {
+                    f.copy = dest.is_file().then(|| dest.clone());
+                    let key = index_key(&a);
+                    let index = self.index.entry(m.clone()).or_default();
+                    if f.copy.is_some() && index.get(&key) != Some(&dest) {
+                        index.insert(key, dest);
+                        self.index_dirty.insert(m.clone());
                     }
                 }
-            } else {
-                f.copy = None;
-                f.fetch = None;
-                if let Some(index) = self.index.get_mut(&m)
-                    && index.remove(&index_key(&a)).is_some()
-                {
-                    self.index_dirty.insert(m.clone());
+                None => {
+                    f.copy = None;
+                    if let Some(index) = self.index.get_mut(&m)
+                        && index.remove(&index_key(&a)).is_some()
+                    {
+                        self.index_dirty.insert(m.clone());
+                    }
                 }
             }
-            f.stat = Some(s);
         }
     }
 
@@ -572,31 +673,50 @@ impl Files {
                 self.old.insert(m);
             }
             if let Some(f) = self.far.get_mut(&a) {
-                f.asked = false;
+                f.asked_at = None;
                 f.retry_at = Some(Instant::now() + Duration::from_secs(5));
             }
         }
     }
 
+    /// The asks whose copy is kept at `key`.
+    fn wanting(&self, key: &Path) -> Vec<Ask> {
+        self.far
+            .iter()
+            .filter(|(a, f)| f.dest(a.machine()).as_deref() == Some(key))
+            .map(|(a, _)| a.clone())
+            .collect()
+    }
+
     fn bytes_came(
         &mut self,
-        a: Ask,
+        key: PathBuf,
         offset: u64,
         stamp: Stamp,
         total: u64,
         bytes: Option<Vec<u8>>,
-    ) -> Option<String> {
+    ) -> Vec<String> {
         self.dirty = true;
-        let m = a.machine().to_string();
-        if let Some(n) = self.reading.get_mut(&m) {
-            *n = n.saturating_sub(1);
+        let Some(x) = self.fetches.get_mut(&key) else {
+            return Vec::new();
+        };
+        // A reply sent again after a reconnect, or one for a read since
+        // given up on: already had, or asked again.
+        if offset != x.got {
+            return Vec::new();
         }
-        let f = self.far.get_mut(&a)?;
-        let x = f.fetch.as_mut()?;
-        x.inflight = false;
-        let (Some(bytes), true) = (bytes, x.stamp == stamp && x.got == offset) else {
-            f.retry_at = Some(Instant::now() + Duration::from_secs(2));
-            return None;
+        x.sent_at = None;
+        let Some(bytes) = bytes.filter(|_| x.stamp == stamp) else {
+            // Another version there: what wants it asks what it is now.
+            if let Some(x) = self.fetches.remove(&key) {
+                let _ = std::fs::remove_file(&x.tmp);
+            }
+            for a in self.wanting(&key) {
+                if let Some(f) = self.far.get_mut(&a) {
+                    f.stale = true;
+                }
+            }
+            return Vec::new();
         };
         let wrote = (|| -> std::io::Result<()> {
             use std::os::unix::fs::FileExt;
@@ -606,47 +726,70 @@ impl Files {
             let file = std::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
-                .truncate(offset == 0)
+                .truncate(false)
                 .open(&x.tmp)?;
             file.write_all_at(&bytes, offset)?;
             Ok(())
         })();
         if wrote.is_err() || (bytes.is_empty() && x.got < total) {
-            f.fetch = None;
-            f.retry_at = Some(Instant::now() + Duration::from_secs(5));
-            return None;
+            // The disk said no, or the file got shorter: again in a while.
+            let _ = std::fs::remove_file(&x.tmp);
+            x.got = 0;
+            x.wait_until = Some(Instant::now() + Duration::from_secs(5));
+            return Vec::new();
         }
         x.got += bytes.len() as u64;
-        if x.got >= x.total {
-            let done = place(&m, &x.real, &x.stamp);
-            if std::fs::rename(&x.tmp, &done).is_ok() {
-                f.copy = Some(done);
-                self.came += 1;
-            }
-            f.fetch = None;
-            // Whole: the session that named it draws it again.
-            return Some(a.session.clone());
+        if x.got < x.total {
+            return Vec::new();
         }
-        None
+        let Some(x) = self.fetches.remove(&key) else {
+            return Vec::new();
+        };
+        if std::fs::rename(&x.tmp, &key).is_err() {
+            let _ = std::fs::remove_file(&x.tmp);
+            return Vec::new();
+        }
+        self.came += 1;
+        // Whole: everything that wants it draws it.
+        let mut sessions = Vec::new();
+        for a in self.wanting(&key) {
+            let m = a.machine().to_string();
+            if let Some(f) = self.far.get_mut(&a) {
+                f.copy = Some(key.clone());
+            }
+            let index = self.index.entry(m.clone()).or_default();
+            index.insert(index_key(&a), key.clone());
+            self.index_dirty.insert(m);
+            if !sessions.contains(&a.session) {
+                sessions.push(a.session.clone());
+            }
+        }
+        sessions
     }
 
-    fn read_gone(&mut self, a: Ask, stat: FileStat, changed: bool) {
+    fn read_gone(&mut self, key: PathBuf, stat: FileStat, changed: bool) {
         self.dirty = true;
-        let m = a.machine().to_string();
-        if let Some(n) = self.reading.get_mut(&m) {
-            *n = n.saturating_sub(1);
+        if let Some(x) = self.fetches.remove(&key) {
+            let _ = std::fs::remove_file(&x.tmp);
         }
-        if let Some(f) = self.far.get_mut(&a) {
-            if let Some(x) = f.fetch.take() {
-                let _ = std::fs::remove_file(&x.tmp);
+        for a in self.wanting(&key) {
+            if let Some(f) = self.far.get_mut(&a) {
+                if changed || passing(&stat) {
+                    // Rewritten mid-read: ask what it is now.
+                    f.stale = true;
+                } else {
+                    f.copy = None;
+                    f.stat = Some(stat.clone());
+                }
             }
-            if changed {
-                // Rewritten mid-read: ask what it is now.
-                f.stale = true;
-            } else {
-                f.copy = None;
-                f.stat = Some(stat);
-            }
+        }
+    }
+
+    fn read_failed(&mut self, key: PathBuf) {
+        self.dirty = true;
+        if let Some(x) = self.fetches.get_mut(&key) {
+            x.sent_at = None;
+            x.wait_until = Some(Instant::now() + Duration::from_secs(2));
         }
     }
 }
@@ -668,14 +811,28 @@ pub fn copy(a: &Ask, cap: u64) -> Look<PathBuf> {
     FILES.with(|f| f.borrow_mut().look_copy(a, cap))
 }
 
+/// Whether `machine` can be asked now.
+pub fn online(machine: &str) -> bool {
+    machine.is_empty() || FILES.with(|f| f.borrow().online.contains(machine))
+}
+
 /// Something says `machine`'s files may have changed: those named by
-/// `paths` (as written), or all of them.
+/// `paths` (as written, or as they resolved there), or all of them.
 pub fn changed(machine: &str, paths: Option<&[String]>) {
     FILES.with(|f| {
         let mut f = f.borrow_mut();
         let mut any = false;
         for (a, e) in f.far.iter_mut() {
-            if a.machine() == machine && paths.is_none_or(|p| p.iter().any(|p| *p == a.path)) {
+            if a.machine() != machine {
+                continue;
+            }
+            let named = paths.is_none_or(|p| {
+                p.iter().any(|p| {
+                    *p == a.path
+                        || matches!(&e.stat, Some(FileStat::File { path, .. }) if path == p)
+                })
+            });
+            if named && e.asked_at.is_none() {
                 e.stale = true;
                 e.retry_at = None;
                 any = true;
@@ -691,8 +848,27 @@ pub fn changed(machine: &str, paths: Option<&[String]>) {
     });
 }
 
+/// Something happened in session `id`: its files are asked about again
+/// (another machine's), or read again (this Mac's).
+pub fn session_changed(id: &str) {
+    FILES.with(|f| {
+        let mut f = f.borrow_mut();
+        let mut any = false;
+        for (a, e) in f.far.iter_mut() {
+            if a.session == id && e.asked_at.is_none() {
+                e.stale = true;
+                e.retry_at = None;
+                any = true;
+            }
+        }
+        f.near.retain(|a, _| a.session != id);
+        f.dirty |= any;
+    });
+}
+
 /// Whether `machine` can be asked now. Coming online asks again about
-/// everything of it.
+/// everything of it; what was in flight is sent again by its link, or
+/// asked again if no answer comes.
 pub fn set_online(machine: &str, online: bool, proto: Option<u32>) {
     FILES.with(|f| {
         let mut f = f.borrow_mut();
@@ -701,7 +877,6 @@ pub fn set_online(machine: &str, online: bool, proto: Option<u32>) {
             f.online.insert(machine.to_string());
         } else {
             f.online.remove(machine);
-            f.reading.remove(machine);
         }
         if let Some(p) = proto {
             if p < 4 {
@@ -712,13 +887,9 @@ pub fn set_online(machine: &str, online: bool, proto: Option<u32>) {
         }
         if online && !was {
             for (a, e) in f.far.iter_mut() {
-                if a.machine() == machine {
+                if a.machine() == machine && e.asked_at.is_none() {
                     e.stale = true;
-                    e.asked = false;
                     e.retry_at = None;
-                    if let Some(x) = e.fetch.as_mut() {
-                        x.inflight = false;
-                    }
                 }
             }
             f.dirty = true;
@@ -739,15 +910,15 @@ pub fn stats_failed(asks: Vec<Ask>, message: &str) {
     FILES.with(|f| f.borrow_mut().stats_failed(asks, message));
 }
 
-/// A range came; the session to draw again when it made a copy whole.
+/// A range came; the sessions to draw again when it made a copy whole.
 pub fn bytes_came(
-    a: Ask,
+    key: PathBuf,
     offset: u64,
     stamp: Stamp,
     total: u64,
     bytes: Option<Vec<u8>>,
-) -> Option<String> {
-    FILES.with(|f| f.borrow_mut().bytes_came(a, offset, stamp, total, bytes))
+) -> Vec<String> {
+    FILES.with(|f| f.borrow_mut().bytes_came(key, offset, stamp, total, bytes))
 }
 
 /// How many copies have come: what's built from them is built again when
@@ -756,27 +927,14 @@ pub fn came() -> u64 {
     FILES.with(|f| f.borrow().came)
 }
 
-pub fn read_gone(a: Ask, stat: FileStat, changed: bool) {
-    FILES.with(|f| f.borrow_mut().read_gone(a, stat, changed));
+pub fn read_gone(key: PathBuf, stat: FileStat, changed: bool) {
+    FILES.with(|f| f.borrow_mut().read_gone(key, stat, changed));
 }
 
-/// A read that got no answer it understood (the link dropped, an error):
-/// asked again shortly.
-pub fn read_failed(a: Ask) {
-    FILES.with(|f| {
-        let mut f = f.borrow_mut();
-        let m = a.machine().to_string();
-        if let Some(n) = f.reading.get_mut(&m) {
-            *n = n.saturating_sub(1);
-        }
-        if let Some(e) = f.far.get_mut(&a) {
-            if let Some(x) = e.fetch.as_mut() {
-                x.inflight = false;
-            }
-            e.retry_at = Some(Instant::now() + Duration::from_secs(2));
-        }
-        f.dirty = true;
-    });
+/// A read that got no answer it understood (an error): asked again
+/// shortly.
+pub fn read_failed(key: PathBuf) {
+    FILES.with(|f| f.borrow_mut().read_failed(key));
 }
 
 /// Forget `machine`'s files, and delete the copies kept of them.
@@ -784,7 +942,8 @@ pub fn forget(machine: &str) {
     FILES.with(|f| {
         let mut f = f.borrow_mut();
         f.far.retain(|a, _| a.machine() != machine);
-        f.reading.remove(machine);
+        f.fetches.retain(|_, x| x.machine != machine);
+        f.index.remove(machine);
     });
     if !machine.is_empty() {
         let _ = std::fs::remove_dir_all(cache_root().join(machine));
@@ -831,9 +990,21 @@ pub fn trim(cap: u64) {
 
 /// Whether anything's waiting to be sent: the window pumps again.
 pub fn busy() -> bool {
+    FILES.with(|f| f.borrow().dirty)
+}
+
+/// Whether something's waiting on a clock (a retry, an unanswered
+/// question): the window looks again in a while, without drawing every
+/// frame meanwhile.
+pub fn waiting() -> bool {
     FILES.with(|f| {
         let f = f.borrow();
-        f.dirty || f.far.values().any(|e| e.retry_at.is_some())
+        f.far
+            .values()
+            .any(|e| e.retry_at.is_some() || e.asked_at.is_some())
+            || f.fetches
+                .values()
+                .any(|x| x.sent_at.is_some() || x.wait_until.is_some())
     })
 }
 

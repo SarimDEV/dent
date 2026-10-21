@@ -87,6 +87,8 @@ async fn conn(d: Arc<Daemon>, stream: UnixStream) -> Result<()> {
 /// the request loop, so a slow disk never holds up an approval or a send.
 static FILE_READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
 const FILE_READS_EACH: usize = 4;
+/// File reads one client may have waiting.
+const READS_QUEUED: usize = 64;
 
 /// Whether `r` only reads files: run beside the loop, its reply on the
 /// bulk lane.
@@ -143,19 +145,28 @@ pub async fn session(
             continue;
         }
         if reads_files(&env.body) {
+            // A client can't queue reads without end: past a point its next
+            // request waits for one to finish.
+            while reads.len() >= READS_QUEUED {
+                let _ = reads.join_next().await;
+            }
             let (d, bulk, mine) = (d.clone(), bulk.clone(), mine.clone());
             let body = env.body;
             reads.spawn(async move {
-                let (Ok(_each), Ok(_all)) = (mine.acquire().await, FILE_READS.acquire().await)
-                else {
-                    return;
+                let msg = {
+                    let (Ok(_each), Ok(_all)) = (mine.acquire().await, FILE_READS.acquire().await)
+                    else {
+                        return;
+                    };
+                    match handle(&d, body).await {
+                        Ok(reply) => Out::Reply { reply },
+                        Err(e) => Out::Error {
+                            message: format!("{e:#}"),
+                        },
+                    }
                 };
-                let msg = match handle(&d, body).await {
-                    Ok(reply) => Out::Reply { reply },
-                    Err(e) => Out::Error {
-                        message: format!("{e:#}"),
-                    },
-                };
+                // Sent with the permits let go: a slow link holds up only
+                // its own replies, never other clients' reads.
                 let _ = bulk.send(encode(req, &msg)).await;
             });
             // Finished ones let go as it goes.

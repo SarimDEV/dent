@@ -938,6 +938,7 @@ impl Dent {
                             }
                         }
                         (Some(path), _) if in_app.is_some() => {
+                            // this Mac's: the file itself
                             crate::open::open(&path.display().to_string(), cx)
                         }
                         (Some(path), _) => cx.open_url(&format!("file://{}", path.display())),

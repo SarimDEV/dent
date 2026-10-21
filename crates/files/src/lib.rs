@@ -109,10 +109,28 @@ fn candidates(written: &str, base: &Path, home: &Path) -> Vec<PathBuf> {
 
 /// How the file `written` names stands.
 pub fn stat(written: &str, base: &Path, home: &Path, policy: &Policy) -> FileStat {
+    stat_with(written, base, home, policy, true)
+}
+
+/// Like [`stat`], without reading a picture's header for its size: for
+/// asking often.
+pub fn stat_plain(written: &str, base: &Path, home: &Path, policy: &Policy) -> FileStat {
+    stat_with(written, base, home, policy, false)
+}
+
+fn stat_with(written: &str, base: &Path, home: &Path, policy: &Policy, size: bool) -> FileStat {
     let all = candidates(written, base, home);
     for p in &all {
         match open(p, policy) {
-            Ok(o) => return o.stat(),
+            Ok(o) if size => return o.stat(),
+            Ok(o) => {
+                return FileStat::File {
+                    path: o.path.display().to_string(),
+                    stamp: o.stamp,
+                    width: None,
+                    height: None,
+                };
+            }
             // Not as written: the next way of reading it.
             Err(FileStat::Missing { .. }) => continue,
             Err(s) => return s,

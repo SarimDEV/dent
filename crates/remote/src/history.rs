@@ -75,10 +75,22 @@ impl History {
             .name("history".into())
             .spawn(move || {
                 for w in rx {
+                    let machine = match &w {
+                        Write::Save { machine, .. } | Write::Reset { machine, .. } => {
+                            Some(machine.clone())
+                        }
+                        _ => None,
+                    };
                     if let Ok(mut db) = writer.lock()
                         && let Err(e) = write(&mut db, w)
                     {
+                        // A batch not kept would leave a gap the next link
+                        // resumes past: what's kept of that machine goes, and
+                        // its history comes again from the start.
                         eprintln!("dent: couldn't keep history: {e:#}");
+                        if let Some(m) = machine {
+                            let _ = write(&mut db, Write::Forget(m));
+                        }
                     }
                 }
             })?;
@@ -102,11 +114,12 @@ impl History {
             let mut q = db.prepare("SELECT body FROM events WHERE machine = ?1 ORDER BY seq")?;
             let mut events = Vec::new();
             for body in q.query_map(params![machine], |r| r.get::<_, String>(0))? {
-                // One that doesn't read as an event (from a newer build)
-                // is left out: the daemon's log is the truth, and history
-                // is only ever a copy of it.
-                if let Ok(e) = serde_json::from_str::<Event>(&body?) {
-                    events.push(e);
+                // One that doesn't read as an event (damage, a newer build):
+                // none of it is used, rather than a history with a hole in
+                // it; it comes again from the daemon.
+                match serde_json::from_str::<Event>(&body?) {
+                    Ok(e) => events.push(e),
+                    Err(_) => return Ok(None),
                 }
             }
             Ok(Some(Kept {
@@ -115,7 +128,16 @@ impl History {
                 events,
             }))
         };
-        read().ok().flatten()
+        match read() {
+            Ok(Some(k)) => Some(k),
+            Ok(None) => {
+                // Not readable whole: what's kept goes, and comes again.
+                drop(db);
+                self.forget(machine);
+                None
+            }
+            Err(_) => None,
+        }
     }
 
     /// Keep `events` from `machine`'s log `epoch`, after the ones before.
@@ -222,7 +244,8 @@ fn write(db: &mut Connection, w: Write) -> rusqlite::Result<()> {
                     "INSERT OR IGNORE INTO events (machine, seq, body) VALUES (?1, ?2, ?3)",
                 )?;
                 for e in &events {
-                    let body = serde_json::to_string(e).unwrap_or_default();
+                    let body = serde_json::to_string(e)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
                     ins.execute(params![machine, e.seq as i64, body])?;
                 }
             }

@@ -5858,7 +5858,7 @@ impl Dent {
 
 /// Another machine's media is copied here whole for a still only up to
 /// this; a bigger one shows without.
-const POSTER_MAX: u64 = 64 << 20;
+const POSTER_MAX: u64 = 16 << 20;
 
 /// A picture session `session` names, to draw on this Mac: the file itself
 /// for this Mac's sessions, the copy here of another machine's; `None`

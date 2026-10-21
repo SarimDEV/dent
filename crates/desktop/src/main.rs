@@ -200,6 +200,7 @@ impl Render for Dent {
             && self.panel_open
         {
             self.refresh_opened(a);
+            self.fill_far_latest(a);
         }
         // A clicked notification opens its session.
         let clicked = notify::take_clicked();

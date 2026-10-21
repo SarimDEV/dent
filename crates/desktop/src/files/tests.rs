@@ -48,10 +48,10 @@ fn serve(real: &str, st: Stamp, content: &[u8]) {
                     let n = asks.len();
                     stats_came(asks, vec![file(real, st); n]);
                 }
-                Send::Read { ask, offset, .. } => {
+                Send::Read { key, offset, .. } => {
                     let end = (offset as usize + READ_MAX as usize).min(content.len());
                     let chunk = content[offset as usize..end].to_vec();
-                    bytes_came(ask, offset, st, content.len() as u64, Some(chunk));
+                    bytes_came(key, offset, st, content.len() as u64, Some(chunk));
                 }
             }
         }
@@ -121,8 +121,8 @@ fn a_file_that_changes_mid_copy_starts_again() {
         }
     }
     for (_, s) in drain() {
-        if let Send::Read { ask, .. } = s {
-            read_gone(ask, file("/home/ada/app/big.bin", stamp(2, 5)), true);
+        if let Send::Read { key, .. } = s {
+            read_gone(key, file("/home/ada/app/big.bin", stamp(2, 5)), true);
         }
     }
     // Asked again, it's the new version that's copied.
@@ -285,6 +285,7 @@ fn drawing_never_reads_a_sessions_file_from_this_disk_unmarked() {
         ("select.rs", include_str!("../select.rs")),
         ("web.rs", include_str!("../web.rs")),
         ("popout.rs", include_str!("../popout.rs")),
+        ("app.rs", include_str!("../app.rs")),
     ];
     let reads = [
         "is_file(",
@@ -292,6 +293,8 @@ fn drawing_never_reads_a_sessions_file_from_this_disk_unmarked() {
         "fs::metadata(",
         ".exists()",
         "read_to_string(",
+        "open::open(",
+        "reveal_path(",
     ];
     let mut bad = Vec::new();
     for (name, src) in sources {
@@ -301,9 +304,14 @@ fn drawing_never_reads_a_sessions_file_from_this_disk_unmarked() {
             if code.starts_with("//") || !reads.iter().any(|r| l.contains(r)) {
                 continue;
             }
+            // On the line, or the one before or after (rustfmt moves a
+            // trailing comment down when the line breaks).
             let marked = l.contains("// this Mac's")
                 || i.checked_sub(1)
-                    .is_some_and(|j| lines[j].contains("// this Mac's"));
+                    .is_some_and(|j| lines[j].contains("// this Mac's"))
+                || lines
+                    .get(i + 1)
+                    .is_some_and(|n| n.trim_start().starts_with("// this Mac's"));
             if !marked {
                 bad.push(format!("{name}:{}: {}", i + 1, code));
             }
@@ -314,4 +322,122 @@ fn drawing_never_reads_a_sessions_file_from_this_disk_unmarked() {
         "read through crate::files, or mark why it's this Mac's:\n{}",
         bad.join("\n")
     );
+}
+
+#[test]
+fn two_ways_of_naming_one_file_make_one_copy_never_a_broken_one() {
+    setup();
+    set_online("vm-two", true, Some(4));
+    // `shot.png` and its full path are one file there.
+    let a = Ask::new("vm-two/s1", "shot.png", "/home/ada/app");
+    let b = Ask::new("vm-two/s1", "/home/ada/app/shot.png", "/home/ada/app");
+    let content: Vec<u8> = (0..(READ_MAX as usize * 3))
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let st = stamp(7, content.len() as u64);
+    picture(&a);
+    // A's copy gets going first.
+    for (_, s) in drain() {
+        if let Send::Stat { asks, .. } = s {
+            let n = asks.len();
+            stats_came(asks, vec![file("/home/ada/app/shot.png", st); n]);
+        }
+    }
+    let first: Vec<(PathBuf, u64)> = drain()
+        .into_iter()
+        .filter_map(|(_, s)| match s {
+            Send::Read { key, offset, .. } => Some((key, offset)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(first.len(), 1);
+    let (key, _) = first[0].clone();
+    bytes_came(
+        key.clone(),
+        0,
+        st,
+        content.len() as u64,
+        Some(content[..READ_MAX as usize].to_vec()),
+    );
+    // Then B asks for the same file, part-way through.
+    picture(&b);
+    serve("/home/ada/app/shot.png", st, &content);
+    let (Look::Here(pa), Look::Here(pb)) = (picture(&a), picture(&b)) else {
+        panic!("{:?} {:?}", picture(&a), picture(&b))
+    };
+    assert_eq!(pa, pb, "one copy");
+    assert_eq!(std::fs::read(pa).unwrap(), content, "and it's whole");
+}
+
+#[test]
+fn a_reply_sent_twice_after_a_reconnect_is_taken_once() {
+    setup();
+    set_online("vm-dup", true, Some(4));
+    let a = Ask::new("vm-dup/s1", "d.bin", "/w");
+    let content = vec![3u8; READ_MAX as usize * 2];
+    let st = stamp(1, content.len() as u64);
+    picture(&a);
+    for (_, s) in drain() {
+        if let Send::Stat { asks, .. } = s {
+            stats_came(asks, vec![file("/w/d.bin", st)]);
+        }
+    }
+    let key = drain()
+        .into_iter()
+        .find_map(|(_, s)| match s {
+            Send::Read { key, .. } => Some(key),
+            _ => None,
+        })
+        .unwrap();
+    let first = content[..READ_MAX as usize].to_vec();
+    bytes_came(
+        key.clone(),
+        0,
+        st,
+        content.len() as u64,
+        Some(first.clone()),
+    );
+    // The same range again (resent by the link): ignored, no stall.
+    bytes_came(key.clone(), 0, st, content.len() as u64, Some(first));
+    serve("/w/d.bin", st, &content);
+    assert_eq!(
+        std::fs::read(picture(&a).shown().unwrap()).unwrap(),
+        content
+    );
+}
+
+#[test]
+fn a_question_never_answered_is_asked_again() {
+    setup();
+    set_online("vm-lost", true, Some(4));
+    let a = Ask::new("vm-lost/s1", "q.png", "/w");
+    picture(&a);
+    assert!(drain().iter().any(|(_, s)| matches!(s, Send::Stat { .. })));
+    // Its link went for good: no answer. In a while it's asked again.
+    FILES.with(|f| {
+        for e in f.borrow_mut().far.values_mut() {
+            e.asked_at = Some(Instant::now() - PATIENCE - Duration::from_secs(1));
+        }
+    });
+    assert!(drain().iter().any(|(_, s)| matches!(s, Send::Stat { .. })));
+}
+
+#[test]
+fn a_failure_waits_on_a_clock_not_on_every_frame() {
+    setup();
+    set_online("vm-fail", true, Some(4));
+    let a = Ask::new("vm-fail/s1", "f.png", "/w");
+    picture(&a);
+    let asks = drain()
+        .into_iter()
+        .find_map(|(_, s)| match s {
+            Send::Stat { asks, .. } => Some(asks),
+            _ => None,
+        })
+        .unwrap();
+    stats_failed(asks, "something broke");
+    drain();
+    // Nothing to send each frame; something to look at again in a while.
+    assert!(!busy());
+    assert!(waiting());
 }

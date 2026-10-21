@@ -92,14 +92,15 @@ pub fn artifacts(v: &SessionView) -> Vec<Artifact> {
                 .map(|(i, ver)| match &ver.content {
                     Some(c) => Rc::from(c.as_bytes()),
                     // An edit to a file we never saw whole: the latest is on
-                    // disk on its machine, read here or copied from there.
-                    None if i + 1 == latest => {
-                        let ask = crate::files::Ask::new(&v.id, &abs.display().to_string(), &v.cwd);
-                        crate::files::copy(&ask, crate::files::WHOLE_MAX)
-                            .shown()
-                            .and_then(|p| std::fs::read(p).ok()) // this Mac's: the file or its copy
+                    // disk on its machine. This Mac's is read here; another
+                    // machine's is copied only when it's opened (the viewer
+                    // fills it in), not for every edit in every session.
+                    None if i + 1 == latest
+                        && dent_client_core::fleet::split(&v.id).0.is_empty() =>
+                    {
+                        std::fs::read(&abs) // this Mac's session
                             .map(Rc::from)
-                            .unwrap_or_else(|| Rc::from(&b""[..]))
+                            .unwrap_or_else(|_| Rc::from(&b""[..]))
                     }
                     None => Rc::from(&b""[..]),
                 })

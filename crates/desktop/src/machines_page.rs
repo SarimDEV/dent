@@ -193,27 +193,83 @@ struct Node {
 /// A shape for every machine: this one (`local`, its id) and each remote
 /// one. One still being added has none yet: its address would take a shape
 /// and move another machine off its own for as long as the sheet is open.
-fn shapes_for(local: &str, machines: &[MachineView]) -> HashMap<String, Shape> {
-    let local = if local.is_empty() { "this" } else { local };
-    let mut s = glyph::assign(
+fn shapes_for(
+    local: &str,
+    machines: &[MachineView],
+    kept: &HashMap<String, Shape>,
+) -> HashMap<String, Shape> {
+    // This machine goes by its id once its daemon has said it, and by the
+    // shape it had last time until then.
+    let mut kept = kept.clone();
+    if !local.is_empty()
+        && !kept.contains_key(local)
+        && let Some(sh) = kept.get(THIS).copied()
+    {
+        kept.insert(local.to_string(), sh);
+    }
+    let local = if local.is_empty() { THIS } else { local };
+    let mut s = glyph::assign_kept(
         std::iter::once(local).chain(
             machines
                 .iter()
                 .map(|m| m.id.as_str())
                 .filter(|id| !id.starts_with('+')),
         ),
+        &kept,
     );
     // This machine's own sessions have plain ids: "" is it too.
     if let Some(sh) = s.get(local).copied() {
         s.insert(String::new(), sh);
+        s.insert(THIS.to_string(), sh);
     }
     s
 }
 
+/// This machine, in the kept shapes, whatever its id.
+const THIS: &str = "this";
+
+fn shapes_path() -> std::path::PathBuf {
+    dent_remote::store::state_dir().join("shapes.json")
+}
+
+/// The shapes machines were given, kept so none changes shape when another
+/// is added or between launches.
+pub fn load_shapes() -> HashMap<String, Shape> {
+    std::fs::read(shapes_path())
+        .ok()
+        .and_then(|b| serde_json::from_slice::<HashMap<String, usize>>(&b).ok())
+        .map(|m| {
+            m.into_iter()
+                .filter_map(|(k, i)| glyph::SHAPES.get(i).map(|s| (k, *s)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 impl Dent {
-    /// A shape for every machine: this one and each remote one.
+    /// A shape for every machine: this one and each remote one. A new
+    /// machine's is kept from then on.
     pub fn shapes(&self) -> HashMap<String, Shape> {
-        shapes_for(&self.machine_id, &self.machines)
+        let mut kept = self.kept_shapes.borrow_mut();
+        let s = shapes_for(&self.machine_id, &self.machines, &kept);
+        let grew = s
+            .iter()
+            .any(|(k, v)| !k.is_empty() && kept.get(k) != Some(v));
+        if grew {
+            for (k, v) in &s {
+                if !k.is_empty() {
+                    kept.insert(k.clone(), *v);
+                }
+            }
+            let index: HashMap<&String, usize> = kept
+                .iter()
+                .filter_map(|(k, v)| glyph::SHAPES.iter().position(|s| s == v).map(|i| (k, i)))
+                .collect();
+            if let Ok(json) = serde_json::to_vec(&index) {
+                let _ = dent_remote::store::write_private(&shapes_path(), &json);
+            }
+        }
+        s
     }
 
     /// The remote machines added: saved, not one still being added.
@@ -1802,12 +1858,12 @@ mod tests {
         };
         let ids = ["8e2e34085ddf", "3f9a2c710b5e", "c27b19e4a0d2"];
         let mut list: Vec<MachineView> = ids.iter().map(|i| saved(i)).collect();
-        let before = shapes_for("5e0d44b91a7c", &list);
+        let before = shapes_for("5e0d44b91a7c", &list, &std::collections::HashMap::new());
         // Whatever shape addresses would hash to.
         for n in 0..12 {
             list.push(saved(&format!("+10.0.0.{n}:7480")));
         }
-        let during = shapes_for("5e0d44b91a7c", &list);
+        let during = shapes_for("5e0d44b91a7c", &list, &std::collections::HashMap::new());
         assert_eq!(during, before);
         assert_eq!(during.get(""), during.get("5e0d44b91a7c"));
     }

@@ -69,9 +69,15 @@ impl Net {
             far: Arc::new(Mutex::new(HashMap::new())),
             history,
         };
-        for s in dent_remote::store::load() {
-            net.follow(s);
-        }
+        // Off the window's thread: reading each machine's kept history
+        // can take a while, and each link starts only once its history is
+        // handed over, so nothing it says comes before what's kept.
+        let n = net.clone();
+        std::thread::spawn(move || {
+            for s in dent_remote::store::load() {
+                n.follow(s);
+            }
+        });
         net
     }
 
