@@ -884,7 +884,7 @@ impl Dent {
                 (Standing::Connecting, _) => "Connecting…".into(),
                 (Standing::Asleep, _) => "Asleep".into(),
                 (Standing::NeedsCode, _) => "Needs a code from it".into(),
-                (_, State::Removed) => "Removed this device".into(),
+                (_, State::Removed) => "This device was removed".into(),
                 (_, State::Incompatible { .. }) => "Needs an update".into(),
                 (_, State::TrustedElsewhere { .. }) => "Trusted on Tailscale only".into(),
                 _ => "Can't reach".into(),

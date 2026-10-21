@@ -35,10 +35,13 @@ fn full() -> String {
     "full".into()
 }
 
-/// Paired devices by id (key fingerprint).
+/// Paired devices by id (key fingerprint), and the devices removed here:
+/// a removed device is told so when it comes back, by any route (the
+/// Tailscale account too), until it's paired again on purpose, with a code.
 pub struct Trust {
     path: PathBuf,
     peers: BTreeMap<String, Peer>,
+    removed: std::collections::BTreeSet<String>,
 }
 
 impl Trust {
@@ -57,7 +60,30 @@ impl Trust {
             },
             Err(_) => BTreeMap::new(),
         };
-        Self { path, peers }
+        // Unreadable, it's read as none removed: a removed device then
+        // still needs its account's trust or a code, as any other.
+        let removed = std::fs::read_to_string(path.with_file_name("removed.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        Self {
+            path,
+            peers,
+            removed,
+        }
+    }
+
+    /// Whether the device with key `public` was removed here, and hasn't
+    /// been paired since.
+    pub fn was_removed(&self, public: &[u8]) -> bool {
+        self.removed.contains(&dent_link::fingerprint(public))
+    }
+
+    fn save_removed(&self, removed: &std::collections::BTreeSet<String>) -> Result<()> {
+        write_private(
+            &self.path.with_file_name("removed.json"),
+            serde_json::to_string(removed)?.as_bytes(),
+        )
     }
 
     pub fn get(&self, public: &[u8]) -> Option<&Peer> {
@@ -79,6 +105,14 @@ impl Trust {
     /// file has, so a failed write trusts nobody new.
     pub fn add(&mut self, public: &[u8], name: &str) -> Result<()> {
         let now = now_ms();
+        let id = dent_link::fingerprint(public);
+        // Paired again on purpose: no longer removed.
+        if self.removed.contains(&id) {
+            let mut removed = self.removed.clone();
+            removed.remove(&id);
+            self.save_removed(&removed)?;
+            self.removed = removed;
+        }
         let mut peers = self.peers.clone();
         peers.insert(
             dent_link::fingerprint(public),
@@ -93,14 +127,23 @@ impl Trust {
         self.commit(peers)
     }
 
-    /// Written before it's acknowledged, as [`Trust::add`].
-    pub fn remove(&mut self, id: &str) -> Result<bool> {
-        if !self.peers.contains_key(id) {
+    /// Written before it's acknowledged, as [`Trust::add`]. `known`: the
+    /// device is trusted another way (its Tailscale account) and is removed
+    /// even though it was never paired.
+    pub fn remove(&mut self, id: &str, known: bool) -> Result<bool> {
+        let paired = self.peers.contains_key(id);
+        if !paired && !known {
             return Ok(false);
         }
-        let mut peers = self.peers.clone();
-        peers.remove(id);
-        self.commit(peers)?;
+        let mut removed = self.removed.clone();
+        removed.insert(id.to_string());
+        self.save_removed(&removed)?;
+        self.removed = removed;
+        if paired {
+            let mut peers = self.peers.clone();
+            peers.remove(id);
+            self.commit(peers)?;
+        }
         Ok(true)
     }
 

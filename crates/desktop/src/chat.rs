@@ -1254,6 +1254,25 @@ impl Dent {
                 "is asleep",
                 "The agent paused there and carries on when it wakes. Messages wait here till then.",
             ),
+            // Nothing happens until something changes, so each says what.
+            crate::machines_page::Standing::NeedsCode => (
+                "needs a code",
+                "Pair with it in Settings › Machines. Messages wait here till then.",
+            ),
+            crate::machines_page::Standing::Blocked => match m.standing() {
+                dent_client_core::machine::State::Removed => (
+                    "removed this device",
+                    "This device was removed there. Pair again in Settings › Machines to use it.",
+                ),
+                dent_client_core::machine::State::Incompatible { .. } => (
+                    "needs an update",
+                    "It and this app don't speak the same version. Update dent where it's older.",
+                ),
+                _ => (
+                    "trusts this device only on Tailscale",
+                    "Connect to it over Tailscale, or pair with a code to use this route.",
+                ),
+            },
             _ => (
                 "can't be reached",
                 "Its sessions keep their place there. Messages wait here till it's back.",

@@ -186,7 +186,12 @@ impl Net {
     }
 
     pub fn remove_device(&self, id: &str) -> Result<bool> {
-        let had = lock(&self.trust).remove(id)?;
+        // One trusted through its Tailscale account (seen this run) is
+        // removed too, so the account doesn't let it straight back in.
+        let known = lock(&self.via_tailscale)
+            .iter()
+            .any(|k| dent_link::fingerprint(k) == id);
+        let had = lock(&self.trust).remove(id, known)?;
         let _ = self.removed.send(id.to_string());
         Ok(had)
     }
@@ -471,6 +476,12 @@ async fn conn(
     }
 
     let pairing_open = lock(&d.net.window).is_open();
+    // Removed here and not paired since: told so, by any route, unless a
+    // code is showing, when it may pair again on purpose.
+    if paired.is_none() && !pairing_open && lock(&d.net.trust).was_removed(&t.remote) {
+        let _ = send_control(&mut ws, &mut t, &Control::Refuse(Refusal::Removed)).await;
+        return Ok(());
+    }
     let mut verdict = match &paired {
         Some(p) => Verdict::Paired {
             access: access(&p.access),

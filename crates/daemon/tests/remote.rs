@@ -385,11 +385,28 @@ async fn pair_then_use_the_daemon_remotely() {
         again.next_control().await,
         Control::Refuse(Refusal::Removed)
     );
-    let after = Device::connect(d.port, &keys).await;
+    // Coming back later, by any route, it's told it was removed (not
+    // greeted as a stranger to pair), and still after a restart.
+    let (_, _, first) = connect(d.port, &keys, &hello("phone", PROTOCOL_MIN, PROTOCOL)).await;
+    assert_eq!(first, Control::Refuse(Refusal::Removed));
+    let mut d = d;
+    if let Some(mut c) = d.child.take() {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+    d.spawn(&[]);
+    let (_, _, first) = connect(d.port, &keys, &hello("phone", PROTOCOL_MIN, PROTOCOL)).await;
+    assert_eq!(first, Control::Refuse(Refusal::Removed));
+    // Paired again on purpose, with a code, it's trusted again.
+    let code = d.code();
+    let mut back = Device::connect(d.port, &keys).await;
+    assert_eq!(back.trust, Trust::Untrusted { pairing_open: true });
+    assert!(matches!(back.pair(&code).await, Control::Paired { .. }));
+    let later = Device::connect(d.port, &keys).await;
     assert_eq!(
-        after.trust,
-        Trust::Untrusted {
-            pairing_open: false
+        later.trust,
+        Trust::Paired {
+            access: dent_link::Access::Full
         }
     );
 }

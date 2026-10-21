@@ -165,7 +165,7 @@ async fn add(args: &[String]) -> Result<()> {
             }
             Note::State(State::Removed) => {
                 break Err(anyhow::anyhow!(
-                    "{addr} removed this device; pair again there with `dent-daemon pair` and --code"
+                    "this device was removed from {addr}; pair again there with `dent-daemon pair` and --code"
                 ));
             }
             Note::State(State::Incompatible { daemon, client }) => {

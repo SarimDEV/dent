@@ -1489,7 +1489,7 @@ pub fn refusal_words(r: &Refusal) -> String {
         ),
         Refusal::NotTrusted => "this device isn't paired with that machine".into(),
         Refusal::TrustedOn { routes } => format!("trusted only over {}", routes.join(", ")),
-        Refusal::Removed => "the machine removed this device".into(),
+        Refusal::Removed => "this device was removed".into(),
         Refusal::Starting { .. } => "the machine is starting".into(),
         Refusal::Busy { .. } => "the machine is busy".into(),
         Refusal::RateLimited { .. } => "too many connections from here".into(),
