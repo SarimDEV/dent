@@ -338,7 +338,7 @@ impl Dent {
             };
             let mut e = Entry::row(
                 format!("machine-{}", m.id),
-                m.name(),
+                &crate::data::machine_short(m.name()),
                 Some(note),
                 here == m.id,
                 pick(m.id.clone()),
@@ -401,36 +401,54 @@ impl Dent {
                 summary.push(format!("{away} can't reach"));
             }
         }
+        // In a narrow window the buttons go under the title, rather than
+        // off the edge.
         let head = div()
             .flex()
+            .flex_wrap()
             .items_end()
-            .gap(px(space::S2))
+            .gap_x(px(space::S2))
+            .gap_y(px(space::S3))
             .pb(px(space::S6))
             .child(
                 div()
                     .flex_1()
+                    .min_w(px(260.))
                     .flex()
                     .flex_col()
                     .gap(px(space::S1))
                     .child(div().ty(DISPLAY).text_color(t.ink).child("Machines"))
                     .child(div().ty(UI).text_color(t.quiet).child(summary.join(" · "))),
             )
+            // Both buttons together: in a narrow window they go under the
+            // title as a pair.
             .child(
-                ui::button("pairing-code", "Pairing code", false, &t)
-                    .relative()
-                    .child(probe(&self.probes, "pairing-code"))
-                    .on_press(cx.listener(|this, _, _, cx| {
-                        this.ask(dent_protocol::Request::OpenPairing, Waiting::Pairing);
-                        cx.notify();
-                    })),
-            )
-            .child(
-                ui::button("add-machine", "Add machine", true, &t)
-                    .relative()
-                    .child(ui::icon("plus", 13., t.surface))
-                    .flex_row_reverse()
-                    .child(probe(&self.probes, "add-machine"))
-                    .on_press(cx.listener(|this, _, window, cx| this.open_adding(window, cx))),
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S2))
+                    .child(
+                        ui::button("pairing-code", "Pairing code", false, &t)
+                            .flex_none()
+                            .relative()
+                            .child(probe(&self.probes, "pairing-code"))
+                            .on_press(cx.listener(|this, _, _, cx| {
+                                this.ask(dent_protocol::Request::OpenPairing, Waiting::Pairing);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        ui::button("add-machine", "Add machine", true, &t)
+                            .flex_none()
+                            .relative()
+                            .child(ui::icon("plus", 13., t.surface))
+                            .flex_row_reverse()
+                            .child(probe(&self.probes, "add-machine"))
+                            .on_press(
+                                cx.listener(|this, _, window, cx| this.open_adding(window, cx)),
+                            ),
+                    ),
             );
         let code = self.pairing_card(cx);
         let first = self.machines.is_empty();
@@ -478,6 +496,7 @@ impl Dent {
                 .gap(px(space::S4))
                 .child(
                     div()
+                        .flex_none()
                         .font_family(crate::theme::mono())
                         .text_size(px(28.))
                         .line_height(px(32.))
@@ -485,31 +504,41 @@ impl Dent {
                         .when(expired, |d| d.line_through())
                         .child(spaced),
                 )
-                .child(div().flex_1().ty(UI).text_color(t.quiet).child(if expired {
-                    "This code has expired. Codes work for a few minutes, once.".to_string()
-                } else {
-                    format!(
-                        "Type it on the other device. Works once, for {} more minute{}.",
-                        left,
-                        if left == 1 { "" } else { "s" }
-                    )
-                }))
+                // Wraps in a narrow window; the buttons keep their room.
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .ty(UI)
+                        .text_color(t.quiet)
+                        .child(if expired {
+                            "This code has expired. Codes work for a few minutes, once.".to_string()
+                        } else {
+                            format!(
+                                "Type it on the other device. Works once, for {} more minute{}.",
+                                left,
+                                if left == 1 { "" } else { "s" }
+                            )
+                        }),
+                )
                 .when(expired, |d| {
                     d.child(
-                        ui::button("pairing-new", "New code", true, &t).on_press(cx.listener(
-                            |this, _, _, cx| {
+                        ui::button("pairing-new", "New code", true, &t)
+                            .flex_none()
+                            .on_press(cx.listener(|this, _, _, cx| {
                                 this.ask(dent_protocol::Request::OpenPairing, Waiting::Pairing);
                                 cx.notify();
-                            },
-                        )),
+                            })),
                     )
                 })
-                .child(ui::ghost("pairing-done", "Done", &t).on_press(cx.listener(
-                    |this, _, _, cx| {
-                        this.pairing = None;
-                        cx.notify();
-                    },
-                )))
+                .child(
+                    ui::ghost("pairing-done", "Done", &t)
+                        .flex_none()
+                        .on_press(cx.listener(|this, _, _, cx| {
+                            this.pairing = None;
+                            cx.notify();
+                        })),
+                )
                 .arrive(
                     SharedString::from(format!("pairing-{code}")),
                     From::Above,
@@ -559,7 +588,7 @@ impl Dent {
                 (AWAY_X + 0.045, y, words.to_string())
             };
             nodes.push(Node {
-                name: m.name().to_string(),
+                name: crate::data::machine_short(m.name()),
                 shape,
                 standing: st,
                 x,
@@ -654,7 +683,16 @@ impl Dent {
                 .whitespace_nowrap()
                 .child(text)
         };
+        // How wide the map was last drawn: a name stops before the next
+        // column (connected machines) or the map's edge (the rest).
+        let strip_w = self
+            .probes
+            .borrow()
+            .get("machines-strip")
+            .map_or(900., |b| b.size.width.as_f32());
         let node_el = |n: &Node, size: f32, below: bool, i: usize| {
+            let limit = if n.standing.connected() { AWAY_X } else { 1. };
+            let room = (limit - n.x) * strip_w - size / 2. - space::S3 - space::S3;
             let faded = matches!(n.standing, Standing::Unreachable | Standing::Blocked);
             let words = div()
                 .flex()
@@ -666,7 +704,11 @@ impl Dent {
                         // A long name ends in "…" rather than run past the
                         // map's edge; under a holder, it keeps to about
                         // the holder's width.
-                        .max_w(px(if below { size * 2. + 24. } else { NAME_MAX }))
+                        .max_w(px(if below {
+                            size * 2. + 24.
+                        } else {
+                            room.clamp(48., NAME_MAX)
+                        }))
                         .truncate()
                         .text_color(if faded { t.quiet } else { t.ink })
                         .child(n.name.clone()),
@@ -890,7 +932,7 @@ impl Dent {
             let open = self.machine_open.as_deref() == Some(m.id.as_str());
             rows.push(self.machine_row(
                 &m.id,
-                m.name(),
+                &crate::data::machine_short(m.name()),
                 None,
                 meta,
                 holder(shape, st.dot(&t), 32., faded, &t),
@@ -1331,7 +1373,7 @@ impl Dent {
         true
     }
 
-    fn start_adding(&mut self, typed: String, cx: &mut Context<Self>) {
+    pub(crate) fn start_adding(&mut self, typed: String, cx: &mut Context<Self>) {
         let Some(addr) = dent_client_core::machine::address(&typed) else {
             if let Some(a) = &mut self.adding {
                 a.bad = Some(format!(

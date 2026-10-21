@@ -387,6 +387,32 @@ pub(super) fn machines() -> Vec<(f32, Act)> {
     ];
     both_themes(&mut v, "machines");
     v.extend([
+        // A pairing code showing, then one that's run out.
+        (
+            0.1,
+            Call(|d, _, cx| {
+                d.pairing = Some(("482913".into(), crate::cards::now_ms() + 4 * 60_000 + 5_000));
+                cx.notify();
+            }),
+        ),
+        (0.4, Shot("machines-code-light")),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                d.pairing = Some(("482913".into(), crate::cards::now_ms()));
+                cx.notify();
+            }),
+        ),
+        (0.4, Shot("machines-code-gone-light")),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                d.pairing = None;
+                cx.notify();
+            }),
+        ),
+    ]);
+    v.extend([
         (0.1, Click("add-machine")),
         (
             0.1,
@@ -397,6 +423,20 @@ pub(super) fn machines() -> Vec<(f32, Act)> {
             ),
         ),
         (0.4, Shot("machines-adding-light")),
+        // Something that can't be an address: said under the field, at once.
+        (
+            0.1,
+            Call(|d, _, cx| d.start_adding("not a host".into(), cx)),
+        ),
+        (
+            0.1,
+            Until(
+                "an address that can't be one is refused at once, with words",
+                |d, _| d.adding.as_ref().is_some_and(|a| a.bad.is_some()),
+                2.,
+            ),
+        ),
+        (0.3, Shot("machines-adding-bad-light")),
         (0.2, Key("escape")),
         (
             0.1,
@@ -433,10 +473,16 @@ fn leave_made_up_machines(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) 
 fn made_up_machines() -> Vec<crate::machines::MachineView> {
     use dent_client_core::machine::State;
     use dent_link::{Access, Goodbye, Trust};
+    // DENT_WALK_LONG: every name long, to see what gives way and how.
+    let long = std::env::var_os("DENT_WALK_LONG").is_some();
     let m = |id: &str, name: &str, state: State, rtt: Option<u64>, via: &str| {
         let mut v = crate::machines::MachineView::saved(dent_remote::Saved {
             id: id.into(),
-            name: name.into(),
+            name: if long {
+                format!("{name}-in-the-basement-closet-with-a-long-name")
+            } else {
+                name.into()
+            },
             routes: vec![via.into()],
             ..Default::default()
         });

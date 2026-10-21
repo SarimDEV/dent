@@ -1309,7 +1309,7 @@ impl Dent {
                                 .truncate()
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(t.ink)
-                                .child(m.name().to_string()),
+                                .child(crate::data::machine_short(m.name())),
                         )
                         .child(
                             div()
@@ -2984,7 +2984,7 @@ impl Dent {
                                         } else {
                                             format!(
                                                 "Waiting for {} · sends when it's back",
-                                                s.machine
+                                                crate::data::machine_short(&s.machine)
                                             )
                                         }
                                     } else if ahead.is_some() {
@@ -4633,7 +4633,16 @@ impl Dent {
             0.
         };
         let fresh = self.new_worktree();
-        let full = text(project)
+        // The machine chip, with its shape, counts too.
+        let machine_w = if self.has_machines() {
+            text(&crate::data::machine_short(
+                &self.machine_name(&self.defaults.machine.clone()),
+            )) + 16.
+        } else {
+            0.
+        };
+        let full = machine_w
+            + text(project)
             + if self.repo_now().is_some() {
                 text("Current checkout") + if fresh { text("from main") } else { 0. }
             } else {
@@ -4671,7 +4680,8 @@ impl Dent {
             .border_color(t.hairline)
             .rounded_b(px(radius::LG))
             .children(self.has_machines().then(|| {
-                let name = self.machine_name(&self.defaults.machine.clone());
+                let name =
+                    crate::data::machine_short(&self.machine_name(&self.defaults.machine.clone()));
                 keep(true, self.chip(Menu::Machine, "", &name, false, cx))
             }))
             .child(keep(

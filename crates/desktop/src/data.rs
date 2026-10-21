@@ -771,6 +771,21 @@ pub fn span(secs: u64) -> String {
 
 /// A machine as people say it: "this Mac" for the computer dent is on,
 /// otherwise its name.
+/// A machine's name for running text (a row, the status bar, a note):
+/// past 24 letters its middle gives way, so its start and end both still
+/// say which it is and what's said after it still shows.
+pub fn machine_short(name: &str) -> String {
+    let c: Vec<char> = name.chars().collect();
+    if c.len() <= 24 {
+        return name.to_string();
+    }
+    format!(
+        "{}…{}",
+        c[..14].iter().collect::<String>(),
+        c[c.len() - 8..].iter().collect::<String>()
+    )
+}
+
 pub fn machine_shown(name: &str) -> String {
     static HERE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let here = HERE.get_or_init(|| {
