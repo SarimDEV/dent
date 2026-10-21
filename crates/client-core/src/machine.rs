@@ -34,9 +34,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use dent_link::{
-    Control, Goodbye, Hello, Initiator, Keys, Opened, Refusal, Transport, Trust, WrongKey,
-};
+use dent_link::{Control, Goodbye, Hello, Initiator, Keys, Opened, Refusal, Transport, Trust};
 
 /// Dialling to a finished handshake and verdict, per address.
 pub const OPEN_MS: u64 = 3_000;
@@ -708,7 +706,7 @@ impl Machine {
                         Err(_) => self.io.push_back(Io::Close { conn }),
                     },
                     Err(e) => {
-                        if e.downcast_ref::<WrongKey>().is_some() {
+                        if matches!(e, dent_link::Error::WrongKey(_)) {
                             diff_machine = Some(a.addr.clone());
                         }
                         self.io.push_back(Io::Close { conn });
