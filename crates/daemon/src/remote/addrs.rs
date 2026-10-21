@@ -127,13 +127,14 @@ pub fn lan_addresses() -> Vec<IpAddr> {
         if virtual_interface(&name) || !advertisable(ip) {
             continue;
         }
-        match ip {
-            IpAddr::V4(_) => v4.push(ip),
-            IpAddr::V6(_) => v6.push(ip),
+        let list = match ip {
+            IpAddr::V4(_) => &mut v4,
+            IpAddr::V6(_) => &mut v6,
+        };
+        if !list.contains(&ip) {
+            list.push(ip);
         }
     }
-    v4.dedup();
-    v6.dedup();
     v4.extend(v6);
     v4
 }

@@ -441,7 +441,14 @@ async fn conn(
         addrs::route(ip, ts_peer.is_some())
     };
     let paired = lock(&d.net.trust).get(&t.remote).cloned();
-    if route == Route::Lan && !d.net.lan.load(Ordering::Relaxed) && paired.is_none() {
+    // With LAN access off, an unpaired device gets in only over Tailscale or
+    // loopback. "Other" is held to the same rule: a LAN device reaching us
+    // by its global or link-local IPv6 address lands there, and so does the
+    // open internet.
+    if matches!(route, Route::Lan | Route::Other)
+        && !d.net.lan.load(Ordering::Relaxed)
+        && paired.is_none()
+    {
         let _ = send_control(&mut ws, &mut t, &Control::Refuse(Refusal::LanOff)).await;
         return Ok(());
     }

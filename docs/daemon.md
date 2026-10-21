@@ -155,7 +155,7 @@ A goal is a session told to keep working until a stated outcome is met, using ea
 
 Devices on other machines reach the daemon over the network ([remote-plan.md](remote-plan.md), stage 1). The code is in `crates/daemon/src/remote` and [`crates/link`](../crates/link).
 
-- **Listening:** one WebSocket on port 7480 (`DENT_REMOTE_PORT`; 0 turns it off), on every address, filtered by the route each connection came in on. Binding an interface address at startup fails when Tailscale comes up later ([spike 14](spikes/14-routes-identity-and-boot.md)). LAN connections from devices that aren't paired are refused unless LAN access is on (`remote.lan` = `on` in the daemon's settings, or `DENT_REMOTE_LAN=1`).
+- **Listening:** one WebSocket on port 7480 (`DENT_REMOTE_PORT`; 0 turns it off), on every address, filtered by the route each connection came in on. Binding an interface address at startup fails when Tailscale comes up later ([spike 14](spikes/14-routes-identity-and-boot.md)). Connections from devices that aren't paired are refused unless they come over Tailscale or loopback, or LAN access is on (`remote.lan` = `on` in the daemon's settings, or `DENT_REMOTE_LAN=1`).
 - **Identity:** `identity.key` in the state folder, bound to the machine in `identity.binding` ([0059](decisions/0059-machine-identity.md)). A copied folder leaves remote access off and says why. `dent-daemon reidentify` makes a new identity.
 - **Handshake:** Noise XX, with each side's protocol range in its encrypted payload. No overlap means a `Refuse(incompatible)` naming both ranges, then the connection closes.
 - **Trust** ([0061](decisions/0061-trust.md)):
