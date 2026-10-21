@@ -47,7 +47,7 @@ The database held 20,000 events. A stand-in agent, started outside the launcher 
 | A filesystem with room for the database but not its snapshot | Refused with the sizes (16.6 MB free, 21.4 MB needed for a 4.4 MB database); nothing was stopped |
 | The agent | Counting throughout all of the above |
 
-19 of 19 checks pass (`run-tests.sh`).
+19 of 19 checks passed (`run-tests.sh`). Two checks added in review then failed and were fixed: a version rolled back by an interrupted restore wasn't marked never to retry, and each daemon restart leaked two pipe descriptors. 21 of 21 now pass.
 
 ## What changes in the plan
 

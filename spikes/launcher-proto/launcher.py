@@ -24,6 +24,18 @@ def log(*a):
     print("launcher:", *a, flush=True)
 
 
+def fsync_path(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def fsync_dir(path):
+    fsync_path(os.path.dirname(path) or ".")
+
+
 def write_atomic(path, data):
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
@@ -31,9 +43,17 @@ def write_atomic(path, data):
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
-    d = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
-    os.fsync(d)
-    os.close(d)
+    fsync_dir(path)
+
+
+def clone(src, dst_dir):
+    """Clone where the filesystem can (APFS, reflink), copy otherwise."""
+    if sys.platform == "darwin":
+        cmd = ["cp", "-c", src, dst_dir]  # clonefile; macOS cp has no --reflink
+    else:
+        cmd = ["cp", "--reflink=auto", src, dst_dir]
+    if subprocess.run(cmd).returncode != 0:
+        shutil.copy2(src, dst_dir)
 
 
 class State:
@@ -63,13 +83,12 @@ def snapshot(st, uid):
     os.makedirs(stage)
     for f in db_files(st.db):
         if os.path.exists(f):
-            # Clone where the filesystem can (reflink), copy otherwise.
-            subprocess.run(["cp", "--reflink=auto", f, stage], check=True)
+            clone(f, stage)
     for f in os.listdir(stage):
-        fd = os.open(os.path.join(stage, f), os.O_RDONLY)
-        os.fsync(fd)
-        os.close(fd)
+        fsync_path(os.path.join(stage, f))
+    fsync_path(stage)
     os.replace(stage, snap)
+    fsync_dir(snap)
     return snap
 
 
@@ -87,8 +106,14 @@ def restore(st, uid):
         if os.path.exists(f):
             os.remove(f)
     for f in os.listdir(snap):
-        shutil.copy2(os.path.join(snap, f), os.path.join(st.root, f))
+        dst = os.path.join(st.root, f)
+        shutil.copy2(os.path.join(snap, f), dst)
+        fsync_path(dst)
+    # The restored files must be on disk before the marker goes, or a power
+    # cut could leave a half-copied database and no marker to finish it.
+    fsync_dir(st.db)
     os.remove(marker)
+    fsync_dir(marker)
 
 
 def free_enough(st):
@@ -98,19 +123,44 @@ def free_enough(st):
     return free >= need, size, free, need
 
 
+class Daemon:
+    """A daemon process and the launcher's ends of its two pipes. The
+    committed pipe stays open while the daemon runs, so it never reads EOF
+    as the launcher going away; both ends are closed when it stops, so
+    restarts don't leak descriptors."""
+
+    def __init__(self, p, prepared, committed):
+        self.p, self.prepared, self.committed = p, prepared, committed
+
+    def commit(self):
+        os.write(self.committed, b"committed\n")
+
+    def close(self):
+        for fd in (self.prepared, self.committed):
+            if fd is not None:
+                os.close(fd)
+        self.prepared = self.committed = None
+
+
 def start(st, ver, trial):
     exe = os.path.join(st.root, "versions", ver, "daemon")
     r3, w3 = os.pipe()  # child -> launcher: prepared
     r4, w4 = os.pipe()  # launcher -> child: committed
     env = dict(os.environ, DENT_DB=st.db, DENT_TRIAL="1" if trial else "0", DENT_VERSION=ver,
                DENT_PREPARED_FD=str(w3), DENT_COMMITTED_FD=str(r4))
-    p = subprocess.Popen([exe], env=env, pass_fds=(w3, r4))
+    try:
+        p = subprocess.Popen([exe], env=env, pass_fds=(w3, r4))
+    except OSError:
+        for fd in (r3, w3, r4, w4):
+            os.close(fd)
+        raise
     os.close(w3)
     os.close(r4)
-    return p, r3, w4
+    return Daemon(p, r3, w4)
 
 
-def wait_prepared(p, r3, timeout):
+def wait_prepared(d, timeout):
+    p, r3 = d.p, d.prepared
     deadline = time.monotonic() + timeout
     buf = b""
     os.set_blocking(r3, False)
@@ -129,14 +179,29 @@ def wait_prepared(p, r3, timeout):
     return "timeout"
 
 
-def stop(p):
-    if p and p.poll() is None:
+def stop(d):
+    if d is None:
+        return
+    p = d.p
+    if p.poll() is None:
         p.terminate()
         try:
             p.wait(5)
         except subprocess.TimeoutExpired:
             p.kill()
             p.wait()
+    d.close()
+
+
+def rolled_back(s, uid):
+    """Record a rollback of the pending version, which is then never
+    retried automatically, however the rollback was reached."""
+    target = s.get("pending")
+    never = s.get("never_retry", [])
+    if target and target not in never:
+        never = never + [target]
+    s.update(pending=None, never_retry=never,
+             outcome={"id": uid, "from": s.get("rollback"), "to": target, "outcome": "rolled_back"})
 
 
 def run(root):
@@ -144,37 +209,45 @@ def run(root):
     s = st.load()
     marker = os.path.join(root, "restore-pending")
     if os.path.exists(marker):
-        uid = open(marker).read().strip()
+        with open(marker) as f:
+            uid = f.read().strip()
         log(f"finishing an interrupted restore of {uid}")
         restore(st, uid)
-        s.update(pending=None, outcome={"id": uid, "outcome": "rolled_back"})
+        rolled_back(s, uid)
         st.save(s)
     if s.get("pending"):
         # Stopped mid-trial: the pending version never committed.
         log(f"found uncommitted {s['pending']}; restoring")
         restore(st, s["update_id"])
-        s.update(pending=None, outcome={"id": s["update_id"], "outcome": "rolled_back"})
+        rolled_back(s, s["update_id"])
         st.save(s)
-    p, r3, w4 = start(st, s["active"], trial=False)
-    os.write(w4, b"committed\n")
+    p = start(st, s["active"], trial=False)
+    p.commit()
     log(f"running {s['active']}")
     req = os.path.join(root, "update-request")
     while True:
         time.sleep(0.2)
-        if p.poll() is not None:
-            log(f"daemon exited {p.returncode}; restarting in 1 s")
+        if p.p.poll() is not None:
+            log(f"daemon exited {p.p.returncode}; restarting in 1 s")
+            stop(p)
             time.sleep(1)
-            p, r3, w4 = start(st, s["active"], trial=False)
-            os.write(w4, b"committed\n")
+            p = start(st, s["active"], trial=False)
+            p.commit()
         if not os.path.exists(req):
             continue
-        target = open(req).read().strip()
+        with open(req) as f:
+            target = f.read().strip()
         os.remove(req)
         s = st.load()
         if target in s.get("never_retry", []):
             log(f"refused {target}: it rolled back before")
             continue
-        man = json.load(open(os.path.join(root, "versions", target, "manifest.json")))
+        try:
+            with open(os.path.join(root, "versions", target, "manifest.json")) as f:
+                man = json.load(f)
+        except (OSError, ValueError) as e:
+            log(f"refused {target}: can't read its manifest ({e})")
+            continue
         if man.get("launcher_protocol", 1) > PROTOCOL:
             log(f"refused {target}: needs launcher protocol {man['launcher_protocol']}")
             continue
@@ -188,23 +261,22 @@ def run(root):
         log(f"update {uid}: {s['active']} -> {target}")
         stop(p)
         snapshot(st, uid)
-        t, r3, w4 = start(st, target, trial=True)
-        got = wait_prepared(t, r3, PREPARE_TIMEOUT)
+        t = start(st, target, trial=True)
+        got = wait_prepared(t, PREPARE_TIMEOUT)
         if got == "prepared":
             s.update(active=target, pending=None, outcome={"id": uid, "from": s["rollback"], "to": target, "outcome": "committed"})
-            st.save(s)
-            os.write(w4, b"committed\n")
+            st.save(s)  # committed durably before the daemon is told
+            t.commit()
             p = t
             log(f"committed {target}")
         else:
             stop(t)
             log(f"trial {got}; restoring the snapshot")
             restore(st, uid)
-            s.update(pending=None, never_retry=s.get("never_retry", []) + [target],
-                     outcome={"id": uid, "from": s["rollback"], "to": target, "outcome": "rolled_back"})
+            rolled_back(s, uid)
             st.save(s)
-            p, r3, w4 = start(st, s["active"], trial=False)
-            os.write(w4, b"committed\n")
+            p = start(st, s["active"], trial=False)
+            p.commit()
             log(f"back on {s['active']}")
 
 

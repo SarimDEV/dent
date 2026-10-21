@@ -36,6 +36,8 @@ stop_launcher() { pkill -f "launcher.py run $1" ; pkill -f "fakedaemon.py" ; sle
 AG=$WORK/agent.count
 setsid bash -c "n=0; while true; do n=\$((n+1)); echo \$n > $AG; sleep 0.1; done" < /dev/null > /dev/null 2>&1 &
 AGPID=$!
+# However the run ends, stop what it started.
+trap 'kill $AGPID 2>/dev/null; pkill -f "launcher.py run $WORK"; pkill -f fakedaemon.py; sudo umount "$WORK/small" 2>/dev/null; rm -rf "$WORK"' EXIT
 
 echo "1. failing migration rolls back"
 R=$WORK/a; setup "$R"; launch "$R"
@@ -78,6 +80,15 @@ pkill -f fakedaemon.py; sleep 0.3
 launch "$R"; sleep 1
 check "restore finished on restart" '[ ! -e $R/restore-pending ] && [ "$(cols $R)" = "seq,body" ] && [ "$(tables $R)" = "events" ]'
 check "v1 serving" 'grep -q "finishing an interrupted restore" $R/launcher.log && [ "$(grep -c "daemon v1: serving" $R/launcher.log)" = 2 ]'
+check "recorded as rolled back, never retried" '[ "$(state $R)" = "v1 rolled_back v2bad" ]'
+
+echo "6b. restarting a daemon that keeps exiting doesn't leak descriptors"
+L=$(pgrep -f "launcher.py run $R" | head -1)
+fds() { ls "/proc/$L/fd" | wc -l; }
+pkill -f fakedaemon.py; sleep 2
+before=$(fds)
+for _ in 1 2 3 4 5; do pkill -f fakedaemon.py; sleep 1.5; done
+check "same descriptors after 5 restarts ($before, $(fds))" '[ "$(fds)" = "$before" ]'
 stop_launcher "$R"
 
 echo "7. not enough disk for the snapshot: refused, nothing stopped"
