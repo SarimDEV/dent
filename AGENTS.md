@@ -34,10 +34,11 @@ All under `crates/`. Package names are prefixed `dent-`.
 | `client-core` | Connections, sync, cache, search, Markdown → block tree. **No I/O and no runtime:** the host feeds it bytes and the time and does the I/O it asks for ([spike 07](docs/spikes/07-client-core.md)), so it binds to iOS (UniFFI) and wasm | `protocol`, `link` |
 | `daemon` | Drivers, event log, git, files, checkpoints, providers, remote devices | `protocol`, `link` |
 | `session-holder` | Owns agent processes and PTYs. Tiny, rarely changed | std + minimal |
-| `desktop` | GPUI app. The only crate allowed to use GPUI | `client-core`, `protocol`, `ambient` |
+| `remote` | Remote machines on tokio for the CLI and desktop: the socket host for `client-core`'s connection actor, the daemon session over it (hello, subscribe, resend, waiting while away), saved machines and this device's key | `client-core`, `protocol`, `link`, tokio |
+| `desktop` | GPUI app. The only crate allowed to use GPUI | `client-core`, `protocol`, `ambient`, `remote` |
 | `ambient` | Ambient backgrounds for the new-session page: simulations drawing into a display list the desktop paints. No I/O, no dependencies ([docs/ambient.md](docs/ambient.md)) | std only |
 | `web` | wasm-bindgen facade over `client-core` | `client-core` |
-| `cli` | `dent` binary: scripts, agents, `dent daemon install`, `dent doctor` | `client-core`, `protocol`, `link`, tokio (its I/O host) |
+| `cli` | `dent` binary: scripts, agents, `dent daemon install`, `dent doctor` | `client-core`, `protocol`, `remote`, tokio |
 | `fake-claude` | Stands in for `claude -p` in tests and demos | serde_json |
 | `hub` | Hosted/self-hosted hub. **AGPL-3.0**; everything else is MIT | `protocol` |
 

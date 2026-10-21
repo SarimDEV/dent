@@ -8,9 +8,10 @@
 //!
 //! [spike 07]: ../../docs/spikes/07-client-core.md
 
+pub mod fleet;
 pub mod machine;
 pub mod timeline;
 
 pub use timeline::{
-    Aside, Branch, Call, Entry, Made, Note, SessionView, Sessions, Version, pr_news,
+    Aside, Branch, Call, Entry, Feed, Made, Note, SessionView, Sessions, Version, pr_news,
 };

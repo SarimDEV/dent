@@ -1576,6 +1576,120 @@ pub enum Reply {
 /// inside it; a state directory with a path too long for a socket address
 /// (about 104 bytes on macOS) gets one in a private folder under /tmp,
 /// named after the state path.
+impl Request {
+    /// Every session id this request names. A client connected to several
+    /// machines qualifies ids with their machine and routes a request by
+    /// them ([decision 0058](../../docs/decisions/0058-independent-machines.md)).
+    /// No catch-all arm: a new request must say whether it names a session.
+    pub fn sessions_mut(&mut self) -> Vec<&mut SessionId> {
+        use Request as R;
+        match self {
+            R::Send { session, .. }
+            | R::Rewind { session, .. }
+            | R::Fork { session, .. }
+            | R::Unqueue { session, .. }
+            | R::Requeue { session, .. }
+            | R::Interrupt { session, .. }
+            | R::Answer { session, .. }
+            | R::SetModel { session, .. }
+            | R::SetPermission { session, .. }
+            | R::SetEffort { session, .. }
+            | R::Rename { session, .. }
+            | R::RestartAgent { session }
+            | R::Close { session }
+            | R::Reopen { session }
+            | R::Resume { session, .. }
+            | R::StopTask { session, .. }
+            | R::Seen { session, .. }
+            | R::Retitle { session }
+            | R::Aside { session, .. }
+            | R::PromoteAside { session, .. }
+            | R::Changes { session, .. }
+            | R::Discard { session, .. }
+            | R::Files { session }
+            | R::RemoveWorktree { session, .. }
+            | R::GitStatus { session }
+            | R::PrBrief { session, .. }
+            | R::Git { session, .. }
+            | R::ReadFile { session, .. }
+            | R::Act { session, .. } => vec![session],
+            R::Commands { session } => session.iter_mut().collect(),
+            R::Hello { .. }
+            | R::Subscribe { .. }
+            | R::OpenPairing
+            | R::Devices
+            | R::RemoveDevice { .. }
+            | R::Create { .. }
+            | R::KeepAwake { .. }
+            | R::Projects
+            | R::Agents { .. }
+            | R::Machine
+            | R::SetLoginItem { .. }
+            | R::Models { .. }
+            | R::Usage { .. }
+            | R::Recent
+            | R::Adopt { .. }
+            | R::Restart
+            | R::FilesIn { .. }
+            | R::Folders { .. }
+            | R::AddProject { .. }
+            | R::HideProject { .. }
+            | R::NewProject { .. }
+            | R::CloneProject { .. }
+            | R::Repo { .. } => Vec::new(),
+        }
+    }
+}
+
+impl Out {
+    /// Every session id this message names, as [`Request::sessions_mut`].
+    pub fn sessions_mut(&mut self) -> Vec<&mut SessionId> {
+        match self {
+            Out::Events { events } => {
+                let mut v = Vec::new();
+                for e in events {
+                    v.push(&mut e.session);
+                    if let Body::Forked { from, .. } = &mut e.body {
+                        v.push(from);
+                    }
+                }
+                v
+            }
+            Out::Delta { session, .. }
+            | Out::Activity { session, .. }
+            | Out::Commands { session, .. }
+            | Out::Sheet { session, .. }
+            | Out::Acted { session, .. } => vec![session],
+            Out::Reply { reply } => match reply {
+                Reply::Created { session } => vec![session],
+                Reply::Welcome { .. }
+                | Reply::Ok
+                | Reply::Pairing { .. }
+                | Reply::Devices { .. }
+                | Reply::Projects { .. }
+                | Reply::Folders { .. }
+                | Reply::ProjectMade { .. }
+                | Reply::Models { .. }
+                | Reply::Agents { .. }
+                | Reply::Machine { .. }
+                | Reply::Commands { .. }
+                | Reply::Recent { .. }
+                | Reply::Usage { .. }
+                | Reply::Changes { .. }
+                | Reply::Files { .. }
+                | Reply::File { .. }
+                | Reply::Repo { .. }
+                | Reply::GitStatus { .. }
+                | Reply::PrBrief { .. }
+                | Reply::GitDone { .. } => Vec::new(),
+            },
+            Out::Resync { .. } | Out::Error { .. } | Out::Models { .. } | Out::CaughtUp { .. } => {
+                Vec::new()
+            }
+        }
+    }
+}
+
 pub fn daemon_socket(state: &std::path::Path) -> std::path::PathBuf {
     let inside = state.join("daemon.sock");
     if inside.as_os_str().len() < 100 {

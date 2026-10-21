@@ -1,0 +1,23 @@
+[package]
+name = "dent-remote"
+description = "Remote machines for dent clients on tokio: the socket host for the connection actor, the daemon session on top of it, and the saved machines."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+dent-protocol.workspace = true
+dent-client-core.workspace = true
+dent-link.workspace = true
+anyhow.workspace = true
+futures-util = "=0.3.34"
+hex = "=0.4.3"
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tokio-tungstenite = "=0.26.2"
+
+[lints]
+workspace = true

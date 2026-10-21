@@ -9,104 +9,18 @@
 //!   follows them, printing every change of state, route and catch-up.
 //!
 //! Its own key and saved machines live in the client state folder
-//! (`DENT_CLIENT_STATE`, else beside the daemon's state, in `client/`).
+//! (`DENT_CLIENT_STATE`, else `client/` beside the daemon's state).
 //!
 //! [remote-plan.md]: ../../docs/remote-plan.md
 
-mod host;
-
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use dent_client_core::machine::{Machine, Note, State};
-use dent_link::Keys;
 use dent_protocol::{Envelope, Out, PROTOCOL, Reply, Request, encode};
-use serde::{Deserialize, Serialize};
+use dent_remote::host;
+use dent_remote::store::{Saved, device_keys, device_name, load, save};
 use tokio::sync::mpsc;
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct Saved {
-    name: String,
-    id: String,
-    /// The machine's public key, hex.
-    key: String,
-    /// Routes to try, best first: the ones added by hand, then those the
-    /// machine reported.
-    routes: Vec<String>,
-    #[serde(default)]
-    learned: Vec<String>,
-}
-
-fn state_dir() -> PathBuf {
-    if let Some(p) = std::env::var_os("DENT_CLIENT_STATE") {
-        return PathBuf::from(p);
-    }
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    if cfg!(target_os = "macos") {
-        home.join("Library/Application Support/dent/client")
-    } else {
-        std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".local/state"))
-            .join("dent/client")
-    }
-}
-
-fn device_keys() -> Result<Keys> {
-    let dir = state_dir();
-    std::fs::create_dir_all(&dir)?;
-    let p = dir.join("device.key");
-    if let Ok(t) = std::fs::read_to_string(&p) {
-        return Keys::from_hex(&t).context("the device key is damaged");
-    }
-    let k = Keys::generate()?;
-    write_private(&p, k.to_hex().as_bytes())?;
-    Ok(k)
-}
-
-fn write_private(path: &std::path::Path, data: &[u8]) -> Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let tmp = path.with_extension("tmp");
-    // The mode applies only to a new file: never reuse one a crash left.
-    let _ = std::fs::remove_file(&tmp);
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    f.write_all(data)?;
-    f.sync_all()?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
-fn load() -> Vec<Saved> {
-    std::fs::read_to_string(state_dir().join("machines.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
-}
-
-fn save(all: &[Saved]) -> Result<()> {
-    std::fs::create_dir_all(state_dir())?;
-    write_private(
-        &state_dir().join("machines.json"),
-        serde_json::to_string_pretty(all)?.as_bytes(),
-    )
-}
-
-fn device_name() -> String {
-    std::process::Command::new("hostname")
-        .arg("-s")
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "dent cli".into())
-}
 
 fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter()
@@ -228,16 +142,13 @@ async fn add(args: &[String]) -> Result<()> {
     let (name, id, addresses) = result?;
     // The key the actor learned (paired) or saw (account trust).
     let key = key.unwrap_or_default();
-    let mut all = load();
-    all.retain(|s| s.id != id);
-    all.push(Saved {
+    dent_remote::store::upsert(&Saved {
         name: name.clone(),
         id: id.clone(),
         key: hex::encode(&key),
         routes: vec![addr],
         learned: addresses,
-    });
-    save(&all)?;
+    })?;
     println!("added {name} ({id})");
     Ok(())
 }
@@ -277,14 +188,7 @@ async fn watch(args: &[String]) -> Result<()> {
     let (note_tx, mut notes) = mpsc::unbounded_channel::<(usize, Note)>();
     let mut asks = Vec::new();
     for (i, s) in all.iter().enumerate() {
-        let known = hex::decode(&s.key).ok().filter(|k| !k.is_empty());
-        let mut routes = s.routes.clone();
-        for r in &s.learned {
-            if !routes.contains(r) {
-                routes.push(r.clone());
-            }
-        }
-        let m = Machine::new(&device_name(), keys.clone(), known, routes);
+        let m = Machine::new(&device_name(), keys.clone(), s.known_key(), s.all_routes());
         let (ask_tx, ask_rx) = mpsc::unbounded_channel();
         let (tx, mut rx) = mpsc::unbounded_channel();
         tokio::spawn(host::run(m, ask_rx, tx));

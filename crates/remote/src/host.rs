@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use dent_client_core::machine::{Io, Machine, Note};
+use dent_client_core::machine::{Io, Machine, Note, Signal};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -20,6 +20,8 @@ enum SockEvent {
 /// What a caller can ask of a running machine.
 pub enum Ask {
     Pair(String),
+    /// Something that should end a wait: foreground, network change, Retry.
+    Signal(Signal),
     Send(Vec<u8>),
     Stop,
 }
@@ -78,6 +80,7 @@ pub async fn run(
             a = asks.recv() => match a {
                 Some(Ask::Pair(code)) => m.pair(&code, now()),
                 Some(Ask::Send(line)) => { m.send(&line, now()); }
+                Some(Ask::Signal(sig)) => m.signal(sig, now()),
                 Some(Ask::Stop) | None => {
                     m.disconnect();
                     for (_, s) in socks.drain() {

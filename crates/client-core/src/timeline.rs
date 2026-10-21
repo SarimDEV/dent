@@ -11,13 +11,25 @@ use serde_json::Value;
 /// Every session the client knows, kept current from the daemon's feed.
 #[derive(Default, Debug, Clone)]
 pub struct Sessions {
-    /// The last event applied; subscribe from here after a reconnect.
+    /// The last event applied from this machine's daemon; subscribe from
+    /// here after a reconnect.
     pub last_seq: u64,
+    /// Every session, this machine's by their plain ids and other machines'
+    /// qualified ([`crate::fleet`]).
     pub list: BTreeMap<String, SessionView>,
+    /// Each other machine's feed, by its id.
+    pub feeds: BTreeMap<String, Feed>,
     /// The newest usage reading from any session of each agent (by its
     /// id), with when it arrived.
     pub limits: BTreeMap<String, (Vec<Window>, u64)>,
     /// Catch-up is over and what arrives is live.
+    pub live: bool,
+}
+
+/// Where another machine's feed stands.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct Feed {
+    pub last_seq: u64,
     pub live: bool,
 }
 
@@ -560,16 +572,61 @@ pub fn viewable(path: &str) -> bool {
 }
 
 impl Sessions {
-    /// Apply one message from the daemon. Returns the sessions it changed.
+    /// Apply one message from this machine's daemon. Returns the sessions
+    /// it changed.
     pub fn apply(&mut self, out: &Out) -> Vec<String> {
+        self.apply_from("", out)
+    }
+
+    /// Where `machine`'s feed stands ("" is this machine).
+    pub fn feed(&self, machine: &str) -> Feed {
+        if machine.is_empty() {
+            return Feed {
+                last_seq: self.last_seq,
+                live: self.live,
+            };
+        }
+        self.feeds.get(machine).copied().unwrap_or_default()
+    }
+
+    fn set_feed(&mut self, machine: &str, f: Feed) {
+        if machine.is_empty() {
+            self.last_seq = f.last_seq;
+            self.live = f.live;
+        } else {
+            self.feeds.insert(machine.to_string(), f);
+        }
+    }
+
+    /// Drop everything from `machine`, whose log started again (a resync):
+    /// its feed replays from the start.
+    pub fn forget(&mut self, machine: &str) -> Vec<String> {
+        let gone: Vec<String> = self
+            .list
+            .keys()
+            .filter(|k| crate::fleet::split(k).0 == machine)
+            .cloned()
+            .collect();
+        for k in &gone {
+            self.list.remove(k);
+        }
+        self.set_feed(machine, Feed::default());
+        gone
+    }
+
+    /// Apply one message from `machine` (its session ids already
+    /// qualified). Returns the sessions it changed.
+    pub fn apply_from(&mut self, machine: &str, out: &Out) -> Vec<String> {
         match out {
             Out::Events { events } => {
                 let mut changed: Vec<String> = Vec::new();
+                let mut feed = self.feed(machine);
                 for e in events {
-                    if e.seq <= self.last_seq {
+                    if e.seq <= feed.last_seq {
                         continue;
                     }
-                    self.last_seq = e.seq;
+                    feed.last_seq = e.seq;
+                    self.set_feed(machine, feed);
                     self.event(e);
                     if !changed.contains(&e.session) {
                         changed.push(e.session.clone());
@@ -610,7 +667,8 @@ impl Sessions {
                 None => Vec::new(),
             },
             Out::CaughtUp { .. } => {
-                self.live = true;
+                let f = self.feed(machine);
+                self.set_feed(machine, Feed { live: true, ..f });
                 Vec::new()
             }
             _ => Vec::new(),
