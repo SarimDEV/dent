@@ -268,3 +268,50 @@ fn this_macs_files_are_read_where_they_are() {
     assert!(drain().is_empty(), "nothing asked of any machine");
     let _ = b64::encode(b"");
 }
+
+#[test]
+fn drawing_never_reads_a_sessions_file_from_this_disk_unmarked() {
+    // Decision 0068: a session's files go through this layer, so another
+    // machine's are never read from this Mac's disk. Code that reads the
+    // disk where a session's file could be says why it's this Mac's.
+    let sources = [
+        ("chat.rs", include_str!("../chat.rs")),
+        ("markdown.rs", include_str!("../markdown.rs")),
+        ("bridge.rs", include_str!("../bridge.rs")),
+        ("viewer.rs", include_str!("../viewer.rs")),
+        ("lightbox.rs", include_str!("../lightbox.rs")),
+        ("cards.rs", include_str!("../cards.rs")),
+        ("context.rs", include_str!("../context.rs")),
+        ("select.rs", include_str!("../select.rs")),
+        ("web.rs", include_str!("../web.rs")),
+        ("popout.rs", include_str!("../popout.rs")),
+    ];
+    let reads = [
+        "is_file(",
+        "std::fs::read(",
+        "fs::metadata(",
+        ".exists()",
+        "read_to_string(",
+    ];
+    let mut bad = Vec::new();
+    for (name, src) in sources {
+        let lines: Vec<&str> = src.lines().collect();
+        for (i, l) in lines.iter().enumerate() {
+            let code = l.trim_start();
+            if code.starts_with("//") || !reads.iter().any(|r| l.contains(r)) {
+                continue;
+            }
+            let marked = l.contains("// this Mac's")
+                || i.checked_sub(1)
+                    .is_some_and(|j| lines[j].contains("// this Mac's"));
+            if !marked {
+                bad.push(format!("{name}:{}: {}", i + 1, code));
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "read through crate::files, or mark why it's this Mac's:\n{}",
+        bad.join("\n")
+    );
+}

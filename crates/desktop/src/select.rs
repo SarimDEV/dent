@@ -1617,6 +1617,7 @@ pub fn open_link(url: &str, window: &mut Window, cx: &mut App) {
 /// (the column is let go). A path that really ends that way stays whole.
 pub fn at_line(path: &str) -> (String, Option<u32>) {
     if std::path::Path::new(path).exists() {
+        // this Mac's, if here: a name that ends in :12
         return (path.to_string(), None);
     }
     let mut rest = path;

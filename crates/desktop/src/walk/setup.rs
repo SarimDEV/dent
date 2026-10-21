@@ -622,6 +622,220 @@ pub(super) fn kept_live() -> Vec<(f32, Act)> {
     ]
 }
 
+/// Another machine's files, against sessions made there beforehand by
+/// `scripts/files-fixtures.sh`: pictures every way a reply names them, the
+/// same path holding a different file on this Mac, a missing one, a note,
+/// a page with its own styles, a video, a tool's screenshot and a sent
+/// picture. Not in `checks`: it needs the VM.
+pub(super) fn files_live() -> Vec<(f32, Act)> {
+    use crate::files::{Ask, Look, Why};
+    fn session(d: &Dent, says: &str) -> Option<(String, String)> {
+        d.sessions.iter().find_map(|s| {
+            let far = !dent_client_core::fleet::split(&s.id).0.is_empty();
+            let has = s.items.iter().any(|i| match i {
+                Item::Text(t) => t.contains(says),
+                Item::User { text, .. } => text.contains(says),
+                _ => false,
+            });
+            (far && has).then(|| (s.id.clone(), s.cwd.clone()))
+        })
+    }
+    fn pic(d: &Dent, says: &str, path: &str) -> Option<Look<std::path::PathBuf>> {
+        let (id, cwd) = session(d, says)?;
+        Some(crate::files::picture(&Ask::new(&id, path, &cwd)))
+    }
+    fn here(d: &Dent, says: &str, path: &str) -> bool {
+        matches!(pic(d, says, path), Some(Look::Here(_)))
+    }
+    fn select(d: &mut Dent, w: &mut Window, cx: &mut Context<Dent>, says: &str) {
+        if let Some((id, _)) = session(d, says) {
+            d.select(Some(id), w, cx);
+        }
+    }
+    let mut v = vec![
+        (0.3, Key("cmd-n")),
+        (
+            0.1,
+            Until(
+                "the VM is online",
+                |d, _| d.machines.iter().any(|m| m.rtt.is_some()),
+                30.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "its files session is here",
+                |d, _| session(d, "Files test").is_some(),
+                10.,
+            ),
+        ),
+        (0.1, Call(|d, w, cx| select(d, w, cx, "Files test"))),
+        (
+            0.1,
+            Until(
+                "a picture named from the session's folder shows",
+                |d, _| here(d, "Files test", "pics/a.png"),
+                10.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "so does one with a space and a # in its name",
+                |d, _| here(d, "Files test", "pics/big shot#1.png"),
+                10.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "~ is the VM's home, not this Mac's",
+                |d, _| match pic(d, "Files test", "~/Pictures/h.png") {
+                    Some(Look::Here(p)) => {
+                        std::fs::read(p).ok().as_deref()
+                            == Some(
+                                &include_bytes!("../../../fake-claude/assets/page-tablet.png")[..],
+                            )
+                    }
+                    _ => false,
+                },
+                10.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "a path this Mac also has shows the VM's file, never this Mac's",
+                |d, _| match pic(d, "Files test", "/tmp/dent-same.png") {
+                    Some(Look::Here(p)) => {
+                        std::fs::read(p).ok().as_deref()
+                            == Some(&include_bytes!("../../../fake-claude/assets/page.png")[..])
+                    }
+                    _ => false,
+                },
+                10.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "a missing one says it's not on the VM, and where it looked",
+                |d, _| {
+                    matches!(
+                        pic(d, "Files test", "nope.png"),
+                        Some(Look::Gone(g)) if g.why == Why::Missing && g.checked.ends_with("/fx/nope.png")
+                    )
+                },
+                10.,
+            ),
+        ),
+    ];
+    both_themes(&mut v, "files-live");
+    v.extend([
+        (
+            0.1,
+            Call(|d, _, cx| {
+                if let Some((_, cwd)) = session(d, "Files test") {
+                    d.open_file(&format!("{cwd}/doc.md"), cx);
+                }
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "its note opens in the viewer",
+                |d, _| d.panel_open && d.arts.iter().any(|a| a.title == "doc.md"),
+                10.,
+            ),
+        ),
+        (1.0, Shot("files-live-doc-light")),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                if let Some((_, cwd)) = session(d, "Files test") {
+                    d.open_file(&format!("{cwd}/page.html"), cx);
+                }
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "its page opens, its styles and pictures from the VM",
+                |d, _| d.arts.iter().any(|a| a.title == "page.html") && d.far_waiting.is_empty(),
+                10.,
+            ),
+        ),
+        (2.0, Shot("files-live-page-light")),
+        (0.1, Call(|d, _, cx| d.open_file("~/Movies/take.mp4", cx))),
+        (
+            0.1,
+            Until(
+                "its video plays from the VM, a range at a time",
+                |d, _| d.far_served > 0,
+                15.,
+            ),
+        ),
+        (2.0, Shot("files-live-video-light")),
+        (0.1, Call(|d, w, cx| select(d, w, cx, "screenshot"))),
+        (
+            0.1,
+            Until(
+                "a tool's screenshot shows",
+                |d, _| {
+                    let Some((id, cwd)) = session(d, "screenshot") else {
+                        return false;
+                    };
+                    d.sessions.iter().filter(|s| s.id == id).any(|s| {
+                        s.items.iter().any(|i| match i {
+                            Item::Tools { pictures, .. } => pictures.iter().any(|p| {
+                                matches!(
+                                    crate::files::picture(&Ask::new(&id, p, &cwd)),
+                                    Look::Here(_)
+                                )
+                            }),
+                            _ => false,
+                        })
+                    })
+                },
+                10.,
+            ),
+        ),
+        (0.5, Shot("files-live-screenshot-light")),
+        (
+            0.1,
+            Call(|d, w, cx| select(d, w, cx, "look at this picture")),
+        ),
+        (
+            0.1,
+            Until(
+                "a picture sent with a message shows",
+                |d, _| {
+                    let Some((id, cwd)) = session(d, "look at this picture") else {
+                        return false;
+                    };
+                    d.sessions.iter().filter(|s| s.id == id).any(|s| {
+                        s.items.iter().any(|i| match i {
+                            Item::User { files, .. } => files.iter().any(|p| {
+                                matches!(
+                                    crate::files::picture(&Ask::new(&id, p, &cwd)),
+                                    Look::Here(_)
+                                )
+                            }),
+                            _ => false,
+                        })
+                    })
+                },
+                10.,
+            ),
+        ),
+        (0.5, Shot("files-live-sent-light")),
+        (0.1, Call(|d, w, cx| select(d, w, cx, "make a video"))),
+        (1.5, Shot("files-live-made-video-light")),
+    ]);
+    v
+}
+
 /// Another machine asleep: its session says why under the header, a
 /// message written meanwhile waits on this Mac with Edit and Remove, and a
 /// new session can be started there from the machine chip. The machine

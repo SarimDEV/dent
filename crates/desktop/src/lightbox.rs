@@ -855,7 +855,7 @@ fn picture_item(path: &std::path::Path) -> Option<ClipboardItem> {
         "tif" | "tiff" => ImageFormat::Tiff,
         _ => return None,
     };
-    let bytes = std::fs::read(path).ok()?;
+    let bytes = std::fs::read(path).ok()?; // this Mac's: the file or its copy
     Some(ClipboardItem::new_image(&Image::from_bytes(format, bytes)))
 }
 

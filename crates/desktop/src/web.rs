@@ -1172,8 +1172,9 @@ fn from_site_root(root: &std::path::Path, dir: &str, path: &str) -> Option<(Arc<
                 full
             };
             if full.is_file() {
+                // this Mac's page
                 let name = full.file_name()?.to_string_lossy().into_owned();
-                return std::fs::read(&full).ok().map(|b| (b.into(), name));
+                return std::fs::read(&full).ok().map(|b| (b.into(), name)); // this Mac's page
             }
         }
         if at == root || !at.pop() {
@@ -1183,7 +1184,7 @@ fn from_site_root(root: &std::path::Path, dir: &str, path: &str) -> Option<(Arc<
 }
 
 fn from_disk(root: &std::path::Path, path: &str) -> Option<Arc<[u8]>> {
-    std::fs::read(disk_path(root, path)?).ok().map(Into::into)
+    std::fs::read(disk_path(root, path)?).ok().map(Into::into) // this Mac's page
 }
 
 /// The file a `{version}/{path}` address names under `root`, if it's there
@@ -1193,7 +1194,7 @@ fn disk_path(root: &std::path::Path, path: &str) -> Option<std::path::PathBuf> {
     let rel = percent_decode(rel);
     let root = root.canonicalize().ok()?;
     let full = root.join(rel).canonicalize().ok()?;
-    (full.starts_with(&root) && full.is_file()).then_some(full)
+    (full.starts_with(&root) && full.is_file()).then_some(full) // this Mac's page
 }
 
 /// The most of a file one answer carries when the player asks for "the rest".

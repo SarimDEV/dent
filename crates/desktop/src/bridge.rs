@@ -97,7 +97,7 @@ pub fn artifacts(v: &SessionView) -> Vec<Artifact> {
                         let ask = crate::files::Ask::new(&v.id, &abs.display().to_string(), &v.cwd);
                         crate::files::copy(&ask, crate::files::WHOLE_MAX)
                             .shown()
-                            .and_then(|p| std::fs::read(p).ok())
+                            .and_then(|p| std::fs::read(p).ok()) // this Mac's: the file or its copy
                             .map(Rc::from)
                             .unwrap_or_else(|| Rc::from(&b""[..]))
                     }
@@ -674,7 +674,7 @@ pub fn media_in(text: &str, cwd: &Path, far: bool) -> Vec<String> {
                 Some(rest) => crate::app::home() + "/" + rest,
                 None => path.clone(),
             };
-            Path::new(&full).is_file()
+            Path::new(&full).is_file() // this Mac's session
         };
         if !out.contains(&path) && there {
             out.push(path);

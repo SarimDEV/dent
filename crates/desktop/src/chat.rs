@@ -1125,7 +1125,13 @@ impl Dent {
                 .child({
                     // Its worktree is cleaned up only when you say;
                     // reopening brings one back on its branch.
-                    let remove = (s.root.is_some() && std::path::Path::new(&s.cwd).exists()).then(|| {
+                    // Whether it's still there is its machine's to say.
+                    let there = matches!(
+                        crate::files::stat(&crate::files::Ask::new(&s.id, &s.cwd, &s.cwd)),
+                        crate::files::Look::Here(dent_protocol::FileStat::Dir { .. })
+                            | crate::files::Look::Stale(dent_protocol::FileStat::Dir { .. })
+                    );
+                    let remove = (s.root.is_some() && there).then(|| {
                         let sid = s.id.clone();
                         let force = self.worktree_force.contains(&s.id);
                         // Its own id once it asks again, so its tooltip is the new one.

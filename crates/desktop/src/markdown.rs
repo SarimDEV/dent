@@ -1248,6 +1248,7 @@ fn image_block(src: &str, alt: &str, t: &Theme, key: &str, r: &mut R) -> AnyElem
                 Some(rest) => format!("{home}/{rest}"),
                 None => at.clone(),
             };
+            // this Mac's: a document of no session
             (full.starts_with('/') && crate::data::is_file(std::path::Path::new(&full)))
                 .then(|| std::path::PathBuf::from(full))
         }

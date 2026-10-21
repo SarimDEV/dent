@@ -884,6 +884,9 @@ pub struct Dent {
     files_timer: bool,
     /// What another machine's pages asked for, not known yet.
     pub far_waiting: Vec<crate::web::FarAsk>,
+    /// Ranges of another machine's files answered to the web view, for
+    /// walkthroughs to see.
+    pub far_served: u64,
     /// Ranges of another machine's video on their way, by request.
     pub web_ranges: HashMap<u64, (crate::web::FarAsk, crate::files::Ask)>,
     /// Another machine's file being opened, tried again until it's here.
@@ -1725,6 +1728,7 @@ impl Dent {
             files_timer: false,
             opening: None,
             far_waiting: Vec::new(),
+            far_served: 0,
             web_ranges: HashMap::new(),
             opened_far: HashMap::new(),
             files_seen: HashMap::new(),
@@ -8055,6 +8059,7 @@ impl Dent {
         let Some((a, ask)) = self.web_ranges.remove(&n) else {
             return;
         };
+        self.far_served += 1;
         let answer = |status: u16, headers: Vec<(&'static str, String)>, body: Vec<u8>| {
             let mut b = wry::http::Response::builder()
                 .status(status)

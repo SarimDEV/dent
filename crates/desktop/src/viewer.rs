@@ -912,7 +912,7 @@ impl Dent {
                 let on_disk = (v == latest)
                     .then(|| art_here(&a, crate::files::COPY_MAX))
                     .flatten()
-                    .filter(|f| f.is_file());
+                    .filter(|f| f.is_file()); // this Mac's: the file or its copy
                 let file = (!server && on_disk.is_none()).then(|| {
                     (
                         a.versions[v - 1].clone(),

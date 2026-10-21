@@ -475,6 +475,108 @@ async fn a_large_reply_arrives_whole_while_pings_still_answer() {
 }
 
 #[tokio::test]
+async fn file_bytes_never_hold_up_live_events() {
+    // Decision 0068: a big transfer goes on a lane of its own, behind live
+    // traffic; what a session streams keeps arriving all through it.
+    let fake =
+        std::path::Path::new(env!("CARGO_BIN_EXE_dent-daemon")).with_file_name("dent-fake-claude");
+    let built = Command::new(env!("CARGO"))
+        .args(["build", "-q", "-p", "dent-fake-claude"])
+        .status()
+        .unwrap();
+    assert!(built.success());
+    let d = Daemon::start(&[("DENT_CLAUDE", fake.to_str().unwrap())]);
+    let keys = Keys::generate().unwrap();
+    let mut dev = Device::connect(d.port, &keys).await;
+    let code = d.code();
+    dev.pair(&code).await;
+    // Trusted: big messages, as a real client takes them.
+    dev.t.limit = dent_link::LARGE;
+    dev.reply(Request::Hello {
+        proto: PROTOCOL,
+        client: "phone".into(),
+    })
+    .await;
+    dev.reply(Request::Subscribe {
+        after: 0,
+        epoch: None,
+    })
+    .await;
+    let work = d.state.parent().unwrap().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("big.bin"), vec![9u8; 48 << 20]).unwrap();
+    let session = match dev
+        .reply(Request::Create {
+            agent: None,
+            cwd: work.display().to_string(),
+            worktree: None,
+            model: None,
+            permission: Default::default(),
+            effort: None,
+            id: "m1".into(),
+            text: "long slowly".into(),
+            attachments: Vec::new(),
+            files: Vec::new(),
+            bring: None,
+        })
+        .await
+    {
+        Out::Reply {
+            reply: Reply::Created { session },
+        } => session,
+        o => panic!("{o:?}"),
+    };
+    // Streaming now.
+    loop {
+        if matches!(dev.out().await.body, Out::Delta { .. }) {
+            break;
+        }
+    }
+    let reads = (48 << 20) / dent_protocol::READ_MAX as u64;
+    let mut asked = std::collections::HashSet::new();
+    for i in 0..reads {
+        asked.insert(
+            dev.request(Request::Read {
+                file: dent_protocol::FileRef {
+                    session: session.clone(),
+                    path: "big.bin".into(),
+                    base: None,
+                },
+                offset: i * dent_protocol::READ_MAX as u64,
+                len: dent_protocol::READ_MAX,
+                expect: None,
+            })
+            .await,
+        );
+    }
+    let start = Instant::now();
+    let (mut live_during, mut last_live, mut worst) = (0, Instant::now(), Duration::ZERO);
+    let mut got = 0u64;
+    while !asked.is_empty() {
+        let e = dev.out().await;
+        if asked.remove(&e.req) {
+            match e.body {
+                Out::Reply {
+                    reply: Reply::Bytes { bytes_b64, .. },
+                } => got += dent_protocol::b64::decode(&bytes_b64).unwrap().len() as u64,
+                o => panic!("{o:?}"),
+            }
+        } else if e.req == 0 && matches!(e.body, Out::Delta { .. } | Out::Events { .. }) {
+            live_during += 1;
+            worst = worst.max(last_live.elapsed());
+            last_live = Instant::now();
+        }
+    }
+    assert_eq!(got, 48 << 20, "every byte, once");
+    eprintln!(
+        "48 MiB in {:?}; {live_during} live messages meanwhile, the longest gap {worst:?}",
+        start.elapsed()
+    );
+    assert!(live_during >= 3, "live events kept coming: {live_during}");
+    assert!(worst < Duration::from_secs(1), "longest gap {worst:?}");
+}
+
+#[tokio::test]
 async fn the_launchers_stop_reason_is_read_from_this_state_folder() {
     let mut d = Daemon::start(&[]);
     let keys = Keys::generate().unwrap();
