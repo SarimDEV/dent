@@ -473,3 +473,25 @@ async fn a_large_reply_arrives_whole_while_pings_still_answer() {
         }
     }
 }
+
+#[tokio::test]
+async fn the_launchers_stop_reason_is_read_from_this_state_folder() {
+    let mut d = Daemon::start(&[]);
+    let keys = Keys::generate().unwrap();
+    let mut dev = Device::connect(d.port, &keys).await;
+    let code = d.code();
+    dev.pair(&code).await;
+    std::fs::write(d.state.join("stop-reason"), "update 1.2.3\n").unwrap();
+    d.signal(libc::SIGTERM);
+    assert_eq!(
+        dev.next_control().await,
+        Control::Goodbye(Goodbye::Update {
+            to: "1.2.3".into(),
+            expected_down_ms: 10_000
+        })
+    );
+    if let Some(mut c) = d.child.take() {
+        let _ = c.wait();
+    }
+    assert!(!d.state.join("stop-reason").exists(), "used once");
+}

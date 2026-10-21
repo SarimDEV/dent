@@ -84,6 +84,9 @@ impl World {
                 bin("dent-fake-claude").display().to_string(),
             ),
             ("FAKE_CLAUDE_SPEED".into(), "0.05".into()),
+            // These tests are about the local socket: no network listener,
+            // so test daemons never hold the real daemon's port.
+            ("DENT_REMOTE_PORT".into(), "0".into()),
         ];
         for (k, v) in env {
             all.retain(|(a, _)| a != k);

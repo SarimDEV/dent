@@ -92,6 +92,9 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // A reason left by a stop that never happened isn't this run's.
+    let _ = std::fs::remove_file(paths.state.join("stop-reason"));
+
     let store = store::Store::open(&paths.db())?;
     let env = env::AgentEnv::detect();
     let rt = tokio::runtime::Runtime::new()?;
@@ -119,14 +122,21 @@ fn main() -> Result<()> {
         // daemon says goodbye to them first, so they show it as quitting
         // (or restarting, when the launcher says so) rather than gone
         // silent.
-        tokio::spawn(remote::serve(d.clone()));
+        {
+            let d = d.clone();
+            tokio::spawn(async move {
+                if let Err(e) = remote::serve(d).await {
+                    eprintln!("dent-daemon: remote access off: {e:#}");
+                }
+            });
+        }
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         tokio::select! {
             r = server::serve(d.clone()) => r?,
             _ = term.recv() => {}
             _ = tokio::signal::ctrl_c() => {}
         }
-        let _ = d.net.bye.send(stop_reason());
+        let _ = d.net.bye.send(stop_reason(&d.paths.state));
         tokio::time::sleep(Duration::from_millis(200)).await;
         anyhow::Ok(())
     })?;
@@ -138,8 +148,7 @@ fn main() -> Result<()> {
 /// `stop-reason` file the launcher writes before stopping it ([decision
 /// 0065](../../docs/decisions/0065-launcher-and-updates.md)): `restart`,
 /// `update <version>`, else quitting.
-fn stop_reason() -> dent_link::Goodbye {
-    let state = paths::Paths::new(None).state;
+fn stop_reason(state: &std::path::Path) -> dent_link::Goodbye {
     let why = std::env::var("DENT_STOP_REASON")
         .ok()
         .or_else(|| std::fs::read_to_string(state.join("stop-reason")).ok())
