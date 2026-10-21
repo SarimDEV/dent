@@ -362,10 +362,14 @@ impl Session {
         };
         let mut rewound_to: Option<String> = None;
         let mut forked_at: Option<Option<String>> = None;
+        // A turn taken back the agent hasn't started again from, and
+        // whether its end is still to come (it leaves the outcome before).
+        let mut withdrew: Option<usize> = None;
+        let mut quiet_end = false;
         // A waiting message handed to the agent whose turn hadn't started:
         // the last daemon went in between, so that turn is still owed.
         let mut handed = false;
-        for e in events.iter().cloned() {
+        for (ix, e) in events.iter().cloned().enumerate() {
             match &e.body {
                 Body::Delivered { .. } => handed = true,
                 Body::TurnStarted
@@ -435,18 +439,34 @@ impl Session {
                     self.agent_started = true;
                     rewound_to = None;
                     forked_at = None;
+                    withdrew = None;
                 }
                 Body::Rewound { to, .. } => {
                     rewound_to = Some(to);
+                    withdrew = None;
                     self.in_turn = false;
                 }
                 Body::Forked { upto, .. } => {
                     forked_at = Some(upto);
+                    withdrew = None;
+                    self.in_turn = false;
+                }
+                // Where it goes back to accounts for any rewind or fork
+                // before it.
+                Body::Withdrawn { .. } => {
+                    rewound_to = None;
+                    forked_at = None;
+                    withdrew = Some(ix);
+                    quiet_end = true;
                     self.in_turn = false;
                 }
                 Body::TurnEnded { outcome } => {
                     self.in_turn = false;
-                    self.settled = settled(&outcome);
+                    if !std::mem::take(&mut quiet_end) {
+                        self.settled = settled(&outcome);
+                    } else if self.settled == Status::New {
+                        self.settled = Status::Interrupted;
+                    }
                 }
                 Body::Background { tasks } => self.background = tasks,
                 Body::Resume { at } => self.wake = at,
@@ -468,13 +488,20 @@ impl Session {
         if let Some(at) = forked_at {
             self.resume_at = Some(at);
         }
+        // So does a turn taken back: the next agent starts from before it.
+        // (From before the turn it took back: anything logged since, a
+        // message the last daemon went before handing over, is no reply.)
+        if let Some(w) = withdrew
+            && let Some(at) = conversation_at(&events, turn_start(&events, w))
+        {
+            self.resume_at = Some(at);
+        }
         // A rewind the agent hasn't picked up yet still applies.
         if let Some(to) = rewound_to
-            && let Some(at) = events
-                .iter()
-                .position(|e| matches!(&e.body, Body::User { id, .. } if *id == to))
+            && let Some(at) = entered_at(&events, &to)
         {
-            self.resume_at = Some(resume_point(&events[..at]));
+            self.resume_at =
+                Some(conversation_at(&events, at).unwrap_or_else(|| resume_point(&events[..at])));
         }
     }
 
@@ -914,7 +941,8 @@ impl Session {
         // Nothing can be steered into an agent that's being stopped: it
         // waits for the turn to end like any other. While a new worktree
         // is set up, everything waits for that.
-        let queued = (working && (!steer || !self.running())) || self.d.setting_up(&self.id);
+        let queued = (working && (!steer || !self.running() || self.stop_asked))
+            || self.d.setting_up(&self.id);
         self.log(Body::User {
             id: id.clone(),
             text: text.clone(),
@@ -949,9 +977,12 @@ impl Session {
     async fn hand_over(&mut self, text: &str, steer: bool, attachments: &[String]) -> Result<()> {
         // A setting that needs a new process changed: this message starts
         // one, unless background work is still running in the old one.
-        if self.respawn && !steer && self.background.is_empty() {
+        // So does going back (a rewind, a message taken back): the running
+        // process still holds what came after.
+        if (self.respawn || self.resume_at.is_some()) && !steer && self.background.is_empty() {
             self.retire_proc().await;
         }
+        let point = self.resume_at.clone();
         if let Err(e) = self.ensure_proc().await {
             self.log(Body::Notice {
                 text: format!("Couldn't start {}: {e:#}", self.agent.name()),
@@ -973,6 +1004,8 @@ impl Session {
                     self.id
                 );
                 self.retire_proc().await;
+                // From where the first one started, not the whole conversation.
+                self.resume_at = self.resume_at.take().or(point);
                 match self.ensure_proc().await {
                     Ok(()) => self.write(&msg).await,
                     Err(e) => Err(e),
@@ -1052,10 +1085,9 @@ impl Session {
             bail!("stop the current turn first");
         }
         let events = self.d.store().session_events(&self.id)?;
-        let Some(at) = events
-            .iter()
-            .position(|e| matches!(&e.body, Body::User { id, .. } if *id == to))
-        else {
+        // From where it entered the conversation: a message that waited
+        // went in after the reply it waited for.
+        let Some(at) = entered_at(&events, &to) else {
             bail!("no such message");
         };
         // Already back there, with nothing said since (a resend after a
@@ -1089,7 +1121,8 @@ impl Session {
             .await?
             .map_err(|e| anyhow::anyhow!(e))?;
         }
-        self.resume_at = Some(resume_point(&events[..at]));
+        self.resume_at =
+            Some(conversation_at(&events, at).unwrap_or_else(|| resume_point(&events[..at])));
         // The running process holds the whole conversation; the next message
         // starts one that picks up at the rewind.
         self.retire_proc().await;
@@ -1185,7 +1218,9 @@ impl Session {
                 a
             }
         };
-        let start = match self.resume_at.take() {
+        // The go-back point is used up only once an agent has started from
+        // it: a start that fails leaves it for the next.
+        let start = match self.resume_at.clone() {
             Some(Some(at)) => Start::ResumeAt {
                 id: agent_session,
                 at,
@@ -1222,6 +1257,7 @@ impl Session {
         );
         h.spawn(&proc, argv, Some(self.cwd.clone().into()), Vec::new())
             .await?;
+        self.resume_at = None;
         h.attach(&proc, 0, 0).await?;
         self.proc = Some(Proc {
             id: proc,
@@ -1291,6 +1327,7 @@ impl Session {
         }
         self.steered = false;
         if self.proc.is_none() {
+            self.stop_asked = true;
             self.end_turn(Outcome::Interrupted { reason: None });
             return Ok(());
         }
@@ -2150,8 +2187,52 @@ impl Session {
         }
         self.stop_at = None;
         self.start_by = None;
-        if std::mem::take(&mut self.stop_asked) {
+        let stopped = std::mem::take(&mut self.stop_asked);
+        if stopped {
             let _ = self.d.store().del(&self.stop_key());
+        }
+        // You stopped it before anything came back: as in Claude Code, the
+        // message goes back to you to change and send again, and leaves the
+        // conversation, the agent's too (its next process starts from the
+        // reply before). Not while background work runs in this process,
+        // which a new one would end.
+        let withdrawn = (stopped
+            && self.in_turn
+            && matches!(outcome, Outcome::Interrupted { .. })
+            && self.background.is_empty()
+            && self.d.partial(&self.id).is_none())
+        .then(|| self.d.store().session_events(&self.id).ok())
+        .flatten()
+        .and_then(|events| unanswered(&events));
+        if let Some((ids, at)) = withdrawn {
+            self.log(Body::Withdrawn { ids });
+            // Nothing left of a first message: it reads stopped, never as
+            // a session still starting (clients show New as working).
+            if self.settled == Status::New {
+                self.settled = Status::Interrupted;
+            }
+            self.resume_at = Some(at);
+            self.last = None;
+            self.in_turn = false;
+            for id in std::mem::take(&mut self.asked).into_keys() {
+                self.log(Body::Answered {
+                    id,
+                    answer: Answer::Expired,
+                });
+            }
+            self.d.clear_partial(&self.id);
+            // The session is as it was before: its last turn's outcome
+            // stands, and nothing new is titled or noted.
+            let body = Body::TurnEnded { outcome };
+            match end {
+                Some(off) => self.log_from(body, off),
+                None => self.log(body),
+            }
+            if self.proc.is_some() {
+                self.idle_at = Some(Instant::now() + idle());
+            }
+            self.update_status();
+            return;
         }
         // Approvals still open belonged to the turn that just ended.
         for id in std::mem::take(&mut self.asked).into_keys() {
@@ -2283,7 +2364,178 @@ fn requeue(
 
 /// The last thing the agent said before `events` end: where a rewound
 /// conversation picks up. `None` when it hadn't said anything yet.
-fn resume_point(events: &[dent_protocol::Event]) -> Option<String> {
+/// Where message `id` entered the conversation: where it was handed to the
+/// agent if it waited first, else where it was sent.
+pub(crate) fn entered_at(events: &[dent_protocol::Event], id: &str) -> Option<usize> {
+    events
+        .iter()
+        .position(|e| matches!(&e.body, Body::Delivered { id: d } if d == id))
+        .or_else(|| {
+            events
+                .iter()
+                .position(|e| matches!(&e.body, Body::User { id: u, .. } if u == id))
+        })
+}
+
+/// Where the turn running (or last run) at event `at` began: just after
+/// the last turn, rewind, fork or take-back before it.
+pub(crate) fn turn_start(events: &[dent_protocol::Event], at: usize) -> usize {
+    events[..at.min(events.len())]
+        .iter()
+        .rposition(|e| {
+            matches!(
+                e.body,
+                Body::TurnEnded { .. }
+                    | Body::Rewound { .. }
+                    | Body::Forked { .. }
+                    | Body::Withdrawn { .. }
+            )
+        })
+        .map_or(0, |b| b + 1)
+}
+
+/// Where the agent's conversation stood just before event `at`: the reply
+/// it carries on from, `Some(None)` for nothing said yet. `None` when the
+/// log can't say exactly: a reply cut short that has no id, or a message
+/// that never got one, which going back to the reply before would lose.
+pub(crate) fn conversation_at(
+    events: &[dent_protocol::Event],
+    at: usize,
+) -> Option<Option<String>> {
+    let mut i = at.min(events.len());
+    while i > 0 {
+        i -= 1;
+        match &events[i].body {
+            Body::Assistant {
+                parent: None, uuid, ..
+            } => return uuid.clone().map(Some),
+            Body::User { queued: false, .. } | Body::Delivered { .. } => return None,
+            // Gone back to before message `to`: the conversation is as it
+            // was then.
+            Body::Rewound { to, .. } => i = entered_at(&events[..i], to)?,
+            Body::Forked { upto, .. } => return Some(upto.clone()),
+            // A turn taken back left nothing in the conversation.
+            Body::Withdrawn { .. } => i = turn_start(events, i),
+            _ => {}
+        }
+    }
+    Some(None)
+}
+
+/// Where each turn taken back lies in `events`: from its start to its end
+/// (the [`Body::TurnEnded`] after the [`Body::Withdrawn`]), both included.
+pub(crate) fn withdrawn_turns(
+    events: &[dent_protocol::Event],
+) -> Vec<std::ops::RangeInclusive<usize>> {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e.body, Body::Withdrawn { .. }))
+        .map(|(w, _)| {
+            let end = events[w..]
+                .iter()
+                .position(|e| matches!(e.body, Body::TurnEnded { .. }))
+                .map_or(w, |n| w + n);
+            turn_start(events, w)..=end
+        })
+        .collect()
+}
+
+/// Every message taken back ([`Body::Withdrawn`]) in `events`.
+pub(crate) fn withdrawn_ids(events: &[dent_protocol::Event]) -> HashSet<String> {
+    events
+        .iter()
+        .filter_map(|e| match &e.body {
+            Body::Withdrawn { ids } => Some(ids.iter().cloned()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// What a turn logs that isn't anything coming back: the messages
+/// themselves, bookkeeping, and thinking (never shown as a reply).
+/// Anything else, a kind added later too, is a reply.
+fn nothing_back(body: &Body) -> bool {
+    match body {
+        Body::Assistant { blocks, .. } => blocks
+            .iter()
+            .all(|b| matches!(b, dent_protocol::Block::Thinking { .. })),
+        Body::Created { .. }
+        | Body::User { .. }
+        | Body::Delivered { .. }
+        | Body::Unqueued { .. }
+        | Body::Requeued { .. }
+        | Body::Checkpoint { .. }
+        | Body::TurnStarted
+        // What runs in the background changing (finishing, say); work
+        // still running keeps the message (see `unanswered`).
+        | Body::Background { .. }
+        | Body::Context { .. }
+        | Body::Limits { .. }
+        | Body::Status { .. }
+        | Body::Notice { .. }
+        | Body::Agent { .. }
+        | Body::Settings { .. }
+        | Body::Seen { .. }
+        | Body::Resume { .. }
+        | Body::PullRequest { .. }
+        | Body::Workspace { .. }
+        | Body::Closed
+        | Body::Reopened
+        | Body::Aside { .. }
+        | Body::AsideReply { .. } => true,
+        _ => false,
+    }
+}
+
+/// A turn you stopped before anything came back: its messages, in the
+/// order sent, and where the agent's conversation stood before them, to go
+/// back to. `None` when something came back, a message is a command (it
+/// may have done its work already), the place before can't be known, or
+/// background work is running in the agent, which going back (a new
+/// process) would end.
+fn unanswered(events: &[dent_protocol::Event]) -> Option<(Vec<String>, Option<String>)> {
+    let working = events.iter().rev().find_map(|e| match &e.body {
+        Body::Background { tasks } => Some(!tasks.is_empty()),
+        _ => None,
+    });
+    if working == Some(true) {
+        return None;
+    }
+    let from = turn_start(events, events.len());
+    let text_of = |id: &str| {
+        events.iter().find_map(|e| match &e.body {
+            Body::User { id: i, text, .. } if i == id => Some(text.as_str()),
+            _ => None,
+        })
+    };
+    let mut ids: Vec<String> = Vec::new();
+    for e in &events[from..] {
+        if !nothing_back(&e.body) {
+            return None;
+        }
+        match &e.body {
+            Body::User {
+                id, queued: false, ..
+            }
+            | Body::Delivered { id } => {
+                if text_of(id).is_none_or(|t| dent_protocol::command_name(t).is_some()) {
+                    return None;
+                }
+                ids.push(id.clone());
+            }
+            Body::Unqueued { id, .. } => ids.retain(|i| i != id),
+            _ => {}
+        }
+    }
+    if ids.is_empty() {
+        return None;
+    }
+    Some((ids, conversation_at(events, from)?))
+}
+
+pub(crate) fn resume_point(events: &[dent_protocol::Event]) -> Option<String> {
     events.iter().rev().find_map(|e| match &e.body {
         Body::Assistant {
             parent: None,
@@ -2345,5 +2597,328 @@ mod requeue_tests {
         assert!(!requeue(&mut h, "x", None));
         assert!(requeue(&mut h, "a", Some("x")));
         assert_eq!(ids(&h), ["b", "c", "a"]);
+    }
+}
+
+#[cfg(test)]
+mod withdraw_tests {
+    use super::*;
+    use dent_protocol::{Block, Event};
+
+    fn log(bodies: Vec<Body>) -> Vec<Event> {
+        bodies
+            .into_iter()
+            .enumerate()
+            .map(|(i, body)| Event {
+                seq: i as u64 + 1,
+                session: "s".into(),
+                at: 0,
+                body,
+            })
+            .collect()
+    }
+    fn user(id: &str, text: &str) -> Body {
+        Body::User {
+            id: id.into(),
+            text: text.into(),
+            queued: false,
+            steer: false,
+            attachments: Vec::new(),
+        }
+    }
+    fn queued(id: &str) -> Body {
+        Body::User {
+            id: id.into(),
+            text: "later".into(),
+            queued: true,
+            steer: false,
+            attachments: Vec::new(),
+        }
+    }
+    fn said(uuid: Option<&str>, block: Block) -> Body {
+        Body::Assistant {
+            parent: None,
+            blocks: vec![block],
+            uuid: uuid.map(str::to_string),
+        }
+    }
+    fn text(t: &str) -> Block {
+        Block::Text { text: t.into() }
+    }
+    fn ended() -> Body {
+        Body::TurnEnded {
+            outcome: Outcome::Done,
+        }
+    }
+    /// A first turn answered with reply `r1`.
+    fn answered() -> Vec<Body> {
+        vec![
+            user("a", "hello"),
+            Body::TurnStarted,
+            said(Some("r1"), text("hi")),
+            ended(),
+        ]
+    }
+    fn with(mut a: Vec<Body>, b: Vec<Body>) -> Vec<Event> {
+        a.extend(b);
+        log(a)
+    }
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn nothing_back_goes_back_to_the_reply_before() {
+        let e = with(answered(), vec![user("b", "go"), Body::TurnStarted]);
+        assert_eq!(unanswered(&e), Some((ids(&["b"]), Some("r1".into()))));
+        // Only thinking came: still nothing back.
+        let e = with(
+            answered(),
+            vec![
+                user("b", "go"),
+                Body::TurnStarted,
+                said(Some("t"), Block::Thinking { text: "hmm".into() }),
+            ],
+        );
+        assert_eq!(unanswered(&e), Some((ids(&["b"]), Some("r1".into()))));
+        // Before it had even started.
+        let e = with(answered(), vec![user("b", "go")]);
+        assert_eq!(unanswered(&e), Some((ids(&["b"]), Some("r1".into()))));
+    }
+
+    #[test]
+    fn a_first_message_goes_back_to_nothing_said() {
+        let e = log(vec![
+            Body::Created {
+                agent: "claude".into(),
+                cwd: "/w".into(),
+                model: None,
+                permission: Permission::Full,
+                title: String::new(),
+            },
+            user("a", "go"),
+            Body::TurnStarted,
+        ]);
+        assert_eq!(unanswered(&e), Some((ids(&["a"]), None)));
+    }
+
+    #[test]
+    fn anything_that_came_back_keeps_the_message() {
+        let tool = Block::Tool {
+            id: "t".into(),
+            name: "Read".into(),
+            input: "{}".into(),
+        };
+        let cases = vec![
+            said(Some("r2"), text("Sure")),
+            said(Some("r2"), tool),
+            Body::ToolResult {
+                tool: "t".into(),
+                error: false,
+                output: String::new(),
+                parent: None,
+                images: Vec::new(),
+            },
+        ];
+        for c in cases {
+            let e = with(
+                answered(),
+                vec![user("b", "go"), Body::TurnStarted, c.clone()],
+            );
+            assert_eq!(unanswered(&e), None, "{c:?}");
+        }
+    }
+
+    #[test]
+    fn background_work_running_keeps_the_message() {
+        let task = |id: &str| dent_protocol::Task {
+            id: id.into(),
+            description: "dev server".into(),
+            kind: "local_bash".into(),
+            call: None,
+        };
+        let mut a = answered();
+        a.insert(
+            3,
+            Body::Background {
+                tasks: vec![task("t")],
+            },
+        );
+        let e = with(a.clone(), vec![user("b", "go"), Body::TurnStarted]);
+        assert_eq!(unanswered(&e), None);
+        // Once it has finished, the message goes back.
+        a.push(Body::Background { tasks: Vec::new() });
+        let e = with(a, vec![user("b", "go"), Body::TurnStarted]);
+        assert_eq!(unanswered(&e).map(|u| u.0), Some(ids(&["b"])));
+    }
+
+    #[test]
+    fn a_command_stays_it_may_have_done_its_work() {
+        let e = with(answered(), vec![user("b", "/compact"), Body::TurnStarted]);
+        assert_eq!(unanswered(&e), None);
+        // Words that merely start with a slash, over lines, are a message.
+        let e = with(answered(), vec![user("b", "/tmp is full\nwhy?")]);
+        assert_eq!(unanswered(&e).map(|u| u.0), Some(ids(&["b"])));
+    }
+
+    #[test]
+    fn a_waiting_message_handed_over_goes_back_and_one_still_waiting_does_not() {
+        // "b" waited through the first turn and went when it ended; "c"
+        // was taken out of the queue; "d" still waits.
+        let e = log(vec![
+            user("a", "hello"),
+            queued("b"),
+            queued("c"),
+            Body::TurnStarted,
+            said(Some("r1"), text("hi")),
+            ended(),
+            Body::Delivered { id: "b".into() },
+            queued("d"),
+            Body::Unqueued {
+                id: "c".into(),
+                returned: None,
+            },
+            Body::TurnStarted,
+        ]);
+        assert_eq!(unanswered(&e), Some((ids(&["b"]), Some("r1".into()))));
+    }
+
+    #[test]
+    fn a_steer_with_no_reply_either_goes_back_with_it() {
+        let e = with(
+            answered(),
+            vec![user("b", "go"), Body::TurnStarted, user("c", "and also")],
+        );
+        assert_eq!(unanswered(&e), Some((ids(&["b", "c"]), Some("r1".into()))));
+    }
+
+    #[test]
+    fn no_exact_place_to_go_back_to_keeps_the_message() {
+        // The reply before was cut short and has no id.
+        let e = log(vec![
+            user("a", "hello"),
+            Body::TurnStarted,
+            said(None, text("hi, so")),
+            Body::TurnEnded {
+                outcome: Outcome::Interrupted { reason: None },
+            },
+            user("b", "go"),
+        ]);
+        assert_eq!(unanswered(&e), None);
+        // The message before never got a reply at all.
+        let e = log(vec![
+            user("a", "hello"),
+            Body::TurnEnded {
+                outcome: Outcome::Error {
+                    message: "x".into(),
+                },
+            },
+            user("b", "go"),
+        ]);
+        assert_eq!(unanswered(&e), None);
+    }
+
+    #[test]
+    fn going_back_accounts_for_rewinds_forks_and_earlier_take_backs() {
+        // Rewound to before "b": the conversation is as it was after r1.
+        let mut a = answered();
+        a.extend([
+            user("b", "two"),
+            Body::TurnStarted,
+            said(Some("r2"), text("two")),
+            ended(),
+            Body::Rewound {
+                to: "b".into(),
+                files: false,
+            },
+            user("c", "go"),
+        ]);
+        assert_eq!(
+            unanswered(&log(a.clone())),
+            Some((ids(&["c"]), Some("r1".into())))
+        );
+        // A rewind to before anything was said: nothing.
+        let e = with(
+            answered(),
+            vec![
+                Body::Rewound {
+                    to: "a".into(),
+                    files: false,
+                },
+                user("c", "go"),
+            ],
+        );
+        assert_eq!(unanswered(&e), Some((ids(&["c"]), None)));
+        // A fork carries on from the reply it was cut at.
+        let e = log(vec![
+            Body::Forked {
+                from: "p".into(),
+                upto: Some("rp".into()),
+            },
+            user("c", "go"),
+        ]);
+        assert_eq!(unanswered(&e), Some((ids(&["c"]), Some("rp".into()))));
+        // A turn already taken back (thinking and all) left nothing.
+        let e = with(
+            answered(),
+            vec![
+                user("b", "go"),
+                Body::TurnStarted,
+                said(Some("t"), Block::Thinking { text: "hmm".into() }),
+                Body::Withdrawn { ids: ids(&["b"]) },
+                Body::TurnEnded {
+                    outcome: Outcome::Interrupted { reason: None },
+                },
+                user("c", "go again"),
+            ],
+        );
+        assert_eq!(unanswered(&e), Some((ids(&["c"]), Some("r1".into()))));
+        assert_eq!(conversation_at(&e, e.len() - 1), Some(Some("r1".into())));
+    }
+
+    #[test]
+    fn a_rewind_to_a_message_that_waited_goes_back_to_the_reply_it_waited_for() {
+        let e = log(vec![
+            user("a", "hello"),
+            queued("b"),
+            Body::TurnStarted,
+            said(Some("r1"), text("hi")),
+            ended(),
+            Body::Delivered { id: "b".into() },
+            Body::TurnStarted,
+            said(Some("r2"), text("two")),
+            ended(),
+        ]);
+        assert_eq!(
+            conversation_at(&e, entered_at(&e, "b").unwrap()),
+            Some(Some("r1".into()))
+        );
+        let mut b: Vec<Body> = e.into_iter().map(|e| e.body).collect();
+        b.extend([
+            Body::Rewound {
+                to: "b".into(),
+                files: false,
+            },
+            user("c", "go"),
+        ]);
+        assert_eq!(unanswered(&log(b)), Some((ids(&["c"]), Some("r1".into()))));
+    }
+
+    #[test]
+    fn a_turn_taken_back_lies_from_its_start_to_its_end() {
+        let e = with(
+            answered(),
+            vec![
+                user("b", "go"),
+                Body::TurnStarted,
+                said(Some("t"), Block::Thinking { text: "hmm".into() }),
+                Body::Withdrawn { ids: ids(&["b"]) },
+                Body::TurnEnded {
+                    outcome: Outcome::Interrupted { reason: None },
+                },
+                user("c", "next"),
+            ],
+        );
+        assert_eq!(withdrawn_turns(&e), vec![4..=8]);
     }
 }

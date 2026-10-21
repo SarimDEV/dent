@@ -92,6 +92,9 @@ pub struct SessionView {
     mark_at: u64,
     /// Where the current turn's entries begin.
     turn_from: usize,
+    /// The turn ending next was taken back ([`Body::Withdrawn`]): its end
+    /// leaves no mark.
+    withdrawn: bool,
     /// The first entry that changed since [`SessionView::take_changes`].
     changed_from: Option<usize>,
     /// Where each tool call lives: entry index and position in it.
@@ -832,6 +835,21 @@ impl SessionView {
                     self.reindex(ix);
                 }
             }
+            // Stopped before any reply: the messages go, and with them
+            // what the turn showed (thinking); those still waiting stay.
+            Body::Withdrawn { ids } => {
+                let from = ids.iter().filter_map(|id| self.user_ix(id)).min();
+                if let Some(from) = from {
+                    let gone = self.entries.split_off(from);
+                    self.entries.extend(
+                        gone.into_iter()
+                            .filter(|e| matches!(e, Entry::User { queued: true, .. })),
+                    );
+                    self.reindex(from);
+                }
+                self.partial.clear();
+                self.withdrawn = true;
+            }
             // Waiting messages show in the order they sit; moving one moves
             // its entry to just before the other, or after everything.
             Body::Requeued { id, before } => {
@@ -975,12 +993,16 @@ impl SessionView {
                 self.turn_from = self.entries.len();
             }
             Body::TurnEnded { outcome } => {
-                self.news = e.seq;
                 self.activity = None;
                 let took = self.working_since.map_or(0, |s| e.at.saturating_sub(s));
                 self.working_since = None;
                 self.partial.clear();
                 self.stop_unfinished();
+                // Taken back: as if it had never been sent.
+                if std::mem::take(&mut self.withdrawn) {
+                    return;
+                }
+                self.news = e.seq;
                 // What the turn edited, to review in one place.
                 let mut paths: Vec<String> = Vec::new();
                 for e in self.entries.get(self.turn_from..).unwrap_or_default() {
@@ -1822,6 +1844,87 @@ mod tests {
             })
             .collect();
         assert_eq!(ids, ["a", "text", "b"]);
+    }
+
+    #[test]
+    fn a_message_taken_back_leaves_no_trace_but_one_waiting_stays() {
+        let user = |id: &str, queued| Body::User {
+            id: id.into(),
+            text: id.into(),
+            queued,
+            steer: false,
+            attachments: Vec::new(),
+        };
+        let reply = |t: &str| Body::Assistant {
+            parent: None,
+            blocks: vec![Block::Text { text: t.into() }],
+            uuid: Some(t.into()),
+        };
+        let s = feed(vec![
+            user("a", false),
+            Body::TurnStarted,
+            reply("hi"),
+            Body::TurnEnded {
+                outcome: Outcome::Done,
+            },
+            user("b", false),
+            Body::TurnStarted,
+            Body::Assistant {
+                parent: None,
+                blocks: vec![Block::Thinking { text: "hmm".into() }],
+                uuid: Some("t".into()),
+            },
+            user("c", true),
+            Body::Withdrawn {
+                ids: vec!["b".into()],
+            },
+            Body::TurnEnded {
+                outcome: Outcome::Interrupted { reason: None },
+            },
+        ]);
+        let v = &s.list["s"];
+        let shape: Vec<String> = v
+            .entries
+            .iter()
+            .map(|e| match e {
+                Entry::User { id, queued, .. } => format!("{id}{}", if *queued { "?" } else { "" }),
+                Entry::Text { .. } => "text".into(),
+                Entry::TurnEnd { .. } => "end".into(),
+                Entry::Note { .. } => "note".into(),
+                _ => "other".into(),
+            })
+            .collect();
+        // No "Stopped", no second turn's end, and nothing new to read.
+        assert_eq!(shape, ["a", "text", "end", "c?"]);
+        assert!(v.working_since.is_none());
+        assert_eq!(v.news, 4);
+        // The next turn reads as usual.
+        let mut s = s;
+        let n = 11;
+        s.apply(&Out::Events {
+            events: vec![
+                Event {
+                    seq: n,
+                    session: "s".into(),
+                    at: n,
+                    body: user("d", false),
+                },
+                Event {
+                    seq: n + 1,
+                    session: "s".into(),
+                    at: n + 1,
+                    body: Body::TurnEnded {
+                        outcome: Outcome::Interrupted { reason: None },
+                    },
+                },
+            ],
+        });
+        let v = &s.list["s"];
+        assert!(matches!(
+            v.entries.iter().rev().nth(1),
+            Some(Entry::Note { .. })
+        ));
+        assert_eq!(v.news, n + 1);
     }
 
     #[test]

@@ -147,7 +147,7 @@ async fn add(args: &[String]) -> Result<()> {
                 let _ = ask_tx.send(host::Ask::Send(hello_line(1)));
             }
             Note::Data { line, .. } => {
-                let Ok(env) = serde_json::from_slice::<Envelope<Out>>(&line) else {
+                let Some(env) = dent_protocol::read_out(&line) else {
                     continue;
                 };
                 if let Out::Reply {
@@ -633,7 +633,7 @@ async fn watch(args: &[String]) -> Result<()> {
                 let _ = asks[i].send(host::Ask::Send(sub));
             }
             Note::Data { line, .. } => {
-                let Ok(env) = serde_json::from_slice::<Envelope<Out>>(&line) else {
+                let Some(env) = dent_protocol::read_out(&line) else {
                     continue;
                 };
                 match env.body {

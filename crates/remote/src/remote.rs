@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use dent_client_core::machine::{Machine, Note, Signal, State};
 use dent_link::{Keys, Trust};
-use dent_protocol::{AgentInfo, Envelope, Out, PROTOCOL, Reply, Request, encode};
+use dent_protocol::{AgentInfo, Out, PROTOCOL, Reply, Request, encode};
 use tokio::sync::mpsc;
 
 use crate::history::History;
@@ -512,7 +512,7 @@ async fn run(
                         events(Event::State(s));
                     }
                     Note::Data { line, .. } => {
-                        let Ok(env) = serde_json::from_slice::<Envelope<Out>>(&line) else {
+                        let Some(env) = dent_protocol::read_out(&line) else {
                             continue;
                         };
                         let (req, out) = (env.req, env.body);

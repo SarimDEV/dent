@@ -232,7 +232,7 @@ mod admin {
     use std::os::unix::net::UnixStream;
 
     use anyhow::{Context, Result, bail};
-    use dent_protocol::{Envelope, Out, PROTOCOL, Reply, Request, encode};
+    use dent_protocol::{Out, PROTOCOL, Reply, Request, encode};
 
     use crate::paths::Paths;
 
@@ -255,7 +255,7 @@ mod admin {
             if r.read_line(&mut line)? == 0 {
                 bail!("the daemon closed the connection");
             }
-            let Ok(env) = serde_json::from_str::<Envelope<Out>>(&line) else {
+            let Some(env) = dent_protocol::read_out(line.as_bytes()) else {
                 continue;
             };
             if env.req != 2 {

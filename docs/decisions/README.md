@@ -68,3 +68,4 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0066. The link's dependencies: snow, spake2 and tokio-tungstenite](0066-link-crates.md)
 - [0067. Settings is a page of its own; Machines shows every machine at a glance](0067-settings-page-and-machines.md)
 - [0068. Files across machines: one resolver on the daemon, ranged reads inside the link, one cache on the client](0068-files-across-machines.md)
+- [0069. Stopped before any reply, a message goes back to the box and out of the conversation](0069-stop-before-a-reply.md)
