@@ -47,7 +47,7 @@ dent is early and moving fast. The desktop app runs on macOS today. Next up:
 - [ ] The iPhone app, with approvals from the lock screen
 - [ ] Linux and Windows
 
-The [roadmap issue](https://github.com/SarimDEV/dent/issues?q=is%3Aissue+label%3Aroadmap) tracks what's next, and [docs/build-order.md](docs/build-order.md) has the full plan.
+The [roadmap](https://github.com/SarimDEV/dent/issues/20) tracks what's next, and [docs/build-order.md](docs/build-order.md) has the full plan.
 
 ## Try it
 
