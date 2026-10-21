@@ -13,6 +13,7 @@
 //! devices; `dent-daemon reidentify` gives this machine a new identity.
 
 mod agent;
+mod bring;
 mod claude;
 mod daemon;
 mod env;
@@ -23,6 +24,7 @@ mod login;
 mod machine;
 mod paths;
 mod plan_tool;
+mod power;
 mod projects;
 mod remote;
 mod secrets;
@@ -127,6 +129,25 @@ fn main() -> Result<()> {
             tokio::spawn(async move {
                 if let Err(e) = remote::serve(d).await {
                     eprintln!("dent-daemon: remote access off: {e:#}");
+                }
+            });
+        }
+        // The machine going to sleep: every device is told, so it reads
+        // as asleep at once instead of gone quiet. The links close; they
+        // dial again once it wakes.
+        {
+            let d = d.clone();
+            power::watch(move |sleeping| {
+                // Set first, so a device that dials in after the goodbyes
+                // (sleep can take a while) is told too.
+                d.net
+                    .asleep
+                    .store(sleeping, std::sync::atomic::Ordering::Relaxed);
+                if sleeping {
+                    let _ = d.net.bye.send(dent_link::Goodbye::Sleep);
+                    // Time for the goodbyes to leave before the network
+                    // sleeps.
+                    std::thread::sleep(Duration::from_millis(300));
                 }
             });
         }

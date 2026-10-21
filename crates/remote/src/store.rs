@@ -21,6 +21,9 @@ pub struct Saved {
     /// Routes the machine reported in its welcome.
     #[serde(default)]
     pub learned: Vec<String>,
+    /// How to wake it, as its welcome last said.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wake: Vec<dent_protocol::Wake>,
 }
 
 impl Saved {
@@ -38,6 +41,23 @@ impl Saved {
 
     pub fn known_key(&self) -> Option<Vec<u8>> {
         hex::decode(&self.key).ok().filter(|k| !k.is_empty())
+    }
+}
+
+/// The state folder of this machine's own daemon (`DENT_STATE`, else the
+/// platform's place for it), where its socket is.
+pub fn daemon_state() -> PathBuf {
+    if let Some(p) = std::env::var_os("DENT_STATE") {
+        return PathBuf::from(p);
+    }
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/dent")
+    } else {
+        std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/state"))
+            .join("dent")
     }
 }
 

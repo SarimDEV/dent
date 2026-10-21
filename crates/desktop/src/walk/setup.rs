@@ -513,6 +513,81 @@ pub(super) fn machines_live() -> Vec<(f32, Act)> {
     v
 }
 
+/// Bringing a project from a machine really saved (`DENT_CLIENT_STATE`)
+/// to this one: the picker offers the other machine's `hello-world`, lists
+/// the files Git ignores there with environment files ticked, and the
+/// session starts here once its clone is made. Not in `checks`: it needs
+/// another machine with that project.
+pub(super) fn bring_live() -> Vec<(f32, Act)> {
+    let mut v = vec![
+        (0.3, Key("cmd-n")),
+        (
+            0.1,
+            Until(
+                "a saved machine comes online",
+                |d, _| d.machines.iter().any(|m| m.rtt.is_some()),
+                30.,
+            ),
+        ),
+        (0.2, Click("chip-project")),
+        (0.2, Keys("hello")),
+        (
+            0.1,
+            Until(
+                "the other machine's project is offered",
+                |d, cx| {
+                    d.project_entries(cx)
+                        .iter()
+                        .any(|e| e.key.starts_with("b-"))
+                },
+                10.,
+            ),
+        ),
+        (0.3, Shot("bring-offered-light")),
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until(
+                "what comes with it is listed",
+                |d, _| d.bring_draft.is_some(),
+                10.,
+            ),
+        ),
+    ];
+    both_themes(&mut v, "bring-files");
+    v.extend([
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until(
+                "Bring chooses it, with its files read",
+                |d, _| d.bringing.is_some() && d.menu.is_none(),
+                10.,
+            ),
+        ),
+        (0.3, Shot("bring-chosen-light")),
+        (0.1, Type(Field::Starter, "say hi")),
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until(
+                "the session works in the clone",
+                |d, _| {
+                    d.sessions.iter().any(|s| {
+                        d.selected.as_deref() == Some(s.id.as_str())
+                            && s.items.iter().any(|i| {
+                                matches!(i, Item::Note { text, .. } if text.starts_with("Cloned"))
+                            })
+                    })
+                },
+                60.,
+            ),
+        ),
+        (0.5, Shot("bring-cloned-light")),
+    ]);
+    v
+}
+
 /// Another machine asleep: its session says why under the header, a
 /// message written meanwhile waits on this Mac with Edit and Remove, and a
 /// new session can be started there from the machine chip. The machine

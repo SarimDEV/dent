@@ -176,6 +176,15 @@ fn repo_name(url: &str) -> String {
     slug(last.strip_suffix(".git").unwrap_or(last))
 }
 
+/// A folder no one has yet in the projects folder, named `name` (`-2`,
+/// `-3` when taken).
+pub fn free_in_root(name: &str) -> Result<PathBuf> {
+    let name = if name.is_empty() { "project" } else { name };
+    let root = root();
+    std::fs::create_dir_all(&root)?;
+    free(&root, name)
+}
+
 /// Clone a Git URL into the projects folder. Only remote URLs, and never
 /// one that git would read as an option.
 pub fn clone(url: &str) -> Result<PathBuf> {

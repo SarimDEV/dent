@@ -16,7 +16,12 @@ use serde::{Deserialize, Serialize};
 ///
 /// 2: a message can carry its files (`Request::Send`'s `files`); a client
 /// sends files that way only to a daemon of 2 or later.
-pub const PROTOCOL: u32 = 2;
+///
+/// 3: a project can be brought to the machine (`Request::Pack`,
+/// `Request::ReadFiles`, and `Request::Create`'s `bring`); LAN access is
+/// set from a client (`Request::SetLan`); the welcome says how to wake the
+/// machine (`wake`).
+pub const PROTOCOL: u32 = 3;
 /// The oldest protocol this build still speaks. Two sides talk when their
 /// ranges overlap ([decision 0060]).
 ///
@@ -88,6 +93,11 @@ pub enum Body {
     /// A held message was taken back before it went.
     Unqueued {
         id: String,
+        /// Given back by the daemon itself, not asked for (the project its
+        /// session was to work in couldn't be brought here), with what it
+        /// said: a client puts it back in the session's reply box.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        returned: Option<Returned>,
     },
     /// A held message moved in the queue: to just before held message
     /// `before`, or to the end.
@@ -574,6 +584,73 @@ pub struct Carried {
     pub bytes_b64: String,
 }
 
+/// A network card a sleeping machine can be woken through: a magic packet
+/// to `broadcast` (its subnet's) naming `mac`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct Wake {
+    /// `aa:bb:cc:dd:ee:ff`.
+    pub mac: String,
+    pub broadcast: String,
+}
+
+/// A message given back ([`Body::Unqueued`]'s `returned`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Returned {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<String>,
+}
+
+/// What another machine needs to make its own checkout of a project
+/// ([`Request::Pack`]).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct Pack {
+    /// The checkout's folder name.
+    pub name: String,
+    /// Its Git remotes another machine can clone from, the one to clone
+    /// first (`origin` when there is one) first. Remotes that are paths on
+    /// this machine are left out.
+    #[serde(default)]
+    pub remotes: Vec<GitRemote>,
+    /// The branch checked out here.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Files Git ignores, which a clone won't have (`.env`), as paths
+    /// relative to the checkout. Ignored folders (`node_modules/`) aren't
+    /// listed.
+    #[serde(default)]
+    pub ignored: Vec<Ignored>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct GitRemote {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Ignored {
+    pub path: String,
+    pub size: u64,
+    /// Offered ticked: an environment file (`.env`, `.env.local`).
+    #[serde(default)]
+    pub carry: bool,
+}
+
+/// A project to bring to the machine a new session starts on
+/// ([`Request::Create`]'s `bring`): cloned from its remotes into the
+/// machine's projects folder, on its branch, with the ignored files it
+/// carries (each [`Carried::name`] a path relative to the checkout).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct Bring {
+    pub name: String,
+    pub remotes: Vec<GitRemote>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<Carried>,
+}
+
 /// The most a message's files may come to, so the message stays well
 /// inside what a link takes once base64 has grown it by a third.
 pub const CARRIED_MAX: usize = 40 << 20;
@@ -725,6 +802,10 @@ pub struct Machine {
     /// macOS guards from background programs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_item_blocked: Option<String>,
+    /// Devices on its local network may connect without Tailscale (to pair
+    /// with a code); paired ones always can.
+    #[serde(default)]
+    pub lan: bool,
 }
 
 /// The GitHub CLI, as pull requests need it.
@@ -1135,6 +1216,12 @@ pub enum Request {
         /// As for [`Request::Send`].
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         files: Vec<Carried>,
+        /// Clone this project here first and work in it (`cwd` is then
+        /// empty). The session exists at once; its first message waits
+        /// until the clone's done. A daemon restarted meanwhile starts the
+        /// clone over.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bring: Option<Bring>,
     },
     /// While the agent works, the message waits for the turn to end,
     /// unless `steer` sends it into the running turn.
@@ -1278,6 +1365,11 @@ pub enum Request {
     },
     /// How this machine stands for Git, GitHub and starting at login.
     Machine,
+    /// Let devices on the local network connect, or not; replies with the
+    /// machine.
+    SetLan {
+        on: bool,
+    },
     /// Start the daemon at login, or stop; replies with the machine.
     SetLoginItem {
         on: bool,
@@ -1365,6 +1457,18 @@ pub enum Request {
     /// Clone a Git URL into `~/dent/projects`.
     CloneProject {
         url: String,
+    },
+    /// What another machine needs to bring the project at `dir` there.
+    /// Answered with [`Reply::Pack`].
+    Pack {
+        dir: String,
+    },
+    /// Ignored files of the checkout at `dir`, read for another machine
+    /// ([`Pack::ignored`] paths), up to [`CARRIED_MAX`] in all. Answered
+    /// with [`Reply::Carried`].
+    ReadFiles {
+        dir: String,
+        paths: Vec<String>,
     },
     /// A folder's repository, for the new session's worktree and branch
     /// choices.
@@ -1515,6 +1619,9 @@ pub enum Reply {
         /// `host:port`, best first. Clients learn routes from them.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         addresses: Vec<String>,
+        /// How to wake it from its own network while it sleeps.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        wake: Vec<Wake>,
     },
     Ok,
     Pairing {
@@ -1580,6 +1687,13 @@ pub enum Reply {
     Repo {
         repo: Option<Repo>,
     },
+    /// `None` when the folder isn't in a Git repository.
+    Pack {
+        pack: Option<Pack>,
+    },
+    Carried {
+        files: Vec<Carried>,
+    },
     /// `None` when the session's folder isn't in a Git repository.
     GitStatus {
         status: Option<GitStatus>,
@@ -1644,6 +1758,7 @@ impl Request {
             | R::Projects
             | R::Agents { .. }
             | R::Machine
+            | R::SetLan { .. }
             | R::SetLoginItem { .. }
             | R::Models { .. }
             | R::Usage { .. }
@@ -1656,6 +1771,8 @@ impl Request {
             | R::HideProject { .. }
             | R::NewProject { .. }
             | R::CloneProject { .. }
+            | R::Pack { .. }
+            | R::ReadFiles { .. }
             | R::Repo { .. } => Vec::new(),
         }
     }
@@ -1699,6 +1816,8 @@ impl Out {
                 | Reply::Files { .. }
                 | Reply::File { .. }
                 | Reply::Repo { .. }
+                | Reply::Pack { .. }
+                | Reply::Carried { .. }
                 | Reply::GitStatus { .. }
                 | Reply::PrBrief { .. }
                 | Reply::GitDone { .. } => Vec::new(),

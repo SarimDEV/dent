@@ -116,6 +116,8 @@ pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// Where `made_once` keeps its claims in the store's key-value table.
 const MADE: &str = "made.";
+/// A session's project still being brought here: [`Bringing`].
+const BRINGING: &str = "bringing.";
 
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -297,9 +299,20 @@ impl Daemon {
     /// How this machine stands for Git, GitHub and starting at login.
     pub async fn machine(self: &Arc<Self>) -> dent_protocol::Machine {
         let path = self.env().path.clone();
-        tokio::task::spawn_blocking(move || crate::machine::check(&path))
+        let mut m = tokio::task::spawn_blocking(move || crate::machine::check(&path))
             .await
-            .unwrap_or_default()
+            .unwrap_or_default();
+        m.lan = self.net.lan.load(std::sync::atomic::Ordering::Relaxed);
+        m
+    }
+
+    /// Let devices on the local network connect, or not, from now and
+    /// after a restart.
+    pub fn set_lan(&self, on: bool) -> Result<()> {
+        self.store()
+            .put("remote.lan", if on { "on" } else { "off" })?;
+        self.net.lan.store(on, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 
     /// The agents this machine can drive and how each stands, asked of
@@ -622,19 +635,8 @@ impl Daemon {
             id,
             text,
             attachments,
+            bring,
         } = new;
-        // No folder: this machine's scratch folder, which a client on
-        // another machine can't name.
-        let cwd = if cwd.is_empty() {
-            let scratch = crate::paths::home().join("dent/scratch");
-            std::fs::create_dir_all(&scratch)?;
-            scratch.display().to_string()
-        } else {
-            cwd
-        };
-        if !std::path::Path::new(&cwd).is_dir() {
-            bail!("{cwd} isn't a folder");
-        }
         let agent = crate::agent::named(agent.as_deref())?;
         let key = (!id.is_empty()).then(|| format!("create.{id}"));
         let (session, made) = self.made_once(key.as_deref())?;
@@ -652,6 +654,36 @@ impl Daemon {
             )
             .await?;
             return Ok(session);
+        }
+        if let Some(b) = bring {
+            if worktree.is_some() {
+                bail!("a project brought from another machine starts in its own checkout");
+            }
+            let first = Op::Send {
+                id,
+                text,
+                steer: false,
+                attachments,
+            };
+            let made = self
+                .create_brought(&session, b, agent, model, permission, effort, first)
+                .await;
+            if made.is_err() {
+                self.forget_bring(&session);
+            }
+            return made.map(|()| session);
+        }
+        // No folder: this machine's scratch folder, which a client on
+        // another machine can't name.
+        let cwd = if cwd.is_empty() {
+            let scratch = crate::paths::home().join("dent/scratch");
+            std::fs::create_dir_all(&scratch)?;
+            scratch.display().to_string()
+        } else {
+            cwd
+        };
+        if !std::path::Path::new(&cwd).is_dir() {
+            bail!("{cwd} isn't a folder");
         }
         // A new worktree is made before the session exists, so one that
         // can't be made leaves nothing behind.
@@ -741,7 +773,7 @@ impl Daemon {
             let (d, session) = (self.clone(), session.clone());
             tokio::spawn(async move {
                 d.set_up(&session, &script, &path, &root).await;
-                lock(&d.setting_up).remove(&session);
+                // The session lets go of what waited itself, in order.
                 if let Err(e) = d.command(&session, Op::SetUp).await {
                     eprintln!("dent-daemon: {session}: couldn't carry on after setup: {e:#}");
                 }
@@ -750,9 +782,205 @@ impl Daemon {
         Ok(session)
     }
 
+    /// A session that works in a project brought from another machine.
+    /// Its folder is kept for it and the job noted before the session
+    /// exists, so a restart finds it; the session then exists (a resend
+    /// finds it too) before the files are kept and the clone starts.
+    #[allow(clippy::too_many_arguments)]
+    async fn create_brought(
+        self: &Arc<Self>,
+        session: &str,
+        mut b: dent_protocol::Bring,
+        agent: &'static dyn crate::agent::Driver,
+        model: Option<String>,
+        permission: Permission,
+        effort: Option<String>,
+        first: Op,
+    ) -> Result<()> {
+        let dest = crate::projects::free_in_root(&crate::projects::slug(&b.name))?;
+        std::fs::create_dir_all(&dest)?;
+        let dest = dest.display().to_string();
+        let files = std::mem::take(&mut b.files);
+        let title = match &first {
+            Op::Send { text, .. } => title(text),
+            _ => String::new(),
+        };
+        self.store().put(
+            &format!("{BRINGING}{session}"),
+            &serde_json::to_string(&Bringing {
+                dest: dest.clone(),
+                bring: b,
+            })?,
+        )?;
+        lock(&self.setting_up).insert(session.to_string());
+        self.append(
+            session,
+            Body::Created {
+                agent: agent.id().into(),
+                cwd: dest,
+                model,
+                permission,
+                title,
+            },
+            None,
+        )?;
+        if let Some(e) = effort.filter(|e| !e.is_empty()) {
+            self.append(
+                session,
+                Body::Settings {
+                    model: None,
+                    permission: None,
+                    title: None,
+                    effort: Some(e),
+                },
+                None,
+            )?;
+        }
+        let row = self
+            .store()
+            .session(session)?
+            .context("session row missing")?;
+        session::start(self.clone(), row, Vec::new());
+        self.command(session, first).await?;
+        // From here the session exists: what goes wrong is said in it.
+        let staging = crate::bring::staging(&self.paths.state, session);
+        let kept = tokio::task::spawn_blocking(move || crate::bring::stage(&staging, &files))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+        let d = self.clone();
+        let id = session.to_string();
+        match kept {
+            Ok(()) => {
+                tokio::spawn(async move { d.bring(&id).await });
+            }
+            Err(e) => {
+                tokio::spawn(async move { d.brought(&id, Err(format!("its files: {e}"))).await });
+            }
+        }
+        Ok(())
+    }
+
+    /// Let go of a project being brought for session `id` that never got
+    /// going: its job, its waiting files, and its folder if still empty.
+    fn forget_bring(&self, id: &str) {
+        let key = format!("{BRINGING}{id}");
+        if let Some(job) = self
+            .store()
+            .get(&key)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_str::<Bringing>(&v).ok())
+        {
+            let _ = std::fs::remove_dir(&job.dest);
+        }
+        let _ = self.store().del(&key);
+        let _ = std::fs::remove_dir_all(crate::bring::staging(&self.paths.state, id));
+        lock(&self.setting_up).remove(id);
+    }
+
+    /// Clone the project session `id` waits on, saying so while it runs and
+    /// in the chat when it's done; then what waited goes. One that fails
+    /// says why and leaves what was sent waiting, for you to take back or
+    /// send on into the empty folder.
+    async fn bring(self: &Arc<Self>, id: &str) {
+        let key = format!("{BRINGING}{id}");
+        let job = self
+            .store()
+            .get(&key)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_str::<Bringing>(&v).ok());
+        let Some(Bringing { dest, bring }) = job else {
+            lock(&self.setting_up).remove(id);
+            return;
+        };
+        let started = now_ms();
+        self.set_activity(
+            id,
+            Some(dent_protocol::Activity::SettingUp {
+                since: started,
+                what: format!("Cloning {}", bring.name),
+            }),
+        );
+        let staging = crate::bring::staging(&self.paths.state, id);
+        let (to, b, st) = (
+            std::path::PathBuf::from(&dest),
+            bring.clone(),
+            staging.clone(),
+        );
+        let got = tokio::task::spawn_blocking(move || crate::bring::clone_into(&to, &b, &st))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+        self.set_activity(id, None);
+        let secs = now_ms().saturating_sub(started).div_ceil(1000);
+        self.brought(id, got.map(|(line, notes)| (line, notes, secs)))
+            .await;
+    }
+
+    /// Say how bringing session `id`'s project went, and let what waited
+    /// go, or give it back. The job's note goes last, so a restart before
+    /// then does it all again rather than leave a message to reach an
+    /// agent in an empty folder.
+    async fn brought(self: &Arc<Self>, id: &str, got: Result<(String, Vec<String>, u64), String>) {
+        let key = format!("{BRINGING}{id}");
+        let Some(Bringing { dest, bring }) = self
+            .store()
+            .get(&key)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_str::<Bringing>(&v).ok())
+        else {
+            return;
+        };
+        let staging = crate::bring::staging(&self.paths.state, id);
+        let ok = got.is_ok();
+        let text = match got {
+            Ok((line, notes, secs)) => {
+                let mut text = format!("{line} in {secs}s");
+                for n in notes {
+                    text.push_str("; ");
+                    text.push_str(&n);
+                }
+                text
+            }
+            Err(e) => {
+                // The agent still needs its folder to start in.
+                let _ = std::fs::create_dir_all(&dest);
+                format!(
+                    "Couldn't bring {} here: {}. What you sent is back in the reply box; \
+                     sent again, it works in an empty folder",
+                    bring.name,
+                    e.trim_end_matches('.')
+                )
+            }
+        };
+        if let Err(e) = self.append(id, Body::Notice { text }, None) {
+            eprintln!("dent-daemon: {id}: {e:#}");
+        }
+        if ok && let Err(e) = crate::server::remember_project(self, &dest) {
+            eprintln!("dent-daemon: {id}: couldn't keep {dest} on the list: {e:#}");
+        }
+        // Done: what waited goes. Failed: it goes back to whoever sent it.
+        // Either way the session stops holding messages in the same step,
+        // so nothing sent meanwhile slips ahead or is held for good.
+        let next = if ok { Op::SetUp } else { Op::GiveBack };
+        if let Err(e) = self.command(id, next).await {
+            eprintln!("dent-daemon: {id}: couldn't carry on after the clone: {e:#}");
+            lock(&self.setting_up).remove(id);
+        }
+        let _ = self.store().del(&key);
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
     /// Session `id`'s new worktree is being set up: what's sent waits.
     pub fn setting_up(&self, id: &str) -> bool {
         lock(&self.setting_up).contains(id)
+    }
+
+    /// Session `id` stops holding what's sent for its setup: called from
+    /// the session itself, in step with what it lets go.
+    pub fn set_up_done(&self, id: &str) {
+        lock(&self.setting_up).remove(id);
     }
 
     /// Run a repository's setup script in a session's new worktree, saying
@@ -1560,8 +1788,31 @@ impl Daemon {
                 }
             });
         }
+        // A clone cut short by the restart starts over; what was sent to
+        // its session goes on waiting.
+        let mut bringing: Vec<String> = self
+            .store()
+            .with_prefix(BRINGING)?
+            .into_iter()
+            .filter_map(|(k, _)| k.strip_prefix(BRINGING).map(str::to_string))
+            .collect();
+        // One whose session was never made is let go.
+        bringing.retain(|id| {
+            let there = rows.iter().any(|r| r.id == *id);
+            if !there {
+                self.forget_bring(id);
+            }
+            there
+        });
+        for id in &bringing {
+            lock(&self.setting_up).insert(id.clone());
+        }
         for row in rows {
             session::start(self.clone(), row, live.clone());
+        }
+        for id in bringing {
+            let d = self.clone();
+            tokio::spawn(async move { d.bring(&id).await });
         }
         Ok(())
     }
@@ -1675,6 +1926,16 @@ pub struct NewSession {
     pub id: String,
     pub text: String,
     pub attachments: Vec<String>,
+    /// A project to clone here first, with `cwd` empty.
+    pub bring: Option<dent_protocol::Bring>,
+}
+
+/// A clone a session waits on, kept until it's done so a restart starts it
+/// over ([`Daemon::bring`]).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Bringing {
+    dest: String,
+    bring: dent_protocol::Bring,
 }
 
 /// A short title from the first message.

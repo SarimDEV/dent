@@ -276,6 +276,7 @@ impl Client {
             text: text.into(),
             attachments: Vec::new(),
             files: Vec::new(),
+            bring: None,
         }) {
             Ok(Out::Reply {
                 reply: dent_protocol::Reply::Created { session },
@@ -469,6 +470,7 @@ fn agents_say_how_they_stand_and_sessions_keep_theirs() {
         text: "hello".into(),
         attachments: Vec::new(),
         files: Vec::new(),
+        bring: None,
     });
     assert!(
         matches!(&made, Err(e) if e.contains("no agent called no-such-agent")),
@@ -485,6 +487,7 @@ fn agents_say_how_they_stand_and_sessions_keep_theirs() {
         text: "hello by name".into(),
         attachments: Vec::new(),
         files: Vec::new(),
+        bring: None,
     }) {
         Ok(Out::Reply {
             reply: dent_protocol::Reply::Created { session },
@@ -715,6 +718,274 @@ fn files_a_message_carries_are_written_here_and_attached() {
     // A name too long for a disk is cut, keeping its extension.
     assert!(paths[2].ends_with(".png"), "{}", paths[2]);
     assert_eq!(std::fs::read(&paths[2]).unwrap(), b"three");
+}
+
+#[test]
+fn a_project_is_brought_from_another_machine_with_its_ignored_files() {
+    let home = std::env::temp_dir().join(format!("dent-bring-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join(".gitconfig"),
+        "[user]\n\tname = t\n\temail = t@t\n",
+    )
+    .unwrap();
+    let h = home.display().to_string();
+    let git = |dir: &Path, args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("HOME", &h)
+            .output()
+            .unwrap();
+        assert!(
+            ok.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&ok.stderr)
+        );
+    };
+    // The machine that has it: a checkout on a branch, pushed to a bare
+    // repository, with ignored files a clone won't have.
+    let there = home.join("there/app");
+    let bare = home.join("app.git");
+    std::fs::create_dir_all(&there).unwrap();
+    git(&home, &["init", "-q", "--bare", bare.to_str().unwrap()]);
+    git(&there, &["init", "-q", "-b", "main"]);
+    std::fs::write(
+        there.join(".gitignore"),
+        ".env*\n!.env.example\nnode_modules/\n",
+    )
+    .unwrap();
+    // Ignored by this checkout alone: the clone won't have the rule.
+    std::fs::write(there.join(".git/info/exclude"), "*.bin\n").unwrap();
+    std::fs::write(there.join(".env.example"), "KEY=\n").unwrap();
+    git(&there, &["add", "."]);
+    git(&there, &["commit", "-q", "-m", "first"]);
+    git(&there, &["checkout", "-q", "-b", "feature"]);
+    git(
+        &there,
+        &[
+            "remote",
+            "add",
+            "origin",
+            &format!("file://{}", bare.display()),
+        ],
+    );
+    git(
+        &there,
+        &[
+            "remote",
+            "add",
+            "upstream",
+            "https://example.com/up/app.git",
+        ],
+    );
+    git(&there, &["push", "-q", "origin", "main", "feature"]);
+    std::fs::write(there.join(".env"), "SECRET=1\n").unwrap();
+    std::fs::create_dir_all(there.join("web")).unwrap();
+    std::fs::write(there.join("web/.env.local"), "B=2\n").unwrap();
+    let odd: Vec<u8> = (0..=255u8).rev().collect();
+    std::fs::write(there.join("blob.bin"), &odd).unwrap();
+    std::fs::create_dir_all(there.join("node_modules/x")).unwrap();
+    std::fs::write(there.join("node_modules/x/i.js"), "1").unwrap();
+
+    let w = World::new(&[("HOME", h.as_str())]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let pack = match c
+        .call(Request::Pack {
+            dir: there.display().to_string(),
+        })
+        .unwrap()
+    {
+        Out::Reply {
+            reply: dent_protocol::Reply::Pack { pack: Some(p) },
+        } => p,
+        o => panic!("{o:?}"),
+    };
+    assert_eq!(pack.name, "app");
+    assert_eq!(pack.branch.as_deref(), Some("feature"));
+    // A remote that's a path on this machine (file://) is no use elsewhere.
+    let names: Vec<_> = pack.remotes.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["upstream"]);
+    // Environment files ticked and first; ignored folders not listed.
+    let listed: Vec<_> = pack
+        .ignored
+        .iter()
+        .map(|i| (i.path.as_str(), i.carry))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (".env", true),
+            ("web/.env.local", true),
+            ("blob.bin", false)
+        ]
+    );
+    // Only files inside the checkout are read.
+    assert!(
+        c.call(Request::ReadFiles {
+            dir: there.display().to_string(),
+            paths: vec!["../app.git/HEAD".into()],
+        })
+        .is_err()
+    );
+    let files = match c
+        .call(Request::ReadFiles {
+            dir: there.display().to_string(),
+            paths: vec![".env".into(), "web/.env.local".into(), "blob.bin".into()],
+        })
+        .unwrap()
+    {
+        Out::Reply {
+            reply: dent_protocol::Reply::Carried { files },
+        } => files,
+        o => panic!("{o:?}"),
+    };
+
+    // The machine it goes to (here the same daemon, standing in): the
+    // session exists at once and works in the clone once it's made.
+    let bring = |files: Vec<dent_protocol::Carried>, url: String| dent_protocol::Bring {
+        name: pack.name.clone(),
+        remotes: vec![
+            dent_protocol::GitRemote {
+                name: "origin".into(),
+                url,
+            },
+            pack.remotes[0].clone(),
+        ],
+        branch: pack.branch.clone(),
+        files,
+    };
+    let create = |c: &mut Client, id: &str, b: dent_protocol::Bring| match c
+        .call(Request::Create {
+            agent: None,
+            cwd: String::new(),
+            worktree: None,
+            model: None,
+            permission: Permission::Full,
+            effort: None,
+            id: id.into(),
+            text: "hello".into(),
+            attachments: Vec::new(),
+            files: Vec::new(),
+            bring: Some(b),
+        })
+        .unwrap()
+    {
+        Out::Reply {
+            reply: dent_protocol::Reply::Created { session },
+        } => session,
+        o => panic!("{o:?}"),
+    };
+    let s = create(
+        &mut c,
+        "m-bring",
+        bring(files, format!("file://{}", bare.display())),
+    );
+    c.wait(&s, "the turn to end", is_done);
+    let notice = c
+        .events(&s)
+        .into_iter()
+        .find_map(|b| match b {
+            Body::Notice { text } => Some(text),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        notice.starts_with("Cloned app from origin on feature and brought 3 ignored files"),
+        "{notice}"
+    );
+    let here = home.join("dent/projects/app");
+    let cwd = c
+        .events(&s)
+        .into_iter()
+        .find_map(|b| match b {
+            Body::Created { cwd, .. } => Some(cwd),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(cwd, here.display().to_string());
+    assert_eq!(std::fs::read(here.join(".env")).unwrap(), b"SECRET=1\n");
+    assert_eq!(
+        std::fs::read(here.join("web/.env.local")).unwrap(),
+        b"B=2\n"
+    );
+    assert_eq!(std::fs::read(here.join("blob.bin")).unwrap(), odd);
+    assert!(!here.join("node_modules").exists());
+    // Every file brought stays out of Git, even one only that checkout
+    // ignored.
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&here)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&status.stdout), "");
+    let remotes = std::process::Command::new("git")
+        .args(["remote"])
+        .current_dir(&here)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&remotes.stdout),
+        "origin\nupstream\n"
+    );
+    // Its staging is gone, and the project's on the list.
+    assert!(!w.state.join("bring").join(&s).exists());
+    match c.call(Request::Projects).unwrap() {
+        Out::Reply {
+            reply: dent_protocol::Reply::Projects { projects },
+        } => assert!(projects.iter().any(|p| Path::new(&p.path) == here)),
+        o => panic!("{o:?}"),
+    }
+    // Sent again, the same session; no second clone.
+    assert_eq!(
+        create(&mut c, "m-bring", bring(Vec::new(), String::new())),
+        s
+    );
+    assert!(!home.join("dent/projects/app-2").exists());
+
+    // One that can't be cloned says why, and what was sent waits.
+    let bad = create(
+        &mut c,
+        "m-bad",
+        bring(Vec::new(), "file:///nowhere/at/all".into()),
+    );
+    c.wait(
+        &bad,
+        "the failure",
+        |b| matches!(b, Body::Notice { text } if text.starts_with("Couldn't bring app here")),
+    );
+    // It's given back, never sent to an agent in an empty folder.
+    c.wait(
+        &bad,
+        "what was sent comes back",
+        |b| matches!(b, Body::Unqueued { id, returned: Some(r) } if id == "m-bad" && r.text == "hello"),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(c.count(&bad, |b| matches!(b, Body::Delivered { .. })), 0);
+    assert_eq!(c.count(&bad, |b| matches!(b, Body::TurnStarted)), 0);
+    assert!(home.join("dent/projects/app-2").is_dir());
+}
+
+#[test]
+fn the_lan_switch_holds_across_a_restart() {
+    let mut w = World::new(&[]);
+    let lan = |c: &mut Client, r: Request| match c.call(r).unwrap() {
+        Out::Reply {
+            reply: dent_protocol::Reply::Machine { machine },
+        } => machine.lan,
+        o => panic!("{o:?}"),
+    };
+    let mut c = w.client();
+    assert!(!lan(&mut c, Request::Machine));
+    assert!(lan(&mut c, Request::SetLan { on: true }));
+    drop(c);
+    w.kill();
+    w.start();
+    let mut c = w.client();
+    assert!(lan(&mut c, Request::Machine), "kept");
+    assert!(!lan(&mut c, Request::SetLan { on: false }));
 }
 
 #[test]
@@ -988,7 +1259,10 @@ fn stop_stops_within_two_seconds_and_returns_held_messages() {
         t.elapsed()
     );
     assert_eq!(
-        c.count(&s, |b| matches!(b, Body::Unqueued { id } if id == "held")),
+        c.count(
+            &s,
+            |b| matches!(b, Body::Unqueued { id, .. } if id == "held")
+        ),
         1
     );
     c.pump(Duration::from_millis(500));
@@ -1356,6 +1630,7 @@ fn effort_reaches_the_agent_and_changing_it_starts_a_new_process() {
         text: "tell me your args".into(),
         attachments: Vec::new(),
         files: Vec::new(),
+        bring: None,
     }) {
         Ok(Out::Reply {
             reply: dent_protocol::Reply::Created { session },
@@ -2026,6 +2301,7 @@ fn resent_creates_forks_and_rewinds_happen_once() {
         text: "hi".into(),
         attachments: Vec::new(),
         files: Vec::new(),
+        bring: None,
     };
     let made = |o: Result<Out, String>| match o {
         Ok(Out::Reply {
@@ -2129,6 +2405,7 @@ fn messages_sent_while_a_new_worktree_is_set_up_wait_and_go_in_order() {
         text: "first".into(),
         attachments: Vec::new(),
         files: Vec::new(),
+        bring: None,
     }) {
         Ok(Out::Reply {
             reply: dent_protocol::Reply::Created { session },

@@ -126,6 +126,7 @@ pub async fn session(
                         id: d.net.id(),
                         epoch: d.net.epoch.clone(),
                         addresses: d.net.addresses().await,
+                        wake: crate::remote::addrs::wake_targets(),
                     })
                 }
             }
@@ -212,6 +213,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             text,
             mut attachments,
             files,
+            bring,
         } => Reply::Created {
             session: d
                 .create(crate::daemon::NewSession {
@@ -227,6 +229,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
                     effort,
                     id,
                     text,
+                    bring,
                 })
                 .await?,
         },
@@ -365,6 +368,16 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             .map_err(|e| anyhow::anyhow!("{e}"))?;
             Reply::Ok
         }
+        Request::Pack { dir } => Reply::Pack {
+            pack: tokio::task::spawn_blocking(move || crate::bring::pack(Path::new(&dir))).await?,
+        },
+        Request::ReadFiles { dir, paths } => Reply::Carried {
+            files: tokio::task::spawn_blocking(move || {
+                crate::bring::read_files(Path::new(&dir), &paths)
+            })
+            .await?
+            .map_err(|e| anyhow::anyhow!(e))?,
+        },
         Request::Repo { dir } => Reply::Repo {
             repo: tokio::task::spawn_blocking(move || crate::workspace::repo(Path::new(&dir)))
                 .await?,
@@ -494,6 +507,12 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
         Request::Machine => Reply::Machine {
             machine: d.machine().await,
         },
+        Request::SetLan { on } => {
+            d.set_lan(on)?;
+            Reply::Machine {
+                machine: d.machine().await,
+            }
+        }
         Request::SetLoginItem { on } => {
             if on && let Some(why) = crate::login::blocked() {
                 bail!("{why}");
@@ -633,7 +652,7 @@ fn hidden_projects(d: &Daemon) -> Result<std::collections::HashSet<String>> {
 }
 
 /// Keep a folder on the list, newest, and back on it if it was taken off.
-fn remember_project(d: &Daemon, path: &str) -> Result<()> {
+pub(crate) fn remember_project(d: &Daemon, path: &str) -> Result<()> {
     let mut added = added_projects(d)?;
     added.insert(path.to_string(), crate::daemon::now_ms());
     let mut hidden = hidden_projects(d)?;

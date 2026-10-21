@@ -235,6 +235,11 @@ impl Cursor {
 /// The oldest protocol whose daemons take files inside a message.
 const CARRIES: u32 = 2;
 
+/// The oldest protocol whose daemons can bring a project from another
+/// machine (`Request::Create`'s `bring`). An older one would read the
+/// request as a session in its scratch folder.
+const BRINGS: u32 = 3;
+
 /// The paths a message attaches, if it's one that carries files.
 fn attached(r: &Request) -> Option<&Vec<String>> {
     match r {
@@ -306,6 +311,15 @@ async fn ready_up(
     name: &str,
     n: u64,
 ) -> Result<(), String> {
+    let brings = pending.lock().ok().is_some_and(|p| {
+        p.0.get(&n)
+            .is_some_and(|(r, _)| matches!(r, Request::Create { bring: Some(_), .. }))
+    });
+    if brings && proto < BRINGS {
+        return Err(format!(
+            "{name} runs an older dent, which can't bring a project from another machine: update dent there"
+        ));
+    }
     let known = theirs.lock().map(|t| t.clone()).unwrap_or_default();
     let Some(mut r) = pending.lock().ok().and_then(|p| p.to_carry(n, &known)) else {
         return Ok(());
@@ -402,7 +416,7 @@ async fn run(
                         let (req, out) = (env.req, env.body);
                         if req == HELLO {
                             match out {
-                                Out::Reply { reply: Reply::Welcome { proto, machine, id, version, agents, addresses, epoch: e, .. } } => {
+                                Out::Reply { reply: Reply::Welcome { proto, machine, id, version, agents, addresses, wake, epoch: e, .. } } => {
                                     if !saved.id.is_empty() && !id.is_empty() && id != saved.id {
                                         events(Event::DifferentMachine(via.0.clone()));
                                         continue;
@@ -414,6 +428,12 @@ async fn run(
                                         saved.id = id.clone();
                                     }
                                     saved.learned = addresses;
+                                    // Kept from before when it says none: a
+                                    // machine waking up on another network
+                                    // still has its cards.
+                                    if !wake.is_empty() {
+                                        saved.wake = wake;
+                                    }
                                     if saved != before && !saved.id.is_empty() {
                                         events(Event::Saved(saved.clone()));
                                     }
@@ -563,6 +583,32 @@ mod tests {
         };
         assert!(carry(&mut gone, &known).unwrap_err().contains("moved.png"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_project_is_brought_only_to_a_daemon_that_can_take_it() {
+        let bring = Request::Create {
+            agent: None,
+            cwd: String::new(),
+            worktree: None,
+            model: None,
+            permission: Default::default(),
+            effort: None,
+            id: "m1".into(),
+            text: "hi".into(),
+            attachments: Vec::new(),
+            files: Vec::new(),
+            bring: Some(Default::default()),
+        };
+        let pending = Arc::new(Mutex::new(Pending::default()));
+        pending.lock().unwrap().0.insert(1, (bring, false));
+        let theirs = Arc::new(Mutex::new(HashSet::new()));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let old = rt.block_on(ready_up(&pending, &theirs, 2, "vm", 1));
+        assert!(old.unwrap_err().contains("can't bring a project"));
+        assert!(rt.block_on(ready_up(&pending, &theirs, 3, "vm", 1)).is_ok());
     }
 
     #[test]

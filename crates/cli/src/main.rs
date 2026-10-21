@@ -9,7 +9,12 @@
 //!   follows them, printing every change of state, route and catch-up.
 //! - `dent ask NAME TEXT [--file PATH]... [--cwd DIR]` starts a session on
 //!   a saved machine (in its scratch folder unless `--cwd`), its files
-//!   carried along, and prints the new session's id.
+//!   carried along, and prints the new session's id. With `--bring DIR`,
+//!   the project at DIR on this machine is cloned there first, with its
+//!   ignored environment files (`.env`), and the session works in it.
+//!
+//! - `dent wake NAME` sends a sleeping machine a Wake-on-LAN packet, from
+//!   the same network, to the cards its last welcome named.
 //!
 //! Its own key and saved machines live in the client state folder
 //! (`DENT_CLIENT_STATE`, else `client/` beside the daemon's state).
@@ -61,9 +66,22 @@ async fn main() -> Result<()> {
         }
         Some("watch") => watch(&args[1..]).await,
         Some("ask") => ask(&args[1..]).await,
+        Some("wake") => {
+            let name = args.get(1).context("dent wake NAME")?;
+            let m = load()
+                .into_iter()
+                .find(|s| s.name == *name || s.id == *name)
+                .with_context(|| format!("no saved machine called {name}"))?;
+            if m.wake.is_empty() {
+                bail!("{name} hasn't said how to wake it: connect to it once while it's awake");
+            }
+            let n = dent_remote::wake::wake(&m.wake)?;
+            println!("sent {n} wake-up packets to {name}");
+            Ok(())
+        }
         _ => {
             eprintln!(
-                "usage: dent machine add HOST:PORT [--code CODE] | dent machines | dent machine remove NAME | dent watch [NAME...] [--secs N] | dent ask NAME TEXT [--file PATH]... [--cwd DIR]"
+                "usage: dent machine add HOST:PORT [--code CODE] | dent machines | dent machine remove NAME | dent watch [NAME...] [--secs N] | dent ask NAME TEXT [--file PATH]... [--cwd DIR | --bring DIR] | dent wake NAME"
             );
             Ok(())
         }
@@ -152,6 +170,7 @@ async fn add(args: &[String]) -> Result<()> {
         key: hex::encode(&key),
         routes: vec![addr],
         learned: addresses,
+        wake: Vec::new(),
     })?;
     println!("added {name} ({id})");
     Ok(())
@@ -170,15 +189,17 @@ fn remove(name: &str) -> Result<()> {
 }
 
 async fn ask(args: &[String]) -> Result<()> {
-    let usage = "dent ask NAME TEXT [--file PATH]... [--cwd DIR]";
+    let usage = "dent ask NAME TEXT [--file PATH]... [--cwd DIR | --bring DIR]";
     let mut plain = Vec::new();
     let mut files = Vec::new();
     let mut cwd = String::new();
+    let mut from = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--file" => files.push(it.next().context(usage)?.clone()),
             "--cwd" => cwd = it.next().context(usage)?.clone(),
+            "--bring" => from = Some(it.next().context(usage)?.clone()),
             _ => plain.push(a.clone()),
         }
     }
@@ -189,6 +210,13 @@ async fn ask(args: &[String]) -> Result<()> {
         .into_iter()
         .find(|s| s.name == *name || s.id == *name)
         .with_context(|| format!("no saved machine called {name}"))?;
+    if from.is_some() && !cwd.is_empty() {
+        bail!("--bring makes the folder it works in: leave out --cwd");
+    }
+    let bring = match from {
+        Some(dir) => Some(pack(&dir)?),
+        None => None,
+    };
     let (tx, mut rx) = mpsc::unbounded_channel();
     let remote = dent_remote::remote::spawn(
         &tokio::runtime::Handle::current(),
@@ -213,6 +241,7 @@ async fn ask(args: &[String]) -> Result<()> {
             text: text.clone(),
             attachments: files,
             files: Vec::new(),
+            bring,
         },
     );
     let wait = tokio::time::sleep(Duration::from_secs(60));
@@ -232,12 +261,80 @@ async fn ask(args: &[String]) -> Result<()> {
                     }
                 }
                 Some(dent_remote::remote::Event::State(s)) => eprintln!("{name}: {s:?}"),
+                // What its welcome said (routes, how to wake it), kept.
+                Some(dent_remote::remote::Event::Saved(s)) => {
+                    let _ = dent_remote::store::upsert(&s);
+                }
                 Some(_) => {}
                 None => bail!("the connection ended"),
             },
             _ = &mut wait => bail!("{name} didn't answer within a minute"),
         }
     }
+}
+
+/// What another machine needs to bring the project at `dir` there, asked
+/// of this machine's daemon: its remotes and branch, and its ignored
+/// environment files.
+fn pack(dir: &str) -> Result<dent_protocol::Bring> {
+    let dir = std::fs::canonicalize(dir)
+        .with_context(|| format!("{dir} isn't a folder here"))?
+        .display()
+        .to_string();
+    let Reply::Pack { pack } = local(Request::Pack { dir: dir.clone() })? else {
+        bail!("unexpected answer from this machine's daemon");
+    };
+    let pack = pack.with_context(|| format!("{dir} isn't in a Git repository"))?;
+    if pack.remotes.is_empty() {
+        bail!("{dir} has no remote another machine can clone from");
+    }
+    let paths: Vec<String> = pack
+        .ignored
+        .iter()
+        .filter(|i| i.carry)
+        .map(|i| i.path.clone())
+        .collect();
+    let files = if paths.is_empty() {
+        Vec::new()
+    } else {
+        for p in &paths {
+            eprintln!("bringing {p}");
+        }
+        match local(Request::ReadFiles { dir, paths })? {
+            Reply::Carried { files } => files,
+            _ => bail!("unexpected answer from this machine's daemon"),
+        }
+    };
+    Ok(dent_protocol::Bring {
+        name: pack.name,
+        remotes: pack.remotes,
+        branch: pack.branch,
+        files,
+    })
+}
+
+/// One request to this machine's daemon, over its socket.
+fn local(r: Request) -> Result<Reply> {
+    use std::io::{BufRead, Write};
+    let sock = dent_protocol::daemon_socket(&dent_remote::store::daemon_state());
+    let mut s = std::os::unix::net::UnixStream::connect(&sock)
+        .with_context(|| format!("dent isn't running on this machine ({})", sock.display()))?;
+    let mut hello = hello_line(1);
+    hello.push(b'\n');
+    s.write_all(&hello)?;
+    s.write_all(&encode(2, &r))?;
+    for line in std::io::BufReader::new(s.try_clone()?).lines() {
+        let env: Envelope<Out> = serde_json::from_str(&line?)?;
+        if env.req != 2 {
+            continue;
+        }
+        return match env.body {
+            Out::Reply { reply } => Ok(reply),
+            Out::Error { message } => bail!(message),
+            o => bail!("unexpected answer: {o:?}"),
+        };
+    }
+    bail!("this machine's daemon hung up")
 }
 
 async fn watch(args: &[String]) -> Result<()> {

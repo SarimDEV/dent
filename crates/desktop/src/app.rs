@@ -684,7 +684,19 @@ pub enum Waiting {
     Git(String),
     /// Taking away a closed session's worktree; `true` when forced.
     RemoveWorktree(String, bool),
+    /// Another machine's projects, to bring one here.
+    Elsewhere(String),
+    /// What bringing the project at a folder on a machine needs: from
+    /// where, the folder, and the machine it's for.
+    Pack(String, String, String),
+    /// The files a project brings, read on its machine, and the machine
+    /// it's for.
+    BringFiles(dent_protocol::Bring, String),
 }
+
+/// A message the daemon gave back longer ago than this isn't put back in
+/// its reply box when it's read again (a log read from the start).
+const GIVEN_BACK_FOR: u64 = 60 * 60 * 1000;
 
 /// How long a Git action's "Push to main?" waits for the second press.
 const GIT_CONFIRM_FOR: std::time::Duration = std::time::Duration::from_secs(5);
@@ -853,6 +865,17 @@ pub struct Dent {
     /// described them and the last `Agents` reply said they stand.
     pub agents: Vec<dent_protocol::AgentInfo>,
     pub projects: Vec<Project>,
+    /// Other machines' projects, by machine, for the picker to offer
+    /// bringing one to the machine new sessions go to.
+    pub elsewhere: HashMap<String, Vec<Project>>,
+    /// A project from another machine being looked at in the picker.
+    pub bring_draft: Option<crate::bring::Draft>,
+    /// The project (machine, folder) whose pack is being asked for.
+    pub bring_asked: Option<(String, String)>,
+    /// The project from another machine the next session brings.
+    pub bringing: Option<crate::bring::Chosen>,
+    /// Messages given back that went back in their reply box, by id.
+    given_back: std::collections::HashSet<String>,
     /// Requests whose replies matter, by request number.
     waiting: HashMap<u64, Waiting>,
     /// Each session's changes, from the daemon.
@@ -1672,6 +1695,11 @@ impl Dent {
             models: HashMap::new(),
             agents: Vec::new(),
             projects: Vec::new(),
+            elsewhere: HashMap::new(),
+            bring_draft: None,
+            bring_asked: None,
+            bringing: None,
+            given_back: Default::default(),
             waiting: HashMap::new(),
             changes: HashMap::new(),
             picks: HashMap::new(),
@@ -2766,9 +2794,18 @@ impl Dent {
                 // out of the queue it's restored or steered;
                 // gone to the agent instead, it's left be.
                 match &e.body {
-                    dent_protocol::Body::Unqueued { id } => {
+                    dent_protocol::Body::Unqueued { id, returned } => {
                         if let Some(tb) = self.taking_back.remove(id) {
                             self.took_back(tb);
+                        } else if let Some(r) = returned
+                            && crate::cards::now_ms().saturating_sub(e.at) < GIVEN_BACK_FOR
+                            && self.given_back.insert(id.clone())
+                        {
+                            // Given back by the daemon (its project couldn't
+                            // be brought there): back in the reply box, once,
+                            // though it's read again on catching up.
+                            let d = self.back_draft(id, &r.text, &r.attachments);
+                            self.restores.push((Some(e.session.clone()), d));
                         }
                     }
                     dent_protocol::Body::Delivered { id } => {
@@ -3062,6 +3099,34 @@ impl Dent {
                     self.toast(ToastAction::Info, w);
                 }
             }
+            (
+                Waiting::Elsewhere(machine),
+                Out::Reply {
+                    reply: Reply::Projects { projects },
+                },
+            ) => {
+                self.elsewhere_came(machine, projects);
+                self.relight_menu(cx);
+            }
+            (Waiting::Elsewhere(_), Out::Error { .. }) => {}
+            (
+                Waiting::Pack(from, dir, to),
+                Out::Reply {
+                    reply: Reply::Pack { pack },
+                },
+            ) => self.pack_came(from, dir, to, Ok(pack), cx),
+            (Waiting::Pack(from, dir, to), Out::Error { message }) => {
+                self.pack_came(from, dir, to, Err(message), cx)
+            }
+            (
+                Waiting::BringFiles(bring, to),
+                Out::Reply {
+                    reply: Reply::Carried { files },
+                },
+            ) => self.bring_files_came(bring, to, Ok(files), cx),
+            (Waiting::BringFiles(bring, to), Out::Error { message }) => {
+                self.bring_files_came(bring, to, Err(message), cx)
+            }
             (Waiting::ProjectMade, Out::Error { message }) => {
                 self.project_busy = None;
                 self.project_error = Some(message);
@@ -3100,12 +3165,17 @@ impl Dent {
                 self.rebuild(&id);
             }
             (
-                Waiting::Create(_),
+                Waiting::Create(typed),
                 Out::Reply {
                     reply: Reply::Created { session },
                 },
             ) => {
                 self.creating = false;
+                // Started from the new-session page: what it brought is
+                // spent.
+                if typed.is_some() {
+                    self.bringing = None;
+                }
                 if let Some(agent) = self.adopting.take() {
                     self.recent.retain(|r| r.agent_session != agent);
                 }
@@ -3537,6 +3607,8 @@ impl Dent {
     /// last new session started with (decision 0054); one never started
     /// in keeps what's chosen now.
     pub fn set_project(&mut self, project: Option<String>) {
+        // A project of its own, or none: nothing's brought.
+        self.bringing = None;
         if self.defaults.project == project {
             return;
         }
@@ -5089,6 +5161,11 @@ impl Dent {
         self.waiting.insert(n, w);
     }
 
+    /// Wait for the reply to request `n`.
+    pub fn waiting_insert(&mut self, n: u64, w: Waiting) {
+        self.waiting.insert(n, w);
+    }
+
     /// Ask the machine new sessions go to.
     pub fn ask_here(&mut self, req: Request, w: Waiting) {
         let n = self.live.send_to(&self.defaults.machine, req);
@@ -5108,12 +5185,19 @@ impl Dent {
         self.defaults.into = None;
         self.repo = None;
         self.projects.clear();
+        self.elsewhere.clear();
+        self.bring_draft = None;
         // What the last machine is still to say about its folders is old
         // news: a project it makes isn't a folder here.
         self.waiting.retain(|_, w| {
             !matches!(
                 w,
-                Waiting::Folders(_) | Waiting::ProjectMade | Waiting::Repo(_)
+                Waiting::Folders(_)
+                    | Waiting::ProjectMade
+                    | Waiting::Repo(_)
+                    | Waiting::Elsewhere(_)
+                    | Waiting::Pack(..)
+                    | Waiting::BringFiles(..)
             )
         });
         self.folders = None;
@@ -5872,7 +5956,13 @@ impl Dent {
         }
         self.ambient.borrow_mut().submit();
         let d = self.defaults.clone();
-        let (cwd, worktree) = d.place(d.project.clone(), self.new_worktree());
+        // A project from another machine is cloned there first. The choice
+        // stands until the session's made, for another try if it isn't.
+        let bring = self.bringing_here().map(|c| c.bring.clone());
+        let (cwd, worktree) = match bring {
+            Some(_) => (String::new(), None),
+            None => d.place(d.project.clone(), self.new_worktree()),
+        };
         // The project keeps what it was started with, for next time.
         self.project_prefs.insert(
             d.project.clone().unwrap_or_default(),
@@ -5899,6 +5989,7 @@ impl Dent {
                 text: typed.message(&self.pastes),
                 attachments: typed.files(),
                 files: Vec::new(),
+                bring,
             },
         );
         // Back to the field, chips and files, if it can't be made.
@@ -6073,6 +6164,7 @@ impl Dent {
                 text: typed.message(&self.pastes),
                 attachments: typed.files(),
                 files: Vec::new(),
+                bring: None,
             },
         );
         self.waiting.insert(n, Waiting::CreateAside(from, typed));
