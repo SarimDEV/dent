@@ -218,7 +218,8 @@ mod admin {
         match ask(paths, Request::OpenPairing)? {
             Reply::Pairing { code, expires } => {
                 let mins = expires.saturating_sub(crate::remote::trust::now_ms()) / 60_000;
-                println!("Pairing code: {} {}", &code[..3], &code[3..]);
+                let (a, b) = code.split_at_checked(3).unwrap_or((&code, ""));
+                println!("Pairing code: {a} {b}");
                 println!("Type it on the other device. It works once, for {mins} more minutes.");
                 Ok(())
             }

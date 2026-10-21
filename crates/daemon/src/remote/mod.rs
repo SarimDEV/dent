@@ -108,11 +108,14 @@ impl Net {
         };
         let epoch = match store.get("log_epoch") {
             Ok(Some(e)) => e,
-            _ => {
+            Ok(None) => {
                 let e = crate::daemon::new_id();
                 let _ = store.put("log_epoch", &e);
                 e
             }
+            // Unreadable just now: an epoch for this run only, never one
+            // written over the log's own.
+            Err(_) => crate::daemon::new_id(),
         };
         let port = std::env::var("DENT_REMOTE_PORT")
             .ok()
