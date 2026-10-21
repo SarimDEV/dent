@@ -9,8 +9,10 @@
 //! The rules ([decision 0062], [spike 12]):
 //! - Any frame counts as life. Pings go every 2 s while idle. After 3 s of
 //!   silence the machine reads as slow; at 5 s a replacement is dialled
-//!   beside the silent link, and whichever proves alive first wins; at
-//!   15 s with no frame the link is torn down.
+//!   beside the silent link, with another dial every second while the
+//!   silence lasts, and whichever proves alive first wins; at 15 s with no
+//!   frame the link is torn down. Pings follow what's heard, not what's
+//!   sent: the daemon only answers them.
 //! - Retries wait 0.1, 0.25, 0.5 and 1 s, then double from 2 s with each
 //!   wait drawn from the upper half of its step, capped at 60 s while the
 //!   app is in front and the machine was online in the last 10 minutes,
@@ -47,6 +49,8 @@ pub const SLOW_MS: u64 = 3_000;
 pub const REPLACE_MS: u64 = 5_000;
 /// Silence before the link is torn down.
 pub const SILENCE_MS: u64 = 15_000;
+/// While silent, a new dial this often beside the replacement race.
+const REDIAL_MS: u64 = 1_000;
 const QUICK: [u64; 4] = [100, 250, 500, 1_000];
 const CAP_NEAR_MS: u64 = 60_000;
 const CAP_FAR_MS: u64 = 300_000;
@@ -219,10 +223,16 @@ struct Open {
     generation: u64,
     opened: u64,
     last_rx: u64,
-    last_tx: u64,
+    /// When this side last pinged. Pings follow what's heard, not what's
+    /// sent: the daemon only answers, so a busy sender must still ping.
+    last_ping: u64,
     slow: bool,
     /// A replacement racing beside the silent link.
     replace: Option<Race>,
+    /// When the next extra dial joins the replacement race, and how many
+    /// have so far (they cycle through the routes).
+    redial_at: u64,
+    redials: usize,
     /// Better routes being tried while on a slower one.
     home: Option<Race>,
     last_home: u64,
@@ -380,7 +390,7 @@ impl Machine {
                         conn: o.conn,
                         data: f,
                     });
-                    o.last_tx = now;
+                    o.last_ping = now;
                 }
                 o.last_home = 0;
             }
@@ -391,7 +401,7 @@ impl Machine {
 
     /// Sends one data message (a JSON line) on the live link. Returns
     /// false when there's none; the caller keeps it for later.
-    pub fn send(&mut self, line: &[u8], now: u64) -> bool {
+    pub fn send(&mut self, line: &[u8], _now: u64) -> bool {
         let Phase::Open(o) = &mut self.phase else {
             return false;
         };
@@ -400,7 +410,6 @@ impl Machine {
                 for data in frames {
                     self.io.push_back(Io::Send { conn: o.conn, data });
                 }
-                o.last_tx = now;
                 true
             }
             Err(_) => false,
@@ -415,13 +424,21 @@ impl Machine {
             Phase::Racing(r) => race_deadline(r),
             Phase::Untrusted { pairing, .. } => pairing.as_ref().map(|(_, d)| *d),
             Phase::Open(o) => {
-                let mut d = (o.last_rx.max(o.last_tx) + PING_MS)
-                    .min(o.last_rx + if o.slow { REPLACE_MS } else { SLOW_MS })
-                    .min(o.last_rx + SILENCE_MS);
-                if let Some(r) = o.replace.as_ref().or(o.home.as_ref())
-                    && let Some(rd) = race_deadline(r)
-                {
-                    d = d.min(rd);
+                // Only deadlines still ahead: one already acted on (slow
+                // shown, replacement running) would wake the host in a loop.
+                let mut d = (o.last_rx.max(o.last_ping) + PING_MS).min(o.last_rx + SILENCE_MS);
+                if !o.slow {
+                    d = d.min(o.last_rx + SLOW_MS);
+                }
+                if o.replace.is_none() {
+                    d = d.min(o.last_rx + REPLACE_MS);
+                } else {
+                    d = d.min(o.redial_at);
+                }
+                for r in [&o.replace, &o.home].into_iter().flatten() {
+                    if let Some(rd) = race_deadline(r) {
+                        d = d.min(rd);
+                    }
                 }
                 if o.home.is_none() && self.better_routes(&o.addr, o.last_rx).next().is_some() {
                     d = d.min(o.last_home + HOME_EVERY_MS);
@@ -497,6 +514,15 @@ impl Machine {
         match &mut self.phase {
             Phase::Open(o) if o.conn == conn => {
                 o.last_rx = now;
+                // The old link proved alive first: it wins.
+                if let Some(r) = o.replace.take() {
+                    for c in race_conns(&r) {
+                        self.io.push_back(Io::Close { conn: c });
+                    }
+                }
+                let Phase::Open(o) = &mut self.phase else {
+                    return;
+                };
                 if o.slow {
                     o.slow = false;
                     self.set_state(State::Online);
@@ -795,11 +821,7 @@ impl Machine {
         if let Phase::Open(o) = &self.phase {
             close.push(o.conn);
             for r in [&o.replace, &o.home].into_iter().flatten() {
-                for a in &r.attempts {
-                    if a.conn != conn && !matches!(a.att, Att::Failed) {
-                        close.push(a.conn);
-                    }
-                }
+                close.extend(race_conns(r));
             }
             // A healthy link swapped out still counts toward a stable run.
             if now.saturating_sub(o.opened) >= STABLE_MS {
@@ -826,9 +848,11 @@ impl Machine {
             generation: self.generation,
             opened: now,
             last_rx: now,
-            last_tx: now,
+            last_ping: now,
             slow: false,
             replace: None,
+            redial_at: now,
+            redials: 0,
             home: None,
             last_home: now,
         }));
@@ -849,6 +873,7 @@ impl Machine {
             _ => return,
         };
         let mut to_replace = false;
+        let mut redial: Option<usize> = None;
         let mut to_home = false;
         {
             let Phase::Open(o) = &mut self.phase else {
@@ -867,27 +892,46 @@ impl Machine {
             let Phase::Open(o) = &mut self.phase else {
                 return;
             };
-            if now >= o.last_rx.max(o.last_tx) + PING_MS
+            if now >= o.last_rx.max(o.last_ping) + PING_MS
                 && let Ok(f) = o.t.seal_control(&Control::Ping { t: now })
             {
                 self.io.push_back(Io::Send {
                     conn: o.conn,
                     data: f,
                 });
-                o.last_tx = now;
+                o.last_ping = now;
             }
             if quiet >= REPLACE_MS && o.replace.is_none() {
                 to_replace = true;
+            } else if o.replace.is_some() && now >= o.redial_at {
+                o.redial_at = now + REDIAL_MS;
+                redial = Some(o.redials);
+                o.redials += 1;
             }
             if o.home.is_none() && !better.is_empty() && now >= o.last_home + HOME_EVERY_MS {
                 o.last_home = now;
                 to_home = true;
             }
         }
+        let replace_routes = match &self.phase {
+            Phase::Open(o) if self.routes.is_empty() => vec![o.addr.clone()],
+            _ => self.routes.clone(),
+        };
         if to_replace {
-            let r = self.new_race(self.routes.clone(), now);
+            let r = self.new_race(replace_routes.clone(), now);
             if let Phase::Open(o) = &mut self.phase {
                 o.replace = Some(r);
+                o.redial_at = now + REDIAL_MS;
+                o.redials = 0;
+            }
+        } else if let Some(i) = redial {
+            // Still silent: one more dial joins the race every second.
+            let addr = replace_routes[i % replace_routes.len()].clone();
+            let mut extra = self.new_race(vec![addr], now);
+            if let Phase::Open(o) = &mut self.phase
+                && let Some(r) = o.replace.as_mut()
+            {
+                r.attempts.append(&mut extra.attempts);
             }
         }
         if to_home {
@@ -923,7 +967,6 @@ impl Machine {
                         conn: o.conn,
                         data: f,
                     });
-                    o.last_tx = now;
                 }
             }
             Control::Pong { t } if t > 0 && t <= now => self.notes.push(Note::Rtt { ms: now - t }),
@@ -932,9 +975,6 @@ impl Machine {
                     g,
                     Goodbye::Restart { .. } | Goodbye::Update { .. } | Goodbye::Awake
                 );
-                if let Phase::Open(o) = &self.phase {
-                    self.io.push_back(Io::Close { conn: o.conn });
-                }
                 self.close_all();
                 self.set_state(State::Away(g));
                 if back_soon {
@@ -951,9 +991,6 @@ impl Machine {
                 }
             }
             Control::Refuse(r) => {
-                if let Phase::Open(o) = &self.phase {
-                    self.io.push_back(Io::Close { conn: o.conn });
-                }
                 if r.transient() {
                     self.lose_open(now, refusal_words(&r));
                 } else {
@@ -966,18 +1003,31 @@ impl Machine {
     }
 
     fn lose_open(&mut self, now: u64, why: String) {
-        let (healthy, addr) = match &self.phase {
-            Phase::Open(o) => (now.saturating_sub(o.opened) >= STABLE_MS, o.addr.clone()),
-            _ => (false, String::new()),
+        let Phase::Open(o) = std::mem::replace(&mut self.phase, Phase::Waiting { until: u64::MAX })
+        else {
+            return;
         };
+        let healthy = now.saturating_sub(o.opened) >= STABLE_MS;
         if healthy {
             self.attempt = 0;
-        } else if !addr.is_empty() && now < self.last_online.unwrap_or(0) + STABLE_MS {
+        } else if now < self.last_online.unwrap_or(0) + STABLE_MS {
             // Answered, then failed fast: leave that route alone for a while.
-            self.cooldown.insert(addr, now + COOLDOWN_MS);
+            self.cooldown.insert(o.addr.clone(), now + COOLDOWN_MS);
         }
-        self.close_all();
+        self.io.push_back(Io::Close { conn: o.conn });
+        if let Some(h) = &o.home {
+            for c in race_conns(h) {
+                self.io.push_back(Io::Close { conn: c });
+            }
+        }
         self.set_state(State::Reconnecting);
+        // A replacement already dialling carries on as the race.
+        if let Some(mut r) = o.replace {
+            r.why = Some(why);
+            self.phase = Phase::Racing(r);
+            self.step_race(now, Slot::Main);
+            return;
+        }
         // A lost live link tries again at once, through every route; if
         // that fails, `why` is what the person sees.
         self.race(now);
@@ -1148,23 +1198,13 @@ impl Machine {
 
     fn close_all(&mut self) {
         let mut close = Vec::new();
-        let race_conns = |r: &Race, close: &mut Vec<u64>| {
-            for a in &r.attempts {
-                if !matches!(a.att, Att::Failed | Att::NotYet) {
-                    close.push(a.conn);
-                }
-            }
-            if let Some((c, ..)) = r.untrusted.as_ref() {
-                close.push(*c);
-            }
-        };
         match &self.phase {
-            Phase::Racing(r) => race_conns(r, &mut close),
+            Phase::Racing(r) => close.extend(race_conns(r)),
             Phase::Untrusted { conn, .. } => close.push(*conn),
             Phase::Open(o) => {
                 close.push(o.conn);
                 for r in [&o.replace, &o.home].into_iter().flatten() {
-                    race_conns(r, &mut close);
+                    close.extend(race_conns(r));
                 }
             }
             _ => {}
@@ -1190,6 +1230,20 @@ enum Slot {
     Main,
     Replace,
     Home,
+}
+
+/// A race's sockets that are open or opening.
+fn race_conns(r: &Race) -> Vec<u64> {
+    let mut v: Vec<u64> = r
+        .attempts
+        .iter()
+        .filter(|a| !matches!(a.att, Att::Failed | Att::NotYet))
+        .map(|a| a.conn)
+        .collect();
+    if let Some((c, ..)) = r.untrusted.as_ref() {
+        v.push(*c);
+    }
+    v
 }
 
 fn race_deadline(r: &Race) -> Option<u64> {

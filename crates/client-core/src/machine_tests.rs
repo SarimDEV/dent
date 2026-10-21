@@ -44,6 +44,9 @@ struct Sim {
     responsive: bool,
     notes: Vec<Note>,
     dials: Vec<String>,
+    /// New dials never complete (the network is still down), while links
+    /// already up stay as they are.
+    hang: bool,
 }
 
 impl Sim {
@@ -69,6 +72,7 @@ impl Sim {
             responsive: true,
             notes: Vec::new(),
             dials: Vec::new(),
+            hang: false,
         }
     }
 
@@ -95,6 +99,9 @@ impl Sim {
         match op {
             Io::Connect { conn, addr } => {
                 self.dials.push(addr.clone());
+                if self.hang {
+                    return;
+                }
                 match self.addrs.get(&addr).copied().unwrap_or(Addr::Silent) {
                     Addr::Up | Addr::Imposter => {
                         self.conns
@@ -511,4 +518,94 @@ fn data_goes_out_only_on_a_live_link() {
     s.m.signal(Signal::Retry, s.now);
     s.pump();
     assert!(s.m.send(br#"{"req":1,"op":"hello","proto":1,"client":"t"}"#, s.now));
+}
+
+/// Brings `s` online over its routes.
+fn online(s: &mut Sim) {
+    s.m.connect(s.now);
+    s.pump();
+    s.run_for(500);
+    assert_eq!(s.m.state(), &State::Online);
+}
+
+#[test]
+fn a_busy_sender_still_pings() {
+    // The daemon only answers pings. A client sending data every half
+    // second must still ping, or the link would read as silent.
+    let mut s = Sim::new(&[("lan:7480", Addr::Up)]);
+    s.trust_device();
+    online(&mut s);
+    for _ in 0..40 {
+        assert!(s.m.send(b"{}", s.now));
+        s.pump();
+        s.run_for(500);
+    }
+    assert!(!s.states().contains(&State::Slow), "{:?}", s.states());
+    assert_eq!(s.ups().len(), 1);
+}
+
+#[test]
+fn silence_never_asks_the_host_to_wake_in_a_loop() {
+    let mut s = Sim::new(&[("lan:7480", Addr::Up)]);
+    s.trust_device();
+    online(&mut s);
+    s.responsive = false;
+    s.hang = true;
+    for _ in 0..60 {
+        s.run_for(250);
+        if let Some(d) = s.m.next_deadline() {
+            assert!(d > s.now, "deadline {d} not after {}", s.now);
+        }
+    }
+}
+
+#[test]
+fn the_old_link_answering_first_cancels_the_replacement() {
+    let mut s = Sim::new(&[("lan:7480", Addr::Up)]);
+    s.trust_device();
+    online(&mut s);
+    s.responsive = false;
+    s.hang = true;
+    s.run_for(5_500);
+    assert!(matches!(&s.m.phase, Phase::Open(o) if o.replace.is_some()));
+    // The old socket's backlog clears and a frame gets through.
+    s.daemon_says(Control::Ping { t: 1 });
+    assert!(matches!(&s.m.phase, Phase::Open(o) if o.replace.is_none()));
+    assert_eq!(s.m.state(), &State::Online);
+    assert_eq!(s.ups().len(), 1);
+}
+
+#[test]
+fn while_silent_a_new_dial_starts_every_second() {
+    let mut s = Sim::new(&[("lan:7480", Addr::Up)]);
+    s.trust_device();
+    online(&mut s);
+    s.responsive = false;
+    s.hang = true;
+    let before = s.dials.len();
+    // From the replacement at 5 s to the teardown at 15 s.
+    s.run_for(14_000);
+    let n = s.dials.len() - before;
+    assert!(n >= 9, "dials while silent: {n}");
+}
+
+#[test]
+fn the_replacement_carries_on_when_the_old_link_closes() {
+    let mut s = Sim::new(&[("lan:7480", Addr::Up)]);
+    s.trust_device();
+    online(&mut s);
+    s.responsive = false;
+    s.hang = true;
+    s.run_for(5_500);
+    let Phase::Open(o) = &s.m.phase else {
+        panic!("not open")
+    };
+    let (old, racing) = (o.conn, o.replace.as_ref().unwrap().attempts[0].conn);
+    s.m.closed(old, "reset", s.now);
+    s.pump();
+    assert_eq!(s.m.state(), &State::Reconnecting);
+    assert!(
+        matches!(&s.m.phase, Phase::Racing(r) if r.attempts.iter().any(|a| a.conn == racing)),
+        "the dial in flight was kept"
+    );
 }
