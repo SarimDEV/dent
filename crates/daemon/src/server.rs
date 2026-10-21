@@ -74,7 +74,8 @@ pub async fn session(
     tx: mpsc::Sender<Vec<u8>>,
 ) -> Result<()> {
     let mut hello = false;
-    let mut sub: Option<tokio::task::JoinHandle<()>> = None;
+    // Ends with the session, even one aborted mid-request.
+    let mut sub: Option<AbortOnDrop> = None;
     while let Some(line) = lines.recv().await {
         let env: Envelope<Request> = match serde_json::from_str(&line) {
             Ok(e) => e,
@@ -129,9 +130,7 @@ pub async fn session(
                 }
             }
             Request::Subscribe { mut after, epoch } => {
-                if let Some(old) = sub.take() {
-                    old.abort();
-                }
+                drop(sub.take());
                 // A different epoch means this log isn't the one the
                 // client's `after` counts in: start over, and say so.
                 if epoch.as_ref().is_some_and(|e| *e != d.net.epoch) {
@@ -146,7 +145,12 @@ pub async fn session(
                         .await;
                 }
                 let rx = d.live.subscribe();
-                sub = Some(tokio::spawn(subscribe(d.clone(), after, rx, tx.clone())));
+                sub = Some(AbortOnDrop(tokio::spawn(subscribe(
+                    d.clone(),
+                    after,
+                    rx,
+                    tx.clone(),
+                ))));
                 Ok(Reply::Ok)
             }
             Request::OpenPairing => d
@@ -169,10 +173,16 @@ pub async fn session(
             break;
         }
     }
-    if let Some(s) = sub {
-        s.abort();
-    }
     Ok(())
+}
+
+/// A task that stops when this is dropped.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
