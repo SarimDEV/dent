@@ -26,7 +26,9 @@ tokio = { workspace = true, features = ["net", "signal"] }
 tokio-tungstenite = "=0.26.2"
 
 [dev-dependencies]
+dent-client-core.workspace = true
 dent-link.workspace = true
+dent-remote.workspace = true
 futures-util = "=0.3.34"
 hex = "=0.4.3"
 libc = "=0.2.190"

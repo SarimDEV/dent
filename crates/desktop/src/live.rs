@@ -30,13 +30,23 @@ pub enum Incoming {
         req: u64,
         out: Out,
     },
+    /// Anything from a remote machine, by the id it was started under
+    /// ([`crate::net`]).
+    Remote {
+        id: String,
+        event: dent_remote::Event,
+    },
+    /// A machine being added was named by its welcome: it goes by `to` now.
+    Renamed {
+        from: String,
+        to: String,
+    },
 }
 
 /// The window's handle for sending requests.
 #[derive(Clone)]
 pub struct Live {
     tx: Sender<(u64, Request)>,
-    next: Arc<AtomicU64>,
     /// The last event the window has applied; reconnects subscribe from here.
     pub seq: Arc<AtomicU64>,
 }
@@ -50,19 +60,13 @@ impl Live {
             .name("dent-live".into())
             .spawn(move || run(state, rx, ui, s))
             .ok();
-        Self {
-            tx,
-            next: Arc::new(AtomicU64::new(100)),
-            seq,
-        }
+        Self { tx, seq }
     }
 
-    /// Send a request; its reply comes back as [`Incoming::Out`] with the
-    /// returned number.
-    pub fn send(&self, r: Request) -> u64 {
-        let n = self.next.fetch_add(1, Ordering::Relaxed);
+    /// Send request number `n`; its reply comes back as [`Incoming::Out`]
+    /// with the same number.
+    pub fn send_as(&self, n: u64, r: Request) {
         let _ = self.tx.send((n, r));
-        n
     }
 }
 

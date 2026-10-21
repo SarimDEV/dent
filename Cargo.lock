@@ -2089,14 +2089,12 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "dent-client-core",
- "dent-link",
  "dent-protocol",
- "futures-util",
+ "dent-remote",
  "hex",
  "serde",
  "serde_json",
  "tokio",
- "tokio-tungstenite",
 ]
 
 [[package]]
@@ -2114,8 +2112,10 @@ name = "dent-daemon"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "dent-client-core",
  "dent-link",
  "dent-protocol",
+ "dent-remote",
  "dent-session-holder",
  "futures-util",
  "hex",
@@ -2137,7 +2137,9 @@ dependencies = [
  "cairo-rs",
  "dent-ambient",
  "dent-client-core",
+ "dent-link",
  "dent-protocol",
+ "dent-remote",
  "futures",
  "gpui-kit",
  "gtk",
@@ -2159,6 +2161,7 @@ dependencies = [
  "rustybuzz",
  "serde",
  "serde_json",
+ "tokio",
  "ttf-parser",
  "webkit2gtk",
  "webview2-com",
@@ -2200,6 +2203,22 @@ version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "dent-remote"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "dent-client-core",
+ "dent-link",
+ "dent-protocol",
+ "futures-util",
+ "hex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

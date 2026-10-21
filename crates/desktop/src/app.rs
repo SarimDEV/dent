@@ -21,6 +21,7 @@ use crate::complete;
 use crate::data::{Artifact, FileDiff, Item, Session};
 use crate::live::{Incoming, Live};
 use crate::markdown::Block;
+use crate::net::Net;
 use crate::theme::{Status, Theme};
 use crate::web::{PageEvent, Preview, Source};
 
@@ -757,7 +758,9 @@ pub struct Dent {
     pub births: HashMap<String, (usize, Vec<(usize, Instant)>)>,
     /// Everything the daemon has said, folded into timelines.
     pub core: Sessions,
-    pub live: Live,
+    pub live: Net,
+    /// Every remote machine saved or being added, for Settings and labels.
+    pub machines: Vec<crate::machines::MachineView>,
     /// This machine's name, once connected; why not, when not.
     pub machine: String,
     pub connection: Result<(), String>,
@@ -1294,6 +1297,16 @@ impl Dent {
             .detach();
         cx.observe_window_activation(window, |this, window, cx| {
             this.window_active = window.is_window_active();
+            // In front, a machine that went quiet is tried again now, and
+            // its retries stay quick (decision 0062).
+            this.live.signal(
+                None,
+                if this.window_active {
+                    dent_client_core::machine::Signal::Foreground
+                } else {
+                    dent_client_core::machine::Signal::Background
+                },
+            );
             // Coming back to the window is looking at the open session.
             this.mark_seen();
             cx.notify();
@@ -1320,7 +1333,7 @@ impl Dent {
         // The daemon's feed arrives on a channel; the window applies it as
         // it comes.
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
-        let live = Live::start(crate::live::default_state(), tx);
+        let live = Net::start(Live::start(crate::live::default_state(), tx.clone()), tx);
         cx.spawn(async move |this, cx| {
             use futures::StreamExt;
             while let Some(first) = rx.next().await {
@@ -1502,6 +1515,10 @@ impl Dent {
             births: HashMap::new(),
             core: Sessions::default(),
             live,
+            machines: dent_remote::store::load()
+                .into_iter()
+                .map(crate::machines::MachineView::saved)
+                .collect(),
             machine: String::new(),
             connection: Err("Starting dent…".into()),
             drops: 0,
@@ -2494,89 +2511,42 @@ impl Dent {
                     }
                     self.connection = Err(why);
                 }
-                Incoming::Out { req, out } => {
-                    if let Out::Events { events } = &out {
-                        // A finished turn may have changed files.
-                        for e in events {
-                            // A waiting message being taken back: once it's
-                            // out of the queue it's restored or steered;
-                            // gone to the agent instead, it's left be.
-                            match &e.body {
-                                dent_protocol::Body::Unqueued { id } => {
-                                    if let Some(tb) = self.taking_back.remove(id) {
-                                        self.took_back(tb);
-                                    }
-                                }
-                                dent_protocol::Body::Delivered { id } => {
-                                    self.taking_back.remove(id);
-                                }
-                                _ => {}
-                            }
-                            // A pull request changing (checks, review, merge)
-                            // changes what the Git button offers.
-                            if matches!(e.body, dent_protocol::Body::PullRequest { .. })
-                                && self.core.live
-                            {
-                                self.fetch_git(&e.session);
-                            }
-                            if matches!(e.body, dent_protocol::Body::TurnEnded { .. })
-                                && self.core.live
-                            {
-                                self.fetch_changes(&e.session);
-                                // A command may have changed what's in
-                                // effect, which the menu marks.
-                                self.fetch_commands(&e.session);
-                            }
+                Incoming::Out { req, out } => self.on_out("", req, out, &mut changed, cx),
+                Incoming::Remote { id, event } => match event {
+                    dent_remote::Event::Out { req, mut out } => {
+                        dent_client_core::fleet::qualify_out(&id, &mut out);
+                        if let Out::Resync { .. } = out {
+                            changed.extend(self.core.forget(&id));
+                        }
+                        self.on_out(&id, req, out, &mut changed, cx);
+                    }
+                    event => {
+                        let named = matches!(
+                            event,
+                            dent_remote::Event::Welcome { .. } | dent_remote::Event::State(_)
+                        );
+                        crate::machines::apply(&mut self.machines, &id, event);
+                        // Its sessions' rows say its name and whether it's away.
+                        if named {
+                            changed.extend(
+                                self.core
+                                    .list
+                                    .keys()
+                                    .filter(|k| dent_client_core::fleet::split(k).0 == id)
+                                    .cloned(),
+                            );
                         }
                     }
-                    if let Out::Commands { session, commands } = &out {
-                        self.commands.insert(session.clone(), commands.clone());
-                    }
-                    if let Out::Sheet {
-                        session, command, ..
-                    } = &out
-                    {
-                        self.act_errors
-                            .retain(|(s, c, _), _| !(s == session && c == command));
-                    }
-                    if let Out::Acted {
-                        session,
-                        command,
-                        act,
-                        url,
-                        error,
-                    } = &out
-                    {
-                        self.acted(session, command, act, url.as_deref(), error.as_deref(), cx);
-                    }
-                    if let Out::Models { models, agent } = &out {
-                        let agent = self.agent_id(Some(agent));
-                        self.models.insert(agent, models.clone());
-                        changed.extend(self.core.list.keys().cloned());
-                    }
-                    let first = !self.core.live;
-                    for id in self.core.apply(&out) {
-                        if !changed.contains(&id) {
-                            changed.push(id);
-                        }
-                    }
-                    if first
-                        && self.core.live
-                        && let Some(id) = self.selected.clone()
-                    {
-                        // Caught up: the open session's changes; others load
-                        // when opened.
-                        self.fetch_changes(&id);
-                    }
-                    if req != 0 {
-                        self.reply(req, out, cx);
-                    }
+                },
+                Incoming::Renamed { from, to } => {
+                    crate::machines::rename(&mut self.machines, &from, &to)
                 }
             }
         }
-        self.live
-            .seq
-            .store(self.core.last_seq, std::sync::atomic::Ordering::Relaxed);
+        self.live.set_seq("", self.core.last_seq);
+        for m in self.live.tags() {
+            self.live.set_seq(&m, self.core.feed(&m).last_seq);
+        }
         changed.sort();
         changed.dedup();
         for id in changed {
@@ -2584,6 +2554,94 @@ impl Dent {
         }
         self.parse_ahead(cx);
         cx.notify();
+    }
+
+    /// One message from `machine`'s daemon ("" is this machine), its
+    /// session ids already qualified.
+    fn on_out(
+        &mut self,
+        machine: &str,
+        req: u64,
+        out: Out,
+        changed: &mut Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Out::Events { events } = &out {
+            // A finished turn may have changed files.
+            for e in events {
+                // A waiting message being taken back: once it's
+                // out of the queue it's restored or steered;
+                // gone to the agent instead, it's left be.
+                match &e.body {
+                    dent_protocol::Body::Unqueued { id } => {
+                        if let Some(tb) = self.taking_back.remove(id) {
+                            self.took_back(tb);
+                        }
+                    }
+                    dent_protocol::Body::Delivered { id } => {
+                        self.taking_back.remove(id);
+                    }
+                    _ => {}
+                }
+                // A pull request changing (checks, review, merge)
+                // changes what the Git button offers.
+                if matches!(e.body, dent_protocol::Body::PullRequest { .. })
+                    && self.core.feed(machine).live
+                {
+                    self.fetch_git(&e.session);
+                }
+                if matches!(e.body, dent_protocol::Body::TurnEnded { .. })
+                    && self.core.feed(machine).live
+                {
+                    self.fetch_changes(&e.session);
+                    // A command may have changed what's in
+                    // effect, which the menu marks.
+                    self.fetch_commands(&e.session);
+                }
+            }
+        }
+        if let Out::Commands { session, commands } = &out {
+            self.commands.insert(session.clone(), commands.clone());
+        }
+        if let Out::Sheet {
+            session, command, ..
+        } = &out
+        {
+            self.act_errors
+                .retain(|(s, c, _), _| !(s == session && c == command));
+        }
+        if let Out::Acted {
+            session,
+            command,
+            act,
+            url,
+            error,
+        } = &out
+        {
+            self.acted(session, command, act, url.as_deref(), error.as_deref(), cx);
+        }
+        if let Out::Models { models, agent } = &out {
+            let agent = self.agent_id(Some(agent));
+            self.models.insert(agent, models.clone());
+            changed.extend(self.core.list.keys().cloned());
+        }
+        let first = !self.core.feed(machine).live;
+        for id in self.core.apply_from(machine, &out) {
+            if !changed.contains(&id) {
+                changed.push(id);
+            }
+        }
+        if first
+            && self.core.feed(machine).live
+            && let Some(id) = self.selected.clone()
+        {
+            // Caught up: the open session's changes; others load
+            // when opened.
+            self.fetch_changes(&id);
+        }
+        if req != 0 {
+            self.reply(req, out, cx);
+        }
     }
 
     /// Replies of turns that just finished, parsed on a background thread,
@@ -4721,7 +4779,24 @@ impl Dent {
 
     /// Draw a session again from its timeline.
     fn rebuild(&mut self, id: &str) {
+        // A remote machine's session says that machine's name and agents.
+        let owner = dent_client_core::fleet::split(id).0;
+        let far = (!owner.is_empty())
+            .then(|| self.machines.iter().find(|m| m.id == owner))
+            .flatten()
+            .cloned();
+        let machine = far
+            .as_ref()
+            .map_or_else(|| self.machine.clone(), |m| m.name().to_string());
+        let agents = far
+            .as_ref()
+            .filter(|m| !m.agents.is_empty())
+            .map_or_else(|| self.agents.clone(), |m| m.agents.clone());
         let Some(v) = self.core.list.get_mut(id) else {
+            // Forgotten (its machine's log started again): not drawn until
+            // the log brings it back.
+            self.sessions.retain(|s| s.id != id);
+            self.built.remove(id);
             return;
         };
         let from = v.take_changes();
@@ -4745,9 +4820,9 @@ impl Dent {
         let mut s = crate::bridge::session(
             v,
             crate::bridge::Context {
-                machine: &self.machine,
+                machine: &machine,
                 models: &models,
-                agents: &self.agents,
+                agents: &agents,
                 diff: self.changes.get(id).cloned(),
                 now_ms,
             },
@@ -4763,9 +4838,9 @@ impl Dent {
             let then = crate::bridge::session(
                 &old,
                 crate::bridge::Context {
-                    machine: &self.machine,
+                    machine: &machine,
                     models: &models,
-                    agents: &self.agents,
+                    agents: &agents,
                     diff: None,
                     now_ms,
                 },
@@ -4775,6 +4850,15 @@ impl Dent {
             s.items = then.items;
             s.versions = crate::bridge::versions(v, Some(b));
             s.old = Some(v.branches[b].seq);
+        }
+        // On a machine that's away, nothing is working: it carries on when
+        // the machine is back.
+        if let Some(m) = &far
+            && let Some(why) = m.away()
+            && s.status == Status::Working
+        {
+            s.status = Status::Waiting;
+            s.detail = why;
         }
         let made_changed = old.as_ref().is_none_or(|(_, _, sig, _)| *sig != s.made_sig);
         let partial_len = v.partial.len();
@@ -4883,7 +4967,9 @@ impl Dent {
         let looking = self.window_active && self.selected.as_deref() == Some(id);
         // News of its pull request says itself, once (below).
         let pr_said = dent_client_core::pr_news(old_pr.as_ref(), s.pr.as_ref());
-        if self.core.live && !looking && old_status.is_some() && old_status != Some(s.status) {
+        // Its own machine's feed: another machine catching up is history.
+        let live = self.core.live_for(id);
+        if live && !looking && old_status.is_some() && old_status != Some(s.status) {
             match s.status {
                 Status::Needs if !pr_said => {
                     crate::notify::post("Needs you", &format!("{} · {}", s.title, s.detail), id)
@@ -4896,7 +4982,7 @@ impl Dent {
             }
         }
         // Its pull request's checks failing, changes asked for, a merge.
-        if self.core.live
+        if live
             && !looking
             && old_status.is_some()
             && pr_said
@@ -4919,7 +5005,7 @@ impl Dent {
                 }
                 _ => {}
             }
-            if old_status.is_none() && self.core.live {
+            if old_status.is_none() && live {
                 self.arrived_at.insert(id.to_string(), Instant::now());
             }
         }

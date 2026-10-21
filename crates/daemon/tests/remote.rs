@@ -529,3 +529,86 @@ async fn one_pairing_exchange_at_a_time() {
         }
     }
 }
+
+/// The client side as the desktop runs it ([`dent_remote`]): pairs with a
+/// code, says hello on its own, and a request made while the daemon is down
+/// waits and goes when it's back.
+#[tokio::test]
+async fn a_client_pairs_and_its_requests_wait_out_a_restart() {
+    use dent_client_core::machine::State;
+    use dent_remote::Event;
+
+    let mut d = Daemon::start(&[]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let saved = dent_remote::Saved {
+        routes: vec![format!("127.0.0.1:{}", d.port)],
+        ..Default::default()
+    };
+    let r = dent_remote::spawn(
+        &tokio::runtime::Handle::current(),
+        Keys::generate().unwrap(),
+        "test",
+        saved,
+        move |e| {
+            let _ = tx.send(e);
+        },
+    );
+    async fn until<T>(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
+        mut f: impl FnMut(Event) -> Option<T>,
+    ) -> T {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(t) = f(rx.recv().await.expect("the client stopped")) {
+                    return t;
+                }
+            }
+        })
+        .await
+        .expect("timed out")
+    }
+
+    // Untrusted: it asks for a code, and pairing with one says hello.
+    until(&mut rx, |e| {
+        matches!(e, Event::State(State::NeedsCode { .. })).then_some(())
+    })
+    .await;
+    r.pair(&d.code());
+    let saved = until(&mut rx, |e| match e {
+        Event::Saved(s) => Some(s),
+        _ => None,
+    })
+    .await;
+    assert_eq!(saved.id.len(), 12);
+    assert!(!saved.key.is_empty(), "the key it paired with is kept");
+    until(&mut rx, |e| {
+        matches!(e, Event::Welcome { .. }).then_some(())
+    })
+    .await;
+    r.send(100, Request::Projects);
+    until(&mut rx, |e| {
+        matches!(e, Event::Out { req: 100, .. }).then_some(())
+    })
+    .await;
+
+    // Down: a request waits, then goes once the daemon is back.
+    d.signal(libc::SIGTERM);
+    if let Some(mut c) = d.child.take() {
+        let _ = c.wait();
+    }
+    until(&mut rx, |e| {
+        matches!(
+            e,
+            Event::State(State::Away(_) | State::Reconnecting | State::Unreachable { .. })
+        )
+        .then_some(())
+    })
+    .await;
+    r.send(101, Request::Projects);
+    d.spawn(&[]);
+    until(&mut rx, |e| {
+        matches!(e, Event::Out { req: 101, .. }).then_some(())
+    })
+    .await;
+    r.stop();
+}
