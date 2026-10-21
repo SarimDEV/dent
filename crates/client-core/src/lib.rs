@@ -8,6 +8,7 @@
 //!
 //! [spike 07]: ../../docs/spikes/07-client-core.md
 
+pub mod machine;
 pub mod timeline;
 
 pub use timeline::{
