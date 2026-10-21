@@ -86,7 +86,7 @@ pub struct Net {
     pub port: u16,
     trust: Mutex<Trust>,
     window: Mutex<Window>,
-    lan: AtomicBool,
+    pub lan: AtomicBool,
     tailscale: tokio::sync::Mutex<Option<(Option<tailnet::SelfNode>, Instant)>>,
     /// Device keys trusted through Tailscale lately, so a LAN attempt from
     /// one can be told "trusted on Tailscale" rather than "pair".

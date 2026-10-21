@@ -126,6 +126,7 @@ pub async fn session(
                         id: d.net.id(),
                         epoch: d.net.epoch.clone(),
                         addresses: d.net.addresses().await,
+                        wake: crate::remote::addrs::wake_targets(),
                     })
                 }
             }
@@ -506,6 +507,12 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
         Request::Machine => Reply::Machine {
             machine: d.machine().await,
         },
+        Request::SetLan { on } => {
+            d.set_lan(on)?;
+            Reply::Machine {
+                machine: d.machine().await,
+            }
+        }
         Request::SetLoginItem { on } => {
             if on && let Some(why) = crate::login::blocked() {
                 bail!("{why}");

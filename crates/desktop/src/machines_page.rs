@@ -786,15 +786,29 @@ impl Dent {
                 (_, State::TrustedElsewhere { .. }) => "Trusted on Tailscale only".into(),
                 _ => "Can't reach".into(),
             };
+            // Asleep or out of reach, with cards it can be woken through:
+            // Wake sends the packets from here, then tries again.
+            let wakes =
+                matches!(st, Standing::Asleep | Standing::Unreachable) && !m.saved.wake.is_empty();
             let retry = (!st.connected() && st != Standing::Connecting).then(|| {
                 let id = m.id.clone();
+                let (cards, name) = (m.saved.wake.clone(), m.name().to_string());
                 ui::inner_button(
                     SharedString::from(format!("retry-{}", m.id)),
-                    "Retry",
+                    if wakes { "Wake" } else { "Retry" },
                     false,
                     &t,
                 )
                 .on_press(cx.listener(move |this, _, _, cx| {
+                    if wakes {
+                        let said = match dent_remote::wake::wake(&cards) {
+                            Ok(_) => {
+                                format!("Sent {name} a wake-up; it works from the same network")
+                            }
+                            Err(e) => format!("Couldn't send {name} a wake-up: {e}"),
+                        };
+                        this.toast(crate::app::ToastAction::Info, said);
+                    }
                     this.live.signal(Some(&id), Signal::Retry);
                     cx.notify();
                 }))

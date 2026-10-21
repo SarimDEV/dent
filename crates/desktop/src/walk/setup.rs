@@ -574,9 +574,10 @@ pub(super) fn bring_live() -> Vec<(f32, Act)> {
                 "the session works in the clone",
                 |d, _| {
                     d.sessions.iter().any(|s| {
-                        s.items.iter().any(
-                            |i| matches!(i, Item::Note { text, .. } if text.starts_with("Cloned")),
-                        )
+                        d.selected.as_deref() == Some(s.id.as_str())
+                            && s.items.iter().any(|i| {
+                                matches!(i, Item::Note { text, .. } if text.starts_with("Cloned"))
+                            })
                     })
                 },
                 60.,

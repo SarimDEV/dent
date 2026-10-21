@@ -24,6 +24,7 @@ mod login;
 mod machine;
 mod paths;
 mod plan_tool;
+mod power;
 mod projects;
 mod remote;
 mod secrets;
@@ -129,6 +130,17 @@ fn main() -> Result<()> {
                 if let Err(e) = remote::serve(d).await {
                     eprintln!("dent-daemon: remote access off: {e:#}");
                 }
+            });
+        }
+        // The machine going to sleep: every device is told, so it reads
+        // as asleep at once instead of gone quiet. The links close; they
+        // dial again once it wakes.
+        {
+            let bye = d.net.bye.clone();
+            power::watch(move || {
+                let _ = bye.send(dent_link::Goodbye::Sleep);
+                // Time for the goodbyes to leave before the network sleeps.
+                std::thread::sleep(Duration::from_millis(300));
             });
         }
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;

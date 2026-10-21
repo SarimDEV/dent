@@ -31,18 +31,17 @@ fn folder(machine: &str) -> PathBuf {
     home.join("Library/Caches/dent/machines").join(machine)
 }
 
-/// Where the copy of `path` from `machine` is kept: named by a hash of the
-/// path, keeping its extension so it's read as the right kind.
+/// Where the copy of `path` from `machine` is kept: in a folder named by a
+/// hash of the path, under its own name, so it reads as itself.
 fn place(machine: &str, path: &str) -> PathBuf {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in path.bytes() {
         h = (h ^ u64::from(b)).wrapping_mul(0x100000001b3);
     }
-    let ext = std::path::Path::new(path)
-        .extension()
-        .map(|e| e.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    folder(machine).join(format!("{h:016x}.{ext}"))
+    let name = std::path::Path::new(path)
+        .file_name()
+        .map_or_else(|| "picture".into(), |n| n.to_string_lossy().into_owned());
+    folder(machine).join(format!("{h:016x}")).join(name)
 }
 
 fn is_picture(path: &str) -> bool {
@@ -126,7 +125,9 @@ impl Dent {
         let key = (machine.clone(), path.clone());
         let at = place(&machine, &path);
         let kept = bytes.is_some_and(|b| {
-            std::fs::create_dir_all(folder(&machine)).is_ok() && std::fs::write(&at, b).is_ok()
+            at.parent()
+                .is_some_and(|p| std::fs::create_dir_all(p).is_ok())
+                && std::fs::write(&at, b).is_ok()
         });
         self.mirror
             .insert(key, if kept { Copy::Here(at) } else { Copy::Failed });
@@ -143,7 +144,7 @@ mod tests {
     #[test]
     fn copies_are_named_by_path_and_keep_their_kind() {
         let a = place("m1", "/home/ada/shot.png");
-        assert_eq!(a.extension().unwrap(), "png");
+        assert_eq!(a.file_name().unwrap(), "shot.png");
         assert_ne!(a, place("m1", "/home/ada/other/shot.png"));
         assert_ne!(a, place("m2", "/home/ada/shot.png"));
         assert!(is_picture("/x/y.JPG"));

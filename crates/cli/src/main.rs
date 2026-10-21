@@ -13,6 +13,9 @@
 //!   the project at DIR on this machine is cloned there first, with its
 //!   ignored environment files (`.env`), and the session works in it.
 //!
+//! - `dent wake NAME` sends a sleeping machine a Wake-on-LAN packet, from
+//!   the same network, to the cards its last welcome named.
+//!
 //! Its own key and saved machines live in the client state folder
 //! (`DENT_CLIENT_STATE`, else `client/` beside the daemon's state).
 //!
@@ -63,9 +66,22 @@ async fn main() -> Result<()> {
         }
         Some("watch") => watch(&args[1..]).await,
         Some("ask") => ask(&args[1..]).await,
+        Some("wake") => {
+            let name = args.get(1).context("dent wake NAME")?;
+            let m = load()
+                .into_iter()
+                .find(|s| s.name == *name || s.id == *name)
+                .with_context(|| format!("no saved machine called {name}"))?;
+            if m.wake.is_empty() {
+                bail!("{name} hasn't said how to wake it: connect to it once while it's awake");
+            }
+            let n = dent_remote::wake::wake(&m.wake)?;
+            println!("sent {n} wake-up packets to {name}");
+            Ok(())
+        }
         _ => {
             eprintln!(
-                "usage: dent machine add HOST:PORT [--code CODE] | dent machines | dent machine remove NAME | dent watch [NAME...] [--secs N] | dent ask NAME TEXT [--file PATH]... [--cwd DIR | --bring DIR]"
+                "usage: dent machine add HOST:PORT [--code CODE] | dent machines | dent machine remove NAME | dent watch [NAME...] [--secs N] | dent ask NAME TEXT [--file PATH]... [--cwd DIR | --bring DIR] | dent wake NAME"
             );
             Ok(())
         }
@@ -154,6 +170,7 @@ async fn add(args: &[String]) -> Result<()> {
         key: hex::encode(&key),
         routes: vec![addr],
         learned: addresses,
+        wake: Vec::new(),
     })?;
     println!("added {name} ({id})");
     Ok(())

@@ -8,6 +8,7 @@
 pub mod host;
 pub mod remote;
 pub mod store;
+pub mod wake;
 
 pub use remote::{Event, Remote, spawn};
 pub use store::Saved;

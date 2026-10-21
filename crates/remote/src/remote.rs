@@ -416,7 +416,7 @@ async fn run(
                         let (req, out) = (env.req, env.body);
                         if req == HELLO {
                             match out {
-                                Out::Reply { reply: Reply::Welcome { proto, machine, id, version, agents, addresses, epoch: e, .. } } => {
+                                Out::Reply { reply: Reply::Welcome { proto, machine, id, version, agents, addresses, wake, epoch: e, .. } } => {
                                     if !saved.id.is_empty() && !id.is_empty() && id != saved.id {
                                         events(Event::DifferentMachine(via.0.clone()));
                                         continue;
@@ -428,6 +428,12 @@ async fn run(
                                         saved.id = id.clone();
                                     }
                                     saved.learned = addresses;
+                                    // Kept from before when it says none: a
+                                    // machine waking up on another network
+                                    // still has its cards.
+                                    if !wake.is_empty() {
+                                        saved.wake = wake;
+                                    }
                                     if saved != before && !saved.id.is_empty() {
                                         events(Event::Saved(saved.clone()));
                                     }

@@ -139,6 +139,106 @@ pub fn lan_addresses() -> Vec<IpAddr> {
     v4
 }
 
+/// How to wake this machine from another on its network: each LAN card's
+/// hardware address with its subnet's broadcast address, for a magic
+/// packet. Cards with no IPv4 LAN address, and virtual ones, are left out.
+pub fn wake_targets() -> Vec<dent_protocol::Wake> {
+    let mut hw: Vec<(String, [u8; 6])> = Vec::new();
+    let mut nets: Vec<(String, Ipv4Addr, Ipv4Addr)> = Vec::new();
+    // SAFETY: as in `interfaces`: getifaddrs fills a list we free below,
+    // and we only read fields (sized by their own length fields) while
+    // it's alive.
+    unsafe {
+        let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut head) != 0 {
+            return Vec::new();
+        }
+        let mut cur = head;
+        while !cur.is_null() {
+            let ifa = &*cur;
+            cur = ifa.ifa_next;
+            if ifa.ifa_addr.is_null() {
+                continue;
+            }
+            let name = std::ffi::CStr::from_ptr(ifa.ifa_name)
+                .to_string_lossy()
+                .into_owned();
+            if virtual_interface(&name) {
+                continue;
+            }
+            let family = i32::from((*ifa.ifa_addr).sa_family);
+            if family == libc::AF_INET && !ifa.ifa_netmask.is_null() {
+                let ip = &*(ifa.ifa_addr as *const libc::sockaddr_in);
+                let mask = &*(ifa.ifa_netmask as *const libc::sockaddr_in);
+                let ip = Ipv4Addr::from(u32::from_be(ip.sin_addr.s_addr));
+                let mask = Ipv4Addr::from(u32::from_be(mask.sin_addr.s_addr));
+                if advertisable(IpAddr::V4(ip)) {
+                    nets.push((name, ip, mask));
+                }
+            } else if let Some(mac) = hardware(ifa.ifa_addr) {
+                hw.push((name, mac));
+            }
+        }
+        libc::freeifaddrs(head);
+    }
+    let mut out: Vec<dent_protocol::Wake> = Vec::new();
+    for (name, ip, mask) in nets {
+        let Some((_, mac)) = hw.iter().find(|(n, _)| *n == name) else {
+            continue;
+        };
+        if *mac == [0; 6] {
+            continue;
+        }
+        let w = dent_protocol::Wake {
+            mac: mac
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(":"),
+            broadcast: Ipv4Addr::from(u32::from(ip) | !u32::from(mask)).to_string(),
+        };
+        if !out.contains(&w) {
+            out.push(w);
+        }
+    }
+    out
+}
+
+/// A link-layer address's six bytes, if `sa` is one.
+///
+/// # Safety
+/// `sa` points at a live sockaddr from getifaddrs.
+unsafe fn hardware(sa: *const libc::sockaddr) -> Option<[u8; 6]> {
+    let family = i32::from(unsafe { (*sa).sa_family });
+    #[cfg(target_os = "macos")]
+    if family == libc::AF_LINK {
+        let dl = sa as *const libc::sockaddr_dl;
+        let (nlen, alen) = unsafe { ((*dl).sdl_nlen as usize, (*dl).sdl_alen as usize) };
+        if alen != 6 {
+            return None;
+        }
+        // The address follows the name, in a field longer than declared.
+        let data = unsafe { std::ptr::addr_of!((*dl).sdl_data) as *const u8 };
+        let mut mac = [0u8; 6];
+        for (i, b) in mac.iter_mut().enumerate() {
+            *b = unsafe { *data.add(nlen + i) };
+        }
+        return Some(mac);
+    }
+    #[cfg(target_os = "linux")]
+    if family == libc::AF_PACKET {
+        let ll = unsafe { &*(sa as *const libc::sockaddr_ll) };
+        if ll.sll_halen != 6 {
+            return None;
+        }
+        let mut mac = [0u8; 6];
+        mac.copy_from_slice(&ll.sll_addr[..6]);
+        return Some(mac);
+    }
+    let _ = family;
+    None
+}
+
 /// Every interface address, through getifaddrs.
 fn interfaces() -> Vec<(String, IpAddr)> {
     let mut out = Vec::new();
@@ -182,6 +282,17 @@ mod tests {
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn wake_targets_are_well_formed() {
+        // Whatever this machine's cards are: each names six bytes and a
+        // broadcast address.
+        for w in wake_targets() {
+            eprintln!("{w:?}");
+            assert_eq!(w.mac.split(':').count(), 6, "{w:?}");
+            assert!(w.broadcast.parse::<Ipv4Addr>().is_ok(), "{w:?}");
+        }
     }
 
     #[test]

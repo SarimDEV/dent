@@ -988,6 +988,26 @@ fn a_project_is_brought_from_another_machine_with_its_ignored_files() {
 }
 
 #[test]
+fn the_lan_switch_holds_across_a_restart() {
+    let mut w = World::new(&[]);
+    let lan = |c: &mut Client, r: Request| match c.call(r).unwrap() {
+        Out::Reply {
+            reply: dent_protocol::Reply::Machine { machine },
+        } => machine.lan,
+        o => panic!("{o:?}"),
+    };
+    let mut c = w.client();
+    assert!(!lan(&mut c, Request::Machine));
+    assert!(lan(&mut c, Request::SetLan { on: true }));
+    drop(c);
+    w.kill();
+    w.start();
+    let mut c = w.client();
+    assert!(lan(&mut c, Request::Machine), "kept");
+    assert!(!lan(&mut c, Request::SetLan { on: false }));
+}
+
+#[test]
 fn projects_are_made_added_taken_off_and_put_back() {
     // Its own home: another test clears `dent-home-<pid>` while running.
     let home = std::env::temp_dir().join(format!("dent-projects-home-{}", std::process::id()));

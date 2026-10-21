@@ -582,6 +582,15 @@ pub struct Carried {
     pub bytes_b64: String,
 }
 
+/// A network card a sleeping machine can be woken through: a magic packet
+/// to `broadcast` (its subnet's) naming `mac`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct Wake {
+    /// `aa:bb:cc:dd:ee:ff`.
+    pub mac: String,
+    pub broadcast: String,
+}
+
 /// A message given back ([`Body::Unqueued`]'s `returned`).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Returned {
@@ -791,6 +800,10 @@ pub struct Machine {
     /// macOS guards from background programs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_item_blocked: Option<String>,
+    /// Devices on its local network may connect without Tailscale (to pair
+    /// with a code); paired ones always can.
+    #[serde(default)]
+    pub lan: bool,
 }
 
 /// The GitHub CLI, as pull requests need it.
@@ -1350,6 +1363,11 @@ pub enum Request {
     },
     /// How this machine stands for Git, GitHub and starting at login.
     Machine,
+    /// Let devices on the local network connect, or not; replies with the
+    /// machine.
+    SetLan {
+        on: bool,
+    },
     /// Start the daemon at login, or stop; replies with the machine.
     SetLoginItem {
         on: bool,
@@ -1599,6 +1617,9 @@ pub enum Reply {
         /// `host:port`, best first. Clients learn routes from them.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         addresses: Vec<String>,
+        /// How to wake it from its own network while it sleeps.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        wake: Vec<Wake>,
     },
     Ok,
     Pairing {
@@ -1735,6 +1756,7 @@ impl Request {
             | R::Projects
             | R::Agents { .. }
             | R::Machine
+            | R::SetLan { .. }
             | R::SetLoginItem { .. }
             | R::Models { .. }
             | R::Usage { .. }

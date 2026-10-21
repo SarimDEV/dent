@@ -443,6 +443,7 @@ impl Dent {
                 ),
         });
         lines.push(self.login_line(&m, cx));
+        lines.push(self.lan_line(&m, cx));
         lines.push(self.notification_line(cx));
         lines
     }
@@ -469,6 +470,29 @@ impl Dent {
                 ))
             }
         }
+    }
+
+    fn lan_line(&mut self, m: &Machine, cx: &mut Context<Self>) -> Line {
+        let on = m.lan;
+        Line::new("lan", "Devices on this network")
+            .under(if on {
+                "Can reach this Mac without Tailscale, to pair with a code"
+            } else {
+                "Only over Tailscale, unless already paired"
+            })
+            .control(self.switch_for(
+                "lan-switch",
+                on,
+                if on {
+                    "Only over Tailscale"
+                } else {
+                    "Let devices on this network pair"
+                },
+                cx,
+                move |this, _, _| {
+                    this.ask(Request::SetLan { on: !on }, Waiting::Machine);
+                },
+            ))
     }
 
     fn notification_line(&mut self, cx: &mut Context<Self>) -> Line {

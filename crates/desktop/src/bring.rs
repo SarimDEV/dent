@@ -240,13 +240,17 @@ impl Dent {
             Some(b) => format!("Clones {from} on {b}{files}"),
             None => format!("Clones {from}{files}"),
         };
-        v.push(Entry::row(
-            "b-go".into(),
-            &format!("Bring {} to {here}", p.name),
-            Some(note),
-            false,
-            act(|this, _, cx| this.bring_chosen(cx)),
-        ));
+        v.push(
+            Entry::row(
+                "b-go".into(),
+                &format!("Bring {} to {here}", p.name),
+                Some(note),
+                false,
+                act(|this, _, cx| this.bring_chosen(cx)),
+            )
+            // Open while its files are read; it closes once they're here.
+            .keeps_open(),
+        );
         if p.ignored.is_empty() {
             return;
         }

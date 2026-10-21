@@ -21,6 +21,9 @@ pub struct Saved {
     /// Routes the machine reported in its welcome.
     #[serde(default)]
     pub learned: Vec<String>,
+    /// How to wake it, as its welcome last said.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wake: Vec<dent_protocol::Wake>,
 }
 
 impl Saved {

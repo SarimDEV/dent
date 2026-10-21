@@ -299,9 +299,20 @@ impl Daemon {
     /// How this machine stands for Git, GitHub and starting at login.
     pub async fn machine(self: &Arc<Self>) -> dent_protocol::Machine {
         let path = self.env().path.clone();
-        tokio::task::spawn_blocking(move || crate::machine::check(&path))
+        let mut m = tokio::task::spawn_blocking(move || crate::machine::check(&path))
             .await
-            .unwrap_or_default()
+            .unwrap_or_default();
+        m.lan = self.net.lan.load(std::sync::atomic::Ordering::Relaxed);
+        m
+    }
+
+    /// Let devices on the local network connect, or not, from now and
+    /// after a restart.
+    pub fn set_lan(&self, on: bool) -> Result<()> {
+        self.store()
+            .put("remote.lan", if on { "on" } else { "off" })?;
+        self.net.lan.store(on, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 
     /// The agents this machine can drive and how each stands, asked of
