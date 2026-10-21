@@ -98,7 +98,7 @@ fn main() -> Result<()> {
     let store = store::Store::open(&paths.db())?;
     let env = env::AgentEnv::detect();
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async move {
+    let run = rt.block_on(async move {
         let d = daemon::Daemon::new(paths, env, store);
         eprintln!(
             "dent-daemon {} on {} ({})",
@@ -139,7 +139,11 @@ fn main() -> Result<()> {
         let _ = d.net.bye.send(stop_reason(&d.paths.state));
         tokio::time::sleep(Duration::from_millis(200)).await;
         anyhow::Ok(())
-    })?;
+    });
+    // Dropping a runtime waits for every blocking task (a git command, an
+    // agent's pipe), however long; asked to stop, the daemon stops promptly.
+    rt.shutdown_timeout(Duration::from_millis(500));
+    run?;
     drop(lock);
     Ok(())
 }
