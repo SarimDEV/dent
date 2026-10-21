@@ -109,7 +109,21 @@ The session holder owns terminal PTYs the same way it owns agents, so a terminal
 
 The daemon serves file reads, directory listings and a watch stream, scoped to project roots. `Files` lists a session's folder for `@` mentions (git's tracked and untracked files, or a walk that skips hidden folders, `node_modules` and `target`); `FilesIn` lists any folder, for a session that hasn't started.
 
-Projects are the folders sessions ran in, the projects in `~/.claude.json` (less any in temporary space, which were one-offs), and folders added from the picker (kept in the store's `kv` table, as are the ones taken off the list). `Folders` completes a typed path to its subfolders (hidden ones only after a typed dot); `AddProject` keeps a folder on the list, making it if asked; `NewProject` makes `~/dent/projects/<name>` (`-2`, `-3` when taken) with `git init`, a README and a first commit, and says so when the commit can't be made; `CloneProject` runs `git clone -- <url>` there for remote URLs only, with prompts turned off so a private repository fails rather than waits. Markdown files changed by an agent show up as events, which drives live reload in the viewer and the "new docs" list per session.
+Projects are the folders sessions ran in, the projects in `~/.claude.json` (less any in temporary space, which were one-offs), and folders added from the picker (kept in the store's `kv` table, as are the ones taken off the list). `Folders` completes a typed path to its subfolders (hidden ones only after a typed dot); `AddProject` keeps a folder on the list, making it if asked; `NewProject` makes `~/dent/projects/<name>` (`-2`, `-3` when taken) with `git init`, a README and a first commit, and says so when the commit can't be made; `CloneProject` runs `git clone -- <url>` there for remote URLs only, with prompts turned off so a private repository fails rather than waits.
+
+A project can also be brought from another machine; the client both machines trust carries it across:
+- `Pack` asks the machine that has it for:
+  - its remotes, leaving out paths on that machine;
+  - its branch;
+  - the files Git ignores there, with the ignored folders (`node_modules/`) left out but environment files inside them kept, and `.env*` marked.
+- `ReadFiles` reads the chosen files, only from inside the checkout and up to 40 MB.
+- `Create` with `bring` on the target machine does the rest:
+  - It makes `~/dent/projects/<name>`, keeps the files under `<state>/bring/<session>/`, and notes the job in `kv`.
+  - It starts the session at once, with its first message held.
+  - The clone runs into a folder of its own beside the destination and is moved into place when whole. A clone over SSH that fails is tried again over HTTPS.
+  - Then the other remotes are added and the branch is checked out, if that remote has it. The files are written in, each kept out of Git through `.git/info/exclude` if the clone's own rules don't ignore it.
+  - A daemon restarted mid-clone starts the job over.
+  - Done, the session's held messages go. Failed, they're given back (`Unqueued` with `returned`), so no agent runs in an empty folder. Markdown files changed by an agent show up as events, which drives live reload in the viewer and the "new docs" list per session.
 
 ## Checkpoints
 

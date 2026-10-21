@@ -29,6 +29,13 @@ Run 2026-10-20 with the real `dent-daemon` on dent-linux and the real `dent` CLI
   - **85 events received, 85 logged by the daemon, 0 gaps, 0 repeats.**
   - It came home to the IPv4 route later.
 - **R-A5, for real:** a SIGTERM showed as "away (quit)" at once, and the link was back 4 s after the daemon restarted.
+- **R-C4, mostly (2026-10-20):** `dent ask lima-dent-linux "say hi" --bring <checkout>` from studio, its origin an SSH address the VM has no key for.
+  - The VM fell back to HTTPS and cloned on the right branch.
+  - `.env` and `.env.local` arrived byte for byte, and stayed ignored on the VM, although studio ignored them only in `.git/info/exclude`.
+  - The VM daemon was `kill -9`ed mid-clone, with its `git clone` left running as an orphan. After the restart, the job started over in a folder of its own. It finished in 10 s, and then the waiting message ran.
+  - A clone that can't be made gives the message back to its reply box, and no agent runs.
+  - The binary and non-UTF-8 files are covered by the daemon test (`a_project_is_brought_from_another_machine_with_its_ignored_files`), not by this run.
+  - The desktop flow ran against the VM in the `bring-live` walk scene: the picker offered the VM's project, listed its ignored files with the `.env*` files ticked, and the session worked in the clone.
 
 ## The rig
 
