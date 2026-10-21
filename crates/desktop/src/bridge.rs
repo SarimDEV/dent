@@ -565,6 +565,7 @@ pub fn session(
         root: v.root.clone(),
         pr: v.pr.clone(),
         machine: cx.machine.to_string(),
+        paused: false,
         agent: format!(
             "{} · {}",
             agent.short,

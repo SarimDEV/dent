@@ -110,8 +110,12 @@ impl Dent {
     pub fn open_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
         self.pane = Some(pane);
         self.check_again();
+        // Opened onto Machines: as when that page is picked, an away
+        // machine is tried again now rather than at its next backoff.
         if pane == Pane::Settings && self.settings_tab == Tab::Machines {
             self.ask(Request::Devices, Waiting::Devices);
+            self.live
+                .signal(None, dent_client_core::machine::Signal::Retry);
         }
         cx.notify();
     }

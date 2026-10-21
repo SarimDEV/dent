@@ -24,6 +24,8 @@ const SUBSCRIBE: u64 = 2;
 enum Cmd {
     /// Request `n`, already in [`Pending`], to go if the link is up.
     Send(u64),
+    /// Request `n` can't go: answer it with this.
+    Refuse(u64, String),
     Pair(String),
     Signal(Signal),
     Stop,
@@ -107,7 +109,11 @@ pub struct Remote {
 impl Remote {
     /// Send request number `n`; its reply comes back as [`Event::Out`] with
     /// the same number. While the machine is away it waits.
-    pub fn send(&self, n: u64, r: Request) {
+    pub fn send(&self, n: u64, mut r: Request) {
+        if let Err(why) = carry(&mut r) {
+            let _ = self.tx.send(Cmd::Refuse(n, why));
+            return;
+        }
         if let Ok(mut p) = self.pending.lock() {
             p.0.insert(n, (r, false));
         }
@@ -209,6 +215,51 @@ impl Cursor {
             _ => {}
         }
     }
+}
+
+/// A message's files that are on this device go inside it: the machine
+/// it's for can't read this device's paths. A path not here is left as it
+/// is: it's one of that machine's own (a message of its, put back to edit).
+/// Read here, on the asking thread, once; a resend carries what was read.
+fn carry(r: &mut Request) -> Result<(), String> {
+    let (Request::Send {
+        attachments, files, ..
+    }
+    | Request::Create {
+        attachments, files, ..
+    }) = r
+    else {
+        return Ok(());
+    };
+    let mut total = files
+        .iter()
+        .map(|f| f.bytes_b64.len() / 4 * 3)
+        .sum::<usize>();
+    let mut keep = Vec::new();
+    for path in std::mem::take(attachments) {
+        let p = std::path::Path::new(&path);
+        if !p.is_file() {
+            keep.push(path);
+            continue;
+        }
+        let name = p
+            .file_name()
+            .map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
+        let bytes = std::fs::read(p).map_err(|e| format!("couldn't read {name}: {e}"))?;
+        total += bytes.len();
+        if total > dent_protocol::CARRIED_MAX {
+            return Err(format!(
+                "these files come to more than {} MB, too many to send to another machine at once",
+                dent_protocol::CARRIED_MAX >> 20
+            ));
+        }
+        files.push(dent_protocol::Carried {
+            name,
+            bytes_b64: dent_protocol::b64::encode(&bytes),
+        });
+    }
+    *attachments = keep;
+    Ok(())
 }
 
 fn line(n: u64, r: &Request) -> Vec<u8> {
@@ -325,6 +376,7 @@ async fn run(
                         let _ = ask_tx.send(Ask::Send(l));
                     }
                 }
+                Some(Cmd::Refuse(req, message)) => events(Event::Out { req, out: Out::Error { message } }),
                 Some(Cmd::Pair(code)) => { let _ = ask_tx.send(Ask::Pair(code)); }
                 Some(Cmd::Signal(s)) => { let _ = ask_tx.send(Ask::Signal(s)); }
                 Some(Cmd::Stop) | None => break,
@@ -372,6 +424,42 @@ mod tests {
         assert!(p.go(5).is_some());
         assert!(!p.cancel(5));
         assert!(!p.cancel(9), "answered or never asked");
+    }
+
+    #[test]
+    fn files_here_travel_inside_the_message_and_the_machines_own_stay_paths() {
+        let dir = std::env::temp_dir().join(format!("dent-carry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let here = dir.join("shot.png");
+        std::fs::write(&here, b"png bytes").unwrap();
+        let theirs = "/home/ada/.local/state/dent/attachments/carried/m1/plan.md".to_string();
+        let mut r = Request::Send {
+            session: "s1".into(),
+            id: "m2".into(),
+            text: "look".into(),
+            steer: false,
+            attachments: vec![here.display().to_string(), theirs.clone()],
+            files: Vec::new(),
+        };
+        carry(&mut r).unwrap();
+        let Request::Send {
+            attachments, files, ..
+        } = &r
+        else {
+            unreachable!()
+        };
+        assert_eq!(attachments, &vec![theirs]);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "shot.png");
+        assert_eq!(
+            dent_protocol::b64::decode(&files[0].bytes_b64).unwrap(),
+            b"png bytes"
+        );
+        // Carried once: sent again, nothing's read twice.
+        let before = r.clone();
+        carry(&mut r).unwrap();
+        assert_eq!(r, before);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -95,7 +95,13 @@ pub fn apply(list: &mut Vec<MachineView>, id: &str, event: Event) {
         } => {
             m.saved.name = name;
             m.version = version;
-            m.agents = agents;
+            // The welcome says what each agent is; how it stands (installed,
+            // signed in) comes with the Agents reply, so a reconnect keeps
+            // the last one for agents still there.
+            let what = |a: &AgentInfo| (a.id.clone(), a.name.clone(), a.caps.clone());
+            if m.agents.iter().map(what).ne(agents.iter().map(what)) {
+                m.agents = agents;
+            }
             m.via = Some((via, trust));
             m.pair_error = None;
             m.impostor = None;

@@ -275,6 +275,7 @@ impl Client {
             id: format!("m-{text}"),
             text: text.into(),
             attachments: Vec::new(),
+            files: Vec::new(),
         }) {
             Ok(Out::Reply {
                 reply: dent_protocol::Reply::Created { session },
@@ -290,6 +291,7 @@ impl Client {
             text: text.into(),
             steer,
             attachments: Vec::new(),
+            files: Vec::new(),
         })
         .unwrap();
     }
@@ -466,6 +468,7 @@ fn agents_say_how_they_stand_and_sessions_keep_theirs() {
         id: "m-nobody".into(),
         text: "hello".into(),
         attachments: Vec::new(),
+        files: Vec::new(),
     });
     assert!(
         matches!(&made, Err(e) if e.contains("no agent called no-such-agent")),
@@ -481,6 +484,7 @@ fn agents_say_how_they_stand_and_sessions_keep_theirs() {
         id: "m-named".into(),
         text: "hello by name".into(),
         attachments: Vec::new(),
+        files: Vec::new(),
     }) {
         Ok(Out::Reply {
             reply: dent_protocol::Reply::Created { session },
@@ -658,6 +662,55 @@ fn a_new_sessions_folder_lists_its_files() {
         })
         .is_err()
     );
+}
+
+#[test]
+fn files_a_message_carries_are_written_here_and_attached() {
+    let w = World::new(&[]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "first");
+    c.wait(&s, "the turn to end", is_done);
+    let file = |name: &str, bytes: &[u8]| dent_protocol::Carried {
+        name: name.into(),
+        bytes_b64: dent_protocol::b64::encode(bytes),
+    };
+    c.call(Request::Send {
+        session: s.clone(),
+        id: "m-carry".into(),
+        text: "look".into(),
+        steer: false,
+        attachments: Vec::new(),
+        files: vec![
+            file("../../escape.txt", b"one"),
+            file("a/escape.txt", b"two"),
+        ],
+    })
+    .unwrap();
+    c.wait(
+        &s,
+        "the message",
+        |b| matches!(b, Body::User { id, .. } if id == "m-carry"),
+    );
+    let paths = c
+        .events(&s)
+        .into_iter()
+        .find_map(|b| match b {
+            Body::User {
+                id, attachments, ..
+            } if id == "m-carry" => Some(attachments),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(paths.len(), 2, "{paths:?}");
+    // Kept to their message's folder, whatever the names say, and two
+    // files of one name both kept.
+    for p in &paths {
+        assert!(p.contains("/attachments/carried/m-carry/"), "{p}");
+    }
+    assert_ne!(paths[0], paths[1]);
+    assert_eq!(std::fs::read(&paths[0]).unwrap(), b"one");
+    assert_eq!(std::fs::read(&paths[1]).unwrap(), b"two");
 }
 
 #[test]
@@ -1298,6 +1351,7 @@ fn effort_reaches_the_agent_and_changing_it_starts_a_new_process() {
         id: "e1".into(),
         text: "tell me your args".into(),
         attachments: Vec::new(),
+        files: Vec::new(),
     }) {
         Ok(Out::Reply {
             reply: dent_protocol::Reply::Created { session },
@@ -1747,6 +1801,7 @@ fn a_session_whose_folder_was_deleted_says_so() {
         text: "hi again".into(),
         steer: false,
         attachments: Vec::new(),
+        files: Vec::new(),
     });
     c.wait(
         &s,
@@ -1966,6 +2021,7 @@ fn resent_creates_forks_and_rewinds_happen_once() {
         id: "first".into(),
         text: "hi".into(),
         attachments: Vec::new(),
+        files: Vec::new(),
     };
     let made = |o: Result<Out, String>| match o {
         Ok(Out::Reply {
@@ -2068,6 +2124,7 @@ fn messages_sent_while_a_new_worktree_is_set_up_wait_and_go_in_order() {
         id: "w1".into(),
         text: "first".into(),
         attachments: Vec::new(),
+        files: Vec::new(),
     }) {
         Ok(Out::Reply {
             reply: dent_protocol::Reply::Created { session },

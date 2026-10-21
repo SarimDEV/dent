@@ -4341,8 +4341,7 @@ impl Dent {
         let column = self.chat_w.min(size::COLUMN + space::S8 * 2.) - space::S8 * 2.;
         // With more than one agent ready, which one runs comes first.
         let pick = self.pickable_agents().len() > 1;
-        let agent =
-            crate::bridge::agent_info(&self.agents, self.new_agent().as_deref().unwrap_or(""));
+        let agent = self.new_agent_info();
         let mut room = column - space::S4 * 2. + space::S2 - size::CONTROL - space::S1 - START_W;
         if pick {
             room -= AGENT_CHIP_W;
@@ -4992,7 +4991,7 @@ impl Dent {
             Menu::Machine => self.machine_entries(),
             Menu::Stash => self.stash_entries(),
             Menu::Agent => {
-                let current = self.agent_id(self.new_agent().as_deref());
+                let current = self.agent_id_on(&self.defaults.machine, self.new_agent().as_deref());
                 self.pickable_agents()
                     .into_iter()
                     .map(|a| {

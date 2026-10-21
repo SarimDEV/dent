@@ -557,6 +557,18 @@ pub(super) fn away() -> Vec<(f32, Act)> {
             ),
         ),
         (
+            0.,
+            Until(
+                "it waits in the sidebar's Paused, not Working",
+                |d, _| {
+                    let [_, _, working, paused] = d.shown_sections();
+                    paused.iter().any(|s| s.id == "c27b19e4a0d2/s1")
+                        && !working.iter().any(|s| s.id == "c27b19e4a0d2/s1")
+                },
+                1.,
+            ),
+        ),
+        (
             0.1,
             Call(|d, _, cx| {
                 d.send_draft(

@@ -210,10 +210,15 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             effort,
             id,
             text,
-            attachments,
+            mut attachments,
+            files,
         } => Reply::Created {
             session: d
                 .create(crate::daemon::NewSession {
+                    attachments: {
+                        attachments.extend(carry(&d.paths.state, &id, files).await?);
+                        attachments
+                    },
                     agent,
                     cwd,
                     worktree,
@@ -222,7 +227,6 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
                     effort,
                     id,
                     text,
-                    attachments,
                 })
                 .await?,
         },
@@ -231,8 +235,10 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             id,
             text,
             steer,
-            attachments,
+            mut attachments,
+            files,
         } => {
+            attachments.extend(carry(&d.paths.state, &id, files).await?);
             d.command(
                 &session,
                 Op::Send {
@@ -676,6 +682,49 @@ fn cwd_of(d: &Daemon, session: &str) -> Result<String> {
 }
 
 /// Read a file, refusing anything outside the session's directory.
+/// Write the files message `id` brought with it ([`Request::Send`]'s
+/// `files`) under the state folder, and their paths, to attach. Sent again,
+/// the same message writes the same files over themselves.
+async fn carry(state: &Path, id: &str, files: Vec<dent_protocol::Carried>) -> Result<Vec<String>> {
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    let dir = state
+        .join("attachments")
+        .join("carried")
+        .join(safe_name(id));
+    tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&dir)?;
+        let mut paths = Vec::new();
+        for (n, f) in files.into_iter().enumerate() {
+            let bytes = b64::decode(&f.bytes_b64)
+                .with_context(|| format!("{} didn't arrive whole", f.name))?;
+            // Two files can share a name (from different folders).
+            let name = match safe_name(&f.name) {
+                s if paths.iter().any(|p: &String| p.ends_with(&format!("/{s}"))) => {
+                    format!("{n}-{s}")
+                }
+                s => s,
+            };
+            let path = dir.join(name);
+            std::fs::write(&path, bytes)?;
+            paths.push(path.display().to_string());
+        }
+        Ok(paths)
+    })
+    .await?
+}
+
+/// The last part of a name sent from elsewhere, as a file name here:
+/// never a path out of its folder.
+fn safe_name(name: &str) -> String {
+    let last = name.rsplit(['/', '\\']).next().unwrap_or("");
+    match last.trim() {
+        "" | "." | ".." => "file".into(),
+        s => s.to_string(),
+    }
+}
+
 fn read_inside(cwd: &Path, path: &str) -> Result<Vec<u8>> {
     let root = cwd.canonicalize()?;
     let full = root.join(path).canonicalize()?;

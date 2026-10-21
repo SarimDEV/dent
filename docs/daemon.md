@@ -83,6 +83,8 @@ Two small things live in the log beside the conversation ([0050](decisions/0050-
 - **Versions:** a fork can stop before a given event (`until`): carrying on an earlier version is a fork up to the rewind that left it.
 - **Awake:** see [0051](decisions/0051-global-shortcut-and-keep-awake.md).
 
+Files a message carries itself (`files` on `send` and `create`, from a client on another machine whose paths mean nothing here) are written to `attachments/carried/<message id>/` under the state folder, named by the last part of their name only, and attached after the message's own paths; sent again, the same message writes the same files. The client reads files it has into the message once, up to 40 MB in all, and leaves paths it doesn't have (that machine's own) as paths.
+
 Pictures in a tool's result (`image` blocks) are written to the session's attachments folder as `tool-<call>-<n>.<ext>` and named in the `tool_result` event's `images`; its kind comes from its bytes, not its label, and base64 broken across lines is read whole. One that can't be written, or whose bytes aren't a PNG, JPEG, GIF or WebP, reads `[image]` in the output.
 
 ## Persistence
