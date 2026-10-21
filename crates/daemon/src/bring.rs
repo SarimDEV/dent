@@ -226,7 +226,9 @@ pub fn clone_into(dest: &Path, b: &Bring, staging: &Path) -> Result<String, Stri
         // the same, and stays that way here.
         let https =
             https_of(&first.url).ok_or_else(|| format!("couldn't clone {}: {e}", first.url))?;
-        clone(&https).map_err(|_| format!("couldn't clone {}: {e}", first.url))?;
+        clone(&https).map_err(|e2| {
+            format!("couldn't clone {}: {e}; nor over HTTPS: {e2}", first.url)
+        })?;
         notes.push(format!(
             "{} over HTTPS, as SSH to it didn't work here",
             first.name
