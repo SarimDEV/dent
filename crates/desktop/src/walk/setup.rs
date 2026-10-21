@@ -1331,6 +1331,30 @@ pub(super) fn resync_live() -> Vec<(f32, Act)> {
     ]
 }
 
+/// Many sessions on the VM (`dent ask` in a loop beforehand): they're all
+/// there, and opening each one in turn is timed. Not in `checks`.
+pub(super) fn many_live() -> Vec<(f32, Act)> {
+    vec![
+        (
+            0.1,
+            Until(
+                "the VM is online with its many sessions",
+                |d, _| {
+                    d.machines.iter().any(|m| m.rtt.is_some())
+                        && d.sessions
+                            .iter()
+                            .filter(|s| !dent_client_core::fleet::split(&s.id).0.is_empty())
+                            .count()
+                            >= 80
+                },
+                30.,
+            ),
+        ),
+        (0.5, Shot("many-light")),
+        (0.5, Sweep),
+    ]
+}
+
 /// Another machine asleep: its session says why under the header, a
 /// message written meanwhile waits on this Mac with Edit and Remove, and a
 /// new session can be started there from the machine chip. The machine
