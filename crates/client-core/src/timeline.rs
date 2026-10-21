@@ -589,6 +589,12 @@ impl Sessions {
         self.feeds.get(machine).copied().unwrap_or_default()
     }
 
+    /// Whether the feed of session `id`'s machine is live: before then, its
+    /// changes are history replaying, not news.
+    pub fn live_for(&self, id: &str) -> bool {
+        self.feed(crate::fleet::split(id).0).live
+    }
+
     fn set_feed(&mut self, machine: &str, f: Feed) {
         if machine.is_empty() {
             self.last_seq = f.last_seq;

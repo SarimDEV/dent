@@ -1572,10 +1572,6 @@ pub enum Reply {
     },
 }
 
-/// The socket a daemon with state directory `state` listens on. Usually
-/// inside it; a state directory with a path too long for a socket address
-/// (about 104 bytes on macOS) gets one in a private folder under /tmp,
-/// named after the state path.
 impl Request {
     /// Every session id this request names. A client connected to several
     /// machines qualifies ids with their machine and routes a request by
@@ -1690,6 +1686,10 @@ impl Out {
     }
 }
 
+/// The socket a daemon with state directory `state` listens on. Usually
+/// inside it; a state directory with a path too long for a socket address
+/// (about 104 bytes on macOS) gets one in a private folder under /tmp,
+/// named after the state path.
 pub fn daemon_socket(state: &std::path::Path) -> std::path::PathBuf {
     let inside = state.join("daemon.sock");
     if inside.as_os_str().len() < 100 {

@@ -4793,6 +4793,10 @@ impl Dent {
             .filter(|m| !m.agents.is_empty())
             .map_or_else(|| self.agents.clone(), |m| m.agents.clone());
         let Some(v) = self.core.list.get_mut(id) else {
+            // Forgotten (its machine's log started again): not drawn until
+            // the log brings it back.
+            self.sessions.retain(|s| s.id != id);
+            self.built.remove(id);
             return;
         };
         let from = v.take_changes();
@@ -4963,7 +4967,9 @@ impl Dent {
         let looking = self.window_active && self.selected.as_deref() == Some(id);
         // News of its pull request says itself, once (below).
         let pr_said = dent_client_core::pr_news(old_pr.as_ref(), s.pr.as_ref());
-        if self.core.live && !looking && old_status.is_some() && old_status != Some(s.status) {
+        // Its own machine's feed: another machine catching up is history.
+        let live = self.core.live_for(id);
+        if live && !looking && old_status.is_some() && old_status != Some(s.status) {
             match s.status {
                 Status::Needs if !pr_said => {
                     crate::notify::post("Needs you", &format!("{} · {}", s.title, s.detail), id)
@@ -4976,7 +4982,7 @@ impl Dent {
             }
         }
         // Its pull request's checks failing, changes asked for, a merge.
-        if self.core.live
+        if live
             && !looking
             && old_status.is_some()
             && pr_said
@@ -4999,7 +5005,7 @@ impl Dent {
                 }
                 _ => {}
             }
-            if old_status.is_none() && self.core.live {
+            if old_status.is_none() && live {
                 self.arrived_at.insert(id.to_string(), Instant::now());
             }
         }

@@ -125,8 +125,12 @@ mod tests {
         // The far machine's low sequence numbers don't count as old here.
         assert_eq!(s.list.len(), 2);
         assert_eq!((s.last_seq, s.feed("ab12").last_seq), (5, 1));
+        // This machine live, the far one still catching up: its sessions'
+        // changes are history, not news.
+        s.apply(&Out::CaughtUp { seq: 5 });
+        assert!(s.live_for("s1") && !s.live_for("ab12/s1"));
         s.apply_from("ab12", &Out::CaughtUp { seq: 1 });
-        assert!(s.feed("ab12").live && !s.live);
+        assert!(s.feed("ab12").live && s.live_for("ab12/s1"));
         // Its log started again: only its sessions go.
         assert_eq!(s.forget("ab12"), vec!["ab12/s1".to_string()]);
         assert_eq!(s.list.keys().collect::<Vec<_>>(), ["s1"]);
