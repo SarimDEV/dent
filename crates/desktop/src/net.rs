@@ -102,13 +102,12 @@ impl Net {
         }
     }
 
-    /// Take back request `n` to `machine` if it's still waiting there.
-    pub fn cancel(&self, machine: &str, n: u64) {
-        if let Ok(f) = self.far.lock()
-            && let Some(f) = f.get(machine)
-        {
-            f.remote.cancel(n);
-        }
+    /// Take back request `n` to `machine` if it never went out: whether it
+    /// was. A machine not followed was never sent anything.
+    pub fn cancel(&self, machine: &str, n: u64) -> bool {
+        self.far
+            .lock()
+            .is_ok_and(|f| f.get(machine).is_none_or(|f| f.remote.cancel(n)))
     }
 
     /// Where this machine's feed is: reconnects subscribe from here.
@@ -178,7 +177,11 @@ impl Net {
                     && let Ok(mut far) = all.lock()
                     && let Some(f) = far.remove(&*tag)
                 {
-                    far.insert(s.id.clone(), f);
+                    // A machine already saved, added again by another
+                    // address: this link takes over from the old one.
+                    if let Some(old) = far.insert(s.id.clone(), f) {
+                        old.remote.stop();
+                    }
                     let _ = ui.unbounded_send(Incoming::Renamed {
                         from: tag.clone(),
                         to: s.id.clone(),

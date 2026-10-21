@@ -534,6 +534,35 @@ impl Defaults {
     }
 }
 
+/// Whether `dir` is machine `machine`'s scratch folder ("" is this one):
+/// this one's is known; another's is `dent/scratch` in a home this machine
+/// can't name.
+pub fn is_scratch(machine: &str, dir: &str) -> bool {
+    if machine.is_empty() {
+        std::path::Path::new(dir) == crate::scratch_dir()
+    } else {
+        std::path::Path::new(dir).ends_with("dent/scratch")
+    }
+}
+
+/// Where a new session on `machine` in `project` has its `@` files kept,
+/// and the folder to ask for them, if one can be named here. The same path
+/// on two machines is two folders.
+pub fn folder_key(machine: &str, project: Option<&str>) -> (String, Option<String>) {
+    let dir = match project {
+        Some(p) => Some(p.to_string()),
+        None if machine.is_empty() => Some(crate::scratch_dir().display().to_string()),
+        // Another machine's scratch folder is its daemon's to find.
+        None => None,
+    };
+    let key = if machine.is_empty() {
+        format!("dir:{}", dir.as_deref().unwrap_or_default())
+    } else {
+        format!("dir:{machine}:{}", dir.as_deref().unwrap_or_default())
+    };
+    (key, dir)
+}
+
 /// A dev server's address as the web view can load it. WebKit won't load
 /// `localhost` by name here, but loads an address: whichever of IPv4 and
 /// IPv6 the server answers on.
@@ -2193,11 +2222,13 @@ impl Dent {
             cx.notify();
             return;
         }
-        // A new session from inside one starts in its folder.
+        // A new session from inside one starts in its folder, on its
+        // machine: the folder is that machine's.
         if id.is_none()
             && let Some(s) = self.current_rc()
         {
-            let p = self.project_for(s.root.as_deref().unwrap_or(&s.cwd));
+            self.set_machine(dent_client_core::fleet::split(&s.id).0.to_string(), cx);
+            let p = self.project_for(&s.id, s.root.as_deref().unwrap_or(&s.cwd));
             self.set_project(p);
         }
         if let Some(id) = &id {
@@ -2791,6 +2822,15 @@ impl Dent {
     }
 
     fn reply(&mut self, req: u64, out: Out, cx: &mut Context<Self>) {
+        // A message that waited, refused (its session is gone there): it
+        // would be sent again on every start, so it stops waiting; the
+        // toast below says why.
+        if let Out::Error { .. } = &out
+            && let Some(o) = crate::outbox::refused(&mut self.outbox, req)
+        {
+            crate::outbox::save(&self.outbox);
+            self.rebuild(&o.session);
+        }
         let Some(w) = self.waiting.remove(&req) else {
             if let Out::Error { message } = out {
                 self.toast(ToastAction::Info, message);
@@ -3138,10 +3178,10 @@ impl Dent {
         cx.notify();
     }
 
-    /// A waiting message the daemon has taken out of its queue: into the
-    /// running turn, or back to the reply box with its files.
     /// A message still waiting on this device for its machine: taken back
-    /// here, never sent. Whether it was one.
+    /// here, never sent. Whether it was one: a message that has gone out
+    /// (its machine was up) may be the daemon's already, so it's taken
+    /// back there like any other.
     fn take_out(&mut self, session: &str, msg: &str) -> bool {
         let Some(o) = self
             .outbox
@@ -3150,11 +3190,12 @@ impl Dent {
         else {
             return false;
         };
-        if let Some(n) = o.req {
-            self.live
-                .cancel(dent_client_core::fleet::split(session).0, n);
+        match o.req {
+            Some(n) => self
+                .live
+                .cancel(dent_client_core::fleet::split(session).0, n),
+            None => true,
         }
-        true
     }
 
     /// A take-back that needs no word from the daemon finishes now.
@@ -3187,6 +3228,8 @@ impl Dent {
         cx.notify();
     }
 
+    /// A waiting message the daemon has taken out of its queue: into the
+    /// running turn, or back to the reply box with its files.
     fn took_back(&mut self, tb: TakingBack) {
         match tb.then {
             Then::Steer => {
@@ -4501,21 +4544,16 @@ impl Dent {
         }
     }
 
-    /// Where a new session's files are kept, by its folder.
-    fn folder_key(&self) -> String {
-        let dir = self
-            .defaults
-            .project
-            .clone()
-            .unwrap_or_else(|| crate::scratch_dir().display().to_string());
-        format!("dir:{dir}")
+    /// Where a new session's files are kept, by its machine and folder.
+    fn folder_key(&self) -> (String, Option<String>) {
+        folder_key(&self.defaults.machine, self.defaults.project.as_deref())
     }
 
     /// The files an `@` offers: the session's, or the new session's folder's.
     fn mention_files(&self) -> Option<&Rc<Vec<String>>> {
         match self.current_rc() {
             Some(s) => self.files.get(&s.id),
-            None => self.files.get(&self.folder_key()),
+            None => self.files.get(&self.folder_key().0),
         }
     }
 
@@ -4626,13 +4664,15 @@ impl Dent {
             self.slash_dismissed = None;
         }
         if token.is_some_and(|t| t.kind == complete::Kind::Mention) && self.current_rc().is_none() {
-            let key = self.folder_key();
+            let (key, dir) = self.folder_key();
             let asked = self
                 .waiting
                 .values()
                 .any(|w| matches!(w, Waiting::Files(f) if *f == key));
-            if !self.files.contains_key(&key) && !asked {
-                let dir = key.trim_start_matches("dir:").to_string();
+            if !self.files.contains_key(&key)
+                && !asked
+                && let Some(dir) = dir
+            {
                 let n = self
                     .live
                     .send_to(&self.defaults.machine, Request::FilesIn { dir });
@@ -4924,6 +4964,17 @@ impl Dent {
         self.defaults.into = None;
         self.repo = None;
         self.projects.clear();
+        // What the last machine is still to say about its folders is old
+        // news: a project it makes isn't a folder here.
+        self.waiting.retain(|_, w| {
+            !matches!(
+                w,
+                Waiting::Folders(_) | Waiting::ProjectMade | Waiting::Repo(_)
+            )
+        });
+        self.folders = None;
+        self.project_busy = None;
+        self.project_error = None;
         self.ask_here(Request::Projects, Waiting::Projects(machine));
         cx.notify();
     }
@@ -5043,8 +5094,17 @@ impl Dent {
             s.old = Some(v.branches[b].seq);
         }
         // Messages still waiting for this session's machine show as its
-        // last ones, waiting.
-        for o in self.outbox.iter().filter(|o| o.session == id) {
+        // last ones, waiting. While it's online one is on its way, not
+        // waiting: it shows once the daemon logs it, as anywhere else.
+        let online = far.as_ref().is_some_and(|m| {
+            use dent_client_core::machine::State;
+            matches!(m.state, State::Online | State::Slow)
+        });
+        for o in self
+            .outbox
+            .iter()
+            .filter(|o| o.session == id && (o.held || !online))
+        {
             let there = s.items.iter().any(
                 |i| matches!(i, Item::User { id, .. } | Item::Queued { id, .. } if *id == o.id),
             );
@@ -5431,10 +5491,10 @@ impl Dent {
         }
     }
 
-    /// A session's folder as a new session's project: the scratch folder is
-    /// "No project".
-    pub fn project_for(&self, cwd: &str) -> Option<String> {
-        (std::path::Path::new(cwd) != crate::scratch_dir()).then(|| cwd.to_string())
+    /// Session `id`'s folder as a new session's project: its machine's
+    /// scratch folder is "No project".
+    pub fn project_for(&self, id: &str, cwd: &str) -> Option<String> {
+        (!is_scratch(dent_client_core::fleet::split(id).0, cwd)).then(|| cwd.to_string())
     }
 
     /// An agent's id as given, or the default agent's for none.
@@ -5791,8 +5851,11 @@ impl Dent {
         // new session.
         let project = match from.as_deref().and_then(|id| self.session(id)) {
             Some(s) => {
+                // A branch or worktree picked on the new-session page is
+                // that project's, maybe on another machine.
                 d.base = None;
-                self.project_for(s.root.as_deref().unwrap_or(&s.cwd))
+                d.into = None;
+                self.project_for(&s.id, s.root.as_deref().unwrap_or(&s.cwd))
             }
             None => d.project.clone(),
         };
@@ -6281,10 +6344,10 @@ impl Dent {
         if self.pressed_again(format!("queued/{msg}")) {
             return;
         }
+        let Some((text, files)) = self.queued(id, msg) else {
+            return;
+        };
         if self.take_out(id, msg) {
-            let Some((text, files)) = self.queued(id, msg) else {
-                return;
-            };
             self.outbox.retain(|o| o.id != msg);
             crate::outbox::save(&self.outbox);
             self.rebuild(id);
@@ -6297,9 +6360,6 @@ impl Dent {
             cx.notify();
             return;
         }
-        let Some((text, files)) = self.queued(id, msg) else {
-            return;
-        };
         // Its place: sent again, it goes back before the one after it.
         let next = self.queued_after(id, msg);
         let n = self.live.send(Request::Unqueue {
@@ -8405,5 +8465,32 @@ mod permission_steps {
         assert_eq!(next_permission(&some, Permission::Plan), Permission::Ask);
         let none = dent_protocol::Caps::default();
         assert_eq!(next_permission(&none, Permission::Full), Permission::Full);
+    }
+}
+
+#[cfg(test)]
+mod machine_folders {
+    use super::{folder_key, is_scratch};
+
+    #[test]
+    fn the_same_path_on_two_machines_is_two_folders() {
+        let here = folder_key("", Some("/Users/me/code/dent"));
+        let there = folder_key("ab12", Some("/Users/me/code/dent"));
+        assert_ne!(here.0, there.0);
+        assert_eq!(there.1.as_deref(), Some("/Users/me/code/dent"));
+        // No project on another machine: its scratch folder isn't this
+        // one's, so nothing is asked for.
+        assert_eq!(folder_key("ab12", None).1, None);
+        let scratch = crate::scratch_dir().display().to_string();
+        assert_eq!(folder_key("", None).1, Some(scratch));
+    }
+
+    #[test]
+    fn another_machines_scratch_folder_is_no_project() {
+        assert!(is_scratch("ab12", "/home/me/dent/scratch"));
+        assert!(!is_scratch("ab12", "/home/me/code/dent"));
+        let here = crate::scratch_dir().display().to_string();
+        assert!(is_scratch("", &here));
+        assert!(!is_scratch("", "/elsewhere/dent/scratch"));
     }
 }

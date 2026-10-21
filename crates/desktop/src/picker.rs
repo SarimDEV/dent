@@ -164,12 +164,11 @@ impl Dent {
     /// Projects matching a search, "No project", then the ways to add one.
     fn search_entries(&self, q: &str, v: &mut Vec<Entry>) {
         let d = &self.defaults;
-        let scratch = crate::scratch_dir().display().to_string();
         let projects: Vec<Project> = self
             .projects
             .iter()
-            // The scratch folder is "No project", below.
-            .filter(|p| p.path != scratch)
+            // The machine's scratch folder is "No project", below.
+            .filter(|p| !crate::app::is_scratch(&d.machine, &p.path))
             .cloned()
             .collect();
         for (n, p) in search(&projects, q).into_iter().enumerate() {

@@ -190,22 +190,40 @@ struct Node {
     caption: String,
 }
 
+/// A shape for every machine: this one (`local`, its id) and each remote
+/// one. One still being added has none yet: its address would take a shape
+/// and move another machine off its own for as long as the sheet is open.
+fn shapes_for(local: &str, machines: &[MachineView]) -> HashMap<String, Shape> {
+    let local = if local.is_empty() { "this" } else { local };
+    let mut s = glyph::assign(
+        std::iter::once(local).chain(
+            machines
+                .iter()
+                .map(|m| m.id.as_str())
+                .filter(|id| !id.starts_with('+')),
+        ),
+    );
+    // This machine's own sessions have plain ids: "" is it too.
+    if let Some(sh) = s.get(local).copied() {
+        s.insert(String::new(), sh);
+    }
+    s
+}
+
 impl Dent {
     /// A shape for every machine: this one and each remote one.
     pub fn shapes(&self) -> HashMap<String, Shape> {
-        let local = if self.machine_id.is_empty() {
-            "this"
-        } else {
-            &self.machine_id
-        };
-        let mut s = glyph::assign(
-            std::iter::once(local).chain(self.machines.iter().map(|m| m.id.as_str())),
-        );
-        // This machine's own sessions have plain ids: "" is it too.
-        if let Some(sh) = s.get(local).copied() {
-            s.insert(String::new(), sh);
-        }
-        s
+        shapes_for(&self.machine_id, &self.machines)
+    }
+
+    /// The remote machines added: saved, not one still being added.
+    pub fn added_machines(&self) -> impl Iterator<Item = &MachineView> {
+        self.machines.iter().filter(|m| !m.id.starts_with('+'))
+    }
+
+    /// Whether there's more than this machine.
+    pub fn has_machines(&self) -> bool {
+        self.added_machines().next().is_some()
     }
 
     /// What machine `id` is called ("" is this one).
@@ -242,7 +260,7 @@ impl Dent {
             here.is_empty(),
             pick(String::new()),
         )];
-        for m in self.machines.iter().filter(|m| !m.id.starts_with('+')) {
+        for m in self.added_machines() {
             let (note, off): (String, Option<&'static str>) = match Standing::of(m) {
                 Standing::Online => (
                     m.rtt
@@ -380,15 +398,13 @@ impl Dent {
     fn pairing_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = self.t;
         let (code, expires) = self.pairing.clone()?;
-        let left = expires.saturating_sub(crate::cards::now_ms()) / 60_000;
+        let left = (expires.saturating_sub(crate::cards::now_ms()) / 60_000).max(1);
         if expires <= crate::cards::now_ms() {
             return None;
         }
-        let spaced = format!(
-            "{} {}",
-            &code[..code.len().min(3)],
-            &code[code.len().min(3)..]
-        );
+        // After its third character, whatever the daemon sent.
+        let cut = code.char_indices().nth(3).map_or(code.len(), |(i, _)| i);
+        let spaced = format!("{} {}", &code[..cut], &code[cut..]);
         Some(
             div()
                 .mb(px(space::S6))
@@ -410,7 +426,7 @@ impl Dent {
                 )
                 .child(div().flex_1().ty(UI).text_color(t.quiet).child(format!(
                     "Type it on the other device. Works once, for {} more minute{}.",
-                    left.max(1),
+                    left,
                     if left == 1 { "" } else { "s" }
                 )))
                 .child(ui::ghost("pairing-done", "Done", &t).on_press(cx.listener(
@@ -1263,6 +1279,15 @@ impl Dent {
         let gone: Vec<String> = self.core.forget(id);
         self.sessions.retain(|s| fleet::split(&s.id).0 != id);
         let _ = gone;
+        // Messages waiting for it would go if it were added again, maybe
+        // days later.
+        if crate::outbox::forget_machine(&mut self.outbox, id) {
+            crate::outbox::save(&self.outbox);
+        }
+        // New sessions no longer go there.
+        if self.defaults.machine == id {
+            self.set_machine(String::new(), cx);
+        }
         self.removing = None;
         self.machine_open = None;
         cx.notify();
@@ -1528,8 +1553,11 @@ impl Dent {
         let st = Standing::of(m);
         let back =
             ui::ghost("adding-back", "Back", &t).on_press(cx.listener(|this, _, window, cx| {
+                // Your Tailscale's devices were found once; they aren't
+                // looked for again.
+                let peers = this.adding.as_ref().and_then(|a| a.peers.clone());
                 this.close_adding(window, cx);
-                this.adding = Some(Adding::default());
+                this.adding = Some(Adding { tag: None, peers });
                 cx.notify();
             }));
         let say = |strong: String, rest: String| {
@@ -1696,7 +1724,11 @@ fn peers_from(v: &serde_json::Value) -> Vec<Peer> {
         .filter(|p| p["UserID"] == *me && p["Tags"].as_array().is_none_or(|t| t.is_empty()))
         .filter(|p| !matches!(p["OS"].as_str(), Some("iOS" | "android" | "tvOS")))
         .filter_map(|p| {
+            // No MagicDNS name (MagicDNS off): nothing to add it by.
             let dns = p["DNSName"].as_str()?.trim_end_matches('.').to_string();
+            if dns.is_empty() {
+                return None;
+            }
             Some(Peer {
                 name: p["HostName"].as_str().unwrap_or(&dns).to_string(),
                 dns,
@@ -1712,7 +1744,28 @@ fn peers_from(v: &serde_json::Value) -> Vec<Peer> {
 #[cfg(test)]
 mod tests {
     // Not a glob: GPUI's prelude has a `test` of its own.
-    use super::{AXIS, axis_x, peers_from, route_kind};
+    use super::{AXIS, axis_x, peers_from, route_kind, shapes_for};
+    use crate::machines::MachineView;
+
+    #[test]
+    fn a_machine_being_added_moves_no_other_off_its_shape() {
+        let saved = |id: &str| {
+            MachineView::saved(dent_remote::Saved {
+                id: id.into(),
+                ..Default::default()
+            })
+        };
+        let ids = ["8e2e34085ddf", "3f9a2c710b5e", "c27b19e4a0d2"];
+        let mut list: Vec<MachineView> = ids.iter().map(|i| saved(i)).collect();
+        let before = shapes_for("5e0d44b91a7c", &list);
+        // Whatever shape addresses would hash to.
+        for n in 0..12 {
+            list.push(saved(&format!("+10.0.0.{n}:7480")));
+        }
+        let during = shapes_for("5e0d44b91a7c", &list);
+        assert_eq!(during, before);
+        assert_eq!(during.get(""), during.get("5e0d44b91a7c"));
+    }
 
     #[test]
     fn routes_are_named_tailscale_or_lan() {
@@ -1744,7 +1797,8 @@ mod tests {
                     "b": {"UserID": 2, "HostName": "shared", "DNSName": "shared.t.ts.net.", "OS": "macOS", "Online": true},
                     "c": {"UserID": 1, "HostName": "box", "DNSName": "box.t.ts.net.", "OS": "linux", "Online": true, "Tags": ["tag:server"]},
                     "d": {"UserID": 1, "HostName": "phone", "DNSName": "phone.t.ts.net.", "OS": "iOS", "Online": true},
-                    "e": {"UserID": 1, "HostName": "old", "DNSName": "old.t.ts.net.", "OS": "macOS", "Online": false}
+                    "e": {"UserID": 1, "HostName": "old", "DNSName": "old.t.ts.net.", "OS": "macOS", "Online": false},
+                    "f": {"UserID": 1, "HostName": "nodns", "DNSName": "", "OS": "linux", "Online": true}
                 }
             }"#,
         )

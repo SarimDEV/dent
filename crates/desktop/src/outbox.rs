@@ -66,6 +66,22 @@ pub fn reload(mut all: Vec<Outgoing>, now: u64) -> Vec<Outgoing> {
     all
 }
 
+/// The daemon refused request `req`: a message it went as will never be
+/// taken (its session is gone there), so it stops waiting. The one taken
+/// out, if any.
+pub fn refused(all: &mut Vec<Outgoing>, req: u64) -> Option<Outgoing> {
+    let i = all.iter().position(|o| o.req == Some(req))?;
+    Some(all.remove(i))
+}
+
+/// Machine `machine` was removed: its messages no longer wait for it.
+/// Whether any did.
+pub fn forget_machine(all: &mut Vec<Outgoing>, machine: &str) -> bool {
+    let before = all.len();
+    all.retain(|o| dent_client_core::fleet::split(&o.session).0 != machine);
+    all.len() != before
+}
+
 /// "14 h", for a held message's note.
 pub fn age(at: u64, now: u64) -> String {
     let h = now.saturating_sub(at) / 3_600_000;
@@ -79,6 +95,37 @@ pub fn age(at: u64, now: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn out(session: &str, id: &str, req: Option<u64>) -> Outgoing {
+        Outgoing {
+            session: session.into(),
+            id: id.into(),
+            text: "go".into(),
+            attachments: Vec::new(),
+            at: 0,
+            held: false,
+            req,
+        }
+    }
+
+    #[test]
+    fn a_refused_message_stops_waiting_and_others_stay() {
+        let mut all = vec![out("ab12/s1", "m1", Some(4)), out("ab12/s1", "m2", None)];
+        assert!(refused(&mut all, 9).is_none());
+        assert_eq!(refused(&mut all, 4).map(|o| o.id), Some("m1".into()));
+        assert_eq!(all.len(), 1);
+        // A held one went as no request: nothing answers for it.
+        assert!(refused(&mut all, 0).is_none());
+    }
+
+    #[test]
+    fn a_removed_machines_messages_stop_waiting() {
+        let mut all = vec![out("ab12/s1", "m1", Some(4)), out("cd34/s1", "m2", Some(5))];
+        assert!(forget_machine(&mut all, "ab12"));
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, "m2");
+        assert!(!forget_machine(&mut all, "ab12"));
+    }
 
     #[test]
     fn a_message_from_long_ago_asks_before_it_goes() {

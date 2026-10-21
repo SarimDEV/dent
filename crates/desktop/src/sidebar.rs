@@ -598,7 +598,7 @@ impl Dent {
                             )]),
                         ),
                         // With more than one machine, which one it runs on.
-                        None if !self.machines.is_empty() && !s.closed => {
+                        None if self.has_machines() && !s.closed => {
                             let owner = dent_client_core::fleet::split(&s.id).0;
                             let shape = self
                                 .shapes()
@@ -699,8 +699,7 @@ impl Dent {
         let machine = crate::data::machine_shown(&self.machine);
         // With other machines: how many, and only the ones that need a look.
         let away: Vec<String> = self
-            .machines
-            .iter()
+            .added_machines()
             .filter_map(|m| {
                 use crate::machines_page::Standing;
                 let word = match Standing::of(m) {
@@ -713,9 +712,9 @@ impl Dent {
             })
             .collect();
         let (link, link_tip) = match &self.connection {
-            Ok(()) if !self.machines.is_empty() => {
+            Ok(()) if self.has_machines() => {
                 let mut parts = away;
-                parts.push(format!("{} machines", self.machines.len() + 1));
+                parts.push(format!("{} machines", self.added_machines().count() + 1));
                 (parts.join(" · "), "Settings › Machines".to_string())
             }
             Ok(()) => (

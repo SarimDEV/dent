@@ -4588,7 +4588,7 @@ impl Dent {
             .border_t_0()
             .border_color(t.hairline)
             .rounded_b(px(radius::LG))
-            .children((!self.machines.is_empty()).then(|| {
+            .children(self.has_machines().then(|| {
                 let name = self.machine_name(&self.defaults.machine.clone());
                 keep(true, self.chip(Menu::Machine, "", &name, false, cx))
             }))
