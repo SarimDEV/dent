@@ -1145,8 +1145,10 @@ fn a_sessions_files_are_stat_and_read_by_what_it_wrote() {
     // Many reads at once never hold up the rest.
     let big = cwd.join("big.bin");
     std::fs::write(&big, vec![7u8; 8 << 20]).unwrap();
+    // More than a client may queue: the rest are told to ask again, and
+    // nothing else waits behind them.
     let mut asked = Vec::new();
-    for i in 0..32u64 {
+    for i in 0..100u64 {
         asked.push(c.send_req(Request::Read {
             file: r("big.bin"),
             offset: i * dent_protocol::READ_MAX as u64,

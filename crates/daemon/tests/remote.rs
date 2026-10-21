@@ -532,27 +532,31 @@ async fn file_bytes_never_hold_up_live_events() {
             break;
         }
     }
+    // Many more in flight than a client keeps (the desktop keeps four).
     let reads = (48 << 20) / dent_protocol::READ_MAX as u64;
+    let file = dent_protocol::FileRef {
+        session: session.clone(),
+        path: "big.bin".into(),
+        base: None,
+    };
     let mut asked = std::collections::HashSet::new();
-    for i in 0..reads {
-        asked.insert(
-            dev.request(Request::Read {
-                file: dent_protocol::FileRef {
-                    session: session.clone(),
-                    path: "big.bin".into(),
-                    base: None,
-                },
-                offset: i * dent_protocol::READ_MAX as u64,
-                len: dent_protocol::READ_MAX,
-                expect: None,
-            })
-            .await,
-        );
-    }
+    let mut next = 0u64;
     let start = Instant::now();
     let (mut live_during, mut last_live, mut worst) = (0, Instant::now(), Duration::ZERO);
     let mut got = 0u64;
-    while !asked.is_empty() {
+    while next < reads || !asked.is_empty() {
+        while asked.len() < 32 && next < reads {
+            asked.insert(
+                dev.request(Request::Read {
+                    file: file.clone(),
+                    offset: next * dent_protocol::READ_MAX as u64,
+                    len: dent_protocol::READ_MAX,
+                    expect: None,
+                })
+                .await,
+            );
+            next += 1;
+        }
         let e = dev.out().await;
         if asked.remove(&e.req) {
             match e.body {
