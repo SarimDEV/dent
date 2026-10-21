@@ -69,6 +69,8 @@ fn write_private(path: &std::path::Path, data: &[u8]) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let tmp = path.with_extension("tmp");
+    // The mode applies only to a new file: never reuse one a crash left.
+    let _ = std::fs::remove_file(&tmp);
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -253,7 +255,10 @@ fn remove(name: &str) -> Result<()> {
 }
 
 async fn watch(args: &[String]) -> Result<()> {
-    let secs: Option<u64> = flag(args, "--secs").and_then(|s| s.parse().ok());
+    let secs: Option<u64> = flag(args, "--secs")
+        .map(|s| s.parse())
+        .transpose()
+        .context("--secs takes a number of seconds")?;
     let names: Vec<&String> = args
         .iter()
         .enumerate()
@@ -348,12 +353,16 @@ async fn watch(args: &[String]) -> Result<()> {
                     Out::Reply {
                         reply: Reply::Welcome { epoch, version, .. },
                     } => {
-                        if tally[i].epoch.as_ref().is_none_or(|e| *e != epoch)
-                            && tally[i].epoch.is_some()
-                        {
-                            println!("{t:7.2}s  {name}: log epoch changed");
+                        // The epoch goes with the cursor: a new one is taken
+                        // only from the resync that resets it, or the next
+                        // link would resume an old cursor in the new log.
+                        match &tally[i].epoch {
+                            None => tally[i].epoch = Some(epoch),
+                            Some(e) if *e != epoch => {
+                                println!("{t:7.2}s  {name}: log epoch changed")
+                            }
+                            Some(_) => {}
                         }
-                        tally[i].epoch = Some(epoch);
                         println!("{t:7.2}s  {name}: dent {version}");
                     }
                     Out::Events { events } => {
@@ -366,8 +375,9 @@ async fn watch(args: &[String]) -> Result<()> {
                         }
                     }
                     Out::CaughtUp { seq } => println!("{t:7.2}s  {name}: caught up at {seq}"),
-                    Out::Resync { .. } => {
+                    Out::Resync { epoch } => {
                         tally[i].last = 0;
+                        tally[i].epoch = Some(epoch);
                         println!("{t:7.2}s  {name}: resync");
                     }
                     _ => {}
