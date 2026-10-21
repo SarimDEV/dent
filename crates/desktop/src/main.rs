@@ -37,6 +37,7 @@ mod machines_page;
 mod markdown;
 mod math;
 mod mdstream;
+mod mirror;
 mod net;
 mod notify;
 mod open;

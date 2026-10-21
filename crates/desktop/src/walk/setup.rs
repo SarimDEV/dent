@@ -587,6 +587,54 @@ pub(super) fn bring_live() -> Vec<(f32, Act)> {
     v
 }
 
+/// A picture in a session on a machine really saved: the session that
+/// `dent ask NAME "look" --file pic.png` started there shows the picture,
+/// copied to this Mac. Not in `checks`: it needs another machine.
+pub(super) fn pictures_live() -> Vec<(f32, Act)> {
+    fn copied(d: &Dent) -> Option<String> {
+        d.sessions.iter().find_map(|s| {
+            s.items.iter().find_map(|i| match i {
+                Item::User { files, .. }
+                    if files
+                        .iter()
+                        .any(|f| f.contains("Library/Caches/dent/machines")) =>
+                {
+                    Some(s.id.clone())
+                }
+                _ => None,
+            })
+        })
+    }
+    vec![
+        (0.3, Key("cmd-n")),
+        (
+            0.1,
+            Until(
+                "a saved machine comes online",
+                |d, _| d.machines.iter().any(|m| m.rtt.is_some()),
+                30.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "its session's picture is copied here",
+                |d, _| copied(d).is_some(),
+                30.,
+            ),
+        ),
+        (
+            0.1,
+            Call(|d, w, cx| {
+                if let Some(id) = copied(d) {
+                    d.select(Some(id), w, cx);
+                }
+            }),
+        ),
+        (1.0, Shot("pictures-live-light")),
+    ]
+}
+
 /// Another machine asleep: its session says why under the header, a
 /// message written meanwhile waits on this Mac with Edit and Remove, and a
 /// new session can be started there from the machine chip. The machine
