@@ -239,7 +239,14 @@ pub async fn session(
             Request::Devices => Ok(Reply::Devices {
                 devices: d.net.devices(),
             }),
-            Request::RemoveDevice { id } => d.net.remove_device(&id).map(|_| Reply::Ok),
+            // One that isn't paired says so, rather than "removed".
+            Request::RemoveDevice { id } => d.net.remove_device(&id).and_then(|had| {
+                if had {
+                    Ok(Reply::Ok)
+                } else {
+                    anyhow::bail!("no device {id} is paired with this machine")
+                }
+            }),
             other => handle(&d, other).await,
         };
         let msg = match out {

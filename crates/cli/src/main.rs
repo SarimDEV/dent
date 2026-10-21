@@ -97,7 +97,13 @@ async fn main() -> Result<()> {
 }
 
 async fn add(args: &[String]) -> Result<()> {
-    let addr = args.first().context("dent machine add HOST:PORT")?.clone();
+    let typed = args.first().context("dent machine add HOST[:PORT]")?;
+    // Not an address at all: said at once, not tried for half a minute.
+    let Some(addr) = dent_client_core::machine::address(typed) else {
+        bail!(
+            "{typed:?} isn't an address: give a host, and a port if it isn't 7480, like 192.168.1.20 or mini.tail1234.ts.net:7480"
+        );
+    };
     let code = flag(args, "--code");
     let keys = device_keys()?;
     let m = Machine::new(&device_name(), keys, None, vec![addr.clone()]);
@@ -160,9 +166,31 @@ async fn add(args: &[String]) -> Result<()> {
                     break Ok((machine, id, addresses));
                 }
             }
-            Note::State(
-                s @ (State::Removed | State::Incompatible { .. } | State::TrustedElsewhere { .. }),
-            ) => break Err(anyhow::anyhow!("{s:?}")),
+            Note::State(State::Removed) => {
+                break Err(anyhow::anyhow!(
+                    "{addr} removed this device; pair again there with `dent-daemon pair` and --code"
+                ));
+            }
+            Note::State(State::Incompatible { daemon, client }) => {
+                break Err(anyhow::anyhow!(
+                    "no protocol in common: {addr} speaks {}–{}, this dent {}–{}; update {}",
+                    daemon.0,
+                    daemon.1,
+                    client.0,
+                    client.1,
+                    if daemon.1 < client.0 {
+                        "the machine"
+                    } else {
+                        "this dent"
+                    }
+                ));
+            }
+            Note::State(State::TrustedElsewhere { routes }) => {
+                break Err(anyhow::anyhow!(
+                    "{addr} trusts this device only over {}: add it by that address instead",
+                    routes.join(", ")
+                ));
+            }
             Note::State(State::Unreachable { why }) => eprintln!("  {why}; retrying"),
             _ => {}
         }
@@ -618,6 +646,7 @@ async fn watch(args: &[String]) -> Result<()> {
                         for e in events {
                             if e.seq > tally[i].last + 1 && tally[i].last > 0 {
                                 tally[i].gaps += 1;
+                                println!("{t:7.2}s  {name}: gap, {} to {}", tally[i].last, e.seq);
                             }
                             tally[i].last = tally[i].last.max(e.seq);
                             tally[i].events += 1;

@@ -58,6 +58,8 @@ pub struct Adding {
     /// Your Tailscale's devices: `None` while looking, `Err` when Tailscale
     /// can't be asked.
     pub peers: Option<Result<Vec<Peer>, String>>,
+    /// What was typed isn't an address: said under the field.
+    pub bad: Option<String>,
 }
 
 /// How a machine stands, in the fixed words.
@@ -1329,19 +1331,19 @@ impl Dent {
         true
     }
 
-    fn start_adding(&mut self, addr: String, cx: &mut Context<Self>) {
-        let addr = if addr.contains(':') && !addr.starts_with('[') && addr.matches(':').count() > 1
-        {
-            // A bare IPv6 address.
-            format!("[{addr}]:7480")
-        } else if addr
-            .rsplit_once(':')
-            .is_some_and(|(_, p)| p.parse::<u16>().is_ok())
-        {
-            addr
-        } else {
-            format!("{addr}:7480")
+    fn start_adding(&mut self, typed: String, cx: &mut Context<Self>) {
+        let Some(addr) = dent_client_core::machine::address(&typed) else {
+            if let Some(a) = &mut self.adding {
+                a.bad = Some(format!(
+                    "“{typed}” isn't an address. Type a name or IP, with :port if it isn't 7480."
+                ));
+            }
+            cx.notify();
+            return;
         };
+        if let Some(a) = &mut self.adding {
+            a.bad = None;
+        }
         let tag = crate::net::adding_tag(&addr);
         self.machines.retain(|m| m.id != tag);
         self.machines.push(MachineView::saved(dent_remote::Saved {
@@ -1629,6 +1631,12 @@ impl Dent {
                                     cx.listener(|this, _, _, cx| this.add_by_address(cx)),
                                 ),
                             ),
+                    )
+                    .children(
+                        self.adding
+                            .as_ref()
+                            .and_then(|a| a.bad.clone())
+                            .map(|why| div().ty(UI).text_color(t.needs.0).child(why)),
                     ),
             )
             .into_any_element()
@@ -1672,7 +1680,11 @@ impl Dent {
                 // looked for again.
                 let peers = this.adding.as_ref().and_then(|a| a.peers.clone());
                 this.close_adding(window, cx);
-                this.adding = Some(Adding { tag: None, peers });
+                this.adding = Some(Adding {
+                    tag: None,
+                    peers,
+                    bad: None,
+                });
                 cx.notify();
             }));
         let say = |strong: String, rest: String| {

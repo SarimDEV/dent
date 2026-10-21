@@ -40,6 +40,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
+const USAGE: &str = "usage: dent-daemon [--state DIR]   run the daemon
+       dent-daemon pair                 show a pairing code for a new device
+       dent-daemon devices [remove ID]  list paired devices, or remove one
+       dent-daemon reidentify           take a new identity (devices pair again)
+       dent-daemon login-item on|off    start at login, or stop doing so";
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let state = args
@@ -75,6 +81,20 @@ fn main() -> Result<()> {
     }
     if args.first().map(String::as_str) == Some("plan-tool") {
         return plan_tool::run();
+    }
+    // Anything else said to it (`--help`, a typo) is answered with how to
+    // use it, never by quietly starting a second daemon.
+    let mut rest = args.iter();
+    while let Some(a) = rest.next() {
+        if a == "--state" && rest.next().is_some() {
+            continue;
+        }
+        let help = matches!(a.as_str(), "--help" | "-h" | "help");
+        eprintln!("{USAGE}");
+        if help {
+            return Ok(());
+        }
+        anyhow::bail!("not something dent-daemon knows: {a}");
     }
     std::fs::create_dir_all(&paths.state)
         .with_context(|| format!("create {}", paths.state.display()))?;
