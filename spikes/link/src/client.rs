@@ -304,6 +304,9 @@ pub struct Rules {
     /// After this much silence, dial a replacement while keeping the old
     /// link, and move to whichever proves alive first.
     pub replace_after: Option<Duration>,
+    /// While on an address other than the first (preferred) one, try the
+    /// better ones this often and move once one is up.
+    pub home_every: Option<Duration>,
 }
 
 impl Rules {
@@ -317,6 +320,7 @@ impl Rules {
             jitter: false,
             reset_after: Duration::ZERO,
             replace_after: None,
+            home_every: None,
         }
     }
 
@@ -330,6 +334,7 @@ impl Rules {
             jitter: true,
             reset_after: Duration::from_secs(30),
             replace_after: Some(Duration::from_secs(5)),
+            home_every: Some(Duration::from_secs(60)),
         }
     }
 
@@ -528,6 +533,10 @@ async fn link(
     });
     let mut heard = std::time::Instant::now();
     let mut swap: Option<tokio::task::JoinHandle<Result<Opened>>> = None;
+    // Addresses ahead of the one in use are better routes to come home to.
+    let better: Vec<SocketAddr> = addrs.iter().take_while(|a| **a != addr).copied().collect();
+    let mut home_checked = std::time::Instant::now();
+    let mut home: Option<tokio::task::JoinHandle<Result<Opened>>> = None;
     let ended = loop {
         let m = tokio::select! {
             m = frx.recv() => m,
@@ -539,6 +548,23 @@ async fn link(
                         Ok(Ok(o)) if o.trusted && o.compatible() => break Ended::Swap(Box::new(o)),
                         _ => {}
                     }
+                }
+                if let Some(h) = home.as_ref().filter(|h| h.is_finished()) {
+                    let _ = h;
+                    match home.take().expect("checked").await {
+                        Ok(Ok(o)) if o.trusted && o.compatible() => break Ended::Swap(Box::new(o)),
+                        _ => {}
+                    }
+                }
+                if let Some(every) = rules.home_every
+                    && !better.is_empty()
+                    && home.is_none()
+                    && home_checked.elapsed() >= every
+                {
+                    home_checked = std::time::Instant::now();
+                    tally.lock().await.dials += 1;
+                    let (me, key, b) = (me.clone(), key.to_vec(), better.clone());
+                    home = Some(tokio::spawn(async move { open_any(&b, &me, Some(&key)).await }));
                 }
                 if quiet >= rules.silence {
                     break Ended::Lost(format!("silent for {} s", rules.silence.as_secs()));
@@ -595,7 +621,7 @@ async fn link(
     };
     pinger.abort();
     reader.abort();
-    if let Some(h) = swap {
+    for h in [swap, home].into_iter().flatten() {
         h.abort();
     }
     Ok(ended)

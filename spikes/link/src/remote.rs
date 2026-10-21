@@ -49,11 +49,14 @@ pub async fn run(args: &[String]) -> Result<()> {
                 .split(',')
                 .map(|a| a.parse())
                 .collect::<Result<_, _>>()?;
-            let rules = match get("--rules").as_deref() {
+            let mut rules = match get("--rules").as_deref() {
                 Some("plan") => Rules::plan(),
                 Some("spike") | None => Rules::spike(),
                 Some(r) => bail!("unknown rules {r}"),
             };
+            if let Some(h) = get("--home-every").and_then(|s| s.parse().ok()) {
+                rules.home_every = Some(Duration::from_secs(h));
+            }
             let secs = get("--secs").and_then(|s| s.parse().ok()).unwrap_or(60);
             let every = get("--prompt-every").and_then(|s| s.parse().ok()).unwrap_or(10);
             let session = get("--session").unwrap_or_else(|| format!("r-{}", std::process::id()));
