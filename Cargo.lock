@@ -2138,6 +2138,7 @@ dependencies = [
  "cairo-rs",
  "dent-ambient",
  "dent-client-core",
+ "dent-files",
  "dent-link",
  "dent-protocol",
  "dent-remote",

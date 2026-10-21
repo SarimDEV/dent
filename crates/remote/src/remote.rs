@@ -39,6 +39,8 @@ pub enum Event {
         name: String,
         id: String,
         version: String,
+        /// The protocol it speaks.
+        proto: u32,
         agents: Vec<AgentInfo>,
         /// The route this link took, and how this device is trusted there.
         via: String,
@@ -474,6 +476,7 @@ async fn run(
                                         name: machine.clone(),
                                         id,
                                         version,
+                                        proto,
                                         agents,
                                         via: via.0.clone(),
                                         trust: via.1.clone(),

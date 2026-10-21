@@ -92,10 +92,15 @@ pub fn artifacts(v: &SessionView) -> Vec<Artifact> {
                 .map(|(i, ver)| match &ver.content {
                     Some(c) => Rc::from(c.as_bytes()),
                     // An edit to a file we never saw whole: the latest is on
-                    // disk on this machine.
-                    None if i + 1 == latest => std::fs::read(&abs)
-                        .map(Rc::from)
-                        .unwrap_or_else(|_| Rc::from(&b""[..])),
+                    // disk on its machine, read here or copied from there.
+                    None if i + 1 == latest => {
+                        let ask = crate::files::Ask::new(&v.id, &abs.display().to_string(), &v.cwd);
+                        crate::files::copy(&ask, crate::files::WHOLE_MAX)
+                            .shown()
+                            .and_then(|p| std::fs::read(p).ok())
+                            .map(Rc::from)
+                            .unwrap_or_else(|| Rc::from(&b""[..]))
+                    }
                     None => Rc::from(&b""[..]),
                 })
                 .collect();
@@ -300,7 +305,8 @@ pub fn session(
                 items.push(Item::Text(text.clone()));
                 // A video, a sound or a PDF it names gets a card under the
                 // reply, the first time, so it's a click from the chat.
-                for path in media_in(text, cwd) {
+                let far = !dent_client_core::fleet::split(&v.id).0.is_empty();
+                for path in media_in(text, cwd, far) {
                     if !built.media.iter().any(|(_, p)| *p == path) {
                         items.push(Item::Made {
                             art: art_id(&v.id, &path),
@@ -645,8 +651,11 @@ pub fn versions(v: &SessionView, viewing: Option<usize>) -> Vec<(String, usize, 
 
 /// Local dev-server addresses in an entry: command output and replies.
 /// The videos, sounds and PDFs a reply names (`out/demo.mp4`, a link to
-/// one, `~/Movies/take.mov`) that are there on disk, by full path, each once.
-pub fn media_in(text: &str, cwd: &Path) -> Vec<String> {
+/// one, `~/Movies/take.mov`), each once: on this Mac, those that are there
+/// on disk, by full path; on another machine, every one named (as made
+/// whole from the session's folder, `~` left for that machine), its card
+/// saying so if it isn't there.
+pub fn media_in(text: &str, cwd: &Path, far: bool) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for word in text.split(|c: char| {
         c.is_whitespace()
@@ -660,7 +669,14 @@ pub fn media_in(text: &str, cwd: &Path) -> Vec<String> {
             continue;
         }
         let path = crate::markdown::resolve(word, Some(cwd));
-        if !out.contains(&path) && Path::new(&path).is_file() {
+        let there = far || {
+            let full = match path.strip_prefix("~/") {
+                Some(rest) => crate::app::home() + "/" + rest,
+                None => path.clone(),
+            };
+            Path::new(&full).is_file()
+        };
+        if !out.contains(&path) && there {
             out.push(path);
         }
     }

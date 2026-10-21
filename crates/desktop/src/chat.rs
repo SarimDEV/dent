@@ -510,10 +510,19 @@ impl Dent {
             let rel = crate::bridge::relative(std::path::Path::new(&s.cwd), p);
             s.diff.iter().any(|f| f.path == rel).then_some(rel)
         });
+        // A file on the session's machine: there, or (another machine's)
+        // still being asked about.
         let openable = d
             .path
             .as_ref()
-            .filter(|p| crate::data::is_file(std::path::Path::new(p)))
+            .filter(|p| {
+                matches!(
+                    crate::files::stat(&crate::files::Ask::new(&s.id, p, &s.cwd)),
+                    crate::files::Look::Loading
+                        | crate::files::Look::Here(dent_protocol::FileStat::File { .. })
+                        | crate::files::Look::Stale(dent_protocol::FileStat::File { .. })
+                )
+            })
             .cloned();
         let review = in_diff.filter(|_| d.edits);
         if out_rest.is_some() || openable.is_some() || review.is_some() {
@@ -1481,7 +1490,7 @@ impl Dent {
                                         .filter_map(|(j, f)| {
                                             Some(crate::lightbox::Shot {
                                                 key: SharedString::from(format!("pic-{msg}-{j}")),
-                                                path: picture_path(f, &s.cwd)?,
+                                                path: picture_path(&s.id, f, &s.cwd)?,
                                             })
                                         })
                                         .collect(),
@@ -1804,6 +1813,7 @@ impl Dent {
                             scope: at.clone(),
                             bg: t.surface,
                             base: Some(std::path::PathBuf::from(&s.cwd)),
+                            session: Some((s.id.clone(), s.cwd.clone())),
                         };
                         div()
                             .relative()
@@ -2079,7 +2089,7 @@ impl Dent {
                     // What the calls brought back as pictures shows whether
                     // the line is open or not: a screenshot is the point.
                     .when(!pictures.is_empty(), |d| {
-                        d.child(tool_pictures(&s.id, ix, pictures, &t))
+                        d.child(tool_pictures(&s.id, &s.cwd, ix, pictures, &t))
                     })
                     .into_any_element()
             }
@@ -2281,6 +2291,7 @@ impl Dent {
                     scope: format!("{}/plan-{ask}", s.id),
                     bg: t.raised,
                     base: Some(std::path::PathBuf::from(&s.cwd)),
+                    session: Some((s.id.clone(), s.cwd.clone())),
                 };
                 let plan_view = markdown::render(blocks.as_slice(), &t, false, &mut r);
                 let keyed = self.ask_focus.is_focused(window);
@@ -3071,9 +3082,28 @@ impl Dent {
         let thumb = (a.kind == Kind::Image)
             .then(|| self.picture(art, version))
             .flatten();
+        // A media file is the session's machine's: how it stands there, and
+        // (another machine's) a copy here to make a still from, when it's
+        // small enough to copy whole.
+        let media = (a.kind == Kind::Media).then(|| crate::files::Ask::new(&s.id, a.path, &s.cwd));
+        let media_stat = media.as_ref().map(crate::files::stat);
+        if let Some(crate::files::Look::Here(dent_protocol::FileStat::Missing { .. })) = &media_stat
+        {
+            // Named in a reply, but not there: no card.
+            return div().into_any_element();
+        }
+        let media_local = media.as_ref().and_then(|ask| {
+            crate::files::copy(ask, POSTER_MAX)
+                .shown()
+                .map(|p| p.display().to_string())
+        });
         // A video or a PDF shows a still of itself once it's made.
         let still = (a.kind == Kind::Media && crate::data::media_kind(a.path) != Some("Sound"))
-            .then(|| self.poster(a.path, cx))
+            .then(|| {
+                media_local
+                    .as_deref()
+                    .and_then(|p| self.poster(crate::data::intern(p), cx))
+            })
             .flatten();
         // A page shows itself above its card, as the viewer last drew it.
         let page = (a.kind == Kind::Html)
@@ -3141,9 +3171,13 @@ impl Dent {
         } else if crate::data::visual_title(a.path).is_some() {
             format!("Visual · v{version}")
         } else if a.kind == Kind::Media {
-            let size = std::fs::metadata(a.path)
-                .map(|m| crate::viewer::bytes(m.len()))
-                .unwrap_or_default();
+            let size = match &media_stat {
+                Some(crate::files::Look::Here(dent_protocol::FileStat::File { stamp, .. }))
+                | Some(crate::files::Look::Stale(dent_protocol::FileStat::File {
+                    stamp, ..
+                })) => crate::viewer::bytes(stamp.size),
+                _ => String::new(),
+            };
             format!(
                 "{} · {} · {size}",
                 crate::bridge::relative(std::path::Path::new(&s.cwd), a.path),
@@ -3788,7 +3822,14 @@ impl Dent {
                 .call
                 .as_deref()
                 .and_then(|call| call_output(s, call))
-                .and_then(|out| output_file(&out));
+                .and_then(|out| output_file(&out))
+                .filter(|p| {
+                    matches!(
+                        crate::files::stat(&crate::files::Ask::new(&s.id, p, &s.cwd)),
+                        crate::files::Look::Here(dent_protocol::FileStat::File { .. })
+                            | crate::files::Look::Stale(dent_protocol::FileStat::File { .. })
+                    )
+                });
             let (sid, tid) = (s.id.clone(), task.id.clone());
             div()
                 .flex()
@@ -5768,6 +5809,7 @@ impl Dent {
             scope: format!("{}/report-{call}", s.id),
             bg: t.surface,
             base: Some(std::path::PathBuf::from(&s.cwd)),
+            session: Some((s.id.clone(), s.cwd.clone())),
         };
         // Inside the tool, quieter than the answer: as an opened thought.
         let body = markdown::render_with(blocks, &t, false, true, &mut r);
@@ -5808,37 +5850,45 @@ impl Dent {
     }
 }
 
-/// Where an attached picture is on disk, if it's a picture that's still there.
-fn picture_path(shown: &str, cwd: &str) -> Option<std::path::PathBuf> {
+/// Another machine's media is copied here whole for a still only up to
+/// this; a bigger one shows without.
+const POSTER_MAX: u64 = 64 << 20;
+
+/// A picture session `session` names, to draw on this Mac: the file itself
+/// for this Mac's sessions, the copy here of another machine's; `None`
+/// when it isn't a picture or isn't here (yet).
+fn picture_path(session: &str, shown: &str, cwd: &str) -> Option<std::path::PathBuf> {
     let ext = shown.rsplit('.').next()?.to_ascii_lowercase();
     if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp") {
         return None;
     }
-    let path = if let Some(rest) = shown.strip_prefix("~/") {
-        std::path::PathBuf::from(std::env::var_os("HOME")?).join(rest)
-    } else if shown.starts_with('/') {
-        std::path::PathBuf::from(shown)
-    } else {
-        std::path::Path::new(cwd).join(shown)
-    };
-    crate::data::is_file(&path).then_some(path)
+    crate::files::picture(&crate::files::Ask::new(session, shown, cwd)).shown()
 }
 
 /// Pictures a group of tool calls brought back, each opening large; they
 /// step together in the large view. One shows at a readable size; more
 /// sit in one row of small tiles, and past [`TOOL_TILES`] the last tile
 /// counts the rest.
-fn tool_pictures(session: &str, ix: usize, paths: &[String], t: &theme::Theme) -> Div {
+fn tool_pictures(session: &str, cwd: &str, ix: usize, paths: &[String], t: &theme::Theme) -> Div {
+    // Each as it's here: this Mac's own, or the copy of another machine's
+    // once it's come.
     let set: crate::lightbox::Set = std::rc::Rc::new(
         paths
             .iter()
             .enumerate()
-            .map(|(j, p)| crate::lightbox::Shot {
-                key: SharedString::from(format!("tool-pic-{session}-{ix}-{j}")),
-                path: std::path::PathBuf::from(p),
+            .filter_map(|(j, p)| {
+                Some(crate::lightbox::Shot {
+                    key: SharedString::from(format!("tool-pic-{session}-{ix}-{j}")),
+                    path: crate::files::picture(&crate::files::Ask::new(session, p, cwd))
+                        .shown()?,
+                })
             })
             .collect(),
     );
+    if set.is_empty() {
+        return div();
+    }
+
     let frame = || {
         div()
             .rounded(px(radius::MD))
@@ -6529,14 +6579,12 @@ fn call_output(s: &Session, call: &str) -> Option<String> {
 }
 
 /// The file background work writes its output to, as the agent's receipt
-/// names it ("Output is being written to: /tmp/…/b1.output").
+/// names it ("Output is being written to: /tmp/…/b1.output"); whether it's
+/// there is the session's machine's to say.
 fn output_file(receipt: &str) -> Option<String> {
     let at = receipt.find("written to:")? + "written to:".len();
     let path = receipt[at..].split_whitespace().next()?;
-    let path = path.trim_end_matches(['.', ',']);
-    std::path::Path::new(path)
-        .is_file()
-        .then(|| path.to_string())
+    Some(path.trim_end_matches(['.', ',']).to_string())
 }
 
 /// How large a message of only emoji reads.

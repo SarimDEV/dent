@@ -1317,6 +1317,8 @@ impl Dent {
 
     fn remove_machine(&mut self, id: &str, cx: &mut Context<Self>) {
         self.live.stop(id, true);
+        // Its files' copies go with it.
+        crate::files::forget(id);
         self.machines.retain(|m| m.id != id);
         // Its sessions leave the list with it; they carry on there.
         let gone: Vec<String> = self.core.forget(id);

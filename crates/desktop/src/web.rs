@@ -194,8 +194,36 @@ pub struct Snapshot {
 
 type Shared<T> = Arc<Mutex<T>>;
 
+/// Another machine's page or video: its own files (pictures, styles, the
+/// video's ranges) are fetched through the link by the window, never
+/// looked for on this Mac's disk ([decision 0068]).
+///
+/// [decision 0068]: ../../../docs/decisions/0068-files-across-machines.md
+#[derive(Clone, Debug, PartialEq)]
+pub struct FarRoot {
+    /// The session, qualified with its machine.
+    pub session: String,
+    pub cwd: String,
+    /// The folder on that machine the page's own files are found from.
+    pub dir: String,
+}
+
+/// A file a far page asked for, waiting for the window to fetch it.
+pub struct FarAsk {
+    pub far: FarRoot,
+    /// Its path from `far.dir`.
+    pub rel: String,
+    /// The `Range` asked for (a player's), if any.
+    pub range: Option<String>,
+    pub ty: &'static str,
+    pub responder: wry::RequestAsyncResponder,
+}
+
 pub struct Preview {
     web: WebView,
+    /// The showing page's machine, when it's another.
+    far: Shared<Option<FarRoot>>,
+    far_asks: Shared<Vec<FarAsk>>,
     files: Shared<HashMap<String, Arc<[u8]>>>,
     /// The folder a page's own images, styles and scripts load from.
     root: Shared<Option<std::path::PathBuf>>,
@@ -307,6 +335,9 @@ impl Preview {
             }
         };
         let f = files.clone();
+        let far: Shared<Option<FarRoot>> = Arc::default();
+        let far_asks: Shared<Vec<FarAsk>> = Arc::default();
+        let (fr, fa, far_pending) = (far.clone(), far_asks.clone(), pending.clone());
         let root: Shared<Option<std::path::PathBuf>> = Arc::default();
         let r = root.clone();
         let page_dir: Shared<String> = Arc::default();
@@ -323,8 +354,46 @@ impl Preview {
             push.clone(),
         );
         let builder = WebViewBuilder::new()
-            .with_custom_protocol("dent".into(), move |_, req| {
+            .with_asynchronous_custom_protocol("dent".into(), move |_, req, responder| {
                 let mut path = req.uri().path().trim_start_matches('/').to_string();
+                // Another machine's page: what isn't the page itself is the
+                // window's to fetch from there.
+                if let Some(far) = fr.lock().ok().and_then(|f| f.clone()) {
+                    let own = f.lock().ok().and_then(|m| {
+                        m.get(&path)
+                            .or_else(|| m.get(&percent_decode(&path)))
+                            .cloned()
+                    });
+                    if let Some(b) = own {
+                        let resp = Response::builder()
+                            .status(200)
+                            .header(CONTENT_TYPE, kind(&path))
+                            .body(Cow::Owned(b.to_vec()))
+                            .unwrap_or_else(|_| Response::new(Cow::Borrowed(&[][..])));
+                        responder.respond(resp);
+                        return;
+                    }
+                    let rel = path
+                        .split_once('/')
+                        .map_or(path.clone(), |(_, r)| r.to_string());
+                    let range = req
+                        .headers()
+                        .get(RANGE)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    if let Ok(mut q) = fa.lock() {
+                        q.push(FarAsk {
+                            far,
+                            rel: percent_decode(&rel),
+                            range,
+                            ty: kind(&path),
+                            responder,
+                        });
+                    }
+                    far_pending.store(true, Ordering::Release);
+                    return;
+                }
+                let respond = |r: Response<Cow<'static, [u8]>>| responder.respond(r);
                 let root = r.lock().ok().and_then(|r| r.clone());
                 // Video and sound play from disk a piece at a time, as the
                 // player asks for them, so a long film never loads whole.
@@ -332,7 +401,7 @@ impl Preview {
                     && let Some(full) = root.as_deref().and_then(|r| disk_path(r, &path))
                 {
                     let range = req.headers().get(RANGE).and_then(|v| v.to_str().ok());
-                    return ranged(&full, range, kind(&path));
+                    return respond(ranged(&full, range, kind(&path)));
                 }
                 // A name with spaces arrives encoded (`Sign-ups%20by%20week`).
                 let mut body = f
@@ -358,11 +427,13 @@ impl Preview {
                     Some(b) => (200, b.to_vec()),
                     None => (404, b"Not found".to_vec()),
                 };
-                Response::builder()
-                    .status(status)
-                    .header(CONTENT_TYPE, kind(&path))
-                    .body(Cow::Owned(bytes))
-                    .unwrap_or_else(|_| Response::new(Cow::Borrowed(&[][..])))
+                respond(
+                    Response::builder()
+                        .status(status)
+                        .header(CONTENT_TYPE, kind(&path))
+                        .body(Cow::Owned(bytes))
+                        .unwrap_or_else(|_| Response::new(Cow::Borrowed(&[][..]))),
+                )
             })
             .with_initialization_script(SCRIPT)
             // Pages stay on their own origin; anything else opens in the browser.
@@ -495,6 +566,8 @@ impl Preview {
 
         Some(Self {
             web,
+            far,
+            far_asks,
             files,
             root,
             page_dir,
@@ -529,7 +602,44 @@ impl Preview {
     }
 
     /// Show `bytes` as `name`, version `v`. Loading the same thing again is a no-op.
+    /// Files far pages asked for since the last call.
+    pub fn take_far(&self) -> Vec<FarAsk> {
+        self.far_asks
+            .lock()
+            .map(|mut q| std::mem::take(&mut *q))
+            .unwrap_or_default()
+    }
+
+    /// Show a page of another machine's, its own files fetched from there.
+    pub fn show_far(&mut self, name: &str, v: usize, bytes: &[u8], far: FarRoot) {
+        self.set_far(Some(far));
+        self.show_page(name, v, bytes, None);
+    }
+
+    /// Show a video, a sound or a PDF of another machine's, played from
+    /// there a range at a time.
+    pub fn show_far_file(&mut self, name: &str, far: FarRoot) {
+        self.set_far(Some(far));
+        self.show_media(name, None);
+    }
+
+    fn set_far(&mut self, far: Option<FarRoot>) {
+        let moved = match self.far.lock() {
+            Ok(mut f) => std::mem::replace(&mut *f, far.clone()) != far,
+            Err(_) => false,
+        };
+        // Another page's files, or another machine's: shown afresh.
+        if moved {
+            self.showing = None;
+        }
+    }
+
     pub fn show(&mut self, name: &str, v: usize, bytes: &[u8], root: Option<&std::path::Path>) {
+        self.set_far(None);
+        self.show_page(name, v, bytes, root);
+    }
+
+    fn show_page(&mut self, name: &str, v: usize, bytes: &[u8], root: Option<&std::path::Path>) {
         // A page outside the project (a scratch folder, say) finds its
         // images and styles beside itself.
         let (name, root) = split_root(name, root);
@@ -564,8 +674,13 @@ impl Preview {
         let (Some(dir), Some(name)) = (file.parent(), file.file_name()) else {
             return;
         };
+        self.set_far(None);
         let name = name.to_string_lossy().into_owned();
-        let root = Some(dir.to_path_buf());
+        self.show_media(&name, Some(dir.to_path_buf()));
+    }
+
+    fn show_media(&mut self, name: &str, root: Option<std::path::PathBuf>) {
+        let name = name.to_string();
         let moved = match self.root.lock() {
             Ok(mut r) => std::mem::replace(&mut *r, root.clone()) != root,
             Err(_) => false,
@@ -1087,7 +1202,7 @@ const RANGE_CHUNK: u64 = 4 << 20;
 /// The bytes of `full` a `Range` header asks for (`bytes=a-b`, `bytes=a-`,
 /// `bytes=-n`): inclusive bounds, clamped to the file; `None` if it can't
 /// be met.
-fn byte_range(range: &str, total: u64) -> Option<(u64, u64)> {
+pub fn byte_range(range: &str, total: u64) -> Option<(u64, u64)> {
     let spec = range
         .trim()
         .strip_prefix("bytes=")?

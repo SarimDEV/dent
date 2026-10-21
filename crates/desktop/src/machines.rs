@@ -20,6 +20,8 @@ pub struct MachineView {
     /// the last welcome.
     pub via: Option<(String, Trust)>,
     pub version: String,
+    /// The protocol its daemon speaks, since its last welcome.
+    pub proto: Option<u32>,
     pub agents: Vec<AgentInfo>,
     /// Its daemon has said how each agent stands (the welcome says only
     /// what they are).
@@ -39,6 +41,7 @@ impl MachineView {
             rtt: None,
             via: None,
             version: String::new(),
+            proto: None,
             agents: Vec::new(),
             agents_known: false,
             pair_error: None,
@@ -92,6 +95,7 @@ pub fn apply(list: &mut Vec<MachineView>, id: &str, event: Event) {
         Event::Welcome {
             name,
             version,
+            proto,
             agents,
             via,
             trust,
@@ -99,6 +103,7 @@ pub fn apply(list: &mut Vec<MachineView>, id: &str, event: Event) {
         } => {
             m.saved.name = name;
             m.version = version;
+            m.proto = Some(proto);
             // The welcome says what each agent is; how it stands (installed,
             // signed in) comes with the Agents reply, so a reconnect keeps
             // the last one for agents still there.

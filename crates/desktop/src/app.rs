@@ -689,6 +689,12 @@ pub enum Waiting {
     /// What bringing the project at a folder on a machine needs: from
     /// where, the folder, and the machine it's for.
     Pack(String, String, String),
+    /// What a session's files are, from their machine ([`crate::files`]).
+    FileStat(Vec<crate::files::Ask>),
+    /// A range of one, from `offset`.
+    FileRead(crate::files::Ask, u64),
+    /// A range another machine's video asked for ([`Dent::web_ranges`]).
+    WebRange,
     /// The files a project brings, read on its machine, and the machine
     /// it's for.
     BringFiles(dent_protocol::Bring, String),
@@ -874,6 +880,20 @@ pub struct Dent {
     pub bring_asked: Option<(String, String)>,
     /// The project from another machine the next session brings.
     pub bringing: Option<crate::bring::Chosen>,
+    /// A redraw is coming to ask again about files that failed.
+    files_timer: bool,
+    /// What another machine's pages asked for, not known yet.
+    pub far_waiting: Vec<crate::web::FarAsk>,
+    /// Ranges of another machine's video on their way, by request.
+    pub web_ranges: HashMap<u64, (crate::web::FarAsk, crate::files::Ask)>,
+    /// Another machine's file being opened, tried again until it's here.
+    pub opening: Option<(crate::files::Ask, Option<u32>)>,
+    /// Other machines' files open in the viewer: what each is, the version
+    /// showing, and when it was last asked about.
+    pub opened_far: HashMap<&'static str, (crate::files::Ask, dent_protocol::Stamp, Instant)>,
+    /// For each of another machine's sessions, how many file copies had
+    /// come when its files were last built.
+    files_seen: HashMap<String, u64>,
     /// Messages given back that went back in their reply box, by id.
     given_back: std::collections::HashSet<String>,
     /// Requests whose replies matter, by request number.
@@ -1476,6 +1496,8 @@ impl Dent {
         // it comes.
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
         let live = Net::start(Live::start(crate::live::default_state(), tx.clone()), tx);
+        // Other machines' file copies kept under their cap, oldest first.
+        std::thread::spawn(|| crate::files::trim(crate::files::CACHE_MAX));
         // Messages that waited through a quit go again now, except ones
         // written long ago, which ask first.
         let mut outbox = crate::outbox::reload(crate::outbox::load(), crate::cards::now_ms());
@@ -1700,6 +1722,12 @@ impl Dent {
             bring_asked: None,
             bringing: None,
             given_back: Default::default(),
+            files_timer: false,
+            opening: None,
+            far_waiting: Vec::new(),
+            web_ranges: HashMap::new(),
+            opened_far: HashMap::new(),
+            files_seen: HashMap::new(),
             waiting: HashMap::new(),
             changes: HashMap::new(),
             picks: HashMap::new(),
@@ -2050,6 +2078,20 @@ impl Dent {
     /// Show a file from a link, at `line` when it names one. A path that
     /// isn't there says so; a folder opens in Finder.
     pub fn open_file_at(&mut self, path: &str, line: Option<u32>, cx: &mut Context<Self>) {
+        // Another machine's file is asked of it, never looked for here.
+        if let Some(s) = self.current()
+            && !dent_client_core::fleet::split(&s.id).0.is_empty()
+        {
+            let ask = crate::files::Ask::new(&s.id, path, &s.cwd);
+            self.opening = None;
+            self.open_far(ask, line, cx);
+            return;
+        }
+        // This Mac's: `~` is this home.
+        let expanded = path
+            .strip_prefix("~/")
+            .map(|rest| format!("{}/{rest}", home()));
+        let path = expanded.as_deref().unwrap_or(path);
         let target = std::path::Path::new(path);
         if !target.exists() {
             // Named as the reply named it: from the session's folder.
@@ -2110,6 +2152,136 @@ impl Dent {
         }
     }
 
+    /// Open another machine's file: asked of it, copied here, shown from
+    /// the copy, which follows the file there. Until it's here it's tried
+    /// again each frame (`opening`); what can't be opened says why, naming
+    /// the machine and the path.
+    pub fn open_far(&mut self, ask: crate::files::Ask, line: Option<u32>, cx: &mut Context<Self>) {
+        use crate::files::Look;
+        use dent_protocol::FileStat;
+        let machine = dent_client_core::fleet::split(&ask.session).0.to_string();
+        let name = self.machine_name(&machine);
+        let first = self.opening.as_ref().map(|(a, _)| a) != Some(&ask);
+        if self.current().map(|s| s.id.as_str()) != Some(ask.session.as_str()) {
+            self.opening = None;
+            return;
+        }
+        let wait = |this: &mut Self, cx: &mut Context<Self>| {
+            if first {
+                let file = ask.path.rsplit('/').next().unwrap_or(&ask.path).to_string();
+                this.toast(ToastAction::Info, format!("Opening {file} from {name}…"));
+            }
+            this.opening = Some((ask.clone(), line));
+            cx.notify();
+        };
+        let (real, stamp) = match crate::files::stat(&ask) {
+            Look::Loading => return wait(self, cx),
+            Look::Gone(g) => {
+                self.opening = None;
+                self.toast(ToastAction::Info, g.said(&name));
+                cx.notify();
+                return;
+            }
+            Look::Here(FileStat::File { path, stamp, .. })
+            | Look::Stale(FileStat::File { path, stamp, .. }) => (path, stamp),
+            Look::Here(FileStat::Dir { path }) | Look::Stale(FileStat::Dir { path }) => {
+                self.opening = None;
+                self.toast(ToastAction::Info, format!("A folder on {name} · {path}"));
+                cx.notify();
+                return;
+            }
+            Look::Here(other) | Look::Stale(other) => {
+                self.opening = None;
+                let said = match &other {
+                    FileStat::Missing { checked } => format!("Not on {name} · {checked}"),
+                    FileStat::Refused { checked } => {
+                        format!("{name} doesn't share this · {checked}")
+                    }
+                    FileStat::Unreadable { checked, error } => {
+                        format!("Can't be read on {name} ({error}) · {checked}")
+                    }
+                    _ => format!("Can't open {}", ask.path),
+                };
+                self.toast(ToastAction::Info, said);
+                cx.notify();
+                return;
+            }
+        };
+        // One the agent made (a tab already) opens as that.
+        if let Some(s) = self.current().cloned() {
+            let known = s.arts.iter().copied().find(|id| {
+                self.art(id).is_some_and(|a| {
+                    crate::viewer::art_far(a)
+                        && a.dir
+                            .as_ref()
+                            .map(|d| d.join(a.path))
+                            .is_some_and(|p| p == std::path::Path::new(&real))
+                })
+            });
+            if let Some(a) = known {
+                self.opening = None;
+                self.mark_line(a, line);
+                self.open_art(a, None, cx);
+                return;
+            }
+        }
+        // A video, a sound or a PDF plays from there, a range at a time.
+        if crate::data::Kind::of(&real) == Some(crate::data::Kind::Media) {
+            self.opening = None;
+            let session = ask.session.clone();
+            let id = crate::bridge::art_id(&session, &real);
+            if !self.arts.iter().any(|a| a.id == id) {
+                let name = real.rsplit('/').next().unwrap_or(&real).to_string();
+                self.arts.push(Artifact {
+                    id,
+                    kind: crate::data::Kind::Media,
+                    title: crate::data::intern(&name),
+                    path: crate::data::intern(&real),
+                    dir: Some(std::path::PathBuf::from(&ask.cwd)),
+                    versions: Vec::new(),
+                });
+            }
+            let list = self.opened.entry(session).or_default();
+            if !list.contains(&id) {
+                list.push(id);
+            }
+            self.open_art(id, None, cx);
+            return;
+        }
+        let cap = crate::files::WHOLE_MAX;
+        let local = match crate::files::copy(&ask, cap) {
+            Look::Here(p) | Look::Stale(p) => p,
+            Look::Loading => return wait(self, cx),
+            Look::Gone(g) => {
+                self.opening = None;
+                self.toast(ToastAction::Info, g.said(&name));
+                cx.notify();
+                return;
+            }
+        };
+        self.opening = None;
+        // Moved on to another session meanwhile: it isn't opened there.
+        if self.current().map(|s| s.id.as_str()) != Some(ask.session.as_str()) {
+            return;
+        }
+        let local = local.display().to_string();
+        let session = ask.session.clone();
+        match self.load_opened(&session, &local) {
+            Some(id) => {
+                self.opened_far.insert(id, (ask, stamp, Instant::now()));
+                self.prefs_changed();
+                self.mark_line(id, line);
+                self.open_art(id, None, cx);
+            }
+            None => {
+                // Not a kind the viewer shows: opened in its app, from the
+                // copy.
+                self.toast(ToastAction::Info, format!("Copied from {name}"));
+                crate::open::open(&local, cx);
+            }
+        }
+    }
+
     /// Read a file into a viewer tab of `session`'s; its id, if it could.
     fn load_opened(&mut self, session: &str, path: &str) -> Option<&'static str> {
         // Media plays from disk; it's never read in whole.
@@ -2163,6 +2335,10 @@ impl Dent {
         let Some(Tab::Art(a)) = self.current().map(|s| self.tab(s)) else {
             return false;
         };
+        // Another machine's: looked at again every few seconds.
+        if let Some((_, _, at)) = self.opened_far.get(a) {
+            return self.panel_open && at.elapsed() >= std::time::Duration::from_secs(3);
+        }
         let (Some(seen), Some(art)) = (self.opened_at.get(a), self.art(a)) else {
             return false;
         };
@@ -2174,6 +2350,10 @@ impl Dent {
 
     /// A file you opened changed on disk: its tab shows the new version.
     pub fn refresh_opened(&mut self, art: &'static str) {
+        if self.opened_far.contains_key(art) {
+            self.refresh_far(art);
+            return;
+        }
         let Some(&seen) = self.opened_at.get(art) else {
             return;
         };
@@ -2204,6 +2384,46 @@ impl Dent {
             a.versions.push(Rc::from(bytes));
             self.updated_at.insert(art, Instant::now());
         }
+    }
+
+    /// Another machine's file you opened: asked about again every few
+    /// seconds; a new version is copied and shown.
+    fn refresh_far(&mut self, art: &'static str) {
+        use crate::files::Look;
+        let Some((ask, seen, at)) = self.opened_far.get(art).cloned() else {
+            return;
+        };
+        let machine = dent_client_core::fleet::split(&ask.session).0.to_string();
+        if at.elapsed() >= std::time::Duration::from_secs(3) {
+            crate::files::changed(&machine, Some(std::slice::from_ref(&ask.path)));
+            self.opened_far
+                .insert(art, (ask.clone(), seen, Instant::now()));
+        }
+        let Look::Here(dent_protocol::FileStat::File { stamp, .. }) = crate::files::stat(&ask)
+        else {
+            return;
+        };
+        if stamp == seen {
+            return;
+        }
+        let Look::Here(local) = crate::files::copy(&ask, crate::files::COPY_MAX) else {
+            return;
+        };
+        self.opened_far.insert(art, (ask, stamp, Instant::now()));
+        let media = self
+            .art(art)
+            .is_some_and(|a| a.kind == crate::data::Kind::Media);
+        if let Some(a) = self.arts.iter_mut().find(|a| a.id == art) {
+            if media {
+                a.path = crate::data::intern(&local.display().to_string());
+            } else if let Ok(bytes) = std::fs::read(&local) {
+                a.versions.push(Rc::from(bytes));
+            }
+        }
+        if media && let Some(p) = &self.preview {
+            p.borrow_mut().reload();
+        }
+        self.updated_at.insert(art, Instant::now());
     }
 
     /// Close a file's tab. The tab beside it shows instead; with none left
@@ -2717,6 +2937,13 @@ impl Dent {
                         let welcome = matches!(event, dent_remote::Event::Welcome { .. });
                         let named = welcome || matches!(event, dent_remote::Event::State(_));
                         crate::machines::apply(&mut self.machines, &id, event);
+                        // Its files can be asked of it while it's online.
+                        if let Some(m) = self.machines.iter().find(|m| m.id == id) {
+                            use dent_client_core::machine::State;
+                            let up =
+                                matches!(m.state, State::Online | State::Slow) && m.proto.is_some();
+                            crate::files::set_online(&id, up, m.proto);
+                        }
                         // Its agents as they stand there, and their models.
                         if welcome {
                             self.waiting.insert(
@@ -3126,6 +3353,54 @@ impl Dent {
             ) => self.bring_files_came(bring, to, Ok(files), cx),
             (Waiting::BringFiles(bring, to), Out::Error { message }) => {
                 self.bring_files_came(bring, to, Err(message), cx)
+            }
+            (
+                Waiting::FileStat(asks),
+                Out::Reply {
+                    reply: Reply::Stats { stats },
+                },
+            ) => {
+                crate::files::stats_came(asks, stats);
+                self.pump_files(cx);
+            }
+            (Waiting::FileStat(asks), Out::Error { message }) => {
+                crate::files::stats_failed(asks, &message);
+                self.pump_files(cx);
+            }
+            (
+                Waiting::FileRead(ask, offset),
+                Out::Reply {
+                    reply:
+                        Reply::Bytes {
+                            stamp,
+                            offset: at,
+                            total,
+                            bytes_b64,
+                        },
+                },
+            ) => {
+                let bytes = (at == offset)
+                    .then(|| dent_protocol::b64::decode(&bytes_b64))
+                    .flatten();
+                if let Some(id) = crate::files::bytes_came(ask, offset, stamp, total, bytes) {
+                    self.files_seen.remove(&id);
+                    self.rebuild(&id);
+                }
+                self.pump_files(cx);
+            }
+            (
+                Waiting::FileRead(ask, _),
+                Out::Reply {
+                    reply: Reply::FileGone { stat, changed },
+                },
+            ) => {
+                crate::files::read_gone(ask, stat, changed);
+                self.pump_files(cx);
+            }
+            (Waiting::WebRange, out) => self.web_range_came(req, out),
+            (Waiting::FileRead(ask, _), _) => {
+                crate::files::read_failed(ask);
+                self.pump_files(cx);
             }
             (Waiting::ProjectMade, Out::Error { message }) => {
                 self.project_busy = None;
@@ -5161,6 +5436,39 @@ impl Dent {
         self.waiting.insert(n, w);
     }
 
+    /// Send what drawing asked of other machines' files, and draw again
+    /// for what came. A failed read waits a moment, then asks again.
+    pub fn pump_files(&mut self, cx: &mut Context<Self>) {
+        let sends = crate::files::drain();
+        let came = !sends.is_empty();
+        for (machine, send) in sends {
+            match send {
+                crate::files::Send::Stat { asks, req } => {
+                    let n = self.live.send_to(&machine, req);
+                    self.waiting.insert(n, Waiting::FileStat(asks));
+                }
+                crate::files::Send::Read { ask, offset, req } => {
+                    let n = self.live.send_to(&machine, req);
+                    self.waiting.insert(n, Waiting::FileRead(ask, offset));
+                }
+            }
+        }
+        if !came && crate::files::busy() && !self.files_timer {
+            self.files_timer = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.files_timer = false;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
     /// Wait for the reply to request `n`.
     pub fn waiting_insert(&mut self, n: u64, w: Waiting) {
         self.waiting.insert(n, w);
@@ -5354,7 +5662,13 @@ impl Dent {
             s.detail = why;
             s.paused = true;
         }
-        let made_changed = old.as_ref().is_none_or(|(_, _, sig, _)| *sig != s.made_sig);
+        // Another machine's files that came since are built in too.
+        let came = crate::files::came();
+        let far_came = !owner.is_empty() && self.files_seen.get(id) != Some(&came);
+        let made_changed = far_came || old.as_ref().is_none_or(|(_, _, sig, _)| *sig != s.made_sig);
+        if far_came {
+            self.files_seen.insert(id.to_string(), came);
+        }
         let partial_len = v.partial.len();
         let partial_now = v.partial.clone();
         let arts = if made_changed {
@@ -7624,6 +7938,7 @@ impl Dent {
 
     /// Page events arrive from the web view; turn them into state.
     pub fn drain_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.serve_far(cx);
         let Some(p) = &self.preview else { return };
         let (events, showing, retired) = {
             let p = p.borrow();
@@ -7643,6 +7958,156 @@ impl Dent {
             self.page_events(a, showing, events, window, cx);
         }
         cx.notify();
+    }
+
+    /// Answer what another machine's page asked for: a video's range read
+    /// from there (pinned to one version), or a picture or style copied
+    /// here whole. What isn't known yet waits for the next frame.
+    pub fn serve_far(&mut self, cx: &mut Context<Self>) {
+        use crate::files::Look;
+        use dent_protocol::FileStat;
+        let mut asks = std::mem::take(&mut self.far_waiting);
+        if let Some(p) = &self.preview {
+            asks.extend(p.borrow().take_far());
+        }
+        for a in asks {
+            let ask = crate::files::Ask::new(&a.far.session, &a.rel, &a.far.cwd)
+                .based(Some(a.far.dir.clone()));
+            let missing = |a: crate::web::FarAsk| {
+                a.responder.respond(
+                    wry::http::Response::builder()
+                        .status(404)
+                        .body(std::borrow::Cow::Owned(b"Not found".to_vec()))
+                        .unwrap_or_else(|_| {
+                            wry::http::Response::new(std::borrow::Cow::Borrowed(&[][..]))
+                        }),
+                )
+            };
+            let media = crate::data::media_kind(&a.rel).is_some();
+            if media || a.range.is_some() {
+                // A player's range: read from there, a piece at a time.
+                let (stamp, total) = match crate::files::stat(&ask) {
+                    Look::Here(FileStat::File { stamp, .. })
+                    | Look::Stale(FileStat::File { stamp, .. }) => (stamp, stamp.size),
+                    Look::Loading => {
+                        self.far_waiting.push(a);
+                        continue;
+                    }
+                    _ => {
+                        missing(a);
+                        continue;
+                    }
+                };
+                let range = a.range.clone().unwrap_or_else(|| "bytes=0-".into());
+                let Some((start, end)) = crate::web::byte_range(&range, total) else {
+                    a.responder.respond(
+                        wry::http::Response::builder()
+                            .status(416)
+                            .header("Content-Range", format!("bytes */{total}"))
+                            .body(std::borrow::Cow::Owned(Vec::new()))
+                            .unwrap_or_else(|_| {
+                                wry::http::Response::new(std::borrow::Cow::Borrowed(&[][..]))
+                            }),
+                    );
+                    continue;
+                };
+                let len = (end - start + 1).min(dent_protocol::READ_MAX as u64) as u32;
+                let machine = dent_client_core::fleet::split(&ask.session).0.to_string();
+                let req = dent_protocol::Request::Read {
+                    file: dent_protocol::FileRef {
+                        session: ask.session.clone(),
+                        path: ask.path.clone(),
+                        base: ask.base.clone(),
+                    },
+                    offset: start,
+                    len,
+                    expect: Some(stamp),
+                };
+                let n = self.live.send_to(&machine, req);
+                self.web_ranges.insert(n, (a, ask));
+                self.waiting.insert(n, Waiting::WebRange);
+                continue;
+            }
+            match crate::files::copy(&ask, crate::files::WHOLE_MAX) {
+                Look::Here(p) | Look::Stale(p) => match std::fs::read(&p) {
+                    Ok(bytes) => a.responder.respond(
+                        wry::http::Response::builder()
+                            .status(200)
+                            .header("Content-Type", a.ty)
+                            .body(std::borrow::Cow::Owned(bytes))
+                            .unwrap_or_else(|_| {
+                                wry::http::Response::new(std::borrow::Cow::Borrowed(&[][..]))
+                            }),
+                    ),
+                    Err(_) => missing(a),
+                },
+                Look::Loading => self.far_waiting.push(a),
+                Look::Gone(_) => missing(a),
+            }
+        }
+        if !self.far_waiting.is_empty() {
+            self.pump_files(cx);
+        }
+    }
+
+    /// A video's range came from its machine, or didn't: the player hears.
+    fn web_range_came(&mut self, n: u64, out: Out) {
+        let Some((a, ask)) = self.web_ranges.remove(&n) else {
+            return;
+        };
+        let answer = |status: u16, headers: Vec<(&'static str, String)>, body: Vec<u8>| {
+            let mut b = wry::http::Response::builder()
+                .status(status)
+                .header("Accept-Ranges", "bytes");
+            for (k, v) in headers {
+                b = b.header(k, v);
+            }
+            b.body(std::borrow::Cow::Owned(body))
+                .unwrap_or_else(|_| wry::http::Response::new(std::borrow::Cow::Borrowed(&[][..])))
+        };
+        match out {
+            Out::Reply {
+                reply:
+                    Reply::Bytes {
+                        offset,
+                        total,
+                        bytes_b64,
+                        ..
+                    },
+            } => {
+                let bytes = dent_protocol::b64::decode(&bytes_b64).unwrap_or_default();
+                if bytes.is_empty() {
+                    a.responder.respond(answer(
+                        416,
+                        vec![("Content-Range", format!("bytes */{total}"))],
+                        Vec::new(),
+                    ));
+                    return;
+                }
+                let end = offset + bytes.len() as u64 - 1;
+                a.responder.respond(answer(
+                    206,
+                    vec![
+                        ("Content-Type", a.ty.to_string()),
+                        ("Content-Length", bytes.len().to_string()),
+                        ("Content-Range", format!("bytes {offset}-{end}/{total}")),
+                    ],
+                    bytes,
+                ));
+            }
+            Out::Reply {
+                reply: Reply::FileGone { changed, .. },
+            } => {
+                // Rewritten while it played: asked about again; the player
+                // stops here.
+                if changed {
+                    let machine = dent_client_core::fleet::split(&ask.session).0.to_string();
+                    crate::files::changed(&machine, Some(std::slice::from_ref(&ask.path)));
+                }
+                a.responder.respond(answer(404, Vec::new(), Vec::new()));
+            }
+            _ => a.responder.respond(answer(502, Vec::new(), Vec::new())),
+        }
     }
 
     /// What a page said, from the viewer or a page in its own window.

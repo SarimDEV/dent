@@ -202,7 +202,25 @@ impl Dent {
         let Some(detail) = line.detail.as_ref() else {
             return;
         };
-        let items = tool_items(detail, |p| std::path::Path::new(p).exists());
+        // The file is the session's machine's: asked of it, and only this
+        // Mac's can be shown in Finder.
+        let Some(s) = self.current().cloned() else {
+            return;
+        };
+        let far = !dent_client_core::fleet::split(&s.id).0.is_empty();
+        let items = tool_items(
+            detail,
+            |p| {
+                matches!(
+                    crate::files::stat(&crate::files::Ask::new(&s.id, p, &s.cwd)),
+                    crate::files::Look::Loading
+                        | crate::files::Look::Here(dent_protocol::FileStat::File { .. })
+                        | crate::files::Look::Stale(dent_protocol::FileStat::File { .. })
+                        | crate::files::Look::Here(dent_protocol::FileStat::Dir { .. })
+                )
+            },
+            !far,
+        );
         if !items.is_empty() {
             self.open_context(at, items, cx);
         }
@@ -405,6 +423,7 @@ pub fn quote_block(words: &str) -> String {
 fn tool_items(
     detail: &crate::data::CallDetail,
     exists: impl Fn(&str) -> bool,
+    here: bool,
 ) -> Vec<(&'static str, Do)> {
     let mut items: Vec<(&str, Do)> = Vec::new();
     if let Some(command) = &detail.command {
@@ -414,7 +433,9 @@ fn tool_items(
     if let Some(path) = &detail.path {
         if exists(path) {
             items.push(("Open", Do::OpenLink(path.clone())));
-            items.push(("Show in Finder", Do::Reveal(path.clone())));
+            if here {
+                items.push(("Show in Finder", Do::Reveal(path.clone())));
+            }
         }
         items.push(("Copy Path", Do::CopyPath(path.clone())));
     }
@@ -443,7 +464,7 @@ mod tests {
             path: None,
             edits: false,
         };
-        let items = super::tool_items(&detail, |_| true);
+        let items = super::tool_items(&detail, |_| true, true);
         let labels: Vec<_> = items.iter().map(|(l, _)| *l).collect();
         assert_eq!(
             labels,
@@ -460,7 +481,7 @@ mod tests {
             path: Some("/p/a.rs".into()),
             edits: true,
         };
-        let labels: Vec<_> = super::tool_items(&file, |_| false)
+        let labels: Vec<_> = super::tool_items(&file, |_| false, true)
             .iter()
             .map(|(l, _)| *l)
             .collect();

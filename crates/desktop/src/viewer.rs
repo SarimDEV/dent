@@ -35,6 +35,68 @@ pub fn art_file(a: &crate::data::Artifact) -> Option<std::path::PathBuf> {
     a.dir.as_ref().map(|d| d.join(p))
 }
 
+/// The session an artifact is from (qualified with its machine): made and
+/// media ones are `session:path`, opened ones `session/open/path`.
+pub fn art_session(id: &str) -> &str {
+    if let Some(i) = id.find("/open/") {
+        return &id[..i];
+    }
+    id.split_once(':').map_or(id, |(s, _)| s)
+}
+
+/// Whether an artifact is another machine's file, not opened from a copy
+/// here: never looked for on this Mac's disk.
+pub fn art_far(a: &crate::data::Artifact) -> bool {
+    !a.id.contains("/open/")
+        && !dent_client_core::fleet::split(art_session(a.id))
+            .0
+            .is_empty()
+}
+
+/// Where another machine's artifact finds its own files there: its
+/// session, and the folder it's in. `None` for this Mac's.
+pub fn far_root(a: &crate::data::Artifact) -> Option<crate::web::FarRoot> {
+    if !art_far(a) {
+        return None;
+    }
+    let cwd = a
+        .dir
+        .as_ref()
+        .map(|d| d.display().to_string())
+        .unwrap_or_default();
+    let full = if a.path.starts_with('/') || a.path.starts_with("~/") {
+        a.path.to_string()
+    } else {
+        format!("{cwd}/{}", a.path)
+    };
+    let dir = full
+        .rsplit_once('/')
+        .map_or(cwd.clone(), |(d, _)| d.to_string());
+    Some(crate::web::FarRoot {
+        session: art_session(a.id).to_string(),
+        cwd,
+        dir,
+    })
+}
+
+/// An artifact's file on this Mac: the file itself, the copy opened here,
+/// or (another machine's) its copy once it's come, up to `cap`.
+pub fn art_here(a: &crate::data::Artifact, cap: u64) -> Option<std::path::PathBuf> {
+    if !art_far(a) {
+        return art_file(a);
+    }
+    let cwd = a
+        .dir
+        .as_ref()
+        .map(|d| d.display().to_string())
+        .unwrap_or_default();
+    crate::files::copy(
+        &crate::files::Ask::new(art_session(a.id), a.path, &cwd),
+        cap,
+    )
+    .shown()
+}
+
 /// A long name cut in the middle, so its start and its extension both show.
 pub fn middle_ellipsis(s: &str, max: usize) -> String {
     let n = s.chars().count();
@@ -611,6 +673,14 @@ impl Dent {
             let mut p = p.borrow_mut();
             if server {
                 p.show_server(a.path);
+            } else if let Some(far) = far_root(&a) {
+                // Another machine's: its video plays from there a range at a
+                // time, and a page's own pictures and styles come from there.
+                if media {
+                    p.show_far_file(a.path.rsplit('/').next().unwrap_or(a.path), far);
+                } else {
+                    p.show_far(a.path, v, &a.versions[v - 1], far);
+                }
             } else if media {
                 if let Some(f) = art_file(&a) {
                     p.show_file(&f);
@@ -840,7 +910,7 @@ impl Dent {
                 // The latest version is the file itself, beside its styles
                 // and pictures; an older one is written out on its own.
                 let on_disk = (v == latest)
-                    .then(|| art_file(&a))
+                    .then(|| art_here(&a, crate::files::COPY_MAX))
                     .flatten()
                     .filter(|f| f.is_file());
                 let file = (!server && on_disk.is_none()).then(|| {
@@ -1283,6 +1353,13 @@ impl Dent {
             bg: t.panel,
             // Links and pictures in a document are found from its folder.
             base: art_file(&a).and_then(|f| f.parent().map(|p| p.to_path_buf())),
+            session: Some((
+                art_session(a.id).to_string(),
+                a.dir
+                    .as_ref()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_default(),
+            )),
         };
         let area = crate::select::area(&format!("doc/{id}"));
         let page = {
@@ -1324,7 +1401,7 @@ impl Dent {
                                 cx.notify();
                             }))
                     })
-                    .when_some(art_file(&a), |d, full| {
+                    .when_some(art_here(&a, crate::files::COPY_MAX), |d, full| {
                         d.child(self.open_button("open-doc", full, cx))
                     }),
             )
@@ -1768,10 +1845,24 @@ impl Dent {
                                     .child(if file.lines.is_empty() {
                                         // Nothing to compare line by line: a
                                         // picture shows itself, anything else says so.
-                                        let full = std::path::Path::new(&s.cwd).join(&file.path);
-                                        let picture = crate::data::Kind::of(&file.path)
-                                            == Some(crate::data::Kind::Image)
-                                            && full.exists();
+                                        // From the session's machine: this Mac's file,
+                                        // or the copy of another's.
+                                        let ask = crate::files::Ask::new(&s.id, &file.path, &s.cwd);
+                                        let shown = (crate::data::Kind::of(&file.path)
+                                            == Some(crate::data::Kind::Image))
+                                        .then(|| crate::files::picture(&ask).shown())
+                                        .flatten();
+                                        let picture = shown.is_some();
+                                        let full = shown.unwrap_or_default();
+                                        let file_size = match crate::files::stat(&ask) {
+                                            crate::files::Look::Here(
+                                                dent_protocol::FileStat::File { stamp, .. },
+                                            )
+                                            | crate::files::Look::Stale(
+                                                dent_protocol::FileStat::File { stamp, .. },
+                                            ) => Some(stamp.size),
+                                            _ => None,
+                                        };
                                         div()
                                             .id("diff")
                                             .size_full()
@@ -1801,9 +1892,7 @@ impl Dent {
                                             // What it is and how big; the
                                             // list beside says it changed.
                                             .child(div().ty(UI).text_color(t.quiet).child({
-                                                let size = std::fs::metadata(&full)
-                                                    .map(|m| bytes(m.len()))
-                                                    .ok();
+                                                let size = file_size.map(bytes);
                                                 let what =
                                                     if picture { "Picture" } else { "Binary file" };
                                                 match size {
@@ -2007,7 +2096,7 @@ impl Dent {
                                 cx.notify();
                             })),
                     )
-                    .when_some(art_file(&a), |d, full| {
+                    .when_some(art_here(&a, crate::files::COPY_MAX), |d, full| {
                         d.child(self.open_button("open-text", full, cx))
                     }),
             )
@@ -2361,6 +2450,7 @@ impl Dent {
                         scope: format!("{}/aside-{}", s.id, a.id),
                         bg: t.panel,
                         base: Some(std::path::PathBuf::from(&s.cwd)),
+                        session: Some((s.id.clone(), s.cwd.clone())),
                     };
                     let body = markdown::render(blocks.as_slice(), &t, false, &mut r);
                     div()
