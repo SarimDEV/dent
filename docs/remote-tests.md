@@ -4,6 +4,20 @@ The real tests behind [remote-plan.md](remote-plan.md). A one-way decision is ac
 
 Each test says how to run it and what passing means. Results go in the spike's findings note, with numbers.
 
+## Stage 0 results
+
+Run on the rig with the spike code, not the real daemon (2026-10-20). Every test still runs against the real code before release.
+- **Passed:** R-B1, R-B2 ([spike 10](spikes/10-tailscale-trust.md)), R-B4 ([spike 15](spikes/15-sleep-restart-and-serve.md)), R-D1 ([spike 09](spikes/09-moving-sessions.md)), R-D2 ([spike 11](spikes/11-moving-git.md)), and R-E1–E6 on Linux ([spike 13](spikes/13-service-and-updates.md); R-E3 and R-E4 with the launcher prototype, and no `dent doctor` yet).
+- **Passed in part:**
+  - R-A1 for 10 minutes, not 60 ([spike 12](spikes/12-link-under-real-networks.md)).
+  - R-A3 without the "froze for 12 s" report, because the spike daemon doesn't measure its own lag (spike 12).
+  - R-A4 with freezes up to 75 s. macOS kills the VM's process when it's frozen for 2 minutes ([spike 15](spikes/15-sleep-restart-and-serve.md)).
+  - R-A5, where a restart showed as "quit". [0065](decisions/0065-launcher-and-updates.md) now has the launcher tell the daemon why it's stopping (spike 15).
+  - R-A6 without the 5-minute cooldown, which the spike doesn't have ([spike 14](spikes/14-routes-identity-and-boot.md)).
+  - R-B7 as far as what a cloned VM keeps; the startup check isn't built (spike 14).
+  - R-D4 without dirty submodules or the size cap (spike 11).
+- **Not run yet:** the rest.
+
 ## The rig
 
 - **studio:** the owner's Mac.
@@ -71,7 +85,7 @@ Tests marked **(owner)** need the owner's hands: the Mac's lid, the Mac's Wi-Fi,
 | Id | Test | How | Passes when |
 | --- | --- | --- | --- |
 | R-D1 | Transcript resume across machines (first) | A real Claude session on studio (2.1.301) reads files, edits, runs tools and has a subagent. Copy its transcript and side files to the VM (2.1.305) under the VM's cwd key, then `claude --resume`; then the reverse direction | The agent continues with context: it answers questions about earlier tool results without re-reading. Records which side files are needed, whether old absolute paths cause wrong reads, and whether older-from-newer works. If resume fails, the text fallback carries the session |
-| R-D2 | Git snapshot | Worktree with commits, staged edits, unstaged edits, untracked files, a deleted file, a rename, a mode change, a binary and a force-added ignored file; pack on studio and apply on the VM | `git status`, `git diff` and `git diff --cached` on the VM match the source exactly, staged split included. The bundle excludes what the VM already has. **Passed** ([spike 11](spikes/11-moving-git.md)) |
+| R-D2 | Git snapshot | Worktree with commits, staged edits, unstaged edits, untracked files, a deleted file, a rename, a mode change, a binary and a force-added ignored file; pack on studio and apply on the VM | `git status`, `git diff` and `git diff --cached` on the VM match the source exactly, staged split included. The bundle excludes what the VM already has |
 | R-D3 | Interrupted at every step | Kill the source daemon, the target daemon or the link at each step in [0064](decisions/0064-moving-sessions.md#interruption-points) | Exactly one live copy every time. A retry with the same move id finishes; Continue here releases the source with its warning |
 | R-D4 | Refusals | Target branch diverged; branch checked out elsewhere on the target; a nested repository; a dirty submodule; bundle over the cap | Each is refused before anything stops, with what to do |
 | R-D5 | A real move mid-task | Start a multi-step task on studio, move it to the VM after the first turn, and let it finish there. Then move a session between two folders that both exist on one machine | The work finishes on the VM with no repeated steps. The tombstone on studio links to it. In the same-machine move, nothing touches the old folder |

@@ -2,7 +2,7 @@
 
 How dent goes from one machine to many: the decisions that are hard to undo, the stages, what each stage must handle, and the real tests that settle each decision before it is built on.
 
-Status: stage 0 done (2026-10-20). Doors 1–6 and 8 are accepted; door 7 (moving sessions) waits on its interrupted-move test. Each record lists the tests still to run against the real code before release ([remote-tests.md](remote-tests.md)).
+Status: stage 0 done (2026-10-20). Doors 1–6 and 8 are accepted; door 7 (moving sessions) stays proposed until its interrupted-move and real-move tests pass (R-D3, R-D5). Each record lists the tests still to run against the real code before release; [remote-tests.md](remote-tests.md#stage-0-results) says which ran in stage 0 and how far.
 
 ## Why this comes next
 
@@ -11,18 +11,18 @@ The owner develops remotely most days, so remote has to be the best part of dent
 - the session holder ([0004](decisions/0004-session-holder.md), [spike 06](spikes/06-session-holder.md)), which already runs in the daemon;
 - the I/O-free client core ([spike 07](spikes/07-client-core.md)).
 
-Before building on them, we studied about 400 failure modes from mature multi-machine agent tools: their fix history, issue trackers and unfinished work. This plan folds every lesson that applies into the stages below. Several of the spikes' choices change as a result:
+Before building on them, we studied about 400 failure modes from mature multi-machine agent tools: their fix history, issue trackers and unfinished work. This plan folds every lesson that applies into the stages below. Several earlier choices change as a result:
 - the 3 s silence rule;
 - the 2 s backoff cap;
 - a `tailscale whois` per connection;
 - prompts refused while a machine is away;
 - moves sent as a patch.
 
-## Where dent starts ahead
+## What dent already has
 
-Keep these. They answer problems other tools still have open.
+Keep these. Each one answers failures from that study.
 
-- **Agents survive daemon restarts and updates** (the session holder). Elsewhere, a server update kills every running turn, and the turns are restarted from a "continue" prompt.
+- **Agents survive daemon restarts and updates** (the session holder). Without it, a server update kills every running turn, and the turns have to be restarted from a "continue" prompt.
 - **Machines say when they go away.** Asleep, quitting and restarting are announced, so a sleeping laptop shows "asleep", not "reconnecting" for hours.
 - **Identity is a key, not an address.** A different machine at a known address is caught in the handshake.
 - **Everything is encrypted by dent,** so there are no rules about which token may travel over which route.
@@ -37,13 +37,13 @@ Each has its own decision record. Everything not listed here is a two-way door, 
 | # | Door | Decision | Record | Settled by |
 | --- | --- | --- | --- | --- |
 | 1 | Shared state | None. Every machine is independent; the client merges the view | [0058](decisions/0058-independent-machines.md) | Owner call |
-| 2 | Machine identity | A key bound to the install, a locked data folder, everything keyed by (machine, id) | [0059](decisions/0059-machine-identity.md) | R-B7 |
-| 3 | The wire | Noise over a WebSocket; framed and chunked with a control lane; log epoch; frozen maintenance subset; refusal codes; idempotency keys | [0060](decisions/0060-remote-wire.md) | R-A1–A10 |
-| 4 | Trust | A pinned key from pairing, or a live Tailscale check with strict rules; removal only when authenticated | [0061](decisions/0061-trust.md) | R-B1–B6 |
-| 5 | Liveness and retry | Any frame counts as life; teardown only after long silence; probe, don't replace; capped jittered backoff from v1 | [0062](decisions/0062-liveness-and-retry.md) | R-A1–A7 |
+| 2 | Machine identity | A key bound to the install, a locked data folder, everything keyed by (machine, id) | [0059](decisions/0059-machine-identity.md) | R-B6, R-B7 |
+| 3 | The wire | Noise over a WebSocket; framed and chunked with a control lane; log epoch; frozen maintenance subset; refusal codes; idempotency keys | [0060](decisions/0060-remote-wire.md) | R-A1–A12 |
+| 4 | Trust | A pinned key from pairing, or a live Tailscale check with strict rules; removal only when authenticated | [0061](decisions/0061-trust.md) | R-B1–B9 |
+| 5 | Liveness and retry | Any frame counts as life; teardown only after long silence; probe before replacing; capped jittered backoff from v1 | [0062](decisions/0062-liveness-and-retry.md) | R-A1–A8 |
 | 6 | Away machines | Prompts queue on the device and send once on reconnect, shown as waiting | [0063](decisions/0063-queued-prompts.md) | Owner call, R-C2 |
-| 7 | Moving a session | A new id on the target with a tombstone; a guarded state machine; the real transcript with a text fallback; git as a snapshot commit in a bundle | [0064](decisions/0064-moving-sessions.md) | R-D1–D4 |
-| 8 | Install and update | A small launcher owns which version runs: trial, database snapshot, commit or roll back | [0065](decisions/0065-launcher-and-updates.md) | R-E1–E6 |
+| 7 | Moving a session | A new id on the target with a tombstone; a guarded state machine; the real transcript with a text fallback; git as a snapshot commit in a bundle | [0064](decisions/0064-moving-sessions.md) | R-D1–D5 |
+| 8 | Install and update | A small launcher owns which version runs: trial, database snapshot, commit or roll back | [0065](decisions/0065-launcher-and-updates.md) | R-E1–E7 |
 
 ## Stages
 
@@ -60,7 +60,7 @@ The test rig is the owner's Mac plus `dent-linux`, a Lima VM on it. The VM is on
    - Check a tagged machine.
    - Check a connection arriving through `tailscale serve` from loopback.
 
-   This decides door 4. (R-B1–B4: B1 and B2 **done**, [spike 10](spikes/10-tailscale-trust.md); B4 **done**, [spike 15](spikes/15-sleep-restart-and-serve.md); B3 optional)
+   This decides door 4. (R-B1–B4: B1 and B2 **done**, [spike 10](spikes/10-tailscale-trust.md); B4 **done**, [spike 15](spikes/15-sleep-restart-and-serve.md); B3 optional; [results](remote-tests.md#stage-0-results))
 3. **The link under a bad network.** Extend `spikes/link` with the new liveness, backoff and route rules, then run it between the Mac and the VM:
    - packet loss and reordering;
    - added latency;
@@ -71,12 +71,12 @@ The test rig is the owner's Mac plus `dent-linux`, a Lima VM on it. The VM is on
    - hours unreachable;
    - an hour-long soak.
 
-   This decides doors 3 and 5. (R-A1–A10: A1 and A3 **done**, [spike 12](spikes/12-link-under-real-networks.md); A6 **done**, [spike 14](spikes/14-routes-identity-and-boot.md); A4 and A5 **done**, [spike 15](spikes/15-sleep-restart-and-serve.md))
+   This decides doors 3 and 5. (R-A1–A10: A1 and A3 **run**, [spike 12](spikes/12-link-under-real-networks.md); A6 **run**, [spike 14](spikes/14-routes-identity-and-boot.md); A4 and A5 **run**, [spike 15](spikes/15-sleep-restart-and-serve.md); some only in part, see the [results](remote-tests.md#stage-0-results))
 4. **Git across machines.** A script that packs a worktree as a snapshot commit in a bundle and applies it on the VM. It must reproduce `git status` exactly:
    - binaries, deletions, renames and file modes;
    - staged, untracked and force-added ignored files.
 
-   It must also refuse diverged branches, nested repositories and dirty submodules. (R-D2, D4: **done**, [spike 11](spikes/11-moving-git.md))
+   It must also refuse diverged branches, nested repositories and dirty submodules. (R-D2 **done**; R-D4 **done** except dirty submodules and the size cap; [spike 11](spikes/11-moving-git.md))
 5. **A daemon under a service manager.**
    - A systemd user service in the VM: linger, surviving SSH logout, the agent PATH, one agent running out of memory.
    - A launcher prototype that trials an update with a failing migration and rolls back. (R-E1–E6) (**done** on Linux, [spike 13](spikes/13-service-and-updates.md))

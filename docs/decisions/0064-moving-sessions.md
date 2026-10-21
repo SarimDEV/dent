@@ -92,7 +92,7 @@ R-D3 kills each side, or the link, at every one of these, and requires exactly o
 
 ## Why
 
-The study of a mature tool's unfinished move feature gave the protocol: the state machine, the uncertain mark, the not-accepted proof, Continue here, the derived import id and the git snapshot. That tool moves only the text of the conversation, so its moved agent starts with a short summary and none of its tool results. dent drives Claude Code's own transcript, so it can resume the real session, which is better as long as R-D1 proves it works across machines and versions. The patch in the old plan lost binaries, deletions, file modes and renames. A snapshot commit carries them exactly.
+The failure study gave the protocol: the state machine, the uncertain mark, the not-accepted proof, Continue here, the derived import id and the git snapshot. Moving only the text of the conversation would leave the moved agent with a short summary and none of its tool results. dent drives Claude Code's own transcript, so it can resume the real session, and R-D1 showed that works across machines and versions. The patch in the old plan lost binaries, deletions, file modes and renames. A snapshot commit carries them exactly.
 
 ## Consequences
 

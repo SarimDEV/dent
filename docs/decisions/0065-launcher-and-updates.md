@@ -60,4 +60,4 @@ The holder already spares dent the worst part, agents dying on update. The launc
 ## Consequences
 
 - Three processes per machine: launcher, daemon and holder. The launcher and the holder are both small and stable. They aren't merged: the holder must never restart, and the launcher must be replaceable on its own.
-- Stage 3 of [remote-plan.md](../remote-plan.md) builds this. Stage 0 proves it with a prototype in the VM (R-E3, R-E4).
+- Stage 3 of [remote-plan.md](../remote-plan.md) builds this. Stage 0 proved it with a prototype in the VM (R-E3, R-E4, [spike 13](../spikes/13-service-and-updates.md)).

@@ -1,6 +1,6 @@
 # 0060. The remote wire: framed Noise over a WebSocket, with a frozen maintenance subset
 
-Status: accepted (2026-10-20, owner's call after stage 0) · Evidence: [spikes 12](../spikes/12-link-under-real-networks.md), [14](../spikes/14-routes-identity-and-boot.md) and [15](../spikes/15-sleep-restart-and-serve.md) · Before release: [R-A7–A12](../remote-tests.md#a-links-liveness-and-routes) against the real daemon · Builds on [0033](0033-direct-websocket-hub-on-hold.md), [0038](0038-local-core.md) · Plan: [remote-plan.md](../remote-plan.md)
+Status: accepted (2026-10-20, owner's call after stage 0) · Evidence: [spikes 12](../spikes/12-link-under-real-networks.md), [14](../spikes/14-routes-identity-and-boot.md) and [15](../spikes/15-sleep-restart-and-serve.md) · Before release: [R-A2 and R-A7–A12](../remote-tests.md#a-links-liveness-and-routes) against the real daemon · Builds on [0033](0033-direct-websocket-hub-on-hold.md), [0038](0038-local-core.md) · Plan: [remote-plan.md](../remote-plan.md)
 
 ## Decision
 
