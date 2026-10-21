@@ -1349,9 +1349,10 @@ impl Machine {
         let wait = half + self.random() % (half + 1);
         // The budget (decision 0062): past the first ten minutes of failing,
         // no more than 60 dials an hour, counting each route an attempt
-        // dials.
+        // dials. It holds for every attempt that lands past the mark, so
+        // one scheduled just before it can't squeeze in an extra.
         let since = *self.failing_since.get_or_insert(now);
-        if now >= since + NEAR_MS {
+        if now + wait >= since + NEAR_MS {
             wait.max(self.routes.len().max(1) as u64 * 60_000)
         } else {
             wait

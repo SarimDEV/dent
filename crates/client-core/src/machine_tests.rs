@@ -48,6 +48,8 @@ struct Sim {
     responsive: bool,
     notes: Vec<Note>,
     dials: Vec<String>,
+    /// When each of those dials began.
+    dialed_at: Vec<u64>,
     /// New dials never complete (the network is still down), while links
     /// already up stay as they are.
     hang: bool,
@@ -78,6 +80,7 @@ impl Sim {
             responsive: true,
             notes: Vec::new(),
             dials: Vec::new(),
+            dialed_at: Vec::new(),
             hang: false,
         }
     }
@@ -105,6 +108,7 @@ impl Sim {
         match op {
             Io::Connect { conn, addr } => {
                 self.dials.push(addr.clone());
+                self.dialed_at.push(self.now);
                 if self.hang {
                     return;
                 }
@@ -912,35 +916,53 @@ fn an_unreachable_machine_stays_within_the_hourly_dial_budget() {
         ("[fd7a::9]:7480", Addr::Up),
         ("studio.local:7480", Addr::Up),
     ];
-    let mut s = Sim::new(&routes);
-    s.trust_device();
-    s.m.connect(0);
-    s.pump();
-    s.run_for(2_000);
-    assert_eq!(s.m.state(), &State::Online);
-    // Gone: some routes drop packets, some refuse at once.
-    for (i, (a, _)) in routes.iter().enumerate() {
-        s.addrs.insert(
-            a.to_string(),
-            if i % 2 == 0 {
-                Addr::Silent
-            } else {
-                Addr::Refused
-            },
-        );
+    // The waits are jittered from each device's own seed: many devices, so
+    // the budget holds for every one and not for a lucky draw.
+    for _ in 0..40 {
+        let mut s = Sim::new(&routes);
+        s.trust_device();
+        s.m.connect(0);
+        s.pump();
+        s.run_for(2_000);
+        assert_eq!(s.m.state(), &State::Online);
+        // Gone: some routes drop packets, some refuse at once.
+        for (i, (a, _)) in routes.iter().enumerate() {
+            s.addrs.insert(
+                a.to_string(),
+                if i % 2 == 0 {
+                    Addr::Silent
+                } else {
+                    Addr::Refused
+                },
+            );
+        }
+        let conns: Vec<u64> = s.conns.keys().copied().collect();
+        for c in conns {
+            s.conns.remove(&c);
+            s.m.closed(c, "reset", s.now);
+        }
+        s.pump();
+        let gone = s.now;
+        s.run_for(3 * 60 * 60_000);
+        // Every hour starting past the first ten minutes, wherever it
+        // starts: no more than 60 dials.
+        let after: Vec<u64> = s
+            .dialed_at
+            .iter()
+            .copied()
+            .filter(|&t| t >= gone + 10 * 60_000)
+            .collect();
+        for (i, &t) in after.iter().enumerate() {
+            let in_hour = after[i..]
+                .iter()
+                .take_while(|&&u| u < t + 60 * 60_000)
+                .count();
+            assert!(
+                in_hour <= 60,
+                "{in_hour} dials in the hour from {} min",
+                (t - gone) / 60_000
+            );
+        }
+        assert!(after.len() >= 100, "it kept trying: {}", after.len());
     }
-    let conns: Vec<u64> = s.conns.keys().copied().collect();
-    for c in conns {
-        s.conns.remove(&c);
-        s.m.closed(c, "reset", s.now);
-    }
-    s.pump();
-    s.run_for(10 * 60_000);
-    let before = s.dials.len();
-    s.run_for(60 * 60_000);
-    let in_hour = s.dials.len() - before;
-    assert!(
-        in_hour <= 60,
-        "{in_hour} dials in an hour, past the 10-minute mark"
-    );
 }
