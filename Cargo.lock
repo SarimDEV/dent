@@ -2167,6 +2167,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dent-link"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "getrandom 0.2.17",
+ "hex",
+ "hmac",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "snow",
+ "spake2",
+]
+
+[[package]]
 name = "dent-protocol"
 version = "0.0.0"
 dependencies = [

@@ -1,0 +1,27 @@
+[package]
+name = "dent-link"
+description = "The link between devices and daemons: Noise XX handshake, framed transport with a control lane, and pairing with a short code. No I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+hex = "=0.4.3"
+hmac = "=0.12.1"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "=0.10.9"
+snow = "=0.9.6"
+spake2 = "=0.4.0"
+
+# No OS randomness on the web: take it from the browser's crypto.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "=0.2.17", features = ["js"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+getrandom = "=0.2.17"
+
+[lints]
+workspace = true
