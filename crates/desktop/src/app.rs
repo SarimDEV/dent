@@ -2108,11 +2108,20 @@ impl Dent {
             self.open_far(ask, line, cx);
             return;
         }
-        // This Mac's: `~` is this home.
-        let expanded = path
-            .strip_prefix("~/")
-            .map(|rest| format!("{}/{rest}", home()));
-        let path = expanded.as_deref().unwrap_or(path);
+        // This Mac's: `~` is this home, `file://` this Mac's address, the
+        // way the daemon reads them.
+        let base = self.current().map(|s| s.cwd.clone()).unwrap_or_default();
+        let Some(expanded) = dent_files::resolve(
+            path,
+            std::path::Path::new(&base),
+            std::path::Path::new(&home()),
+        ) else {
+            self.toast(ToastAction::Info, format!("{path} is on another computer"));
+            cx.notify();
+            return;
+        };
+        let expanded = expanded.display().to_string();
+        let path = expanded.as_str();
         let target = std::path::Path::new(path);
         // this Mac's: a local path, or a copy here
         if !target.exists() {
@@ -8427,6 +8436,18 @@ impl Dent {
                 PageEvent::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
                 PageEvent::Found(n) => self.page_found(n),
                 PageEvent::Dropped(paths) => self.attach_paths(&paths, window, cx),
+                // A page's link to a file names its session's file, on its
+                // machine: opened like any link to a file, in that session,
+                // never this Mac's file of that name in the browser.
+                PageEvent::External(url) if url.starts_with("file:") => {
+                    let sid = crate::viewer::art_session(art).to_string();
+                    if self.current().map(|s| s.id.as_str()) != Some(sid.as_str())
+                        && self.session(&sid).is_some()
+                    {
+                        self.select(Some(sid), window, cx);
+                    }
+                    self.open_file_at(&url, None, cx);
+                }
                 PageEvent::External(url) => cx.open_url(&url),
             }
         }

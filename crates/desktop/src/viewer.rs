@@ -222,7 +222,20 @@ impl Dent {
                 None,
             ));
         }
-        for a in self.open_arts(s).into_iter().filter_map(|a| self.art(a)) {
+        let arts: Vec<_> = self
+            .open_arts(s)
+            .into_iter()
+            .filter_map(|a| self.art(a))
+            .collect();
+        // Files are named by their own name, with as much of their folder
+        // as tells two of the same name apart.
+        let files: Vec<&str> = arts
+            .iter()
+            .filter(|a| a.kind != Kind::Server && crate::data::visual_title(a.path).is_none())
+            .map(|a| a.path)
+            .collect();
+        let mut names = tab_names(&files).into_iter();
+        for a in arts {
             tabs.push((
                 Tab::Art(a.id),
                 if a.kind == Kind::Server {
@@ -230,7 +243,7 @@ impl Dent {
                 } else if let Some(v) = crate::data::visual_title(a.path) {
                     v.to_string()
                 } else {
-                    a.path.rsplit('/').next().unwrap_or(a.path).to_string()
+                    names.next().unwrap_or_default()
                 },
                 a.kind.icon(),
                 Some(crate::data::intern(&self.shown(a))),
@@ -2781,3 +2794,59 @@ const TAB_STRIP_CHROME: f32 = 56.;
 const TAB_CHROME: f32 = 56.;
 /// About how wide a letter of a tab's name is.
 const TAB_LETTER: f32 = 7.;
+
+/// Each path's tab name: its file name, and when another has the same
+/// name, as many of its folders as it takes to tell them apart
+/// (`take.mp4 · clips`, `take.mp4 · raw`).
+fn tab_names(paths: &[&str]) -> Vec<String> {
+    let parts: Vec<Vec<&str>> = paths
+        .iter()
+        .map(|p| p.split('/').filter(|c| !c.is_empty()).rev().collect())
+        .collect();
+    let name = |i: usize| parts[i].first().copied().unwrap_or(paths[i]);
+    (0..paths.len())
+        .map(|i| {
+            let same: Vec<usize> = (0..paths.len())
+                .filter(|&j| j != i && name(j) == name(i) && paths[j] != paths[i])
+                .collect();
+            if same.is_empty() {
+                return name(i).to_string();
+            }
+            // The fewest folders, nearest first, that no other of the same
+            // name ends with too.
+            let folders = &parts[i][1..];
+            let n = (1..=folders.len())
+                .find(|&n| {
+                    same.iter()
+                        .all(|&j| parts[j].get(1..=n) != Some(&folders[..n]))
+                })
+                .unwrap_or(folders.len());
+            let dir: Vec<&str> = folders[..n].iter().rev().copied().collect();
+            format!("{} · {}", name(i), dir.join("/"))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tab_names;
+
+    #[test]
+    fn two_files_of_one_name_are_told_apart_by_their_folders() {
+        assert_eq!(
+            tab_names(&["/w/clips/take.mp4", "/w/raw/take.mp4", "/w/notes.md"]),
+            ["take.mp4 · clips", "take.mp4 · raw", "notes.md"]
+        );
+        // The same nearest folder: one more is shown.
+        assert_eq!(
+            tab_names(&["/a/out/x.png", "/b/out/x.png"]),
+            ["x.png · a/out", "x.png · b/out"]
+        );
+        // One folder inside the other.
+        assert_eq!(
+            tab_names(&["/w/x.png", "/w/sub/x.png"]),
+            ["x.png · w", "x.png · sub"]
+        );
+        assert_eq!(tab_names(&["/only.txt"]), ["only.txt"]);
+    }
+}

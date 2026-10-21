@@ -42,27 +42,94 @@ impl Policy {
 }
 
 /// Where a written path points, before anything is checked on disk.
-/// `file://` addresses are decoded; `~` is `home`; a relative path is taken
-/// from `base`.
-pub fn resolve(written: &str, base: &Path, home: &Path) -> PathBuf {
+/// `file://` addresses are decoded; `~` is `home` and `~name` that user's
+/// home here; a relative path is taken from `base`. `None` for a `file://`
+/// address naming another computer: no file here is it.
+pub fn resolve(written: &str, base: &Path, home: &Path) -> Option<PathBuf> {
     let w = written.trim();
     let w = match w.strip_prefix("file://") {
-        // `file:///x` and `file://localhost/x` both name `/x`.
-        Some(rest) => decode(rest.strip_prefix("localhost").unwrap_or(rest)),
+        // `file:///x`, `file://localhost/x` and `file://<this machine>/x`
+        // all name `/x`.
+        Some(rest) => {
+            let (host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+            if !is_this_host(host) {
+                return None;
+            }
+            decode(if path.is_empty() { "/" } else { path })
+        }
         None => w.to_string(),
     };
     if w == "~" {
-        return home.to_path_buf();
+        return Some(home.to_path_buf());
     }
     if let Some(rest) = w.strip_prefix("~/") {
-        return home.join(rest);
+        return Some(home.join(rest));
+    }
+    // `~name/…`, as a shell reads it: that user's home, when there's one.
+    if let Some(rest) = w.strip_prefix('~') {
+        let (name, rest) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+        if let Some(theirs) = home_of(name) {
+            return Some(theirs.join(rest.trim_start_matches('/')));
+        }
     }
     let p = Path::new(&w);
-    if p.is_absolute() {
+    Some(if p.is_absolute() {
         p.to_path_buf()
     } else {
         base.join(p)
+    })
+}
+
+/// Whether a `file://` address's host is this machine: none, `localhost`,
+/// or its own name (as `name`, `name.local` or fully).
+fn is_this_host(host: &str) -> bool {
+    if host.is_empty() || host.eq_ignore_ascii_case("localhost") {
+        return true;
     }
+    let mut buf = [0u8; 256];
+    // SAFETY: the buffer is as long as said, and ends in a NUL either way.
+    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len() - 1) } == 0;
+    if !ok {
+        return false;
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(0);
+    let mine = String::from_utf8_lossy(&buf[..end]);
+    let first = |s: &str| s.split('.').next().unwrap_or(s).to_ascii_lowercase();
+    !mine.is_empty() && first(&mine) == first(host)
+}
+
+/// The home folder of the user `name` on this machine.
+fn home_of(name: &str) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    {
+        return None;
+    }
+    let cname = std::ffi::CString::new(name).ok()?;
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buf = vec![0u8; 4096];
+    let mut out: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: every pointer is to memory owned here and as long as said;
+    // `out` is either null or `&mut pwd`, whose strings live in `buf`.
+    let r = unsafe {
+        libc::getpwnam_r(
+            cname.as_ptr(),
+            &mut pwd,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            &mut out,
+        )
+    };
+    if r != 0 || out.is_null() || pwd.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: a NUL-ended string inside `buf`, filled in above.
+    let dir = unsafe { std::ffi::CStr::from_ptr(pwd.pw_dir) };
+    let dir = Path::new(std::ffi::OsStr::from_bytes(dir.to_bytes()));
+    (!dir.as_os_str().is_empty()).then(|| dir.to_path_buf())
 }
 
 /// `%20` and the like, as a `file://` address writes them.
@@ -97,12 +164,12 @@ fn hex(c: Option<&u8>) -> Option<u8> {
 /// without a `#fragment` or `?query` a link may carry (a file named with
 /// a `#` in it wins when it's there).
 fn candidates(written: &str, base: &Path, home: &Path) -> Vec<PathBuf> {
-    let mut v = vec![resolve(written, base, home)];
-    if let Some(cut) = written.find(['#', '?']).filter(|&i| i > 0) {
-        let short = resolve(&written[..cut], base, home);
-        if !v.contains(&short) {
-            v.push(short);
-        }
+    let mut v: Vec<PathBuf> = resolve(written, base, home).into_iter().collect();
+    if let Some(cut) = written.find(['#', '?']).filter(|&i| i > 0)
+        && let Some(short) = resolve(&written[..cut], base, home)
+        && !v.contains(&short)
+    {
+        v.push(short);
     }
     v
 }
@@ -136,9 +203,13 @@ fn stat_with(written: &str, base: &Path, home: &Path, policy: &Policy, size: boo
             Err(s) => return s,
         }
     }
-    // Missing every way: said as written.
+    // Missing every way: said as written (another computer's address, as
+    // it was written).
     FileStat::Missing {
-        checked: all[0].display().to_string(),
+        checked: all
+            .first()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| written.trim().to_string()),
     }
 }
 

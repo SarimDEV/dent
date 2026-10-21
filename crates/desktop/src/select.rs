@@ -1603,8 +1603,9 @@ thread_local! {
 /// Follow a link: web addresses in the browser; a file dent can show (a
 /// document, page or picture) in the viewer; any other file in its app.
 pub fn open_link(url: &str, window: &mut Window, cx: &mut App) {
-    // A path, `~/…` too (whose home it is, the session's machine says).
-    if url.starts_with('/') || url.starts_with("~/") {
+    // A path, `~/…`, `~name/…` and `file://…` too (whose home and which
+    // computer, the session's machine says).
+    if url.starts_with('/') || url.starts_with('~') || url.starts_with("file://") {
         // The window decides where it shows, and says so when it can't.
         OPEN.with(|o| *o.borrow_mut() = Some(at_line(url)));
         window.refresh();

@@ -21,23 +21,49 @@ fn dir(name: &str) -> PathBuf {
 #[test]
 fn home_is_the_machines_own_and_relative_is_the_folder_given() {
     let (base, home) = (Path::new("/work/app"), Path::new("/home/ada"));
-    assert_eq!(resolve("~/x.png", base, home), Path::new("/home/ada/x.png"));
-    assert_eq!(resolve("~", base, home), home);
+    let r = |w: &str| resolve(w, base, home);
+    assert_eq!(r("~/x.png").unwrap(), Path::new("/home/ada/x.png"));
+    assert_eq!(r("~").unwrap(), home);
+    assert_eq!(r("out/x.png").unwrap(), Path::new("/work/app/out/x.png"));
+    assert_eq!(r("/abs/x.png").unwrap(), Path::new("/abs/x.png"));
+    assert_eq!(r("file:///a%20b/c.png").unwrap(), Path::new("/a b/c.png"));
     assert_eq!(
-        resolve("out/x.png", base, home),
-        Path::new("/work/app/out/x.png")
-    );
-    assert_eq!(resolve("/abs/x.png", base, home), Path::new("/abs/x.png"));
-    assert_eq!(
-        resolve("file:///a%20b/c.png", base, home),
-        Path::new("/a b/c.png")
-    );
-    assert_eq!(
-        resolve("file://localhost/a/c.png", base, home),
+        r("file://localhost/a/c.png").unwrap(),
         Path::new("/a/c.png")
     );
-    // `~user` isn't this machine's home.
-    assert_eq!(resolve("~bob/x", base, home), Path::new("/work/app/~bob/x"));
+    // This machine by its own name is this machine.
+    let me = String::from_utf8(
+        std::process::Command::new("hostname")
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let me = me.trim();
+    assert_eq!(
+        r(&format!("file://{me}/a/c.png")).unwrap(),
+        Path::new("/a/c.png")
+    );
+    let short = me.split('.').next().unwrap().to_uppercase();
+    assert_eq!(
+        r(&format!("file://{short}.local/a")).unwrap(),
+        Path::new("/a")
+    );
+    // Another computer's file is no file here.
+    assert_eq!(r("file://elsewhere-not-this-one/a/c.png"), None);
+    // `~name` is that user's home, as a shell reads it; no such user, and
+    // it's a name like any other.
+    let root = if cfg!(target_os = "macos") {
+        "/var/root"
+    } else {
+        "/root"
+    };
+    assert_eq!(r("~root/x").unwrap(), Path::new(root).join("x"));
+    assert_eq!(r("~root").unwrap(), Path::new(root));
+    assert_eq!(
+        r("~nobody-dent-test/x").unwrap(),
+        Path::new("/work/app/~nobody-dent-test/x")
+    );
 }
 
 #[test]

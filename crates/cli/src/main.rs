@@ -372,7 +372,7 @@ async fn get(args: &[String]) -> Result<()> {
         .find(|s| s.name == *name || s.id == *name)
         .with_context(|| format!("no saved machine called {name}"))?;
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let remote = dent_remote::remote::spawn(
+    let remote = dent_remote::remote::spawn_asking(
         &tokio::runtime::Handle::current(),
         device_keys()?,
         "dent cli",
@@ -469,7 +469,7 @@ async fn call(args: &[String]) -> Result<()> {
         .find(|s| s.name == *name || s.id == *name)
         .with_context(|| format!("no saved machine called {name}"))?;
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let remote = dent_remote::remote::spawn(
+    let remote = dent_remote::remote::spawn_asking(
         &tokio::runtime::Handle::current(),
         device_keys()?,
         "dent cli",

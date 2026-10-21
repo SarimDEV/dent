@@ -17,7 +17,12 @@ use dent_protocol::Event;
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// The format of the file; another one is begun again.
-const VERSION: i64 = 1;
+const VERSION: i64 = 2;
+
+/// The most kept across every machine. Past it, the machines used least
+/// lately go first, whole: their history comes again from the start next
+/// time. A machine with more than this alone isn't kept.
+pub const HISTORY_MAX: u64 = 1 << 30;
 
 enum Write {
     /// Events from `machine`'s log `epoch`, in order.
@@ -32,6 +37,8 @@ enum Write {
         epoch: String,
     },
     Forget(String),
+    /// `machine`'s kept log was used (loaded): it's the last to go.
+    Touch(String),
     /// Answered once every write before it is done (tests, shutdown).
     Flush(mpsc::Sender<()>),
 }
@@ -56,6 +63,11 @@ impl History {
     /// The kept logs in `dir` (made, readable by this user only, if need
     /// be). A file that can't be read as this format is begun again.
     pub fn open(dir: &Path) -> anyhow::Result<History> {
+        History::open_capped(dir, HISTORY_MAX)
+    }
+
+    /// Like [`History::open`], keeping at most `cap` bytes of events.
+    pub fn open_capped(dir: &Path, cap: u64) -> anyhow::Result<History> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(dir)?;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
@@ -92,9 +104,9 @@ impl History {
                         }
                         _ => None,
                     };
-                    if let Ok(mut db) = writer.lock()
-                        && let Err(e) = write(&mut db, w)
-                    {
+                    let saved = matches!(w, Write::Save { .. });
+                    let Ok(mut db) = writer.lock() else { continue };
+                    if let Err(e) = write(&mut db, w) {
                         // A batch not kept would leave a gap the next link
                         // resumes past: what's kept of that machine goes, and
                         // its history comes again from the start.
@@ -102,6 +114,14 @@ impl History {
                         if let Some(m) = machine {
                             let _ = write(&mut db, Write::Forget(m.clone()));
                             broken.insert(m);
+                        }
+                    } else if saved && let Some(m) = machine {
+                        // Over the cap: whole machines go, used least lately
+                        // first. Nothing more of theirs is kept this run, so
+                        // what's kept never starts partway through a log.
+                        match trim(&mut db, &m, cap) {
+                            Ok(gone) => broken.extend(gone),
+                            Err(e) => eprintln!("dent: couldn't trim history: {e:#}"),
                         }
                     }
                 }
@@ -112,7 +132,8 @@ impl History {
     /// `machine`'s kept log, if there is one.
     pub fn load(&self, machine: &str) -> Option<Kept> {
         let db = self.db.lock().ok()?;
-        let read = || -> rusqlite::Result<Option<Kept>> {
+        // `Ok(None)`: kept, but not readable whole.
+        let read = || -> rusqlite::Result<Option<Option<Kept>>> {
             let Some((epoch, last_seq)) = db
                 .query_row(
                     "SELECT epoch, last_seq FROM feeds WHERE machine = ?1",
@@ -121,7 +142,7 @@ impl History {
                 )
                 .optional()?
             else {
-                return Ok(None);
+                return Ok(Some(None));
             };
             let mut q = db.prepare("SELECT body FROM events WHERE machine = ?1 ORDER BY seq")?;
             let mut events = Vec::new();
@@ -134,14 +155,19 @@ impl History {
                     Err(_) => return Ok(None),
                 }
             }
-            Ok(Some(Kept {
+            Ok(Some(Some(Kept {
                 epoch,
                 last_seq: last_seq as u64,
                 events,
-            }))
+            })))
         };
         match read() {
-            Ok(Some(k)) => Some(k),
+            // Nothing kept.
+            Ok(Some(None)) => None,
+            Ok(Some(Some(k))) => {
+                let _ = self.tx.send(Write::Touch(machine.into()));
+                Some(k)
+            }
             Ok(None) => {
                 // Not readable whole: what's kept goes, and comes again.
                 drop(db);
@@ -178,6 +204,20 @@ impl History {
         let _ = self.tx.send(Write::Forget(machine.into()));
     }
 
+    /// How many bytes of events are kept, across every machine.
+    pub fn kept_bytes(&self) -> u64 {
+        self.db
+            .lock()
+            .ok()
+            .and_then(|db| {
+                db.query_row("SELECT COALESCE(SUM(bytes), 0) FROM feeds", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .ok()
+            })
+            .unwrap_or(0) as u64
+    }
+
     /// Wait until every write so far is on disk.
     pub fn flush(&self) {
         let (tx, rx) = mpsc::channel();
@@ -200,7 +240,9 @@ fn connect(path: &PathBuf) -> anyhow::Result<Connection> {
                 "CREATE TABLE feeds (
                     machine TEXT PRIMARY KEY,
                     epoch TEXT NOT NULL,
-                    last_seq INTEGER NOT NULL
+                    last_seq INTEGER NOT NULL,
+                    bytes INTEGER NOT NULL DEFAULT 0,
+                    used INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE events (
                     machine TEXT NOT NULL,
@@ -210,6 +252,18 @@ fn connect(path: &PathBuf) -> anyhow::Result<Connection> {
                 ) WITHOUT ROWID;",
             )?;
             db.pragma_update(None, "user_version", VERSION)?;
+        }
+        // The first format, before the cap: each machine's size counted.
+        1 => {
+            db.execute_batch(
+                "BEGIN;
+                ALTER TABLE feeds ADD COLUMN bytes INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE feeds ADD COLUMN used INTEGER NOT NULL DEFAULT 0;
+                UPDATE feeds SET bytes = (SELECT COALESCE(SUM(length(body)), 0)
+                    FROM events WHERE events.machine = feeds.machine);
+                PRAGMA user_version = 2;
+                COMMIT;",
+            )?;
         }
         VERSION => {}
         v => anyhow::bail!("format {v}, not {VERSION}"),
@@ -251,6 +305,7 @@ fn write(db: &mut Connection, w: Write) -> rusqlite::Result<()> {
                     params![machine, epoch],
                 )?;
             }
+            let mut added = 0i64;
             {
                 let mut ins = t.prepare_cached(
                     "INSERT OR IGNORE INTO events (machine, seq, body) VALUES (?1, ?2, ?3)",
@@ -258,13 +313,16 @@ fn write(db: &mut Connection, w: Write) -> rusqlite::Result<()> {
                 for e in &events {
                     let body = serde_json::to_string(e)
                         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-                    ins.execute(params![machine, e.seq as i64, body])?;
+                    if ins.execute(params![machine, e.seq as i64, body])? > 0 {
+                        added += body.len() as i64;
+                    }
                 }
             }
             let last = events.iter().map(|e| e.seq).max().unwrap_or(0) as i64;
             t.execute(
-                "UPDATE feeds SET last_seq = MAX(last_seq, ?2) WHERE machine = ?1",
-                params![machine, last],
+                "UPDATE feeds SET last_seq = MAX(last_seq, ?2), bytes = bytes + ?3, used = ?4
+                 WHERE machine = ?1",
+                params![machine, last, added, now()],
             )?;
             t.commit()
         }
@@ -272,11 +330,17 @@ fn write(db: &mut Connection, w: Write) -> rusqlite::Result<()> {
             let t = db.transaction()?;
             t.execute("DELETE FROM events WHERE machine = ?1", params![machine])?;
             t.execute(
-                "INSERT OR REPLACE INTO feeds (machine, epoch, last_seq) VALUES (?1, ?2, 0)",
-                params![machine, epoch],
+                "INSERT OR REPLACE INTO feeds (machine, epoch, last_seq, used) VALUES (?1, ?2, 0, ?3)",
+                params![machine, epoch, now()],
             )?;
             t.commit()
         }
+        Write::Touch(machine) => db
+            .execute(
+                "UPDATE feeds SET used = ?2 WHERE machine = ?1",
+                params![machine, now()],
+            )
+            .map(|_| ()),
         Write::Forget(machine) => {
             let t = db.transaction()?;
             t.execute("DELETE FROM events WHERE machine = ?1", params![machine])?;
@@ -288,6 +352,53 @@ fn write(db: &mut Connection, w: Write) -> rusqlite::Result<()> {
             Ok(())
         }
     }
+}
+
+/// Seconds since 1970, for which machine was used last.
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// Keep what's kept under `cap`, dropping whole machines, the ones used
+/// least lately first and `last` (just saved) only if it's too big alone.
+/// The machines dropped.
+fn trim(db: &mut Connection, last: &str, cap: u64) -> rusqlite::Result<Vec<String>> {
+    let mut total: i64 = db.query_row("SELECT COALESCE(SUM(bytes), 0) FROM feeds", [], |r| {
+        r.get(0)
+    })?;
+    if total as u64 <= cap {
+        return Ok(Vec::new());
+    }
+    let order: Vec<(String, i64)> = {
+        let mut q = db.prepare("SELECT machine, bytes FROM feeds ORDER BY used, machine")?;
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    // Too big alone: it goes, and the others stay.
+    if let Some((_, bytes)) = order.iter().find(|(m, _)| m == last)
+        && *bytes as u64 > cap
+    {
+        eprintln!(
+            "dent: {last}'s history is more than can be kept; it comes from the start each time"
+        );
+        write(db, Write::Forget(last.to_string()))?;
+        return Ok(vec![last.to_string()]);
+    }
+    let mut gone = Vec::new();
+    for (m, bytes) in order.into_iter().filter(|(m, _)| m != last) {
+        if total as u64 <= cap {
+            break;
+        }
+        eprintln!(
+            "dent: the kept history is over its cap; {m}'s comes again from the start next time"
+        );
+        write(db, Write::Forget(m.clone()))?;
+        total -= bytes;
+        gone.push(m);
+    }
+    Ok(gone)
 }
 
 #[cfg(test)]
@@ -376,6 +487,103 @@ mod tests {
         }
         let h = History::open(&d).unwrap();
         assert!(h.load("m").is_none(), "not read in part");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// How many bytes one test event takes kept.
+    fn size() -> u64 {
+        serde_json::to_string(&ev(1)).unwrap().len() as u64
+    }
+
+    /// When `machine` was used last, set by hand: seconds are too coarse to
+    /// order a test by.
+    fn used(h: &History, machine: &str, at: i64) {
+        h.flush();
+        h.db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE feeds SET used = ?2 WHERE machine = ?1",
+                params![machine, at],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn over_the_cap_the_machine_used_least_lately_goes_whole() {
+        let d = dir("cap");
+        // Room for five events.
+        let h = History::open_capped(&d, size() * 5).unwrap();
+        h.save("old", "e", vec![ev(1), ev(2)]);
+        used(&h, "old", 1);
+        h.save("used", "e", vec![ev(1), ev(2)]);
+        used(&h, "used", 3);
+        h.save("new", "e", vec![ev(1)]);
+        used(&h, "new", 2);
+        h.flush();
+        assert_eq!(h.kept_bytes(), size() * 5);
+        // One more: the one used least lately goes, all of it.
+        h.save("new", "e", vec![ev(2)]);
+        h.flush();
+        assert!(h.load("old").is_none());
+        assert_eq!(h.load("used").unwrap().events.len(), 2);
+        assert_eq!(h.load("new").unwrap().events.len(), 2);
+        assert_eq!(h.kept_bytes(), size() * 4);
+        // Nothing more of it is kept this run: kept from partway through
+        // its log, it would read as whole.
+        h.save("old", "e", vec![ev(3)]);
+        h.flush();
+        assert!(h.load("old").is_none());
+        // Its log starting again (a resync) keeps it again.
+        h.reset("old", "e2");
+        h.save("old", "e2", vec![ev(1)]);
+        h.flush();
+        assert_eq!(h.load("old").unwrap().events.len(), 1);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_machine_too_big_alone_isnt_kept_and_the_rest_stay() {
+        let d = dir("toobig");
+        let h = History::open_capped(&d, size() * 3).unwrap();
+        h.save("small", "e", vec![ev(1)]);
+        h.save("big", "e", (1..=4).map(ev).collect());
+        h.flush();
+        assert!(h.load("big").is_none());
+        assert_eq!(h.load("small").unwrap().events.len(), 1);
+        h.save("big", "e", vec![ev(5)]);
+        h.flush();
+        assert!(h.load("big").is_none(), "no log kept from partway");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn the_first_format_is_kept_and_counted() {
+        let d = dir("v1");
+        std::fs::create_dir_all(&d).unwrap();
+        {
+            let db = Connection::open(d.join("history.db")).unwrap();
+            db.execute_batch(
+                "CREATE TABLE feeds (machine TEXT PRIMARY KEY, epoch TEXT NOT NULL,
+                    last_seq INTEGER NOT NULL);
+                CREATE TABLE events (machine TEXT NOT NULL, seq INTEGER NOT NULL,
+                    body TEXT NOT NULL, PRIMARY KEY (machine, seq)) WITHOUT ROWID;
+                PRAGMA user_version = 1;",
+            )
+            .unwrap();
+            db.execute("INSERT INTO feeds VALUES ('m', 'e', 2)", [])
+                .unwrap();
+            for seq in [1u64, 2] {
+                db.execute(
+                    "INSERT INTO events VALUES ('m', ?1, ?2)",
+                    params![seq as i64, serde_json::to_string(&ev(seq)).unwrap()],
+                )
+                .unwrap();
+            }
+        }
+        let h = History::open(&d).unwrap();
+        let k = h.load("m").unwrap();
+        assert_eq!((k.last_seq, k.events.len()), (2, 2));
+        assert_eq!(h.kept_bytes(), size() * 2);
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

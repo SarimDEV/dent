@@ -706,7 +706,8 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             let policy = d.file_policy();
             let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
                 let home = crate::paths::home();
-                let at = dent_files::resolve(&path, Path::new(&cwd), &home);
+                let at = dent_files::resolve(&path, Path::new(&cwd), &home)
+                    .ok_or_else(|| anyhow::anyhow!("{path} is on another computer"))?;
                 let o = dent_files::open(&at, &policy).map_err(|s| anyhow::anyhow!(said(&s)))?;
                 o.read_all(FILE_CAP)
                     .map_err(|_| anyhow::anyhow!("{path} is too big to show"))

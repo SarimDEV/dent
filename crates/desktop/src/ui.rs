@@ -683,6 +683,28 @@ impl Render for Tip {
     }
 }
 
+/// Over a picture drawn from a copy kept from before, while `machine` is
+/// away: it may have changed there since. Sits in the picture's corner, so
+/// the picture is `relative`.
+pub fn kept_mark(id: impl Into<SharedString>, machine: &str, t: &Theme) -> Stateful<Div> {
+    let name = crate::data::machine_shown(machine);
+    div()
+        .id(id.into())
+        .absolute()
+        .left(px(space::S1H))
+        .bottom(px(space::S1H))
+        .px(px(space::S1H))
+        .rounded(px(radius::SM))
+        .bg(black().opacity(0.6))
+        .text_color(white())
+        .ty(LABEL)
+        .child("Offline copy")
+        .tooltip(tip_owned(
+            format!("{name} is offline. This is the copy from before, and it may have changed there since."),
+            *t,
+        ))
+}
+
 pub fn tip(
     text: &'static str,
     keys: Option<&'static str>,

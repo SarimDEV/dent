@@ -194,6 +194,30 @@ pub fn spawn_kept(
     keeping: Option<Keeping>,
     events: impl FnMut(Event) + Send + 'static,
 ) -> Remote {
+    spawn_with(rt, keys, client, saved, keeping, true, events)
+}
+
+/// Like [`spawn`], for asking only: no link subscribes to the machine's
+/// log, so nothing of it comes, only answers (`dent call`, `dent get`).
+pub fn spawn_asking(
+    rt: &tokio::runtime::Handle,
+    keys: Keys,
+    client: &str,
+    saved: Saved,
+    events: impl FnMut(Event) + Send + 'static,
+) -> Remote {
+    spawn_with(rt, keys, client, saved, None, false, events)
+}
+
+fn spawn_with(
+    rt: &tokio::runtime::Handle,
+    keys: Keys,
+    client: &str,
+    saved: Saved,
+    keeping: Option<Keeping>,
+    follow: bool,
+    events: impl FnMut(Event) + Send + 'static,
+) -> Remote {
     let (tx, rx) = mpsc::unbounded_channel();
     let resumed = keeping.as_ref().and_then(|k| k.resume.clone());
     let seq = Arc::new(AtomicU64::new(resumed.as_ref().map_or(0, |r| r.1)));
@@ -210,6 +234,7 @@ pub fn spawn_kept(
         client.to_string(),
         saved,
         keeping,
+        follow,
         seq.clone(),
         pending.clone(),
         theirs.clone(),
@@ -390,6 +415,7 @@ async fn run(
     client: String,
     mut saved: Saved,
     keeping: Option<Keeping>,
+    follow: bool,
     seq: Arc<AtomicU64>,
     pending: Arc<Mutex<Pending>>,
     theirs: Arc<Mutex<HashSet<String>>>,
@@ -445,7 +471,9 @@ async fn run(
                         let hello = Request::Hello { proto: PROTOCOL, client: client.clone() };
                         let sub = cursor.subscribe();
                         let _ = ask_tx.send(Ask::Send(line(HELLO, &hello)));
-                        let _ = ask_tx.send(Ask::Send(line(SUBSCRIBE, &sub)));
+                        if follow {
+                            let _ = ask_tx.send(Ask::Send(line(SUBSCRIBE, &sub)));
+                        }
                     }
                     Note::State(s) => {
                         if !matches!(s, State::Online | State::Slow) {

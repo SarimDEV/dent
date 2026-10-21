@@ -1195,9 +1195,10 @@ fn looks_like_path(c: &str) -> bool {
 }
 
 /// Where a link or picture in a document points: a web address as it is,
-/// a path made whole from the document's folder. `~/…` stays as written:
-/// whose home it is depends on the machine the session runs on, which the
-/// file layer knows ([`crate::files`]).
+/// a path made whole from the document's folder. `~/…`, `~name/…` and
+/// `file://…` stay as written: whose home it is, and whether a `file://`
+/// host is that machine, depend on the machine the session runs on, which
+/// the file layer asks ([`crate::files`]).
 pub fn resolve(href: &str, base: Option<&std::path::Path>) -> String {
     // A reference to an issue, in the repository `base` is in. One that
     // can't be found keeps its `github:` and is no link.
@@ -1209,7 +1210,7 @@ pub fn resolve(href: &str, base: Option<&std::path::Path>) -> String {
     }
     let path = href.split(['#', '?']).next().unwrap_or(href);
     let path = crate::web::percent_decode(path);
-    if path.starts_with('/') || path.starts_with("~/") {
+    if path.starts_with('/') || path.starts_with('~') {
         return path;
     }
     match base {
@@ -1235,13 +1236,15 @@ pub fn resolve(href: &str, base: Option<&std::path::Path>) -> String {
 /// a web picture is a link to it.
 fn image_block(src: &str, alt: &str, t: &Theme, key: &str, r: &mut R) -> AnyElement {
     let at = resolve(src, r.base.as_deref());
+    let mut kept = None;
     let here = match &r.session {
         // A session's picture: from its machine, never this Mac's disk.
-        Some((id, cwd)) if !at.contains("://") => crate::files::picture(
-            &crate::files::Ask::new(id, &at, cwd)
-                .based(r.base.as_ref().map(|b| b.display().to_string())),
-        )
-        .shown(),
+        Some((id, cwd)) if !at.contains("://") || at.starts_with("file://") => {
+            let ask = crate::files::Ask::new(id, &at, cwd)
+                .based(r.base.as_ref().map(|b| b.display().to_string()));
+            kept = crate::files::kept(&ask);
+            crate::files::picture(&ask).shown()
+        }
         _ => {
             let home = std::env::var("HOME").unwrap_or_default();
             let full = match at.strip_prefix("~/") {
@@ -1259,15 +1262,23 @@ fn image_block(src: &str, alt: &str, t: &Theme, key: &str, r: &mut R) -> AnyElem
             .flex()
             .flex_col()
             .gap(px(space::S1))
-            .child(crate::lightbox::picture(
-                &crate::lightbox::single(format!("{key}/pic"), path.clone()),
-                0,
-                img(path.clone())
-                    .max_w_full()
-                    .max_h(px(520.))
-                    .object_fit(ObjectFit::Contain)
-                    .rounded(px(radius::MD)),
-            ))
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .child(crate::lightbox::picture(
+                        &crate::lightbox::single(format!("{key}/pic"), path.clone()),
+                        0,
+                        img(path.clone())
+                            .max_w_full()
+                            .max_h(px(520.))
+                            .object_fit(ObjectFit::Contain)
+                            .rounded(px(radius::MD)),
+                    ))
+                    .when_some(kept, |d, m| {
+                        d.child(crate::ui::kept_mark(format!("{key}/kept"), &m, t))
+                    }),
+            )
             .when(!alt.is_empty(), |d| {
                 d.child(div().ty(LABEL).text_color(t.quiet).child(alt.to_string()))
             })

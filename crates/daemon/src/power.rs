@@ -2,8 +2,9 @@
 //! ([`dent_link::Goodbye::Sleep`]) before it does, so a client reads the
 //! machine as asleep at once rather than as gone after a silence
 //! ([decision 0062](../../../docs/decisions/0062-liveness-and-retry.md)).
-//! On macOS it comes from IOKit's system power notifications; elsewhere
-//! there's nothing yet, and a sleeping machine reads as unreachable.
+//! On macOS it comes from IOKit's system power notifications, on Linux from
+//! logind's `PrepareForSleep`; elsewhere there's nothing yet, and a
+//! sleeping machine reads as unreachable.
 
 /// Call `changed(true)` each time the machine is about to sleep, and
 /// `changed(false)` once it's awake again. Sleep waits for it (up to
@@ -13,8 +14,76 @@ pub fn watch(changed: impl Fn(bool) + Send + Sync + 'static) {
     mac::watch(Box::new(changed));
 }
 
-#[cfg(not(target_os = "macos"))]
+/// On Linux, a delay lock holds sleep back (up to logind's
+/// `InhibitDelayMaxSec`, 5 s by default) until `changed(true)` returns.
+/// Called inside the runtime.
+#[cfg(target_os = "linux")]
+pub fn watch(changed: impl Fn(bool) + Send + Sync + 'static) {
+    linux::watch(std::sync::Arc::new(changed));
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn watch(_changed: impl Fn(bool) + Send + Sync + 'static) {}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::sync::Arc;
+
+    use futures_util::StreamExt;
+    use zbus::zvariant::OwnedFd;
+
+    #[zbus::proxy(
+        interface = "org.freedesktop.login1.Manager",
+        default_service = "org.freedesktop.login1",
+        default_path = "/org/freedesktop/login1"
+    )]
+    trait Manager {
+        fn inhibit(&self, what: &str, who: &str, why: &str, mode: &str) -> zbus::Result<OwnedFd>;
+        #[zbus(signal)]
+        fn prepare_for_sleep(&self, start: bool) -> zbus::Result<()>;
+    }
+
+    pub fn watch(changed: Arc<dyn Fn(bool) + Send + Sync>) {
+        tokio::spawn(async move {
+            if let Err(e) = run(changed).await {
+                eprintln!("dent-daemon: can't hear when the machine sleeps: {e}");
+            }
+        });
+    }
+
+    /// The lock that makes sleep wait for the goodbyes; `None` when it's
+    /// refused (the machine's policy), and then the goodbyes race the sleep.
+    async fn hold(m: &ManagerProxy<'_>) -> Option<OwnedFd> {
+        m.inhibit(
+            "sleep",
+            "dent",
+            "Telling devices this machine is going to sleep",
+            "delay",
+        )
+        .await
+        .map_err(|e| eprintln!("dent-daemon: sleep won't wait for devices to be told: {e}"))
+        .ok()
+    }
+
+    async fn run(changed: Arc<dyn Fn(bool) + Send + Sync>) -> zbus::Result<()> {
+        let bus = zbus::Connection::system().await?;
+        let m = ManagerProxy::new(&bus).await?;
+        let mut sleeps = m.receive_prepare_for_sleep().await?;
+        let mut lock = hold(&m).await;
+        while let Some(s) = sleeps.next().await {
+            let start = s.args()?.start;
+            let f = changed.clone();
+            let _ = tokio::task::spawn_blocking(move || f(start)).await;
+            if start {
+                // Told: sleep can go ahead.
+                lock = None;
+            } else if lock.is_none() {
+                lock = hold(&m).await;
+            }
+        }
+        Ok(())
+    }
+}
 
 #[cfg(target_os = "macos")]
 mod mac {

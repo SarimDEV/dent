@@ -888,6 +888,14 @@ pub fn copy(a: &Ask, cap: u64) -> Look<PathBuf> {
     FILES.with(|f| f.borrow_mut().look_copy(a, cap))
 }
 
+/// The machine whose picture `a` is drawn from a copy kept from before,
+/// while that machine is away: it may have changed there since, so it's
+/// marked ([`crate::ui::kept_mark`]). `None` when it's current.
+pub fn kept(a: &Ask) -> Option<String> {
+    let m = a.machine();
+    (!online(m) && matches!(picture(a), Look::Stale(_))).then(|| m.to_string())
+}
+
 /// Whether `machine` can be asked now.
 pub fn online(machine: &str) -> bool {
     machine.is_empty() || FILES.with(|f| f.borrow().online.contains(machine))

@@ -3184,10 +3184,14 @@ impl Dent {
                 })) => crate::viewer::bytes(stamp.size),
                 _ => String::new(),
             };
+            // How it stood when its machine went away: said so.
+            let kept = matches!(media_stat, Some(crate::files::Look::Stale(_)))
+                && !crate::files::online(dent_client_core::fleet::split(&s.id).0);
             format!(
-                "{} · {} · {size}",
+                "{} · {} · {size}{}",
                 crate::bridge::relative(std::path::Path::new(&s.cwd), a.path),
                 crate::data::media_kind(a.path).unwrap_or_default(),
+                if kept { " · offline copy" } else { "" },
             )
         } else {
             format!("{} · v{version}", a.path)
@@ -5878,6 +5882,10 @@ fn picture_path(session: &str, shown: &str, cwd: &str) -> Option<std::path::Path
 fn tool_pictures(session: &str, cwd: &str, ix: usize, paths: &[String], t: &theme::Theme) -> Div {
     // Each as it's here: this Mac's own, or the copy of another machine's
     // once it's come.
+    // Drawn from copies kept from before, their machine away: marked.
+    let kept = paths
+        .iter()
+        .find_map(|p| crate::files::kept(&crate::files::Ask::new(session, p, cwd)));
     let set: crate::lightbox::Set = std::rc::Rc::new(
         paths
             .iter()
@@ -5905,18 +5913,31 @@ fn tool_pictures(session: &str, cwd: &str, ix: usize, paths: &[String], t: &them
     if set.len() == 1 {
         // As wide as it is, up to the cap, and narrower with the column.
         return div().mt(px(space::S2)).flex().child(
-            crate::lightbox::picture(
-                &set,
-                0,
-                frame().max_w_full().max_h(px(TOOL_PICTURE_H)).child(
-                    img(set[0].path.clone())
-                        .max_w_full()
-                        .max_h(px(TOOL_PICTURE_H))
-                        .object_fit(ObjectFit::Contain),
-                ),
-            )
-            .min_w_0()
-            .max_w(px(TOOL_PICTURE_W)),
+            div()
+                .relative()
+                .flex()
+                .min_w_0()
+                .child(
+                    crate::lightbox::picture(
+                        &set,
+                        0,
+                        frame().max_w_full().max_h(px(TOOL_PICTURE_H)).child(
+                            img(set[0].path.clone())
+                                .max_w_full()
+                                .max_h(px(TOOL_PICTURE_H))
+                                .object_fit(ObjectFit::Contain),
+                        ),
+                    )
+                    .min_w_0()
+                    .max_w(px(TOOL_PICTURE_W)),
+                )
+                .when_some(kept, |d, m| {
+                    d.child(crate::ui::kept_mark(
+                        format!("tool-kept-{session}-{ix}"),
+                        &m,
+                        t,
+                    ))
+                }),
         );
     }
     let shown = set.len().min(TOOL_TILES);
@@ -5924,6 +5945,7 @@ fn tool_pictures(session: &str, cwd: &str, ix: usize, paths: &[String], t: &them
     let more = set.len() - shown;
     div()
         .mt(px(space::S2))
+        .relative()
         .flex()
         .gap(px(space::S1H))
         .children((0..shown).map(|j| {
@@ -5967,6 +5989,14 @@ fn tool_pictures(session: &str, cwd: &str, ix: usize, paths: &[String], t: &them
             .min_w_0()
             .flex_shrink(1.)
         }))
+        // Over the tiles, in the first one's corner.
+        .when_some(kept, |d, m| {
+            d.child(crate::ui::kept_mark(
+                format!("tool-kept-{session}-{ix}"),
+                &m,
+                t,
+            ))
+        })
 }
 
 /// The most a tool's picture takes in the chat; it opens large on a click.
