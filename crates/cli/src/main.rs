@@ -13,6 +13,9 @@
 //!   the project at DIR on this machine is cloned there first, with its
 //!   ignored environment files (`.env`), and the session works in it.
 //!
+//! - `dent call NAME JSON` sends one request (as JSON, `{"op": …}`) to a
+//!   saved machine and prints its reply, for scripts and for looking into
+//!   what a machine says.
 //! - `dent wake NAME` sends a sleeping machine a Wake-on-LAN packet, from
 //!   the same network, to the cards its last welcome named.
 //!
@@ -66,6 +69,7 @@ async fn main() -> Result<()> {
         }
         Some("watch") => watch(&args[1..]).await,
         Some("ask") => ask(&args[1..]).await,
+        Some("call") => call(&args[1..]).await,
         Some("wake") => {
             let name = args.get(1).context("dent wake NAME")?;
             let m = load()
@@ -335,6 +339,47 @@ fn local(r: Request) -> Result<Reply> {
         };
     }
     bail!("this machine's daemon hung up")
+}
+
+async fn call(args: &[String]) -> Result<()> {
+    let [name, json] = args else {
+        bail!("dent call NAME JSON");
+    };
+    let req: Request = serde_json::from_str(json).context("not a request")?;
+    let saved = load()
+        .into_iter()
+        .find(|s| s.name == *name || s.id == *name)
+        .with_context(|| format!("no saved machine called {name}"))?;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let remote = dent_remote::remote::spawn(
+        &tokio::runtime::Handle::current(),
+        device_keys()?,
+        "dent cli",
+        saved,
+        move |e| {
+            let _ = tx.send(e);
+        },
+    );
+    const REQ: u64 = 10;
+    let started = Instant::now();
+    remote.send(REQ, req);
+    let wait = tokio::time::sleep(Duration::from_secs(60));
+    tokio::pin!(wait);
+    loop {
+        tokio::select! {
+            e = rx.recv() => match e {
+                Some(dent_remote::remote::Event::Out { req: REQ, out }) => {
+                    remote.stop();
+                    eprintln!("answered in {:?}", started.elapsed());
+                    println!("{}", serde_json::to_string(&out)?);
+                    return Ok(());
+                }
+                Some(_) => {}
+                None => bail!("the connection ended"),
+            },
+            _ = &mut wait => bail!("{name} didn't answer within a minute"),
+        }
+    }
 }
 
 async fn watch(args: &[String]) -> Result<()> {

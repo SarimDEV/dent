@@ -8044,6 +8044,14 @@ impl Dent {
         for a in asks {
             let ask = crate::files::Ask::new(&a.far.session, &a.rel, &a.far.cwd)
                 .based(Some(a.far.dir.clone()));
+            if std::env::var_os("DENT_DEBUG_FILES").is_some() {
+                eprintln!(
+                    "files: page asks {} range {:?} → {:?}",
+                    a.rel,
+                    a.range,
+                    crate::files::stat(&ask)
+                );
+            }
             let missing = |a: crate::web::FarAsk| {
                 a.responder.respond(
                     wry::http::Response::builder()
@@ -8138,6 +8146,15 @@ impl Dent {
             return;
         };
         self.far_served += 1;
+        if std::env::var_os("DENT_DEBUG_FILES").is_some() {
+            let what = match &out {
+                Out::Reply {
+                    reply: Reply::Bytes { offset, total, .. },
+                } => format!("bytes from {offset} of {total}"),
+                o => format!("{o:?}").chars().take(160).collect(),
+            };
+            eprintln!("files: page range for {} came: {what}", ask.path);
+        }
         let answer = |status: u16, headers: Vec<(&'static str, String)>, body: Vec<u8>| {
             let mut b = wry::http::Response::builder()
                 .status(status)

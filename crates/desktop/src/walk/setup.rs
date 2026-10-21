@@ -849,6 +849,311 @@ pub(super) fn files_live() -> Vec<(f32, Act)> {
     v
 }
 
+/// Trying to break another machine's files, against the VM (after
+/// `scripts/files-fixtures.sh` and the edge sessions in
+/// `scripts/break-fixtures.sh`): files that can't be read, a folder named
+/// like a picture, an empty one, a link loop, a file too big to show, a
+/// 3 GB video, sixty pictures at once, a note rewritten while it's open,
+/// and the VM's daemon going away and coming back. Not in `checks`.
+pub(super) fn break_live() -> Vec<(f32, Act)> {
+    use crate::files::{Ask, Look, Why};
+    fn session(d: &Dent, says: &str) -> Option<(String, String)> {
+        d.sessions.iter().find_map(|s| {
+            let far = !dent_client_core::fleet::split(&s.id).0.is_empty();
+            let has = s
+                .items
+                .iter()
+                .any(|i| matches!(i, Item::Text(t) if t.contains(says)));
+            (far && has).then(|| (s.id.clone(), s.cwd.clone()))
+        })
+    }
+    fn pic(d: &Dent, says: &str, path: &str) -> Option<Look<std::path::PathBuf>> {
+        let (id, cwd) = session(d, says)?;
+        Some(crate::files::picture(&Ask::new(&id, path, &cwd)))
+    }
+    fn gone(d: &Dent, says: &str, path: &str, why: fn(&Why) -> bool) -> bool {
+        matches!(pic(d, says, path), Some(Look::Gone(g)) if why(&g.why))
+    }
+    fn select(d: &mut Dent, w: &mut Window, cx: &mut Context<Dent>, says: &str) {
+        if let Some((id, _)) = session(d, says) {
+            d.select(Some(id), w, cx);
+        }
+    }
+    fn vm(cmd: &str) {
+        // The walkthrough runs with a home of its own; the VM is the real
+        // home's.
+        let user = std::env::var("USER").unwrap_or_default();
+        let ok = std::process::Command::new("/opt/homebrew/bin/limactl")
+            .args(["shell", "dent-linux", "--", "bash", "-lc", cmd])
+            .env("HOME", format!("/Users/{user}"))
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "couldn't run on the VM: {cmd}");
+    }
+    fn online(d: &Dent) -> bool {
+        use dent_client_core::machine::State;
+        d.machines
+            .iter()
+            .any(|m| matches!(m.state, State::Online | State::Slow) && m.proto.is_some())
+    }
+    fn toast_has(d: &Dent, words: &str) -> bool {
+        d.toast.as_ref().is_some_and(|t| t.text.contains(words))
+    }
+    let mut v = vec![
+        (0.3, Key("cmd-n")),
+        (0.1, Until("the VM is online", |d, _| online(d), 30.)),
+        (
+            0.1,
+            Until(
+                "its edge session is here",
+                |d, _| session(d, "Edge files").is_some(),
+                10.,
+            ),
+        ),
+        (0.1, Call(|d, w, cx| select(d, w, cx, "Edge files"))),
+        (
+            0.1,
+            Until(
+                "a pipe named as a picture is unreadable, and nothing hangs",
+                |d, _| {
+                    gone(d, "Edge files", "pipe.png", |w| {
+                        matches!(w, Why::Unreadable(_))
+                    })
+                },
+                10.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "a file it may not read says so",
+                |d, _| {
+                    gone(d, "Edge files", "locked.png", |w| {
+                        matches!(w, Why::Unreadable(_))
+                    })
+                },
+                10.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "a folder named like a picture is a folder",
+                |d, _| gone(d, "Edge files", "dir.png", |w| *w == Why::Folder),
+                10.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "a link loop is unreadable",
+                |d, _| {
+                    gone(d, "Edge files", "loop1", |w| {
+                        matches!(w, Why::Unreadable(_))
+                    })
+                },
+                10.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "a name in another script shows",
+                |d, _| {
+                    matches!(
+                        pic(d, "Edge files", "ünïcødé 名前.png"),
+                        Some(Look::Here(_))
+                    )
+                },
+                10.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "an empty file is here, empty",
+                |d, _| match pic(d, "Edge files", "empty.png") {
+                    Some(Look::Here(p)) => std::fs::metadata(p).is_ok_and(|m| m.len() == 0),
+                    _ => false,
+                },
+                10.,
+            ),
+        ),
+        (0.5, Shot("break-edges-light")),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                if let Some((_, cwd)) = session(d, "Edge files") {
+                    d.open_file(&format!("{cwd}/big.bin"), cx);
+                }
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "a file too big to show says so, how big and where",
+                |d, _| {
+                    toast_has(d, "Too big to show here (47.7 MB)") && toast_has(d, "/fx/big.bin")
+                },
+                15.,
+            ),
+        ),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                // A 3 GB file of its own each run, so nothing of it is open
+                // or kept already.
+                let name = format!("sparse-{}.mov", std::process::id());
+                vm(&format!("truncate -s 3G ~/fx/{name}"));
+                d.far_served = 0;
+                if let Some((_, cwd)) = session(d, "Edge files") {
+                    d.open_file(&format!("{cwd}/{name}"), cx);
+                }
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "a 3 GB video starts playing from there, a range at a time",
+                |d, _| d.far_served > 0,
+                15.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "and isn't copied whole",
+                |_, _| {
+                    let mut total = 0u64;
+                    let mut stack = vec![crate::files::cache_root()];
+                    while let Some(dir) = stack.pop() {
+                        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                            match e.metadata() {
+                                Ok(m) if m.is_dir() => stack.push(e.path()),
+                                Ok(m) => total += m.len(),
+                                _ => {}
+                            }
+                        }
+                    }
+                    total < 100 << 20
+                },
+                1.,
+            ),
+        ),
+        (0.1, Call(|d, w, cx| select(d, w, cx, "Many pictures"))),
+        (
+            0.1,
+            Until(
+                "sixty pictures in a reply all come",
+                |d, _| {
+                    (0..60).all(|i| {
+                        matches!(
+                            pic(d, "Many pictures", &format!("many/p{i:02}.png")),
+                            Some(Look::Here(_))
+                        )
+                    })
+                },
+                30.,
+            ),
+        ),
+        (0.5, Shot("break-many-light")),
+        (0.1, Call(|d, w, cx| select(d, w, cx, "Files test"))),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                if let Some((_, cwd)) = session(d, "Files test") {
+                    d.open_file(&format!("{cwd}/doc.md"), cx);
+                }
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "its note opens",
+                |d, _| d.panel_open && d.arts.iter().any(|a| a.title == "doc.md"),
+                10.,
+            ),
+        ),
+        (
+            0.1,
+            Call(|_, _, _| vm("printf '# Notes\\n\\nRewritten on the VM.\\n' > ~/fx/doc.md")),
+        ),
+        (
+            0.1,
+            Until(
+                "rewritten there while it's open, the new version shows",
+                |d, _| {
+                    d.arts
+                        .iter()
+                        .find(|a| a.title == "doc.md")
+                        .and_then(|a| a.versions.last())
+                        .is_some_and(|v| String::from_utf8_lossy(v).contains("Rewritten"))
+                },
+                15.,
+            ),
+        ),
+        (0.5, Shot("break-rewritten-light")),
+        (
+            0.1,
+            Call(|_, _, _| {
+                vm(
+                    "printf '# Notes\\n\\nA picture beside me:\\n\\n![a](pics/a.png)\\n' > ~/fx/doc.md",
+                )
+            }),
+        ),
+        (0.1, Call(|_, _, _| vm("kill $(pgrep -x dent-daemon)"))),
+        (
+            0.1,
+            Until("the VM's daemon goes away", |d, _| !online(d), 20.),
+        ),
+        (
+            0.1,
+            Until(
+                "a picture already here shows, marked as kept",
+                |d, _| {
+                    matches!(
+                        pic(d, "Many pictures", "many/p00.png"),
+                        Some(Look::Stale(_))
+                    )
+                },
+                5.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "one never fetched says the VM is away",
+                |d, _| {
+                    gone(d, "Many pictures", "many/never-asked.png", |w| {
+                        *w == Why::Away
+                    })
+                },
+                5.,
+            ),
+        ),
+        (0.5, Shot("break-away-light")),
+        (
+            0.1,
+            Call(|_, _, _| {
+                vm(
+                    "cd ~/dent && (DENT_REMOTE_LAN=1 DENT_CLAUDE=$HOME/dent/target/release/dent-fake-claude setsid nohup target/release/dent-daemon --state $HOME/rt/dd2 >> ~/rt/dd2.log 2>&1 < /dev/null &)",
+                )
+            }),
+        ),
+        (0.1, Until("it comes back", |d, _| online(d), 60.)),
+        (
+            0.1,
+            Until(
+                "and its pictures are current again",
+                |d, _| matches!(pic(d, "Many pictures", "many/p00.png"), Some(Look::Here(_))),
+                15.,
+            ),
+        ),
+    ];
+    both_themes(&mut v, "break-back");
+    v
+}
+
 /// Another machine asleep: its session says why under the header, a
 /// message written meanwhile waits on this Mac with Edit and Remove, and a
 /// new session can be started there from the machine chip. The machine
