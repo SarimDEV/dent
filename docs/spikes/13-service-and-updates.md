@@ -54,7 +54,7 @@ The database held 20,000 events. A stand-in agent, started outside the launcher 
 - **Restarting from inside the service** must hand off to a transient unit, not just use `--no-block`. The follow-up step (recording an outcome, starting a rollback) runs in that unit. [0065](../decisions/0065-launcher-and-updates.md) is updated.
 - **Out-of-memory detection** reads the agents slice's `memory.events`. A scope's `Result` can't be trusted for this.
 - **`dent daemon install` must check linger and enable it,** or print the one `sudo` line. A box where it's off loses dent at logout.
-- **The launcher's shape held up as designed.** The real one is a small Rust binary with the same steps; the prototype's 220 lines suggest it stays small.
+- **The launcher's shape held up as designed.** The real one is a small Rust binary with the same steps; the prototype's 290 lines suggest it stays small.
 
 ## Not covered yet
 

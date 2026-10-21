@@ -55,6 +55,6 @@ Replacement dials during a freeze fail at their 3 s handshake limit (the kernel 
 
 ## Not covered yet
 
-- Coming home from Tailscale to the LAN (R-A6) needs the route-switch logic, which isn't built in the spike.
-- A frozen machine (R-A4), address changes (R-A7), hours unreachable (R-A8), chunking under load (R-A9), versions (R-A10) and two clients (R-A11).
+- Coming home from Tailscale to the LAN (R-A6) needs the route-switch logic, which isn't built in the spike. (Since built and run: [spike 14](14-routes-identity-and-boot.md).)
+- A frozen machine (R-A4; since run in [spike 15](15-sleep-restart-and-serve.md)), address changes (R-A7), hours unreachable (R-A8), chunking under load (R-A9), versions (R-A10) and two clients (R-A11).
 - "Froze for 12 s" reports from the daemon after a stall. The spike's daemon doesn't measure its own lag.

@@ -13,7 +13,7 @@ Clients hold no authority over sessions: they render from their cache and send c
 - `client-core`: connections, sync, cache, search; used by the desktop app and, through UniFFI, the iPhone app.
 - `desktop`: the GPUI app.
 - `ios`: the SwiftUI app.
-- `hub`: accounts, devices, connection brokering and relay, shared state, backup; open source under AGPL-3.0 and self-hostable; everything else is MIT.
+- `hub`: accounts, devices, connection brokering and relay, backup; open source under AGPL-3.0 and self-hostable; everything else is MIT.
 - `push`: dent-push, the stateless Cloudflare Worker that forwards encrypted phone notifications to Apple (TypeScript).
 - `web`: the browser client, built on the client core compiled to WebAssembly.
 - `cli`: the command-line client for scripts and agents.

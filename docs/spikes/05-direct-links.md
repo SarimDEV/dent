@@ -2,6 +2,8 @@
 
 Date: 2026-10-12 · Rust, tokio, tokio-tungstenite 0.26.2, snow 0.9.6 (Noise), spake2 0.4.0, mdns-sd 0.21.5 · Apple Silicon, release build · Code: [spikes/link](../../spikes/link) (library, daemon and test harness) and `--devices` in [spikes/gpui-chat](../../spikes/gpui-chat)
 
+Later changes: the liveness and backoff numbers below are replaced by [0062](../decisions/0062-liveness-and-retry.md), and a prompt for an away machine now waits on the device ([0063](../decisions/0063-queued-prompts.md)).
+
 Questions:
 
 - Can a second machine be set up so it simply shows up in Settings and connects?

@@ -21,7 +21,7 @@ dent (dent.sh) is a fast, chat-first app for driving coding agents (Claude Code 
 
 **Principles**
 
-- The daemon is the source of truth for anything it runs, and the hub for shared state; clients are views with a cache.
+- The daemon is the source of truth for anything it runs. Machines share no state; the view across them is built in the client ([0058](decisions/0058-independent-machines.md)). Clients are views with a cache.
 - Everything is an event in a log, so any client can catch up from any point.
 - Agents are plugins behind one adapter interface, so adding a third agent touches one module.
 - Public from day one: cross-platform, documented protocol, no hard-coded personal setup.

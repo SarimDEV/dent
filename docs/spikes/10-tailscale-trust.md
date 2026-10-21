@@ -1,6 +1,6 @@
 # Spike 10: Tailscale trust through the LocalAPI
 
-Date: 2026-10-20 · Tailscale 1.102.4 standalone (studio, macOS 26.5) and 1.104.2 (dent-linux, Ubuntu 24.04) · Tests [R-B1, R-B2, R-B4](../remote-tests.md#b-trust-and-identity) for [0061](../decisions/0061-trust.md)
+Date: 2026-10-20 · Tailscale 1.102.4 standalone (studio, macOS 26.5) and 1.104.2 (dent-linux, Ubuntu 24.04) · Tests [R-B1, R-B2](../remote-tests.md#b-trust-and-identity) for [0061](../decisions/0061-trust.md)
 
 Question: can the daemon tell, quickly and without running the Tailscale CLI, whether a connecting peer belongs to the same Tailscale account?
 
@@ -35,6 +35,6 @@ For comparison, the CLI (`tailscale whois --json`) took 0.02 s here, but runs a 
   - compare the peer's `Node.User` with the daemon's own `Self.UserID`;
   - require `Node.Tags` to be empty;
   - treat any lookup failure (404, 401, timeout) as "not trusted by account", never as an error that blocks pairing.
-- **Loopback and LAN addresses can never match,** so connections through Tailscale Serve, or over the LAN, fall to pairing by construction. A test with a real Serve forward still runs once the daemon listens (R-B4).
+- **Loopback and LAN addresses can never match,** so connections through Tailscale Serve, or over the LAN, fall to pairing by construction. A real Serve forward later confirmed it (R-B4, [spike 15](15-sleep-restart-and-serve.md)).
 - **On macOS, a non-admin user can't read the token.** For that user the daemon can't use account trust, and says so in `dent doctor`. A per-connection CLI call is not the fallback, for the reasons in 0061.
 - **Not yet tested:** a tagged node (R-B3, needs the owner to create a tag) and leaving the tailnet mid-session (R-B9, needs the daemon).
