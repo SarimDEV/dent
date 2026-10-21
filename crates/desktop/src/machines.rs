@@ -213,4 +213,160 @@ mod tests {
             "a link dropping from online is still finding out: sessions keep their state"
         );
     }
+
+    fn mini() -> Vec<MachineView> {
+        vec![MachineView::saved(Saved {
+            id: "ab12".into(),
+            name: "mini".into(),
+            ..Saved::default()
+        })]
+    }
+
+    fn goes(list: &mut Vec<MachineView>, s: State) {
+        apply(list, "ab12", Event::State(s));
+    }
+
+    fn aways() -> Vec<State> {
+        use dent_link::Goodbye;
+        vec![
+            State::Away(Goodbye::Sleep),
+            State::Unreachable {
+                why: "timeout".into(),
+            },
+            State::Away(Goodbye::Quit),
+            State::Away(Goodbye::Restart {
+                expected_down_ms: 500,
+            }),
+            State::Away(Goodbye::Update {
+                to: "9".into(),
+                expected_down_ms: 500,
+            }),
+        ]
+    }
+
+    #[test]
+    fn away_holds_across_every_retry() {
+        for away in aways() {
+            let mut list = mini();
+            goes(&mut list, away.clone());
+            let said = list[0].away();
+            for s in [
+                State::Connecting,
+                State::Reconnecting,
+                State::Connecting,
+                State::Reconnecting,
+            ] {
+                goes(&mut list, s.clone());
+                assert_eq!(*list[0].standing(), away, "{away:?} then {s:?}");
+                assert_eq!(list[0].away(), said, "{away:?} then {s:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn away_never_sticks_after_online() {
+        for away in aways() {
+            for online in [State::Online, State::Slow] {
+                let mut list = mini();
+                goes(&mut list, away.clone());
+                goes(&mut list, State::Connecting);
+                goes(&mut list, online.clone());
+                assert_eq!(*list[0].standing(), online);
+                assert_eq!(list[0].away(), None);
+                for s in [State::Reconnecting, State::Connecting] {
+                    goes(&mut list, s.clone());
+                    assert_eq!(*list[0].standing(), s, "{away:?}, {online:?}, then {s:?}");
+                    assert_eq!(list[0].away(), None);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn whatever_comes_after_away_is_shown_as_itself() {
+        use dent_link::Goodbye;
+        let after = [
+            State::Away(Goodbye::Awake),
+            State::Online,
+            State::Slow,
+            State::Removed,
+            State::NeedsCode { pairing_open: true },
+            State::Incompatible {
+                daemon: (1, 2),
+                client: (3, 4),
+            },
+            State::TrustedElsewhere {
+                routes: vec!["ts".into()],
+            },
+        ];
+        for away in aways() {
+            for s in &after {
+                let mut list = mini();
+                goes(&mut list, away.clone());
+                goes(&mut list, State::Reconnecting);
+                goes(&mut list, s.clone());
+                assert_eq!(list[0].standing(), s, "{away:?} then {s:?}");
+                // And what was away is gone with it: a retry is a retry.
+                goes(&mut list, State::Connecting);
+                assert_eq!(
+                    *list[0].standing(),
+                    State::Connecting,
+                    "{away:?}, {s:?}, then Connecting"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_latest_way_away_is_the_one_held() {
+        use dent_link::Goodbye;
+        let mut list = mini();
+        let unreachable = State::Unreachable {
+            why: "timeout".into(),
+        };
+        goes(&mut list, State::Away(Goodbye::Sleep));
+        goes(&mut list, State::Connecting);
+        goes(&mut list, unreachable.clone());
+        goes(&mut list, State::Reconnecting);
+        assert_eq!(*list[0].standing(), unreachable);
+        goes(&mut list, State::Away(Goodbye::Sleep));
+        goes(&mut list, State::Connecting);
+        assert_eq!(*list[0].standing(), State::Away(Goodbye::Sleep));
+    }
+
+    #[test]
+    fn off_is_shown_as_off_while_away() {
+        use dent_link::Goodbye;
+        let mut list = mini();
+        goes(&mut list, State::Away(Goodbye::Sleep));
+        goes(&mut list, State::Off);
+        assert_eq!(*list[0].standing(), State::Off);
+        // As Off reads on its own (not as asleep).
+        let mut fresh = mini();
+        goes(&mut fresh, State::Off);
+        assert_eq!(list[0].away(), fresh[0].away());
+    }
+
+    // Turned off, then on again later: is it still "waiting to wake"? The
+    // code says yes (Off keeps what was away); this asks for a plain retry.
+    #[test]
+    fn turned_off_and_on_again_is_a_fresh_try() {
+        use dent_link::Goodbye;
+        let mut list = mini();
+        goes(&mut list, State::Away(Goodbye::Sleep));
+        goes(&mut list, State::Off);
+        goes(&mut list, State::Connecting);
+        assert_eq!(*list[0].standing(), State::Connecting);
+    }
+
+    #[test]
+    fn a_fresh_machine_trying_isnt_away() {
+        let mut list = mini();
+        goes(&mut list, State::Connecting);
+        assert_eq!(*list[0].standing(), State::Connecting);
+        assert_eq!(list[0].away(), None);
+        // One never heard of before, first heard trying.
+        apply(&mut list, "zz99", Event::State(State::Reconnecting));
+        assert_eq!(*list[1].standing(), State::Reconnecting);
+    }
 }

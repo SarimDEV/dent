@@ -2857,4 +2857,101 @@ mod tests {
             ["x.png · /", "x.png · w"]
         );
     }
+
+    /// Every name unique when every path is: the property tabs rely on.
+    fn unique(paths: &[&str]) -> Vec<String> {
+        let names = tab_names(paths);
+        assert_eq!(names.len(), paths.len());
+        let mut distinct: Vec<&str> = paths.to_vec();
+        distinct.sort();
+        distinct.dedup();
+        if distinct.len() == paths.len() {
+            let mut seen = std::collections::HashSet::new();
+            for (p, n) in paths.iter().zip(&names) {
+                assert!(
+                    seen.insert(n.clone()),
+                    "{n:?} twice (for {p:?}) in {names:?}"
+                );
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn many_of_one_name_are_all_told_apart() {
+        let three = ["/a/x/f.md", "/b/x/f.md", "/c/y/f.md"];
+        assert_eq!(unique(&three), ["f.md · a/x", "f.md · b/x", "f.md · y"]);
+        let ten: Vec<String> = (0..10).map(|i| format!("/w/d{i}/take.mp4")).collect();
+        let ten: Vec<&str> = ten.iter().map(|s| s.as_str()).collect();
+        unique(&ten);
+        let many: Vec<String> = (0..300)
+            .map(|i| format!("/r/{}/{}/same.txt", i % 7, i))
+            .collect();
+        let many: Vec<&str> = many.iter().map(|s| s.as_str()).collect();
+        unique(&many);
+    }
+
+    #[test]
+    fn the_same_path_twice_is_one_name() {
+        assert_eq!(
+            tab_names(&["/w/a.md", "/w/a.md", "/v/a.md"]),
+            ["a.md · w", "a.md · w", "a.md · v"]
+        );
+        assert_eq!(tab_names(&["/w/a.md", "/w/a.md"]), ["a.md", "a.md"]);
+    }
+
+    #[test]
+    fn deep_shared_folders_and_nested_suffixes() {
+        unique(&["/a/s/s/s/s/f", "/b/s/s/s/s/f"]);
+        unique(&["/x/w/f", "/w/f", "/y/x/w/f"]);
+        unique(&["/f", "/a/f", "/b/a/f", "/c/b/a/f"]);
+        unique(&["/w/x.png", "/w/sub/x.png", "/x.png", "/sub/x.png"]);
+    }
+
+    #[test]
+    fn unicode_and_odd_characters_dont_panic() {
+        unique(&[
+            "/写真/猫.png",
+            "/图片/猫.png",
+            "/é/🎬 take #1 %20.mp4",
+            "/ê/🎬 take #1 %20.mp4",
+        ]);
+        unique(&["/a b/c d.txt", "/a  b/c d.txt"]);
+    }
+
+    #[test]
+    fn empty_and_root_dont_panic() {
+        let _ = tab_names(&[]);
+        let _ = tab_names(&[""]);
+        let _ = tab_names(&["", "/", "//", "/x"]);
+        unique(&["/x.png", "/a/x.png", "/b/x.png"]);
+    }
+
+    // Distinct paths that come out the same once empty parts are dropped.
+    #[test]
+    fn slashes_dont_make_two_tabs_of_one_name() {
+        unique(&["/w/f.md", "/w//f.md"]);
+    }
+
+    #[test]
+    fn a_trailing_slash_doesnt_make_two_tabs_of_one_name() {
+        unique(&["/w/f.md", "/w/f.md/"]);
+    }
+
+    #[test]
+    fn relative_and_absolute_are_told_apart() {
+        unique(&["w/f.md", "/w/f.md"]);
+    }
+
+    #[test]
+    fn a_relative_file_at_the_top_isnt_said_to_be_at_the_root() {
+        let names = unique(&["x.png", "/x.png"]);
+        assert_ne!(names[0], "x.png · /", "{names:?}");
+    }
+
+    #[test]
+    fn a_name_with_the_separator_in_it_isnt_mistaken_for_another() {
+        // `f · x` the file, and `f` in `x` told apart from `f` in `y`.
+        unique(&["/x/f", "/y/f", "/z/f · x"]);
+    }
 }

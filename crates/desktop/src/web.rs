@@ -1349,6 +1349,99 @@ mod root_tests {
     }
 
     #[test]
+    fn ranges_at_the_edges_and_lying_ones() {
+        const C: u64 = 4 << 20;
+        // Open-ended and suffix ranges.
+        assert_eq!(byte_range("bytes=0-", 100), Some((0, 99)));
+        assert_eq!(byte_range("bytes=-500", 100), Some((0, 99)));
+        assert_eq!(byte_range("bytes=-500", 1000), Some((500, 999)));
+        assert_eq!(byte_range("bytes=500-", 1000), Some((500, 999)));
+        // Start at, and beyond, the end: not satisfiable.
+        assert_eq!(byte_range("bytes=100-", 100), None);
+        assert_eq!(byte_range("bytes=99-", 100), Some((99, 99)));
+        assert_eq!(byte_range("bytes=500-600", 100), None);
+        // End beyond the end: cut to it.
+        assert_eq!(byte_range("bytes=0-1000", 100), Some((0, 99)));
+        // Empty and one-byte files.
+        for r in ["bytes=0-", "bytes=-1", "bytes=0-0", "bytes=-0"] {
+            assert_eq!(byte_range(r, 0), None, "{r}");
+        }
+        assert_eq!(byte_range("bytes=0-", 1), Some((0, 0)));
+        assert_eq!(byte_range("bytes=0-0", 1), Some((0, 0)));
+        assert_eq!(byte_range("bytes=-1", 1), Some((0, 0)));
+        assert_eq!(byte_range("bytes=-5", 1), Some((0, 0)));
+        assert_eq!(byte_range("bytes=1-", 1), None);
+        // A suffix of none: nothing to give.
+        assert_eq!(byte_range("bytes=-0", 100), None);
+        // Backwards.
+        assert_eq!(byte_range("bytes=5-3", 100), None);
+        // Several ranges: the first.
+        assert_eq!(byte_range("bytes=0-1,5-6", 100), Some((0, 1)));
+        assert_eq!(byte_range("bytes=0-1, 5-6", 100), Some((0, 1)));
+        // Garbage.
+        for r in [
+            "",
+            "bytes",
+            "bytes=",
+            "bytes=-",
+            "bytes=a-b",
+            "bytes=1-b",
+            "items=0-1",
+            "bytes=,0-1",
+            "bytes=0--1",
+            "bytes=-5-10",
+            "bytes=1.5-2",
+            "bytes=0x10-",
+        ] {
+            assert_eq!(byte_range(r, 100), None, "{r:?}");
+        }
+        // Whitespace around the whole and around the numbers.
+        assert_eq!(byte_range("  bytes=0-1  ", 100), Some((0, 1)));
+        assert_eq!(byte_range("bytes= 2 - 3 ", 100), Some((2, 3)));
+        // Numbers past u64: refused, not wrapped.
+        let big = "99999999999999999999999";
+        assert_eq!(byte_range(&format!("bytes={big}-"), 100), None);
+        assert_eq!(byte_range(&format!("bytes=0-{big}"), 100), None);
+        assert_eq!(byte_range(&format!("bytes=-{big}"), 100), None);
+        // At u64's edge.
+        let max = u64::MAX;
+        assert_eq!(
+            byte_range(&format!("bytes={}-", max - 1), max),
+            Some((max - 1, max - 1))
+        );
+        assert_eq!(byte_range(&format!("bytes=0-{max}"), max), Some((0, C - 1)));
+        assert_eq!(byte_range(&format!("bytes=-{max}"), max), Some((0, C - 1)));
+        // A chunk, exactly, and one byte past.
+        assert_eq!(
+            byte_range(&format!("bytes=0-{}", C - 1), C * 2),
+            Some((0, C - 1))
+        );
+        assert_eq!(
+            byte_range(&format!("bytes=0-{}", C), C * 2),
+            Some((0, C - 1))
+        );
+    }
+
+    #[test]
+    fn a_signed_number_isnt_a_range() {
+        // RFC 9110: digits only. Rust's parse takes a leading '+'.
+        assert_eq!(byte_range("bytes=+5-", 100), None);
+        assert_eq!(byte_range("bytes=-+5", 100), None);
+    }
+
+    #[test]
+    fn the_unit_is_case_insensitive() {
+        // RFC 9110: range units are case-insensitive.
+        assert_eq!(byte_range("Bytes=0-1", 100), Some((0, 1)));
+    }
+
+    #[test]
+    fn a_satisfiable_range_after_an_unsatisfiable_one_is_used() {
+        // RFC 9110: satisfiable when any range is.
+        assert_eq!(byte_range("bytes=500-600,0-1", 100), Some((0, 1)));
+    }
+
+    #[test]
     fn a_video_page_names_its_file_safely() {
         let p = media_page("my clip \"1\".mp4");
         assert!(p.contains(r#"<video src="my%20clip%20%221%22.mp4""#));

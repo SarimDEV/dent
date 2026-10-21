@@ -1911,4 +1911,58 @@ mod tests {
         );
         assert_eq!(p[0].dns, "linux.t.ts.net");
     }
+
+    #[test]
+    fn standing_holds_while_tried_again_and_lets_go_online() {
+        use super::Standing;
+        use crate::machines::apply;
+        use dent_client_core::machine::State;
+        use dent_link::Goodbye;
+        use dent_remote::Event;
+        let mut list = vec![MachineView::saved(dent_remote::Saved {
+            id: "ab12".into(),
+            ..Default::default()
+        })];
+        let mut goes = |s: State| {
+            apply(&mut list, "ab12", Event::State(s));
+            Standing::of(&list[0])
+        };
+        assert_eq!(goes(State::Away(Goodbye::Sleep)), Standing::Asleep);
+        assert_eq!(goes(State::Connecting), Standing::Asleep);
+        assert_eq!(goes(State::Reconnecting), Standing::Asleep);
+        assert_eq!(
+            goes(State::Unreachable { why: "x".into() }),
+            Standing::Unreachable
+        );
+        assert_eq!(goes(State::Connecting), Standing::Unreachable);
+        assert_eq!(goes(State::Off), Standing::Connecting);
+        assert_eq!(goes(State::Away(Goodbye::Awake)), Standing::Connecting);
+        assert_eq!(goes(State::Connecting), Standing::Connecting);
+        assert_eq!(goes(State::Away(Goodbye::Sleep)), Standing::Asleep);
+        assert_eq!(goes(State::Online), Standing::Online);
+        assert_eq!(goes(State::Reconnecting), Standing::Connecting);
+        assert_eq!(goes(State::Away(Goodbye::Sleep)), Standing::Asleep);
+        assert_eq!(goes(State::Removed), Standing::Blocked);
+        assert_eq!(goes(State::Connecting), Standing::Connecting);
+        assert_eq!(
+            goes(State::Unreachable { why: "x".into() }),
+            Standing::Unreachable
+        );
+        assert_eq!(
+            goes(State::NeedsCode {
+                pairing_open: false
+            }),
+            Standing::NeedsCode
+        );
+        assert_eq!(goes(State::Reconnecting), Standing::Connecting);
+        assert_eq!(goes(State::Away(Goodbye::Sleep)), Standing::Asleep);
+        assert_eq!(
+            goes(State::Incompatible {
+                daemon: (1, 1),
+                client: (2, 2)
+            }),
+            Standing::Blocked
+        );
+        assert_eq!(goes(State::Connecting), Standing::Connecting);
+    }
 }

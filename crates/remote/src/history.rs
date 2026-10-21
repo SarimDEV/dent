@@ -591,4 +591,360 @@ mod tests {
         assert_eq!(h.kept_bytes(), size() * 2);
         std::fs::remove_dir_all(&d).unwrap();
     }
+
+    fn evn(seq: u64, id: &str) -> Event {
+        Event {
+            seq,
+            session: "s1".into(),
+            at: seq,
+            body: Body::Delivered { id: id.into() },
+        }
+    }
+
+    fn bytes_of(e: &Event) -> u64 {
+        serde_json::to_string(e).unwrap().len() as u64
+    }
+
+    fn seqs(h: &History, m: &str) -> Option<Vec<u64>> {
+        h.load(m).map(|k| k.events.iter().map(|e| e.seq).collect())
+    }
+
+    #[test]
+    fn a_cap_of_nothing_keeps_nothing_but_empty_logs() {
+        let d = dir("cap0");
+        let h = History::open_capped(&d, 0).unwrap();
+        h.save("m", "e", vec![ev(1)]);
+        h.flush();
+        assert!(h.load("m").is_none());
+        assert_eq!(h.kept_bytes(), 0);
+        // An empty batch is never sent; a reset keeps an empty log.
+        h.save("n", "e", vec![]);
+        h.reset("n", "e");
+        h.flush();
+        let k = h.load("n").unwrap();
+        assert_eq!((k.last_seq, k.events.len()), (0, 0));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn at_the_cap_kept_and_a_byte_over_not() {
+        for (cap, kept) in [
+            (size() * 3, true),
+            (size() * 3 - 1, false),
+            (size() * 3 + 1, true),
+        ] {
+            let d = dir(&format!("edge{cap}"));
+            let h = History::open_capped(&d, cap).unwrap();
+            h.save("m", "e", vec![ev(1), ev(2), ev(3)]);
+            h.flush();
+            assert_eq!(h.load("m").is_some(), kept, "cap {cap}");
+            assert_eq!(
+                h.kept_bytes(),
+                if kept { size() * 3 } else { 0 },
+                "cap {cap}"
+            );
+            std::fs::remove_dir_all(&d).unwrap();
+        }
+    }
+
+    #[test]
+    fn at_the_cap_across_machines_and_a_byte_over() {
+        let d = dir("edgeacross");
+        let h = History::open_capped(&d, size() * 4).unwrap();
+        h.save("a", "e", vec![ev(1), ev(2)]);
+        used(&h, "a", 1);
+        h.save("b", "e", vec![ev(1), ev(2)]);
+        used(&h, "b", 2);
+        h.flush();
+        assert_eq!(h.kept_bytes(), size() * 4);
+        assert!(h.load("a").is_some() && h.load("b").is_some());
+        used(&h, "a", 1);
+        used(&h, "b", 2);
+        // An event one byte bigger than the others pushes it over.
+        let fat = evn(3, "m33");
+        assert_eq!(bytes_of(&fat), size() + 1);
+        h.save("b", "e", vec![fat]);
+        h.flush();
+        assert!(h.load("a").is_none(), "used least lately");
+        assert_eq!(seqs(&h, "b").unwrap(), [1, 2, 3]);
+        assert_eq!(h.kept_bytes(), size() * 3 + 1);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn fifty_machines_go_in_the_order_last_used() {
+        let d = dir("fifty");
+        // Room for 40 machines of one event each.
+        let h = History::open_capped(&d, size() * 40).unwrap();
+        for i in 0..50u64 {
+            let m = format!("m{i:02}");
+            h.save(&m, "e", vec![ev(1)]);
+            // Used in a scrambled order, never their name's.
+            used(&h, &m, ((i * 37) % 50) as i64 + 10);
+        }
+        h.flush();
+        assert!(h.kept_bytes() <= size() * 40, "{}", h.kept_bytes());
+        // Which are kept: the newest by `used` at each save. Simulate.
+        let mut kept: Vec<(i64, u64)> = Vec::new();
+        for i in 0..50u64 {
+            // At save time the new one's `used` is now(): newest of all.
+            kept.push((i64::MAX, i));
+            if kept.len() > 40 {
+                kept.sort();
+                let new = kept.iter().position(|&(_, j)| j == i).unwrap();
+                let oldest = if new == 0 { 1 } else { 0 };
+                kept.remove(oldest);
+            }
+            let at = ((i * 37) % 50) as i64 + 10;
+            kept.iter_mut().find(|(_, j)| *j == i).unwrap().0 = at;
+        }
+        let mut want: Vec<String> = kept.iter().map(|&(_, i)| format!("m{i:02}")).collect();
+        want.sort();
+        let got: Vec<String> = (0..50)
+            .map(|i| format!("m{i:02}"))
+            .filter(|m| h.load(m).is_some())
+            .collect();
+        assert_eq!(got, want);
+        assert_eq!(h.kept_bytes(), size() * 40);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn re_sent_events_and_a_new_log_arent_counted_twice() {
+        let d = dir("recount");
+        let h = History::open_capped(&d, size() * 100).unwrap();
+        h.save("m", "e", vec![ev(1), ev(2)]);
+        h.save("m", "e", vec![ev(1), ev(2), ev(2)]);
+        h.save("m", "e", vec![ev(2), ev(3)]);
+        h.flush();
+        assert_eq!(h.kept_bytes(), size() * 3);
+        // Another log: the old one's bytes go with its events.
+        h.save("m", "e2", vec![ev(1)]);
+        h.flush();
+        assert_eq!(h.kept_bytes(), size());
+        h.reset("m", "e3");
+        h.flush();
+        assert_eq!(h.kept_bytes(), 0);
+        h.save("m", "e3", vec![ev(1)]);
+        h.forget("m");
+        h.flush();
+        assert_eq!(h.kept_bytes(), 0);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_machine_too_big_alone_saved_again_and_again() {
+        let d = dir("bigagain");
+        let h = History::open_capped(&d, size() * 2).unwrap();
+        h.save("small", "e", vec![ev(1)]);
+        for round in 0..20u64 {
+            h.save(
+                "big",
+                "e",
+                (round * 3 + 1..=round * 3 + 3).map(ev).collect(),
+            );
+        }
+        h.flush();
+        assert!(h.load("big").is_none());
+        assert_eq!(seqs(&h, "small").unwrap(), [1]);
+        assert_eq!(h.kept_bytes(), size());
+        // A new log, still too big: not kept, the rest stay.
+        h.reset("big", "e2");
+        h.save("big", "e2", (1..=3).map(ev).collect());
+        h.flush();
+        assert!(h.load("big").is_none());
+        assert_eq!(seqs(&h, "small").unwrap(), [1]);
+        // Small enough now: kept.
+        h.reset("big", "e3");
+        h.save("big", "e3", vec![ev(1)]);
+        h.flush();
+        assert_eq!(seqs(&h, "big").unwrap(), [1]);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn evicted_is_gone_after_a_restart_never_partway() {
+        let d = dir("reopen");
+        {
+            let h = History::open_capped(&d, size() * 2).unwrap();
+            h.save("old", "e", vec![ev(1), ev(2)]);
+            used(&h, "old", 1);
+            h.save("new", "e", vec![ev(1)]);
+            h.flush();
+            assert!(h.load("old").is_none());
+            // More of the evicted log in this run: not kept.
+            h.save("old", "e", vec![ev(3), ev(4)]);
+            h.flush();
+            assert!(h.load("old").is_none());
+        }
+        let h = History::open_capped(&d, size() * 2).unwrap();
+        assert!(
+            h.load("old").is_none(),
+            "evicted, so nothing after a restart"
+        );
+        assert_eq!(seqs(&h, "new").unwrap(), [1]);
+        assert_eq!(h.kept_bytes(), size());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_lower_cap_on_reopening_is_kept_to() {
+        let d = dir("lower");
+        {
+            let h = History::open_capped(&d, size() * 10).unwrap();
+            h.save("a", "e", (1..=5).map(ev).collect());
+            h.save("b", "e", (1..=5).map(ev).collect());
+            h.flush();
+        }
+        let h = History::open_capped(&d, size() * 3).unwrap();
+        // Read before any save: is what's over the cap still served?
+        assert!(
+            h.kept_bytes() <= size() * 3,
+            "{} kept over a cap of {}",
+            h.kept_bytes(),
+            size() * 3
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_first_format_body_that_isnt_json() {
+        let d = dir("v1bad");
+        std::fs::create_dir_all(&d).unwrap();
+        {
+            let db = Connection::open(d.join("history.db")).unwrap();
+            db.execute_batch(
+                "CREATE TABLE feeds (machine TEXT PRIMARY KEY, epoch TEXT NOT NULL,
+                    last_seq INTEGER NOT NULL);
+                CREATE TABLE events (machine TEXT NOT NULL, seq INTEGER NOT NULL,
+                    body TEXT NOT NULL, PRIMARY KEY (machine, seq)) WITHOUT ROWID;
+                PRAGMA user_version = 1;
+                INSERT INTO feeds VALUES ('m', 'e', 2);
+                INSERT INTO events VALUES ('m', 1, 'not json');
+                INSERT INTO events VALUES ('m', 2, X'FFFE00');
+                INSERT INTO feeds VALUES ('ok', 'e', 0);",
+            )
+            .unwrap();
+        }
+        let h = History::open(&d).unwrap();
+        assert_eq!(h.kept_bytes(), 8 + 3);
+        assert!(h.load("m").is_none(), "not read in part");
+        h.flush();
+        assert_eq!(h.kept_bytes(), 0);
+        assert!(h.load("ok").is_some());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn the_first_format_counts_bytes_not_letters() {
+        let d = dir("v1utf8");
+        std::fs::create_dir_all(&d).unwrap();
+        let events = [evn(1, "✓猫🎬"), evn(2, "é\u{0}\"\\"), evn(3, "plain")];
+        {
+            let db = Connection::open(d.join("history.db")).unwrap();
+            db.execute_batch(
+                "CREATE TABLE feeds (machine TEXT PRIMARY KEY, epoch TEXT NOT NULL,
+                    last_seq INTEGER NOT NULL);
+                CREATE TABLE events (machine TEXT NOT NULL, seq INTEGER NOT NULL,
+                    body TEXT NOT NULL, PRIMARY KEY (machine, seq)) WITHOUT ROWID;
+                PRAGMA user_version = 1;
+                INSERT INTO feeds VALUES ('m', 'e', 3);",
+            )
+            .unwrap();
+            for e in &events {
+                db.execute(
+                    "INSERT INTO events VALUES ('m', ?1, ?2)",
+                    params![e.seq as i64, serde_json::to_string(e).unwrap()],
+                )
+                .unwrap();
+            }
+        }
+        let h = History::open(&d).unwrap();
+        let want: u64 = events.iter().map(bytes_of).sum();
+        assert_eq!(h.kept_bytes(), want);
+        assert_eq!(seqs(&h, "m").unwrap(), [1, 2, 3]);
+        // And saved the new way: counted the same.
+        h.save("n", "e", events.to_vec());
+        h.flush();
+        assert_eq!(h.kept_bytes(), want * 2);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_new_file_gives_space_back() {
+        let d = dir("vacuum");
+        let h = History::open(&d).unwrap();
+        let mode: i64 =
+            h.db.lock()
+                .unwrap()
+                .pragma_query_value(None, "auto_vacuum", |r| r.get(0))
+                .unwrap();
+        assert_eq!(mode, 2, "INCREMENTAL");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn saves_from_many_threads_on_clones() {
+        let d = dir("threads");
+        let h = History::open_capped(&d, size() * 1000).unwrap();
+        let hands: Vec<_> = (0..8)
+            .map(|t| {
+                let h = h.clone();
+                std::thread::spawn(move || {
+                    let m = format!("m{t}");
+                    for seq in 1..=50u64 {
+                        h.save(&m, "e", vec![ev(seq)]);
+                        if seq % 10 == 0 {
+                            let _ = h.load(&m);
+                            let _ = h.kept_bytes();
+                        }
+                    }
+                    // Sent again from another thread at once.
+                    h.save("shared", "e", (1..=20).map(ev).collect());
+                })
+            })
+            .collect();
+        for t in hands {
+            t.join().unwrap();
+        }
+        h.flush();
+        for t in 0..8 {
+            assert_eq!(
+                seqs(&h, &format!("m{t}")).unwrap(),
+                (1..=50).collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(seqs(&h, "shared").unwrap(), (1..=20).collect::<Vec<_>>());
+        let of = |n: u64| (1..=n).map(|s| bytes_of(&ev(s))).sum::<u64>();
+        assert_eq!(h.kept_bytes(), 8 * of(50) + of(20));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn many_threads_over_the_cap_never_leave_a_partial_log() {
+        let d = dir("threadscap");
+        let h = History::open_capped(&d, size() * 60).unwrap();
+        let hands: Vec<_> = (0..8)
+            .map(|t| {
+                let h = h.clone();
+                std::thread::spawn(move || {
+                    for seq in 1..=20u64 {
+                        h.save(&format!("m{t}"), "e", vec![ev(seq)]);
+                    }
+                })
+            })
+            .collect();
+        for t in hands {
+            t.join().unwrap();
+        }
+        h.flush();
+        assert!(h.kept_bytes() <= size() * 60);
+        for t in 0..8 {
+            if let Some(s) = seqs(&h, &format!("m{t}")) {
+                assert_eq!(s, (1..=s.len() as u64).collect::<Vec<_>>(), "m{t} partial");
+                assert_eq!(s.len(), 20, "m{t} kept, but not all of it");
+            }
+        }
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 }

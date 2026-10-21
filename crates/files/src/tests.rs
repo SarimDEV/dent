@@ -227,3 +227,213 @@ fn picture_sizes_from_headers() {
     assert_eq!(picture_size(&webp), Some((640, 480)));
     assert_eq!(picture_size(b"plain text"), None);
 }
+
+#[test]
+fn file_addresses_at_their_edges() {
+    let (base, home) = (Path::new("/work/app"), Path::new("/home/ada"));
+    let r = |w: &str| resolve(w, base, home);
+    assert_eq!(r("file://").unwrap(), Path::new("/"));
+    assert_eq!(r("file:///").unwrap(), Path::new("/"));
+    assert_eq!(r("file://localhost").unwrap(), Path::new("/"));
+    assert_eq!(r("file://LOCALHOST/x").unwrap(), Path::new("/x"));
+    assert_eq!(r("  file:///x  ").unwrap(), Path::new("/x"));
+    // A port is still another computer's name.
+    assert_eq!(r("file://host:80/x"), None);
+    assert_eq!(r("file://localhost:80/x"), None);
+    // Percent-encoding.
+    assert_eq!(r("file:///a%2Fb").unwrap(), Path::new("/a/b"));
+    assert_eq!(r("file:///a%zzb").unwrap(), Path::new("/a%zzb"));
+    assert_eq!(r("file:///a%").unwrap(), Path::new("/a%"));
+    assert_eq!(r("file:///a%2").unwrap(), Path::new("/a%2"));
+    assert_eq!(r("file:///%E2%9C%93").unwrap(), Path::new("/✓"));
+    // Not an address: written as is, `%20` and all.
+    assert_eq!(r("/a%20b").unwrap(), Path::new("/a%20b"));
+    // `..` in an address isn't resolved away here (the policy sees the
+    // real path).
+    assert_eq!(r("file:///a/../b").unwrap(), Path::new("/a/../b"));
+}
+
+#[test]
+fn a_decoded_nul_is_no_file_and_no_panic() {
+    let d = dir("nul");
+    let p = Policy::default();
+    assert_eq!(
+        resolve("file:///a%00b", &d, &d).unwrap(),
+        Path::new("/a\0b")
+    );
+    let s = stat("file:///a%00b", &d, &d, &p);
+    assert!(
+        !matches!(s, FileStat::File { .. } | FileStat::Dir { .. }),
+        "{s:?}"
+    );
+    let s = stat("a\0b", &d, &d, &p);
+    assert!(
+        !matches!(s, FileStat::File { .. } | FileStat::Dir { .. }),
+        "{s:?}"
+    );
+}
+
+#[test]
+fn a_nul_is_missing_not_unreadable() {
+    // A name no file can have is no file, as a missing one is.
+    let d = dir("nul2");
+    let s = stat("a\0b.png", &d, &d, &Policy::default());
+    assert!(matches!(s, FileStat::Missing { .. }), "{s:?}");
+}
+
+#[test]
+fn the_scheme_is_case_insensitive() {
+    // RFC 3986: schemes are case-insensitive.
+    let (base, home) = (Path::new("/work/app"), Path::new("/home/ada"));
+    assert_eq!(resolve("FILE:///x", base, home).unwrap(), Path::new("/x"));
+}
+
+#[test]
+fn this_machine_by_its_loopback_address_is_this_machine() {
+    // `file://127.0.0.1/x` and `file://[::1]/x` can only name this machine.
+    let (base, home) = (Path::new("/work/app"), Path::new("/home/ada"));
+    assert_eq!(
+        resolve("file://127.0.0.1/x", base, home).as_deref(),
+        Some(Path::new("/x"))
+    );
+    assert_eq!(
+        resolve("file://[::1]/x", base, home).as_deref(),
+        Some(Path::new("/x"))
+    );
+}
+
+#[test]
+fn tildes_at_their_edges() {
+    let (base, home) = (Path::new("/work/app"), Path::new("/home/ada"));
+    let r = |w: &str| resolve(w, base, home).unwrap();
+    let root = if cfg!(target_os = "macos") {
+        "/var/root"
+    } else {
+        "/root"
+    };
+    assert_eq!(r("~/"), home);
+    assert_eq!(r("~root/"), Path::new(root));
+    assert_eq!(r("~root//x"), Path::new(root).join("x"));
+    // Not a user name: a name like any other, taken from the folder.
+    assert_eq!(r("~../etc"), Path::new("/work/app/~../etc"));
+    assert_eq!(r("~./x"), Path::new("/work/app/~./x"));
+    assert_eq!(r("~a b/x"), Path::new("/work/app/~a b/x"));
+    assert_eq!(r("~a%20b/x"), Path::new("/work/app/~a%20b/x"));
+    let long = format!("~{}", "a".repeat(300));
+    assert_eq!(r(&long), Path::new("/work/app").join(&long));
+    assert_eq!(
+        r(&format!("{long}/x")),
+        Path::new("/work/app").join(&long).join("x")
+    );
+    let huge = format!("~{}", "b".repeat(100_000));
+    assert_eq!(r(&huge), Path::new("/work/app").join(&huge));
+    // As an address: `file:///~root` is a folder named `~root` at the top,
+    // not root's home.
+    assert_eq!(r("file:///~root"), Path::new("/~root"));
+}
+
+#[test]
+fn candidates_at_their_edges() {
+    let (base, home) = (Path::new("/w"), Path::new("/h"));
+    let c = |w: &str| candidates(w, base, home);
+    assert_eq!(c("a.md#h"), [Path::new("/w/a.md#h"), Path::new("/w/a.md")]);
+    assert_eq!(
+        c("a.md?q=1#h"),
+        [Path::new("/w/a.md?q=1#h"), Path::new("/w/a.md")]
+    );
+    assert_eq!(c("#only"), [Path::new("/w/#only")]);
+    assert_eq!(c("?only"), [Path::new("/w/?only")]);
+    assert_eq!(c("a.md#"), [Path::new("/w/a.md#"), Path::new("/w/a.md")]);
+    assert_eq!(c("~/a#b"), [Path::new("/h/a#b"), Path::new("/h/a")]);
+    // Another computer's address: nothing here, its fragment cut or not.
+    assert!(c("file://elsewhere-not-this-one/a#b").is_empty());
+    // An address whose fragment comes before the host ends: the cut is
+    // taken from the whole string.
+    assert_eq!(c("file://#x"), [Path::new("/")]);
+    assert_eq!(c(""), [Path::new("/w")]);
+}
+
+#[test]
+fn another_computers_file_is_missing_as_written() {
+    let d = dir("away");
+    let p = Policy::default();
+    for w in [
+        "file://elsewhere-not-this-one/a/c.png",
+        "  file://elsewhere-not-this-one/a/c.png#x  ",
+        "file://host:80/x",
+        "file://elsewhere-not-this-one",
+    ] {
+        match stat(w, &d, &d, &p) {
+            FileStat::Missing { checked } => assert_eq!(checked, w.trim()),
+            s => panic!("{w}: {s:?}"),
+        }
+        match stat_plain(w, &d, &d, &p) {
+            FileStat::Missing { checked } => assert_eq!(checked, w.trim()),
+            s => panic!("{w}: {s:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_real_file_with_a_hash_and_odd_characters() {
+    let d = dir("odd");
+    let p = Policy::default();
+    std::fs::write(d.join("take #1 ✓.png"), b"x").unwrap();
+    std::fs::write(d.join("a?b.md"), b"x").unwrap();
+    std::fs::write(d.join("pct%20.md"), b"x").unwrap();
+    assert!(matches!(
+        stat("take #1 ✓.png", &d, &d, &p),
+        FileStat::File { .. }
+    ));
+    assert!(matches!(stat("a?b.md", &d, &d, &p), FileStat::File { .. }));
+    assert!(matches!(
+        stat("pct%20.md", &d, &d, &p),
+        FileStat::File { .. }
+    ));
+    // As an address, `%23` is the `#`.
+    let addr = format!("file://{}/take%20%231%20%E2%9C%93.png", d.display());
+    assert!(
+        matches!(stat(&addr, &d, &d, &p), FileStat::File { .. }),
+        "{addr}"
+    );
+    // `#1` read as a fragment when the whole isn't there: `take ` is not.
+    match stat("take #2 ✓.png", &d, &d, &p) {
+        FileStat::Missing { checked } => assert!(checked.ends_with("take #2 ✓.png")),
+        s => panic!("{s:?}"),
+    }
+}
+
+#[test]
+fn very_long_paths_dont_panic() {
+    let d = dir("long");
+    let p = Policy::default();
+    let long = "x".repeat(5000);
+    let s = stat(&long, &d, &d, &p);
+    assert!(!matches!(s, FileStat::File { .. }), "{s:?}");
+    let deep = "a/".repeat(3000);
+    let s = stat(&deep, &d, &d, &p);
+    assert!(!matches!(s, FileStat::File { .. }), "{s:?}");
+}
+
+#[test]
+fn a_long_fragment_still_falls_back_to_the_file() {
+    // A link to a long heading: as written, the name is too long for the
+    // disk; without the fragment it's there.
+    let d = dir("longfrag");
+    std::fs::write(d.join("notes.md"), b"x").unwrap();
+    let w = format!("notes.md#{}", "a-very-long-heading-".repeat(15));
+    match stat(&w, &d, &d, &Policy::default()) {
+        FileStat::File { path, .. } => assert!(path.ends_with("/notes.md"), "{path}"),
+        s => panic!("{s:?}"),
+    }
+}
+
+#[test]
+fn a_doubled_slash_after_a_tilde_stays_home() {
+    // `~//x` is home's `x` to a shell; joined as is, `/x` replaces home.
+    let (base, home) = (Path::new("/work/app"), Path::new("/home/ada"));
+    assert_eq!(
+        resolve("~//x", base, home).unwrap(),
+        Path::new("/home/ada/x")
+    );
+}

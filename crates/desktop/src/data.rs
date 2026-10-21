@@ -887,4 +887,154 @@ mod tests {
         let unique: std::collections::HashSet<_> = all.iter().collect();
         assert_eq!(unique.len(), all.len());
     }
+
+    mod picture_dims {
+        use super::super::picture_dims;
+        use std::path::PathBuf;
+
+        fn dir(name: &str) -> PathBuf {
+            let d = std::env::temp_dir().join(format!("dent-dims-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        }
+
+        fn png(w: u32, h: u32) -> Vec<u8> {
+            let mut b = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+            b.extend(w.to_be_bytes());
+            b.extend(h.to_be_bytes());
+            b.extend([8, 6, 0, 0, 0]);
+            b
+        }
+
+        /// A JPEG whose start-of-frame (300 wide, 100 high) comes after
+        /// `exif` bytes of APP1 segments, each as big as one can be.
+        fn jpeg_after(exif: usize) -> Vec<u8> {
+            let mut b = vec![0xff, 0xd8];
+            let mut left = exif;
+            while left > 0 {
+                let n = left.min(65533);
+                b.extend([0xff, 0xe1]);
+                b.extend(((n + 2) as u16).to_be_bytes());
+                b.extend(std::iter::repeat_n(0u8, n));
+                left -= n;
+            }
+            b.extend([
+                0xff, 0xc0, 0x00, 0x11, 0x08, 0x00, 0x64, 0x01, 0x2c, 0x03, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0,
+            ]);
+            b
+        }
+
+        fn at(d: &std::path::Path, name: &str, bytes: &[u8]) -> PathBuf {
+            let p = d.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            p
+        }
+
+        #[test]
+        fn sizes_at_their_edges() {
+            let d = dir("edges");
+            assert_eq!(picture_dims(&at(&d, "zero.png", &png(0, 0))), None);
+            assert_eq!(picture_dims(&at(&d, "zw.png", &png(0, 5))), None);
+            assert_eq!(picture_dims(&at(&d, "one.png", &png(1, 1))), Some((1, 1)));
+            assert_eq!(
+                picture_dims(&at(&d, "tall.png", &png(1, 100_000))),
+                Some((1, 100_000))
+            );
+            assert_eq!(
+                picture_dims(&at(&d, "huge.png", &png(u32::MAX, u32::MAX))),
+                Some((u32::MAX, u32::MAX))
+            );
+            let p = png(640, 480);
+            assert_eq!(picture_dims(&at(&d, "cut.png", &p[..20])), None);
+            assert_eq!(picture_dims(&at(&d, "empty.png", b"")), None);
+            assert_eq!(
+                picture_dims(&at(&d, "text.png", b"not a picture at all")),
+                None
+            );
+            assert_eq!(picture_dims(&d.join("missing.png")), None);
+            assert_eq!(picture_dims(&d), None, "a folder");
+            let j = jpeg_after(10);
+            assert_eq!(picture_dims(&at(&d, "cut.jpg", &j[..j.len() - 15])), None);
+            // A segment length pointing past the end.
+            assert_eq!(
+                picture_dims(&at(
+                    &d,
+                    "lying.jpg",
+                    &[0xff, 0xd8, 0xff, 0xe1, 0xff, 0xff, 0, 0, 0, 0, 0]
+                )),
+                None
+            );
+            std::fs::remove_dir_all(&d).unwrap();
+        }
+
+        #[test]
+        fn a_jpeg_after_its_metadata() {
+            let d = dir("exif");
+            assert_eq!(
+                picture_dims(&at(&d, "small.jpg", &jpeg_after(1000))),
+                Some((300, 100))
+            );
+            assert_eq!(
+                picture_dims(&at(&d, "under.jpg", &jpeg_after(200 << 10))),
+                Some((300, 100))
+            );
+            std::fs::remove_dir_all(&d).unwrap();
+        }
+
+        // "Enough for any header": a JPEG's metadata (thumbnails, XMP, an
+        // ICC profile, MPF previews) can run past 256 KiB.
+        #[test]
+        fn a_jpeg_after_more_than_256_kib_of_metadata() {
+            let d = dir("bigexif");
+            assert_eq!(
+                picture_dims(&at(&d, "over.jpg", &jpeg_after(300 << 10))),
+                Some((300, 100))
+            );
+            std::fs::remove_dir_all(&d).unwrap();
+        }
+
+        #[test]
+        fn a_changed_file_is_read_again_after_a_few_seconds() {
+            let d = dir("change");
+            let p = at(&d, "x.png", &png(10, 20));
+            assert_eq!(picture_dims(&p), Some((10, 20)));
+            std::fs::write(&p, png(30, 40)).unwrap();
+            // Within the few seconds: what was seen (by design).
+            assert_eq!(picture_dims(&p), Some((10, 20)));
+            std::fs::remove_file(&p).unwrap();
+            assert_eq!(
+                picture_dims(&p),
+                Some((10, 20)),
+                "gone, still the old answer"
+            );
+            std::fs::write(&p, png(30, 40)).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(3100));
+            assert_eq!(picture_dims(&p), Some((30, 40)));
+            std::fs::remove_dir_all(&d).unwrap();
+        }
+
+        // Drawn on the window's thread: a pipe named like a picture must
+        // not hang it.
+        #[test]
+        fn a_pipe_named_like_a_picture_doesnt_hang() {
+            let d = dir("fifo");
+            let p = d.join("x.png");
+            let c = std::ffi::CString::new(p.to_str().unwrap()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+            let (tx, rx) = std::sync::mpsc::channel();
+            let q = p.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(picture_dims(&q));
+            });
+            let r = rx.recv_timeout(std::time::Duration::from_secs(2));
+            if r.is_err() {
+                // Let the stuck open go.
+                let _ = std::fs::OpenOptions::new().write(true).open(&p);
+            }
+            assert_eq!(r, Ok(None), "hung on a pipe");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
 }
