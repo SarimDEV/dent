@@ -1,0 +1,15 @@
+[package]
+name = "dent-files"
+description = "Files a session names, resolved and read the same way on the daemon and in a client: where a written path points, a safe open, a stamp per version, ranged reads."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+dent-protocol.workspace = true
+libc = "=0.2.190"
+
+[lints]
+workspace = true

@@ -70,6 +70,11 @@ const CTL_QUEUE: usize = 64;
 /// live connection ([decision 0061]).
 const RECHECK: Duration = Duration::from_secs(300);
 /// Lines waiting to go to one remote client.
+/// File replies waiting to go to one device: each up to [`READ_MAX`]
+/// bytes, so a few is plenty.
+///
+/// [`READ_MAX`]: dent_protocol::READ_MAX
+const BULK_QUEUE: usize = 8;
 const OUT_QUEUE: usize = 256;
 /// How long Tailscale's view of this machine is reused.
 const TAILSCALE_TTL: Duration = Duration::from_secs(30);
@@ -86,7 +91,7 @@ pub struct Net {
     pub port: u16,
     trust: Mutex<Trust>,
     window: Mutex<Window>,
-    lan: AtomicBool,
+    pub lan: AtomicBool,
     tailscale: tokio::sync::Mutex<Option<(Option<tailnet::SelfNode>, Instant)>>,
     /// Device keys trusted through Tailscale lately, so a LAN attempt from
     /// one can be told "trusted on Tailscale" rather than "pair".
@@ -95,6 +100,9 @@ pub struct Net {
     removed: broadcast::Sender<String>,
     /// Goodbyes for every remote connection, as the daemon goes away.
     pub bye: broadcast::Sender<Goodbye>,
+    /// The machine is on its way to sleep: a device that connects now is
+    /// told so at once, not left to find it gone.
+    pub asleep: AtomicBool,
     preauth: Mutex<HashMap<IpAddr, usize>>,
     preauth_all: Arc<Semaphore>,
     untrusted: Arc<Semaphore>,
@@ -121,12 +129,13 @@ impl Net {
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(PORT);
-        let lan = std::env::var("DENT_REMOTE_LAN").is_ok_and(|v| v == "1")
-            || store
-                .get("remote.lan")
-                .ok()
-                .flatten()
-                .is_some_and(|v| v == "on");
+        // Once set from a client (`SetLan`), the setting wins; until then
+        // `DENT_REMOTE_LAN=1` turns it on.
+        let lan = match store.get("remote.lan").ok().flatten().as_deref() {
+            Some("on") => true,
+            Some("off") => false,
+            _ => std::env::var("DENT_REMOTE_LAN").is_ok_and(|v| v == "1"),
+        };
         Self {
             identity,
             problem,
@@ -139,6 +148,7 @@ impl Net {
             via_tailscale: Mutex::new(HashSet::new()),
             removed: broadcast::channel(16).0,
             bye: broadcast::channel(4).0,
+            asleep: AtomicBool::new(false),
             preauth: Mutex::new(HashMap::new()),
             preauth_all: Arc::new(Semaphore::new(PREAUTH_ALL)),
             untrusted: Arc::new(Semaphore::new(UNTRUSTED_ALL)),
@@ -156,23 +166,38 @@ impl Net {
         lock(&self.window).open()
     }
 
+    pub fn pairing_now(&self) -> Option<(String, u64)> {
+        lock(&self.window).showing()
+    }
+
     pub fn devices(&self) -> Vec<dent_protocol::Device> {
-        lock(&self.trust)
-            .list()
-            .into_iter()
-            .map(|(id, p)| dent_protocol::Device {
+        let trust = lock(&self.trust);
+        let device = |how: &str| {
+            let how = how.to_string();
+            move |(id, p): (String, trust::Peer)| dent_protocol::Device {
                 id,
                 name: p.name,
-                how: "paired".into(),
+                how: how.clone(),
                 access: p.access,
                 added: p.added,
                 seen: p.seen,
-            })
+            }
+        };
+        trust
+            .list()
+            .into_iter()
+            .map(device("paired"))
+            .chain(trust.list_account().into_iter().map(device("tailscale")))
             .collect()
     }
 
     pub fn remove_device(&self, id: &str) -> Result<bool> {
-        let had = lock(&self.trust).remove(id)?;
+        // One trusted through its Tailscale account (seen this run) is
+        // removed too, so the account doesn't let it straight back in.
+        let known = lock(&self.via_tailscale)
+            .iter()
+            .any(|k| dent_link::fingerprint(k) == id);
+        let had = lock(&self.trust).remove(id, known)?;
         let _ = self.removed.send(id.to_string());
         Ok(had)
     }
@@ -457,13 +482,23 @@ async fn conn(
     }
 
     let pairing_open = lock(&d.net.window).is_open();
+    // Removed here and not paired since: told so, by any route, unless a
+    // code is showing, when it may pair again on purpose.
+    let removed = paired.is_none() && lock(&d.net.trust).was_removed(&t.remote);
+    if removed && !pairing_open {
+        let _ = send_control(&mut ws, &mut t, &Control::Refuse(Refusal::Removed)).await;
+        return Ok(());
+    }
     let mut verdict = match &paired {
         Some(p) => Verdict::Paired {
             access: access(&p.access),
         },
         None => Verdict::Untrusted { pairing_open },
     };
+    // A removed device comes back only by pairing, never through its
+    // account alone.
     if matches!(verdict, Verdict::Untrusted { .. })
+        && !removed
         && route == Route::Tailscale
         && let (Some(me_ts), Some(p)) = (me_ts.as_ref(), ts_peer.as_ref())
         && tailnet::same_account(me_ts, p)
@@ -472,6 +507,9 @@ async fn conn(
             access: Access::Full,
         };
         lock(&d.net.via_tailscale).insert(t.remote.clone());
+        if !hello.probe {
+            lock(&d.net.trust).seen_by_account(&t.remote, &hello.name);
+        }
     }
     // Trusted through the Tailscale account but reached another way: say
     // so, unless a code is showing here, when it may pair to use this route
@@ -518,9 +556,18 @@ async fn conn(
         return Ok(());
     }
     if let Verdict::Untrusted { .. } = verdict {
-        let paired = tokio::time::timeout(UNTRUSTED, pairing(&d, &mut ws, &mut t, &hello))
-            .await
-            .context("untrusted for too long")??;
+        let paired = tokio::time::timeout(
+            UNTRUSTED,
+            pairing(
+                &d,
+                &mut ws,
+                &mut t,
+                &hello,
+                matches!(route, Route::Lan | Route::Other),
+            ),
+        )
+        .await
+        .context("untrusted for too long")??;
         if !paired {
             return Ok(());
         }
@@ -578,7 +625,15 @@ const NAME_MAX: usize = 64;
 /// An untrusted device may pair while a code shows. Returns whether it's
 /// now trusted. Only a completed exchange with a wrong code counts as a
 /// guess; a dropped connection doesn't.
-async fn pairing(d: &Daemon, ws: &mut Ws, t: &mut Transport, hello: &Hello) -> Result<bool> {
+/// `by_lan`: the device came in by the local network, which LAN access
+/// lets in; turned off meanwhile, it can't finish pairing.
+async fn pairing(
+    d: &Daemon,
+    ws: &mut Ws,
+    t: &mut Transport,
+    hello: &Hello,
+    by_lan: bool,
+) -> Result<bool> {
     loop {
         let frame = tokio::time::timeout(HANDSHAKE * 6, recv_bin(ws))
             .await
@@ -640,6 +695,10 @@ async fn pairing(d: &Daemon, ws: &mut Ws, t: &mut Transport, hello: &Hello) -> R
                 } else {
                     name
                 };
+                if by_lan && !d.net.lan.load(Ordering::Relaxed) {
+                    send_control(ws, t, &Control::Refuse(Refusal::LanOff)).await?;
+                    return Ok(false);
+                }
                 lock(&d.net.trust).add(&t.remote, &name)?;
                 let mine = dent_link::pair::confirm(&key, &t.hash, dent_link::pair::Role::Daemon);
                 send_control(
@@ -691,14 +750,18 @@ async fn trusted(
     let (mut sink, mut stream) = ws.split();
     let (lines_tx, lines_rx) = mpsc::channel::<String>(64);
     let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(OUT_QUEUE);
+    // File bytes go on a lane of their own, after live traffic.
+    let (bulk_tx, mut bulk_rx) = mpsc::channel::<Vec<u8>>(BULK_QUEUE);
     let (ctl_tx, mut ctl_rx) = mpsc::channel::<Control>(CTL_QUEUE);
-    let session = tokio::spawn(crate::server::session(d.clone(), lines_rx, out_tx));
+    let session = tokio::spawn(crate::server::session(d.clone(), lines_rx, out_tx, bulk_tx));
     let mut removed = d.net.removed.subscribe();
     let mut bye = d.net.bye.subscribe();
 
     // The writer alone seals and sends, so frames go out in nonce order.
-    // Control messages go first, and between the parts of a large message.
-    // A goodbye or refusal is the last thing sent.
+    // Control messages go first, and between the parts of a large message;
+    // then replies and live events; file bytes last (each one small, so a
+    // live event waits for one at most). A goodbye or refusal is the last
+    // thing sent.
     let mut writer = {
         let t = t.clone();
         tokio::spawn(async move {
@@ -719,6 +782,33 @@ async fn trusted(
                     Err(_) => false,
                 }
             };
+            // Sends one data line in parts, control first between them;
+            // whether to go on.
+            let data = async |sink: &mut futures_util::stream::SplitSink<Ws, Message>,
+                              ctl_rx: &mut mpsc::Receiver<Control>,
+                              mut line: Vec<u8>| {
+                if line.last() == Some(&b'\n') {
+                    line.pop();
+                }
+                let mut i = 0;
+                loop {
+                    while let Ok(c) = ctl_rx.try_recv() {
+                        if !control(sink, c).await {
+                            return false;
+                        }
+                    }
+                    let part = lock(&t).seal_part(&line, i);
+                    let part = match part {
+                        Ok(Some(p)) => p,
+                        Ok(None) => return true,
+                        Err(_) => return false,
+                    };
+                    if !send(sink, part).await {
+                        return false;
+                    }
+                    i += 1;
+                }
+            };
             'run: loop {
                 tokio::select! {
                     biased;
@@ -729,27 +819,15 @@ async fn trusted(
                         }
                     }
                     line = out_rx.recv() => {
-                        let Some(mut line) = line else { break };
-                        if line.last() == Some(&b'\n') {
-                            line.pop();
+                        let Some(line) = line else { break };
+                        if !data(&mut sink, &mut ctl_rx, line).await {
+                            break 'run;
                         }
-                        let mut i = 0;
-                        loop {
-                            while let Ok(c) = ctl_rx.try_recv() {
-                                if !control(&mut sink, c).await {
-                                    break 'run;
-                                }
-                            }
-                            let part = lock(&t).seal_part(&line, i);
-                            let part = match part {
-                                Ok(Some(p)) => p,
-                                Ok(None) => break,
-                                Err(_) => break 'run,
-                            };
-                            if !send(&mut sink, part).await {
-                                break 'run;
-                            }
-                            i += 1;
+                    }
+                    line = bulk_rx.recv() => {
+                        let Some(line) = line else { break };
+                        if !data(&mut sink, &mut ctl_rx, line).await {
+                            break 'run;
                         }
                     }
                 }
@@ -761,6 +839,10 @@ async fn trusted(
     let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + RECHECK, RECHECK);
 
     let result: Result<()> = async {
+        if d.net.asleep.load(Ordering::Relaxed) {
+            let _ = ctl_tx.try_send(Control::Goodbye(Goodbye::Sleep));
+            return Ok(());
+        }
         loop {
             let frame = tokio::select! {
                 f = tokio::time::timeout(IDLE, stream.next()) => match f {

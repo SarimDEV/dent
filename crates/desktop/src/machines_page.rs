@@ -58,6 +58,8 @@ pub struct Adding {
     /// Your Tailscale's devices: `None` while looking, `Err` when Tailscale
     /// can't be asked.
     pub peers: Option<Result<Vec<Peer>, String>>,
+    /// What was typed isn't an address: said under the field.
+    pub bad: Option<String>,
 }
 
 /// How a machine stands, in the fixed words.
@@ -75,7 +77,7 @@ pub enum Standing {
 
 impl Standing {
     pub fn of(m: &MachineView) -> Self {
-        match &m.state {
+        match m.standing() {
             State::Online | State::Slow => Standing::Online,
             State::Off | State::Connecting | State::Reconnecting => Standing::Connecting,
             State::Away(Goodbye::Sleep) => Standing::Asleep,
@@ -193,27 +195,83 @@ struct Node {
 /// A shape for every machine: this one (`local`, its id) and each remote
 /// one. One still being added has none yet: its address would take a shape
 /// and move another machine off its own for as long as the sheet is open.
-fn shapes_for(local: &str, machines: &[MachineView]) -> HashMap<String, Shape> {
-    let local = if local.is_empty() { "this" } else { local };
-    let mut s = glyph::assign(
+fn shapes_for(
+    local: &str,
+    machines: &[MachineView],
+    kept: &HashMap<String, Shape>,
+) -> HashMap<String, Shape> {
+    // This machine goes by its id once its daemon has said it, and by the
+    // shape it had last time until then.
+    let mut kept = kept.clone();
+    if !local.is_empty()
+        && !kept.contains_key(local)
+        && let Some(sh) = kept.get(THIS).copied()
+    {
+        kept.insert(local.to_string(), sh);
+    }
+    let local = if local.is_empty() { THIS } else { local };
+    let mut s = glyph::assign_kept(
         std::iter::once(local).chain(
             machines
                 .iter()
                 .map(|m| m.id.as_str())
                 .filter(|id| !id.starts_with('+')),
         ),
+        &kept,
     );
     // This machine's own sessions have plain ids: "" is it too.
     if let Some(sh) = s.get(local).copied() {
         s.insert(String::new(), sh);
+        s.insert(THIS.to_string(), sh);
     }
     s
 }
 
+/// This machine, in the kept shapes, whatever its id.
+const THIS: &str = "this";
+
+fn shapes_path() -> std::path::PathBuf {
+    dent_remote::store::state_dir().join("shapes.json")
+}
+
+/// The shapes machines were given, kept so none changes shape when another
+/// is added or between launches.
+pub fn load_shapes() -> HashMap<String, Shape> {
+    std::fs::read(shapes_path())
+        .ok()
+        .and_then(|b| serde_json::from_slice::<HashMap<String, usize>>(&b).ok())
+        .map(|m| {
+            m.into_iter()
+                .filter_map(|(k, i)| glyph::SHAPES.get(i).map(|s| (k, *s)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 impl Dent {
-    /// A shape for every machine: this one and each remote one.
+    /// A shape for every machine: this one and each remote one. A new
+    /// machine's is kept from then on.
     pub fn shapes(&self) -> HashMap<String, Shape> {
-        shapes_for(&self.machine_id, &self.machines)
+        let mut kept = self.kept_shapes.borrow_mut();
+        let s = shapes_for(&self.machine_id, &self.machines, &kept);
+        let grew = s
+            .iter()
+            .any(|(k, v)| !k.is_empty() && kept.get(k) != Some(v));
+        if grew {
+            for (k, v) in &s {
+                if !k.is_empty() {
+                    kept.insert(k.clone(), *v);
+                }
+            }
+            let index: HashMap<&String, usize> = kept
+                .iter()
+                .filter_map(|(k, v)| glyph::SHAPES.iter().position(|s| s == v).map(|i| (k, i)))
+                .collect();
+            if let Ok(json) = serde_json::to_vec(&index) {
+                let _ = dent_remote::store::write_private(&shapes_path(), &json);
+            }
+        }
+        s
     }
 
     /// The remote machines added: saved, not one still being added.
@@ -280,7 +338,7 @@ impl Dent {
             };
             let mut e = Entry::row(
                 format!("machine-{}", m.id),
-                m.name(),
+                &crate::data::machine_short(m.name()),
                 Some(note),
                 here == m.id,
                 pick(m.id.clone()),
@@ -343,36 +401,54 @@ impl Dent {
                 summary.push(format!("{away} can't reach"));
             }
         }
+        // In a narrow window the buttons go under the title, rather than
+        // off the edge.
         let head = div()
             .flex()
+            .flex_wrap()
             .items_end()
-            .gap(px(space::S2))
+            .gap_x(px(space::S2))
+            .gap_y(px(space::S3))
             .pb(px(space::S6))
             .child(
                 div()
                     .flex_1()
+                    .min_w(px(260.))
                     .flex()
                     .flex_col()
                     .gap(px(space::S1))
                     .child(div().ty(DISPLAY).text_color(t.ink).child("Machines"))
                     .child(div().ty(UI).text_color(t.quiet).child(summary.join(" · "))),
             )
+            // Both buttons together: in a narrow window they go under the
+            // title as a pair.
             .child(
-                ui::button("pairing-code", "Pairing code", false, &t)
-                    .relative()
-                    .child(probe(&self.probes, "pairing-code"))
-                    .on_press(cx.listener(|this, _, _, cx| {
-                        this.ask(dent_protocol::Request::OpenPairing, Waiting::Pairing);
-                        cx.notify();
-                    })),
-            )
-            .child(
-                ui::button("add-machine", "Add machine", true, &t)
-                    .relative()
-                    .child(ui::icon("plus", 13., t.surface))
-                    .flex_row_reverse()
-                    .child(probe(&self.probes, "add-machine"))
-                    .on_press(cx.listener(|this, _, window, cx| this.open_adding(window, cx))),
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S2))
+                    .child(
+                        ui::button("pairing-code", "Pairing code", false, &t)
+                            .flex_none()
+                            .relative()
+                            .child(probe(&self.probes, "pairing-code"))
+                            .on_press(cx.listener(|this, _, _, cx| {
+                                this.ask(dent_protocol::Request::OpenPairing, Waiting::Pairing);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        ui::button("add-machine", "Add machine", true, &t)
+                            .flex_none()
+                            .relative()
+                            .child(ui::icon("plus", 13., t.surface))
+                            .flex_row_reverse()
+                            .child(probe(&self.probes, "add-machine"))
+                            .on_press(
+                                cx.listener(|this, _, window, cx| this.open_adding(window, cx)),
+                            ),
+                    ),
             );
         let code = self.pairing_card(cx);
         let first = self.machines.is_empty();
@@ -420,6 +496,7 @@ impl Dent {
                 .gap(px(space::S4))
                 .child(
                     div()
+                        .flex_none()
                         .font_family(crate::theme::mono())
                         .text_size(px(28.))
                         .line_height(px(32.))
@@ -427,31 +504,41 @@ impl Dent {
                         .when(expired, |d| d.line_through())
                         .child(spaced),
                 )
-                .child(div().flex_1().ty(UI).text_color(t.quiet).child(if expired {
-                    "This code has expired. Codes work for a few minutes, once.".to_string()
-                } else {
-                    format!(
-                        "Type it on the other device. Works once, for {} more minute{}.",
-                        left,
-                        if left == 1 { "" } else { "s" }
-                    )
-                }))
+                // Wraps in a narrow window; the buttons keep their room.
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .ty(UI)
+                        .text_color(t.quiet)
+                        .child(if expired {
+                            "This code has expired. Codes work for a few minutes, once.".to_string()
+                        } else {
+                            format!(
+                                "Type it on the other device. Works once, for {} more minute{}.",
+                                left,
+                                if left == 1 { "" } else { "s" }
+                            )
+                        }),
+                )
                 .when(expired, |d| {
                     d.child(
-                        ui::button("pairing-new", "New code", true, &t).on_press(cx.listener(
-                            |this, _, _, cx| {
+                        ui::button("pairing-new", "New code", true, &t)
+                            .flex_none()
+                            .on_press(cx.listener(|this, _, _, cx| {
                                 this.ask(dent_protocol::Request::OpenPairing, Waiting::Pairing);
                                 cx.notify();
-                            },
-                        )),
+                            })),
                     )
                 })
-                .child(ui::ghost("pairing-done", "Done", &t).on_press(cx.listener(
-                    |this, _, _, cx| {
-                        this.pairing = None;
-                        cx.notify();
-                    },
-                )))
+                .child(
+                    ui::ghost("pairing-done", "Done", &t)
+                        .flex_none()
+                        .on_press(cx.listener(|this, _, _, cx| {
+                            this.pairing = None;
+                            cx.notify();
+                        })),
+                )
                 .arrive(
                     SharedString::from(format!("pairing-{code}")),
                     From::Above,
@@ -501,7 +588,7 @@ impl Dent {
                 (AWAY_X + 0.045, y, words.to_string())
             };
             nodes.push(Node {
-                name: m.name().to_string(),
+                name: crate::data::machine_short(m.name()),
                 shape,
                 standing: st,
                 x,
@@ -596,17 +683,33 @@ impl Dent {
                 .whitespace_nowrap()
                 .child(text)
         };
+        // How wide the map was last drawn: a name stops before the next
+        // column (connected machines) or the map's edge (the rest).
+        let strip_w = self
+            .probes
+            .borrow()
+            .get("machines-strip")
+            .map_or(900., |b| b.size.width.as_f32());
         let node_el = |n: &Node, size: f32, below: bool, i: usize| {
+            let limit = if n.standing.connected() { AWAY_X } else { 1. };
+            let room = (limit - n.x) * strip_w - size / 2. - space::S3 - space::S3;
             let faded = matches!(n.standing, Standing::Unreachable | Standing::Blocked);
             let words = div()
                 .flex()
                 .flex_col()
-                .when(below, |d| d.items_center())
                 .child(
                     div()
                         .ty(UI)
                         .font_weight(FontWeight::MEDIUM)
-                        .whitespace_nowrap()
+                        // A long name ends in "…" rather than run past the
+                        // map's edge; under a holder, it keeps to about
+                        // the holder's width.
+                        .max_w(px(if below {
+                            size * 2. + 24.
+                        } else {
+                            room.clamp(48., NAME_MAX)
+                        }))
+                        .truncate()
                         .text_color(if faded { t.quiet } else { t.ink })
                         .child(n.name.clone()),
                 )
@@ -615,9 +718,9 @@ impl Dent {
                 .ml(px(-size / 2.))
                 .mt(px(-size / 2.))
                 .flex()
-                .when(below, |d| {
-                    d.flex_col().items_center().ml(px(-size)).w(px(size * 2.))
-                })
+                // Under the holder, from its left edge: near the map's edge
+                // a centred name would be cut off there.
+                .when(below, |d| d.flex_col().items_start())
                 .when(!below, |d| d.items_center())
                 .gap(px(if below { space::S1H } else { space::S3 }))
                 .child(holder(n.shape, n.standing.dot(&t), size, faded, &t))
@@ -768,7 +871,7 @@ impl Dent {
             let st = Standing::of(m);
             let shape = shapes.get(&m.id).copied().unwrap_or(Shape::Circle);
             let faded = matches!(st, Standing::Unreachable | Standing::Blocked);
-            let meta = match (st, &m.state) {
+            let meta = match (st, m.standing()) {
                 (Standing::Online, _) => format!(
                     "Online · {}",
                     m.via
@@ -781,20 +884,46 @@ impl Dent {
                 (Standing::Connecting, _) => "Connecting…".into(),
                 (Standing::Asleep, _) => "Asleep".into(),
                 (Standing::NeedsCode, _) => "Needs a code from it".into(),
-                (_, State::Removed) => "Removed this device".into(),
+                (_, State::Removed) => "This device was removed".into(),
                 (_, State::Incompatible { .. }) => "Needs an update".into(),
                 (_, State::TrustedElsewhere { .. }) => "Trusted on Tailscale only".into(),
                 _ => "Can't reach".into(),
             };
+            // Asleep or out of reach, with cards it can be woken through:
+            // Wake sends the packets from here, then tries again.
+            let wakes =
+                matches!(st, Standing::Asleep | Standing::Unreachable) && !m.saved.wake.is_empty();
             let retry = (!st.connected() && st != Standing::Connecting).then(|| {
                 let id = m.id.clone();
+                let (cards, name) = (m.saved.wake.clone(), m.name().to_string());
                 ui::inner_button(
                     SharedString::from(format!("retry-{}", m.id)),
-                    "Retry",
+                    if wakes { "Wake" } else { "Retry" },
                     false,
                     &t,
                 )
                 .on_press(cx.listener(move |this, _, _, cx| {
+                    if wakes {
+                        // Sent off the window's thread; it says how it went.
+                        let (cards, name) = (cards.clone(), name.clone());
+                        cx.spawn(async move |this, cx| {
+                            let sent = cx
+                                .background_executor()
+                                .spawn(async move { dent_remote::wake::wake(&cards) })
+                                .await;
+                            let said = match sent {
+                                Ok(_) => {
+                                    format!("Sent {name} a wake-up; it works from the same network")
+                                }
+                                Err(e) => format!("Couldn't send {name} a wake-up: {e}"),
+                            };
+                            let _ = this.update(cx, |this, cx| {
+                                this.toast(crate::app::ToastAction::Info, said);
+                                cx.notify();
+                            });
+                        })
+                        .detach();
+                    }
                     this.live.signal(Some(&id), Signal::Retry);
                     cx.notify();
                 }))
@@ -803,7 +932,7 @@ impl Dent {
             let open = self.machine_open.as_deref() == Some(m.id.as_str());
             rows.push(self.machine_row(
                 &m.id,
-                m.name(),
+                &crate::data::machine_short(m.name()),
                 None,
                 meta,
                 holder(shape, st.dot(&t), 32., faded, &t),
@@ -911,8 +1040,10 @@ impl Dent {
             .child(holder)
             .child(
                 div()
+                    // Gives way in a narrow window, its name ending in "…".
                     .w(px(240.))
-                    .flex_none()
+                    .min_w(px(120.))
+                    .flex_shrink(1.)
                     .flex()
                     .flex_col()
                     .child(
@@ -938,12 +1069,19 @@ impl Dent {
                     .child(div().ty(UI).text_color(t.quiet).truncate().child(meta)),
             )
             .child(
+                // The counts that fit, whole; the rest wrap onto a line
+                // that's never shown, rather than shrink to nothing.
                 div()
                     .flex_1()
-                    .min_w_0()
+                    // Room for one count whole; the name gives way for it.
+                    .min_w(px(110.))
+                    .h(px(LINE_H))
+                    .overflow_hidden()
                     .flex()
+                    .flex_wrap()
                     .items_center()
-                    .gap(px(space::S3))
+                    .gap_x(px(space::S3))
+                    .gap_y(px(space::S4))
                     .ty(UI)
                     .text_color(t.quiet)
                     .children(sessions.into_iter().map(|(st, n)| {
@@ -955,7 +1093,9 @@ impl Dent {
                             Status::Idle => "stopped",
                         };
                         div()
+                            .h(px(LINE_H))
                             .flex()
+                            .flex_none()
                             .items_center()
                             .gap(px(space::S1H))
                             .whitespace_nowrap()
@@ -1127,12 +1267,17 @@ impl Dent {
                     }))
                     .into_any_element()
             };
-            rows.push(self.simple_row(
-                "smartphone",
-                d.name.clone(),
-                format!("paired with a code {when}"),
-                Some(action),
-            ));
+            let (icon, how) = if d.how == "tailscale" {
+                let seen = match crate::cards::now_ms().saturating_sub(d.seen) / 86_400_000 {
+                    0 => "today".to_string(),
+                    1 => "yesterday".to_string(),
+                    n => format!("{n} days ago"),
+                };
+                ("laptop", format!("on your Tailscale, last here {seen}"))
+            } else {
+                ("smartphone", format!("paired with a code {when}"))
+            };
+            rows.push(self.simple_row(icon, d.name.clone(), how, Some(action)));
         }
         rows.push(self.simple_row(
             "shield-check",
@@ -1233,19 +1378,19 @@ impl Dent {
         true
     }
 
-    fn start_adding(&mut self, addr: String, cx: &mut Context<Self>) {
-        let addr = if addr.contains(':') && !addr.starts_with('[') && addr.matches(':').count() > 1
-        {
-            // A bare IPv6 address.
-            format!("[{addr}]:7480")
-        } else if addr
-            .rsplit_once(':')
-            .is_some_and(|(_, p)| p.parse::<u16>().is_ok())
-        {
-            addr
-        } else {
-            format!("{addr}:7480")
+    pub(crate) fn start_adding(&mut self, typed: String, cx: &mut Context<Self>) {
+        let Some(addr) = dent_client_core::machine::address(&typed) else {
+            if let Some(a) = &mut self.adding {
+                a.bad = Some(format!(
+                    "“{typed}” isn't an address. Type a name or IP, with :port if it isn't 7480."
+                ));
+            }
+            cx.notify();
+            return;
         };
+        if let Some(a) = &mut self.adding {
+            a.bad = None;
+        }
         let tag = crate::net::adding_tag(&addr);
         self.machines.retain(|m| m.id != tag);
         self.machines.push(MachineView::saved(dent_remote::Saved {
@@ -1291,6 +1436,8 @@ impl Dent {
 
     fn remove_machine(&mut self, id: &str, cx: &mut Context<Self>) {
         self.live.stop(id, true);
+        // Its files' copies go with it.
+        crate::files::forget(id);
         self.machines.retain(|m| m.id != id);
         // Its sessions leave the list with it; they carry on there.
         let gone: Vec<String> = self.core.forget(id);
@@ -1531,6 +1678,12 @@ impl Dent {
                                     cx.listener(|this, _, _, cx| this.add_by_address(cx)),
                                 ),
                             ),
+                    )
+                    .children(
+                        self.adding
+                            .as_ref()
+                            .and_then(|a| a.bad.clone())
+                            .map(|why| div().ty(UI).text_color(t.needs.0).child(why)),
                     ),
             )
             .into_any_element()
@@ -1574,7 +1727,11 @@ impl Dent {
                 // looked for again.
                 let peers = this.adding.as_ref().and_then(|a| a.peers.clone());
                 this.close_adding(window, cx);
-                this.adding = Some(Adding { tag: None, peers });
+                this.adding = Some(Adding {
+                    tag: None,
+                    peers,
+                    bad: None,
+                });
                 cx.notify();
             }));
         let say = |strong: String, rest: String| {
@@ -1618,7 +1775,7 @@ impl Dent {
                 ))
                 .into_any_element();
         }
-        match (&m.state, st) {
+        match (m.standing(), st) {
             (_, Standing::NeedsCode) => div()
                 .flex()
                 .flex_col()
@@ -1758,6 +1915,12 @@ fn peers_from(v: &serde_json::Value) -> Vec<Peer> {
     out
 }
 
+/// The widest a machine's name runs on the map.
+const NAME_MAX: f32 = 180.;
+
+/// A machine row's line of session counts.
+const LINE_H: f32 = 24.;
+
 #[cfg(test)]
 mod tests {
     // Not a glob: GPUI's prelude has a `test` of its own.
@@ -1774,12 +1937,12 @@ mod tests {
         };
         let ids = ["8e2e34085ddf", "3f9a2c710b5e", "c27b19e4a0d2"];
         let mut list: Vec<MachineView> = ids.iter().map(|i| saved(i)).collect();
-        let before = shapes_for("5e0d44b91a7c", &list);
+        let before = shapes_for("5e0d44b91a7c", &list, &std::collections::HashMap::new());
         // Whatever shape addresses would hash to.
         for n in 0..12 {
             list.push(saved(&format!("+10.0.0.{n}:7480")));
         }
-        let during = shapes_for("5e0d44b91a7c", &list);
+        let during = shapes_for("5e0d44b91a7c", &list, &std::collections::HashMap::new());
         assert_eq!(during, before);
         assert_eq!(during.get(""), during.get("5e0d44b91a7c"));
     }
@@ -1826,5 +1989,59 @@ mod tests {
             ["linux", "old"]
         );
         assert_eq!(p[0].dns, "linux.t.ts.net");
+    }
+
+    #[test]
+    fn standing_holds_while_tried_again_and_lets_go_online() {
+        use super::Standing;
+        use crate::machines::apply;
+        use dent_client_core::machine::State;
+        use dent_link::Goodbye;
+        use dent_remote::Event;
+        let mut list = vec![MachineView::saved(dent_remote::Saved {
+            id: "ab12".into(),
+            ..Default::default()
+        })];
+        let mut goes = |s: State| {
+            apply(&mut list, "ab12", Event::State(s));
+            Standing::of(&list[0])
+        };
+        assert_eq!(goes(State::Away(Goodbye::Sleep)), Standing::Asleep);
+        assert_eq!(goes(State::Connecting), Standing::Asleep);
+        assert_eq!(goes(State::Reconnecting), Standing::Asleep);
+        assert_eq!(
+            goes(State::Unreachable { why: "x".into() }),
+            Standing::Unreachable
+        );
+        assert_eq!(goes(State::Connecting), Standing::Unreachable);
+        assert_eq!(goes(State::Off), Standing::Connecting);
+        assert_eq!(goes(State::Away(Goodbye::Awake)), Standing::Connecting);
+        assert_eq!(goes(State::Connecting), Standing::Connecting);
+        assert_eq!(goes(State::Away(Goodbye::Sleep)), Standing::Asleep);
+        assert_eq!(goes(State::Online), Standing::Online);
+        assert_eq!(goes(State::Reconnecting), Standing::Connecting);
+        assert_eq!(goes(State::Away(Goodbye::Sleep)), Standing::Asleep);
+        assert_eq!(goes(State::Removed), Standing::Blocked);
+        assert_eq!(goes(State::Connecting), Standing::Connecting);
+        assert_eq!(
+            goes(State::Unreachable { why: "x".into() }),
+            Standing::Unreachable
+        );
+        assert_eq!(
+            goes(State::NeedsCode {
+                pairing_open: false
+            }),
+            Standing::NeedsCode
+        );
+        assert_eq!(goes(State::Reconnecting), Standing::Connecting);
+        assert_eq!(goes(State::Away(Goodbye::Sleep)), Standing::Asleep);
+        assert_eq!(
+            goes(State::Incompatible {
+                daemon: (1, 1),
+                client: (2, 2)
+            }),
+            Standing::Blocked
+        );
+        assert_eq!(goes(State::Connecting), Standing::Connecting);
     }
 }

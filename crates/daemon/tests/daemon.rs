@@ -276,6 +276,7 @@ impl Client {
             text: text.into(),
             attachments: Vec::new(),
             files: Vec::new(),
+            bring: None,
         }) {
             Ok(Out::Reply {
                 reply: dent_protocol::Reply::Created { session },
@@ -469,6 +470,7 @@ fn agents_say_how_they_stand_and_sessions_keep_theirs() {
         text: "hello".into(),
         attachments: Vec::new(),
         files: Vec::new(),
+        bring: None,
     });
     assert!(
         matches!(&made, Err(e) if e.contains("no agent called no-such-agent")),
@@ -485,6 +487,7 @@ fn agents_say_how_they_stand_and_sessions_keep_theirs() {
         text: "hello by name".into(),
         attachments: Vec::new(),
         files: Vec::new(),
+        bring: None,
     }) {
         Ok(Out::Reply {
             reply: dent_protocol::Reply::Created { session },
@@ -715,6 +718,483 @@ fn files_a_message_carries_are_written_here_and_attached() {
     // A name too long for a disk is cut, keeping its extension.
     assert!(paths[2].ends_with(".png"), "{}", paths[2]);
     assert_eq!(std::fs::read(&paths[2]).unwrap(), b"three");
+}
+
+#[test]
+fn a_project_is_brought_from_another_machine_with_its_ignored_files() {
+    let home = std::env::temp_dir().join(format!("dent-bring-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join(".gitconfig"),
+        "[user]\n\tname = t\n\temail = t@t\n",
+    )
+    .unwrap();
+    let h = home.display().to_string();
+    let git = |dir: &Path, args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("HOME", &h)
+            .output()
+            .unwrap();
+        assert!(
+            ok.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&ok.stderr)
+        );
+    };
+    // The machine that has it: a checkout on a branch, pushed to a bare
+    // repository, with ignored files a clone won't have.
+    let there = home.join("there/app");
+    let bare = home.join("app.git");
+    std::fs::create_dir_all(&there).unwrap();
+    git(&home, &["init", "-q", "--bare", bare.to_str().unwrap()]);
+    git(&there, &["init", "-q", "-b", "main"]);
+    std::fs::write(
+        there.join(".gitignore"),
+        ".env*\n!.env.example\nnode_modules/\n",
+    )
+    .unwrap();
+    // Ignored by this checkout alone: the clone won't have the rule.
+    std::fs::write(there.join(".git/info/exclude"), "*.bin\n").unwrap();
+    std::fs::write(there.join(".env.example"), "KEY=\n").unwrap();
+    git(&there, &["add", "."]);
+    git(&there, &["commit", "-q", "-m", "first"]);
+    git(&there, &["checkout", "-q", "-b", "feature"]);
+    git(
+        &there,
+        &[
+            "remote",
+            "add",
+            "origin",
+            &format!("file://{}", bare.display()),
+        ],
+    );
+    git(
+        &there,
+        &[
+            "remote",
+            "add",
+            "upstream",
+            "https://example.com/up/app.git",
+        ],
+    );
+    git(&there, &["push", "-q", "origin", "main", "feature"]);
+    std::fs::write(there.join(".env"), "SECRET=1\n").unwrap();
+    std::fs::create_dir_all(there.join("web")).unwrap();
+    std::fs::write(there.join("web/.env.local"), "B=2\n").unwrap();
+    let odd: Vec<u8> = (0..=255u8).rev().collect();
+    std::fs::write(there.join("blob.bin"), &odd).unwrap();
+    std::fs::create_dir_all(there.join("node_modules/x")).unwrap();
+    std::fs::write(there.join("node_modules/x/i.js"), "1").unwrap();
+
+    let w = World::new(&[("HOME", h.as_str())]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let pack = match c
+        .call(Request::Pack {
+            dir: there.display().to_string(),
+        })
+        .unwrap()
+    {
+        Out::Reply {
+            reply: dent_protocol::Reply::Pack { pack: Some(p) },
+        } => p,
+        o => panic!("{o:?}"),
+    };
+    assert_eq!(pack.name, "app");
+    assert_eq!(pack.branch.as_deref(), Some("feature"));
+    // A remote that's a path on this machine (file://) is no use elsewhere.
+    let names: Vec<_> = pack.remotes.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["upstream"]);
+    // Environment files ticked and first; ignored folders not listed.
+    let listed: Vec<_> = pack
+        .ignored
+        .iter()
+        .map(|i| (i.path.as_str(), i.carry))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (".env", true),
+            ("web/.env.local", true),
+            ("blob.bin", false)
+        ]
+    );
+    // All pushed, nothing changed: a clone has everything.
+    assert_eq!((pack.unpushed, pack.changed, pack.missing()), (0, 0, None));
+    // A commit on no remote and a change not committed: said, since a
+    // clone won't have them.
+    std::fs::write(
+        there.join(".env.example"),
+        "KEY=1
+",
+    )
+    .unwrap();
+    git(&there, &["commit", "-q", "-am", "here only"]);
+    std::fs::write(there.join(".gitignore"), "changed\n").unwrap();
+    let again = match c
+        .call(Request::Pack {
+            dir: there.display().to_string(),
+        })
+        .unwrap()
+    {
+        Out::Reply {
+            reply: dent_protocol::Reply::Pack { pack: Some(p) },
+        } => p,
+        o => panic!("{o:?}"),
+    };
+    assert_eq!((again.unpushed, again.changed), (1, 1));
+    assert_eq!(
+        again.missing().as_deref(),
+        Some(
+            "1 commit here isn't pushed, and 1 file has changes not committed: the copy there won't have them"
+        )
+    );
+    git(&there, &["reset", "-q", "--hard", "origin/feature"]);
+    // Only files inside the checkout are read.
+    assert!(
+        c.call(Request::ReadFiles {
+            dir: there.display().to_string(),
+            paths: vec!["../app.git/HEAD".into()],
+        })
+        .is_err()
+    );
+    let files = match c
+        .call(Request::ReadFiles {
+            dir: there.display().to_string(),
+            paths: vec![".env".into(), "web/.env.local".into(), "blob.bin".into()],
+        })
+        .unwrap()
+    {
+        Out::Reply {
+            reply: dent_protocol::Reply::Carried { files },
+        } => files,
+        o => panic!("{o:?}"),
+    };
+
+    // The machine it goes to (here the same daemon, standing in): the
+    // session exists at once and works in the clone once it's made.
+    let bring = |files: Vec<dent_protocol::Carried>, url: String| dent_protocol::Bring {
+        name: pack.name.clone(),
+        remotes: vec![
+            dent_protocol::GitRemote {
+                name: "origin".into(),
+                url,
+            },
+            pack.remotes[0].clone(),
+        ],
+        branch: pack.branch.clone(),
+        files,
+    };
+    let create = |c: &mut Client, id: &str, b: dent_protocol::Bring| match c
+        .call(Request::Create {
+            agent: None,
+            cwd: String::new(),
+            worktree: None,
+            model: None,
+            permission: Permission::Full,
+            effort: None,
+            id: id.into(),
+            text: "hello".into(),
+            attachments: Vec::new(),
+            files: Vec::new(),
+            bring: Some(b),
+        })
+        .unwrap()
+    {
+        Out::Reply {
+            reply: dent_protocol::Reply::Created { session },
+        } => session,
+        o => panic!("{o:?}"),
+    };
+    let s = create(
+        &mut c,
+        "m-bring",
+        bring(files, format!("file://{}", bare.display())),
+    );
+    c.wait(&s, "the turn to end", is_done);
+    let notice = c
+        .events(&s)
+        .into_iter()
+        .find_map(|b| match b {
+            Body::Notice { text } => Some(text),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        notice.starts_with("Cloned app from origin on feature and brought 3 ignored files"),
+        "{notice}"
+    );
+    let here = home.join("dent/projects/app");
+    let cwd = c
+        .events(&s)
+        .into_iter()
+        .find_map(|b| match b {
+            Body::Created { cwd, .. } => Some(cwd),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(cwd, here.display().to_string());
+    assert_eq!(std::fs::read(here.join(".env")).unwrap(), b"SECRET=1\n");
+    assert_eq!(
+        std::fs::read(here.join("web/.env.local")).unwrap(),
+        b"B=2\n"
+    );
+    assert_eq!(std::fs::read(here.join("blob.bin")).unwrap(), odd);
+    assert!(!here.join("node_modules").exists());
+    // Every file brought stays out of Git, even one only that checkout
+    // ignored.
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&here)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&status.stdout), "");
+    let remotes = std::process::Command::new("git")
+        .args(["remote"])
+        .current_dir(&here)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&remotes.stdout),
+        "origin\nupstream\n"
+    );
+    // Its staging is gone, and the project's on the list.
+    assert!(!w.state.join("bring").join(&s).exists());
+    match c.call(Request::Projects).unwrap() {
+        Out::Reply {
+            reply: dent_protocol::Reply::Projects { projects },
+        } => assert!(projects.iter().any(|p| Path::new(&p.path) == here)),
+        o => panic!("{o:?}"),
+    }
+    // Sent again, the same session; no second clone.
+    assert_eq!(
+        create(&mut c, "m-bring", bring(Vec::new(), String::new())),
+        s
+    );
+    assert!(!home.join("dent/projects/app-2").exists());
+
+    // One that can't be cloned says why, and what was sent waits.
+    let bad = create(
+        &mut c,
+        "m-bad",
+        bring(Vec::new(), "file:///nowhere/at/all".into()),
+    );
+    c.wait(
+        &bad,
+        "the failure",
+        |b| matches!(b, Body::Notice { text } if text.starts_with("Couldn't bring app here")),
+    );
+    // It's given back, never sent to an agent in an empty folder.
+    c.wait(
+        &bad,
+        "what was sent comes back",
+        |b| matches!(b, Body::Unqueued { id, returned: Some(r) } if id == "m-bad" && r.text == "hello"),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(c.count(&bad, |b| matches!(b, Body::Delivered { .. })), 0);
+    assert_eq!(c.count(&bad, |b| matches!(b, Body::TurnStarted)), 0);
+    assert!(home.join("dent/projects/app-2").is_dir());
+}
+
+#[test]
+fn the_lan_switch_holds_across_a_restart() {
+    let mut w = World::new(&[]);
+    let lan = |c: &mut Client, r: Request| match c.call(r).unwrap() {
+        Out::Reply {
+            reply: dent_protocol::Reply::Machine { machine },
+        } => machine.lan,
+        o => panic!("{o:?}"),
+    };
+    let mut c = w.client();
+    assert!(!lan(&mut c, Request::Machine));
+    assert!(lan(&mut c, Request::SetLan { on: true }));
+    drop(c);
+    w.kill();
+    w.start();
+    let mut c = w.client();
+    assert!(lan(&mut c, Request::Machine), "kept");
+    assert!(!lan(&mut c, Request::SetLan { on: false }));
+}
+
+#[test]
+fn a_sessions_files_are_stat_and_read_by_what_it_wrote() {
+    use dent_protocol::{FileRef, FileStat};
+    let home = std::env::temp_dir().join(format!("dent-files-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(home.join("Movies")).unwrap();
+    std::fs::write(home.join("Movies/take.mov"), b"movie bytes").unwrap();
+    let h = home.canonicalize().unwrap().display().to_string();
+    let w = World::new(&[("HOME", h.as_str())]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "first");
+    c.wait(&s, "the turn to end", is_done);
+    let cwd = Path::new(&w.cwd()).canonicalize().unwrap();
+    std::fs::write(
+        cwd.join("chart.png"),
+        b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR\0\0\x02\x80\0\0\x01\xe0",
+    )
+    .unwrap();
+    std::fs::create_dir_all(cwd.join("out")).unwrap();
+    let outside = std::env::temp_dir().join(format!("dent-outside-{}.txt", std::process::id()));
+    std::fs::write(&outside, b"outside").unwrap();
+    let state = w.state.canonicalize().unwrap();
+    std::fs::create_dir_all(state.join("attachments/x")).unwrap();
+    std::fs::write(state.join("attachments/x/pic.png"), b"pic").unwrap();
+    let r = |p: &str| FileRef {
+        session: s.clone(),
+        path: p.into(),
+        base: None,
+    };
+    let stats = match c
+        .call(Request::Stat {
+            files: vec![
+                r("chart.png"),
+                r("~/Movies/take.mov"),
+                r(&outside.display().to_string()),
+                r(&state.join("dent.db").display().to_string()),
+                r(&state.join("attachments/x/pic.png").display().to_string()),
+                r("missing.png"),
+                r("out"),
+                FileRef {
+                    session: "no-such-session".into(),
+                    path: "x".into(),
+                    base: None,
+                },
+            ],
+        })
+        .unwrap()
+    {
+        Out::Reply {
+            reply: dent_protocol::Reply::Stats { stats },
+        } => stats,
+        o => panic!("{o:?}"),
+    };
+    assert_eq!(stats.len(), 8);
+    match &stats[0] {
+        FileStat::File {
+            path,
+            width,
+            height,
+            ..
+        } => {
+            assert_eq!(Path::new(path), cwd.join("chart.png"));
+            assert_eq!((*width, *height), (Some(640), Some(480)));
+        }
+        s => panic!("{s:?}"),
+    }
+    // `~` is the daemon's home, not the asker's.
+    assert!(matches!(&stats[1], FileStat::File { path, .. } if path.starts_with(&h)));
+    // Outside the session's folder: readable, by a trusted device.
+    assert!(matches!(&stats[2], FileStat::File { .. }), "{:?}", stats[2]);
+    // The daemon's own state isn't, but the files it wrote for sessions are.
+    assert!(
+        matches!(&stats[3], FileStat::Refused { .. }),
+        "{:?}",
+        stats[3]
+    );
+    assert!(matches!(&stats[4], FileStat::File { .. }), "{:?}", stats[4]);
+    assert!(
+        matches!(&stats[5], FileStat::Missing { checked } if Path::new(checked) == Path::new(&w.cwd()).join("missing.png"))
+    );
+    assert!(matches!(&stats[6], FileStat::Dir { .. }));
+    assert!(matches!(&stats[7], FileStat::Unreadable { .. }));
+
+    // A range, pinned to its version; rewritten, it says so.
+    let read = |c: &mut Client, p: &str, offset: u64, expect| {
+        c.call(Request::Read {
+            file: r(p),
+            offset,
+            len: 5,
+            expect,
+        })
+        .unwrap()
+    };
+    let stamp = match read(&mut c, "~/Movies/take.mov", 0, None) {
+        Out::Reply {
+            reply:
+                dent_protocol::Reply::Bytes {
+                    stamp,
+                    total,
+                    bytes_b64,
+                    ..
+                },
+        } => {
+            assert_eq!(total, 11);
+            assert_eq!(dent_protocol::b64::decode(&bytes_b64).unwrap(), b"movie");
+            stamp
+        }
+        o => panic!("{o:?}"),
+    };
+    match read(&mut c, "~/Movies/take.mov", 6, Some(stamp)) {
+        Out::Reply {
+            reply: dent_protocol::Reply::Bytes { bytes_b64, .. },
+        } => assert_eq!(dent_protocol::b64::decode(&bytes_b64).unwrap(), b"bytes"),
+        o => panic!("{o:?}"),
+    }
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    std::fs::write(home.join("Movies/take.mov"), b"other movie").unwrap();
+    assert!(matches!(
+        read(&mut c, "~/Movies/take.mov", 6, Some(stamp)),
+        Out::Reply {
+            reply: dent_protocol::Reply::FileGone { changed: true, .. }
+        }
+    ));
+    assert!(matches!(
+        read(
+            &mut c,
+            &state.join("identity.key").display().to_string(),
+            0,
+            None
+        ),
+        Out::Reply {
+            reply: dent_protocol::Reply::FileGone {
+                stat: FileStat::Refused { .. } | FileStat::Missing { .. },
+                ..
+            }
+        }
+    ));
+    // The viewer's whole-file read follows the same rule.
+    assert!(
+        c.call(Request::ReadFile {
+            session: s.clone(),
+            path: outside.display().to_string(),
+        })
+        .is_ok()
+    );
+    assert!(
+        c.call(Request::ReadFile {
+            session: s.clone(),
+            path: state.join("dent.db").display().to_string(),
+        })
+        .is_err()
+    );
+
+    // Many reads at once never hold up the rest.
+    let big = cwd.join("big.bin");
+    std::fs::write(&big, vec![7u8; 8 << 20]).unwrap();
+    // More than a client may queue: the rest are told to ask again, and
+    // nothing else waits behind them.
+    let mut asked = Vec::new();
+    for i in 0..100u64 {
+        asked.push(c.send_req(Request::Read {
+            file: r("big.bin"),
+            offset: i * dent_protocol::READ_MAX as u64,
+            len: dent_protocol::READ_MAX,
+            expect: None,
+        }));
+    }
+    let t = std::time::Instant::now();
+    assert!(c.call(Request::Projects).is_ok());
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(2),
+        "{:?}",
+        t.elapsed()
+    );
+    let _ = std::fs::remove_file(&outside);
 }
 
 #[test]
@@ -988,7 +1468,10 @@ fn stop_stops_within_two_seconds_and_returns_held_messages() {
         t.elapsed()
     );
     assert_eq!(
-        c.count(&s, |b| matches!(b, Body::Unqueued { id } if id == "held")),
+        c.count(
+            &s,
+            |b| matches!(b, Body::Unqueued { id, .. } if id == "held")
+        ),
         1
     );
     c.pump(Duration::from_millis(500));
@@ -1356,6 +1839,7 @@ fn effort_reaches_the_agent_and_changing_it_starts_a_new_process() {
         text: "tell me your args".into(),
         attachments: Vec::new(),
         files: Vec::new(),
+        bring: None,
     }) {
         Ok(Out::Reply {
             reply: dent_protocol::Reply::Created { session },
@@ -2026,6 +2510,7 @@ fn resent_creates_forks_and_rewinds_happen_once() {
         text: "hi".into(),
         attachments: Vec::new(),
         files: Vec::new(),
+        bring: None,
     };
     let made = |o: Result<Out, String>| match o {
         Ok(Out::Reply {
@@ -2129,6 +2614,7 @@ fn messages_sent_while_a_new_worktree_is_set_up_wait_and_go_in_order() {
         text: "first".into(),
         attachments: Vec::new(),
         files: Vec::new(),
+        bring: None,
     }) {
         Ok(Out::Reply {
             reply: dent_protocol::Reply::Created { session },
@@ -2167,4 +2653,640 @@ fn messages_sent_while_a_new_worktree_is_set_up_wait_and_go_in_order() {
         "{cwd}"
     );
     assert!(std::path::Path::new(&cwd).join("ready.txt").exists());
+}
+
+// ---------------------------------------------------------------------------
+// Adversarial tests (break-b): carried files, bringing a project, messages
+// that wait, the LAN switch. Each fails only when a user would see wrong
+// data, a hang, or a hole.
+
+fn carried_file(name: &str, bytes: &[u8]) -> dent_protocol::Carried {
+    dent_protocol::Carried {
+        name: name.into(),
+        bytes_b64: dent_protocol::b64::encode(bytes),
+    }
+}
+
+fn user_attachments(c: &Client, s: &str, msg: &str) -> Vec<String> {
+    c.events(s)
+        .into_iter()
+        .find_map(|b| match b {
+            Body::User {
+                id, attachments, ..
+            } if id == msg => Some(attachments),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn send_files(c: &mut Client, s: &str, id: &str, files: Vec<dent_protocol::Carried>) {
+    c.call(Request::Send {
+        session: s.into(),
+        id: id.into(),
+        text: "look".into(),
+        steer: false,
+        attachments: Vec::new(),
+        files,
+    })
+    .unwrap();
+}
+
+/// A thousand files in one message, all named alike, plus empty files and
+/// names that try to climb out or are only dots, unicode or very long:
+/// each arrives with its own bytes, at its own path inside its message's
+/// folder; and the same message sent again (a reconnect) is taken once.
+#[test]
+fn bb_many_oddly_named_files_arrive_intact_and_a_resend_is_taken_once() {
+    let w = World::new(&[]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "first");
+    c.wait(&s, "the turn to end", is_done);
+    let mut files: Vec<(String, Vec<u8>)> = (0..1000)
+        .map(|i| ("notes.txt".to_string(), format!("file {i}").into_bytes()))
+        .collect();
+    for (name, bytes) in [
+        ("empty", &b""[..]),
+        ("", b"no name"),
+        ("..", b"dots"),
+        ("...", b"three dots"),
+        ("a\\..\\..\\win.txt", b"backslashes"),
+        ("résumé 📄.pdf", b"unicode"),
+    ] {
+        files.push((name.into(), bytes.to_vec()));
+    }
+    files.push((format!("{}.pdf", "é".repeat(150)), b"long".to_vec()));
+    let req: Vec<_> = files.iter().map(|(n, b)| carried_file(n, b)).collect();
+    send_files(&mut c, &s, "m-many", req.clone());
+    c.wait(
+        &s,
+        "the message",
+        |b| matches!(b, Body::User { id, .. } if id == "m-many"),
+    );
+    let paths = user_attachments(&c, &s, "m-many");
+    assert_eq!(paths.len(), files.len());
+    let distinct: std::collections::HashSet<_> = paths.iter().map(|p| p.to_lowercase()).collect();
+    assert_eq!(distinct.len(), paths.len(), "two files landed on one path");
+    for (p, (name, bytes)) in paths.iter().zip(&files) {
+        assert!(p.contains("/attachments/carried/m-many/"), "{p}");
+        assert_eq!(&std::fs::read(p).unwrap(), bytes, "{name:?} at {p}");
+    }
+    // Sent again after a reconnect: one message, the same files.
+    send_files(&mut c, &s, "m-many", req);
+    c.pump(Duration::from_millis(800));
+    assert_eq!(
+        c.count(&s, |b| matches!(b, Body::User { id, .. } if id == "m-many")),
+        1
+    );
+    let dir = w.state.join("attachments/carried/m-many");
+    assert_eq!(std::fs::read_dir(dir).unwrap().count(), files.len());
+}
+
+/// Message ids are chosen by clients. Two different messages must never
+/// share a folder: the second would overwrite the first's attachment, and
+/// the agent (or the user opening it) would see the wrong file.
+#[test]
+fn bb_two_messages_never_overwrite_each_others_files() {
+    let w = World::new(&[]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "first");
+    c.wait(&s, "the turn to end", is_done);
+    send_files(
+        &mut c,
+        &s,
+        "web/m1",
+        vec![carried_file("plan.md", b"from web")],
+    );
+    c.wait(
+        &s,
+        "the first",
+        |b| matches!(b, Body::User { id, .. } if id == "web/m1"),
+    );
+    send_files(
+        &mut c,
+        &s,
+        "cli/m1",
+        vec![carried_file("plan.md", b"from cli")],
+    );
+    c.wait(
+        &s,
+        "the second",
+        |b| matches!(b, Body::User { id, .. } if id == "cli/m1"),
+    );
+    let first = user_attachments(&c, &s, "web/m1");
+    let second = user_attachments(&c, &s, "cli/m1");
+    assert_ne!(first, second, "both messages point at one file");
+    assert_eq!(
+        std::fs::read(&first[0]).unwrap(),
+        b"from web",
+        "the first message's attachment was overwritten by the second"
+    );
+}
+
+/// Many messages for a session, then all of them sent again (the app
+/// resends everything still waiting after a restart): each is taken
+/// exactly once, in the order written.
+#[test]
+fn bb_many_waiting_messages_are_taken_once_in_order_through_a_resend() {
+    let w = World::new(&[]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "first");
+    c.wait(&s, "the turn to end", is_done);
+    let ids: Vec<String> = (0..15).map(|i| format!("q{i:02}")).collect();
+    for round in 0..2 {
+        for id in &ids {
+            c.send_req(Request::Send {
+                session: s.clone(),
+                id: id.clone(),
+                text: format!("say {id}"),
+                steer: false,
+                attachments: Vec::new(),
+                files: Vec::new(),
+            });
+        }
+        if round == 0 {
+            c.pump(Duration::from_millis(100));
+        }
+    }
+    let until = Instant::now() + Duration::from_secs(40);
+    let users = |c: &Client| -> Vec<String> {
+        c.events(&s)
+            .into_iter()
+            .filter_map(|b| match b {
+                Body::User { id, .. } if id.starts_with('q') => Some(id),
+                _ => None,
+            })
+            .collect()
+    };
+    while users(&c).len() < ids.len() && Instant::now() < until {
+        c.pump(Duration::from_millis(100));
+    }
+    c.pump(Duration::from_secs(2));
+    assert_eq!(users(&c), ids);
+}
+
+struct BringHome {
+    home: PathBuf,
+    h: String,
+}
+
+impl BringHome {
+    fn new(tag: &str) -> Self {
+        let home = std::env::temp_dir().join(format!("dent-bb-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join(".gitconfig"),
+            "[user]\n\tname = t\n\temail = t@t\n[init]\n\tdefaultBranch = main\n",
+        )
+        .unwrap();
+        let home = home.canonicalize().unwrap();
+        let h = home.display().to_string();
+        Self { home, h }
+    }
+
+    fn git(&self, dir: &Path, args: &[&str]) -> String {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("HOME", &self.h)
+            .output()
+            .unwrap();
+        assert!(
+            ok.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&ok.stderr)
+        );
+        String::from_utf8_lossy(&ok.stdout).into_owned()
+    }
+
+    /// A checkout `there/app` on `branch`, pushed to the bare `app.git`.
+    fn repo(&self, branch: &str, gitignore: &str) -> (PathBuf, PathBuf) {
+        let there = self.home.join("there/app");
+        let bare = self.home.join("app.git");
+        std::fs::create_dir_all(&there).unwrap();
+        self.git(
+            &self.home,
+            &["init", "-q", "--bare", bare.to_str().unwrap()],
+        );
+        self.git(&there, &["init", "-q", "-b", "main"]);
+        std::fs::write(there.join(".gitignore"), gitignore).unwrap();
+        std::fs::write(there.join("README.md"), "hi\n").unwrap();
+        self.git(&there, &["add", "."]);
+        self.git(&there, &["commit", "-q", "-m", "first"]);
+        if branch != "main" {
+            self.git(&there, &["checkout", "-q", "-b", branch]);
+        }
+        self.git(
+            &there,
+            &[
+                "remote",
+                "add",
+                "origin",
+                &format!("file://{}", bare.display()),
+            ],
+        );
+        let mut push = vec!["push", "-q", "origin", "main"];
+        if branch != "main" {
+            push.push(branch);
+        }
+        self.git(&there, &push);
+        (there, bare)
+    }
+
+    fn projects(&self) -> PathBuf {
+        self.home.join("dent/projects")
+    }
+}
+
+impl Drop for BringHome {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.home);
+    }
+}
+
+fn bring_req(
+    id: &str,
+    url: &str,
+    branch: Option<&str>,
+    files: Vec<dent_protocol::Carried>,
+) -> Request {
+    Request::Create {
+        agent: None,
+        cwd: String::new(),
+        worktree: None,
+        model: None,
+        permission: Permission::Full,
+        effort: None,
+        id: id.into(),
+        text: "hello".into(),
+        attachments: Vec::new(),
+        files: Vec::new(),
+        bring: Some(dent_protocol::Bring {
+            name: "app".into(),
+            remotes: vec![dent_protocol::GitRemote {
+                name: "origin".into(),
+                url: url.into(),
+            }],
+            branch: branch.map(str::to_string),
+            files,
+        }),
+    }
+}
+
+fn created(out: Result<Out, String>) -> String {
+    match out {
+        Ok(Out::Reply {
+            reply: dent_protocol::Reply::Created { session },
+        }) => session,
+        o => panic!("{o:?}"),
+    }
+}
+
+fn cwd_of(c: &Client, s: &str) -> PathBuf {
+    c.events(s)
+        .into_iter()
+        .find_map(|b| match b {
+            Body::Created { cwd, .. } => Some(PathBuf::from(cwd)),
+            _ => None,
+        })
+        .unwrap()
+}
+
+fn notices(c: &Client, s: &str) -> Vec<String> {
+    c.events(s)
+        .into_iter()
+        .filter_map(|b| match b {
+            Body::Notice { text } => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Carried files must never land in the repository (`.git`). On a disk
+/// that ignores case (every Mac's default), `.GIT` *is* `.git`: a file sent
+/// as `.GIT/hooks/pre-commit` must not end up as the clone's hook.
+#[test]
+fn bb_a_carried_file_never_lands_in_git_by_another_case() {
+    let b = BringHome::new("case");
+    let (_there, bare) = b.repo("main", ".env\n");
+    let w = World::new(&[("HOME", b.h.as_str())]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = created(c.call(bring_req(
+        "m-case",
+        &format!("file://{}", bare.display()),
+        None,
+        vec![
+            carried_file(".env", b"A=1\n"),
+            carried_file(".GIT/hooks/pre-commit", b"#!/bin/sh\necho owned\n"),
+            carried_file(".Git/info/attributes", b"* filter=evil\n"),
+        ],
+    )));
+    // Refused whole (the message given back) or brought without them:
+    // either way nothing lands in the repository.
+    c.wait(&s, "the turn to end or the message given back", |b| {
+        is_done(b)
+            || matches!(
+                b,
+                Body::Unqueued {
+                    returned: Some(_),
+                    ..
+                }
+            )
+    });
+    let here = cwd_of(&c, &s);
+    let git = here.join(".git");
+    assert!(
+        !git.join("hooks/pre-commit").exists() && !git.join("info/attributes").exists(),
+        "carried files were written inside .git (pre-commit: {}, info/attributes: {}); notices {:?}",
+        git.join("hooks/pre-commit").exists(),
+        git.join("info/attributes").exists(),
+        notices(&c, &s)
+    );
+}
+
+/// Files ignored only by the other checkout's own rules are kept out of
+/// Git here through `.git/info/exclude`. A name ending in a space, or with
+/// a newline in it, must still be excluded, or the secret shows up in
+/// `git status` and is one `git add -A` from a commit (and a newline lets
+/// a name add an ignore rule of its own).
+#[test]
+fn bb_brought_secrets_with_awkward_names_stay_out_of_git() {
+    let b = BringHome::new("exclude");
+    let (there, bare) = b.repo("main", "");
+    std::fs::write(there.join(".git/info/exclude"), "secret*\n").unwrap();
+    let names = ["secret key ", "secret\nREADME.md", "secret [1]"];
+    for n in names {
+        std::fs::write(there.join(n), b"token").unwrap();
+    }
+    let w = World::new(&[("HOME", b.h.as_str())]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let files = match c
+        .call(Request::ReadFiles {
+            dir: there.display().to_string(),
+            paths: names.iter().map(|n| n.to_string()).collect(),
+        })
+        .unwrap()
+    {
+        Out::Reply {
+            reply: dent_protocol::Reply::Carried { files },
+        } => files,
+        o => panic!("{o:?}"),
+    };
+    let s = created(c.call(bring_req(
+        "m-ex",
+        &format!("file://{}", bare.display()),
+        None,
+        files,
+    )));
+    c.wait(&s, "the turn to end", is_done);
+    let here = cwd_of(&c, &s);
+    for n in names {
+        if n.contains('\n') {
+            // No exclude rule can hold a line break: left out, not left
+            // where it could be committed.
+            assert!(!here.join(n).exists(), "{n:?} brought");
+        } else {
+            assert_eq!(std::fs::read(here.join(n)).unwrap(), b"token", "{n:?}");
+        }
+    }
+    let status = b.git(
+        &here,
+        &["status", "--porcelain", "-z", "--untracked-files=all"],
+    );
+    assert_eq!(
+        status,
+        "",
+        "brought secrets aren't ignored in the clone; exclude is:\n{}",
+        std::fs::read_to_string(here.join(".git/info/exclude")).unwrap_or_default()
+    );
+}
+
+/// A static HTTP server for a bare repository (Git's "dumb" protocol). The
+/// first `stall` connections are accepted and never answered, as a link
+/// that stalls mid-clone.
+fn dumb_http(
+    root: PathBuf,
+    stall: usize,
+) -> (
+    u16,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<Mutex<Vec<std::net::TcpStream>>>,
+) {
+    use std::io::Read;
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let held = Arc::new(Mutex::new(Vec::new()));
+    let (n2, held2) = (n.clone(), held.clone());
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let Ok(mut s) = s else { break };
+            if n2.fetch_add(1, Ordering::SeqCst) < stall {
+                held2.lock().unwrap().push(s);
+                continue;
+            }
+            let root = root.clone();
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                let mut b = [0u8; 1024];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match s.read(&mut b) {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&b[..k]),
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf);
+                let path = head.split_whitespace().nth(1).unwrap_or("/");
+                let path = path.split('?').next().unwrap_or("/");
+                let file = root.join(path.trim_start_matches('/'));
+                let resp = match std::fs::read(&file) {
+                    Ok(body) if file.is_file() => {
+                        let mut r = format!(
+                            "HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
+                            body.len()
+                        )
+                        .into_bytes();
+                        r.extend(body);
+                        r
+                    }
+                    _ => b"HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec(),
+                };
+                let _ = s.write_all(&resp);
+            });
+        }
+    });
+    (port, n, held)
+}
+
+/// The clone is a durable job: the daemon restarting mid-clone, twice,
+/// starts it over each time; in the end the project is there once, whole,
+/// on its slashed branch, with its files, no half-made folders left, and
+/// the first message reaches the agent exactly once.
+#[test]
+fn bb_a_clone_survives_two_restarts_mid_clone() {
+    let b = BringHome::new("restart");
+    let (_there, bare) = b.repo("feature/x/y", ".env\n");
+    b.git(&bare, &["update-server-info"]);
+    let (port, accepted, held) = dumb_http(b.home.clone(), 2);
+    let url = format!("http://127.0.0.1:{port}/app.git");
+    let mut w = World::new(&[("HOME", b.h.as_str())]);
+    let mut c = w.client();
+    let s = created(c.call(bring_req(
+        "m-dur",
+        &url,
+        Some("feature/x/y"),
+        vec![carried_file(".env", b"K=v\n")],
+    )));
+    for k in 1..=2 {
+        let until = Instant::now() + Duration::from_secs(15);
+        while accepted.load(Ordering::SeqCst) < k {
+            assert!(Instant::now() < until, "clone try {k} never started");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(c);
+        w.kill();
+        w.start();
+        c = w.client();
+    }
+    c.subscribe(0);
+    c.wait(&s, "the turn to end", is_done);
+    held.lock().unwrap().clear();
+    let here = b.projects().join("app");
+    assert_eq!(cwd_of(&c, &s), here);
+    assert!(here.join("README.md").is_file(), "{:?}", notices(&c, &s));
+    assert_eq!(std::fs::read(here.join(".env")).unwrap(), b"K=v\n");
+    assert_eq!(
+        b.git(&here, &["symbolic-ref", "--short", "HEAD"]).trim(),
+        "feature/x/y"
+    );
+    let left: Vec<_> = std::fs::read_dir(b.projects())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, ["app"], "half-made clones or second folders left");
+    c.pump(Duration::from_millis(500));
+    assert_eq!(
+        c.count(&s, |b| matches!(b, Body::User { id, .. } if id == "m-dur")),
+        1
+    );
+    assert_eq!(c.count(&s, |b| matches!(b, Body::TurnStarted)), 1);
+}
+
+/// The same project brought several times at once, with a folder of that
+/// name already there holding someone's work: each bring gets a folder of
+/// its own, none is cloned over another, and the existing folder is
+/// untouched.
+#[test]
+fn bb_brings_of_one_project_at_once_never_share_a_folder() {
+    let b = BringHome::new("twice");
+    let (_there, bare) = b.repo("main", ".env\n");
+    std::fs::create_dir_all(b.projects().join("app")).unwrap();
+    std::fs::write(b.projects().join("app/mine.txt"), "my work").unwrap();
+    let w = World::new(&[("HOME", b.h.as_str())]);
+    let url = format!("file://{}", bare.display());
+    let mut clients: Vec<Client> = (0..4).map(|_| w.client()).collect();
+    let reqs: Vec<u64> = clients
+        .iter_mut()
+        .enumerate()
+        .map(|(i, c)| {
+            c.send_req(bring_req(
+                &format!("m-at-once-{i}"),
+                &url,
+                None,
+                vec![carried_file(".env", format!("N={i}\n").as_bytes())],
+            ))
+        })
+        .collect();
+    let mut sessions = Vec::new();
+    for (c, req) in clients.iter_mut().zip(reqs) {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(o) = c.replies.remove(&req) {
+                sessions.push(created(Ok(o)));
+                break;
+            }
+            assert!(Instant::now() < until, "no reply");
+            c.pump(Duration::from_millis(50));
+        }
+    }
+    let mut c = w.client();
+    c.subscribe(0);
+    let mut dirs = std::collections::HashSet::new();
+    for (i, s) in sessions.iter().enumerate() {
+        c.wait(s, "the turn to end", is_done);
+        let here = cwd_of(&c, s);
+        assert!(
+            dirs.insert(here.clone()),
+            "two brings share {}",
+            here.display()
+        );
+        assert!(here.join("README.md").is_file(), "{:?}", notices(&c, s));
+        assert_eq!(
+            std::fs::read_to_string(here.join(".env")).unwrap(),
+            format!("N={i}\n")
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(b.projects().join("app/mine.txt")).unwrap(),
+        "my work"
+    );
+}
+
+/// The saved LAN setting wins over DENT_REMOTE_LAN across restarts, and
+/// what the daemon does (in memory) always matches what it will come back
+/// with (on disk), even when two devices flip the switch at once.
+#[test]
+fn bb_the_lan_switch_wins_over_the_env_and_disk_matches_memory() {
+    let mut w = World::new(&[("DENT_REMOTE_LAN", "1")]);
+    let lan_of = |o: Out| match o {
+        Out::Reply {
+            reply: dent_protocol::Reply::Machine { machine },
+        } => machine.lan,
+        o => panic!("{o:?}"),
+    };
+    let mut c = w.client();
+    assert!(lan_of(c.call(Request::Machine).unwrap()), "env turns it on");
+    assert!(!lan_of(c.call(Request::SetLan { on: false }).unwrap()));
+    drop(c);
+    w.kill();
+    w.start();
+    let mut c = w.client();
+    assert!(
+        !lan_of(c.call(Request::Machine).unwrap()),
+        "turned off, it stays off though DENT_REMOTE_LAN=1"
+    );
+    drop(c);
+    for round in 0..5 {
+        let mut a = w.client();
+        let mut b = w.client();
+        let (mut ra, mut rb) = (Vec::new(), Vec::new());
+        // Each SetLan answers with the whole machine (~150 ms here).
+        for _ in 0..20 {
+            ra.push(a.send_req(Request::SetLan { on: true }));
+            rb.push(b.send_req(Request::SetLan { on: false }));
+        }
+        for (c, rs) in [(&mut a, &ra), (&mut b, &rb)] {
+            let until = Instant::now() + Duration::from_secs(60);
+            while !rs.iter().all(|r| c.replies.contains_key(r)) {
+                assert!(Instant::now() < until, "SetLan replies didn't all come");
+                c.pump(Duration::from_millis(20));
+            }
+        }
+        let memory = lan_of(a.call(Request::Machine).unwrap());
+        drop((a, b));
+        w.kill();
+        w.start();
+        let mut c = w.client();
+        let disk = lan_of(c.call(Request::Machine).unwrap());
+        assert_eq!(
+            memory, disk,
+            "round {round}: on before the restart was {memory}, after {disk}"
+        );
+    }
 }

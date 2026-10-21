@@ -12,6 +12,7 @@ mod ansi;
 mod app;
 mod assets;
 mod bridge;
+mod bring;
 mod cards;
 mod chat;
 mod complete;
@@ -21,6 +22,7 @@ mod data;
 mod diagram;
 mod draft;
 mod ds;
+mod files;
 mod find;
 mod gitbar;
 mod github;
@@ -152,6 +154,13 @@ impl Render for Dent {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.last_frame = Instant::now();
         crate::ui::set_menu_open(self.context.is_some());
+        // What this frame's drawing asks of other machines' files goes once
+        // it's drawn.
+        cx.defer_in(window, |this, _, cx| {
+            if crate::files::busy() {
+                this.pump_files(cx);
+            }
+        });
         // DENT_COUNT_FRAMES prints how many frames each 5 s, to find idle redraws.
         if std::env::var_os("DENT_COUNT_FRAMES").is_some() {
             thread_local!(static T: std::cell::Cell<Option<(Instant, u64)>> = const { std::cell::Cell::new(None) });
@@ -179,11 +188,20 @@ impl Render for Dent {
         if let Some((path, line)) = select::take_open() {
             self.open_file_at(&path, line, cx);
         }
+        // Other machines' files being opened, each once it's here, in the
+        // order asked.
+        for (ask, line) in self.opening.clone() {
+            self.open_far(ask, line, cx);
+        }
+        if let Some(ask) = self.outside.clone() {
+            self.open_outside_far(ask, cx);
+        }
         // A file you opened in the viewer follows its changes on disk.
         if let Some(Tab::Art(a)) = self.current().map(|s| self.tab(s))
             && self.panel_open
         {
             self.refresh_opened(a);
+            self.fill_far_latest(a);
         }
         // A clicked notification opens its session.
         let clicked = notify::take_clicked();

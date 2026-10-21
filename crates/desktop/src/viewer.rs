@@ -35,6 +35,64 @@ pub fn art_file(a: &crate::data::Artifact) -> Option<std::path::PathBuf> {
     a.dir.as_ref().map(|d| d.join(p))
 }
 
+/// The session an artifact is from (qualified with its machine): made and
+/// media ones are `session:path`, opened ones `session/open/path`.
+pub fn art_session(id: &str) -> &str {
+    if let Some(i) = id.find("/open/") {
+        return &id[..i];
+    }
+    id.split_once(':').map_or(id, |(s, _)| s)
+}
+
+/// Whether an artifact is another machine's file, not opened from a copy
+/// here: never looked for on this Mac's disk.
+pub fn art_far(a: &crate::data::Artifact) -> bool {
+    !a.id.contains("/open/")
+        && !dent_client_core::fleet::split(art_session(a.id))
+            .0
+            .is_empty()
+}
+
+/// Where another machine's artifact finds its own files there: its
+/// session, and the folder it's in. `None` for this Mac's.
+pub fn far_root(a: &crate::data::Artifact) -> Option<crate::web::FarRoot> {
+    if !art_far(a) {
+        return None;
+    }
+    let cwd = a
+        .dir
+        .as_ref()
+        .map(|d| d.display().to_string())
+        .unwrap_or_default();
+    let full = if a.path.starts_with('/') || a.path.starts_with("~/") {
+        a.path.to_string()
+    } else {
+        format!("{cwd}/{}", a.path)
+    };
+    let dir = full
+        .rsplit_once('/')
+        .map_or(cwd.clone(), |(d, _)| d.to_string());
+    Some(crate::web::FarRoot {
+        session: art_session(a.id).to_string(),
+        cwd,
+        dir,
+    })
+}
+
+/// What another machine's artifact is, to ask of the file layer; `None`
+/// for this Mac's.
+pub fn far_ask(a: &crate::data::Artifact) -> Option<crate::files::Ask> {
+    if !art_far(a) {
+        return None;
+    }
+    let cwd = a
+        .dir
+        .as_ref()
+        .map(|d| d.display().to_string())
+        .unwrap_or_default();
+    Some(crate::files::Ask::new(art_session(a.id), a.path, &cwd))
+}
+
 /// A long name cut in the middle, so its start and its extension both show.
 pub fn middle_ellipsis(s: &str, max: usize) -> String {
     let n = s.chars().count();
@@ -164,7 +222,20 @@ impl Dent {
                 None,
             ));
         }
-        for a in self.open_arts(s).into_iter().filter_map(|a| self.art(a)) {
+        let arts: Vec<_> = self
+            .open_arts(s)
+            .into_iter()
+            .filter_map(|a| self.art(a))
+            .collect();
+        // Files are named by their own name, with as much of their folder
+        // as tells two of the same name apart.
+        let files: Vec<&str> = arts
+            .iter()
+            .filter(|a| a.kind != Kind::Server && crate::data::visual_title(a.path).is_none())
+            .map(|a| a.path)
+            .collect();
+        let mut names = tab_names(&files).into_iter();
+        for a in arts {
             tabs.push((
                 Tab::Art(a.id),
                 if a.kind == Kind::Server {
@@ -172,7 +243,7 @@ impl Dent {
                 } else if let Some(v) = crate::data::visual_title(a.path) {
                     v.to_string()
                 } else {
-                    a.path.rsplit('/').next().unwrap_or(a.path).to_string()
+                    names.next().unwrap_or_default()
                 },
                 a.kind.icon(),
                 Some(crate::data::intern(&self.shown(a))),
@@ -611,6 +682,14 @@ impl Dent {
             let mut p = p.borrow_mut();
             if server {
                 p.show_server(a.path);
+            } else if let Some(far) = far_root(&a) {
+                // Another machine's: its video plays from there a range at a
+                // time, and a page's own pictures and styles come from there.
+                if media {
+                    p.show_far_file(a.path.rsplit('/').next().unwrap_or(a.path), far);
+                } else {
+                    p.show_far(a.path, v, &a.versions[v - 1], far);
+                }
             } else if media {
                 if let Some(f) = art_file(&a) {
                     p.show_file(&f);
@@ -839,13 +918,19 @@ impl Dent {
                 let server_url = a.path.to_string();
                 // The latest version is the file itself, beside its styles
                 // and pictures; an older one is written out on its own.
-                let on_disk = (v == latest)
+                // Another machine's file opens from a copy here, made when
+                // it's asked for, never just because this is drawn.
+                let far = far_ask(&a);
+                let on_disk = (v == latest && far.is_none())
                     .then(|| art_file(&a))
                     .flatten()
-                    .filter(|f| f.is_file());
+                    .filter(|f| f.is_file()); // this Mac's
                 let file = (!server && on_disk.is_none()).then(|| {
                     (
-                        a.versions[v - 1].clone(),
+                        a.versions
+                            .get(v - 1)
+                            .cloned()
+                            .unwrap_or_else(|| Rc::from(&b""[..])),
                         a.path.rsplit('/').next().unwrap_or(a.path).to_string(),
                     )
                 });
@@ -859,8 +944,14 @@ impl Dent {
                         },
                         cx,
                     ))
-                    .on_press(move |_, _, cx| match (&on_disk, &file) {
+                    .on_press(cx.listener(move |this, _, _, cx| match (&on_disk, &file) {
+                        _ if far.is_some() && (media || v == latest) => {
+                            if let Some(ask) = far.clone() {
+                                this.open_outside_far(ask, cx);
+                            }
+                        }
                         (Some(path), _) if in_app.is_some() => {
+                            // this Mac's: the file itself
                             crate::open::open(&path.display().to_string(), cx)
                         }
                         (Some(path), _) => cx.open_url(&format!("file://{}", path.display())),
@@ -872,7 +963,7 @@ impl Dent {
                             }
                         }
                         (None, None) => cx.open_url(&server_url),
-                    })
+                    }))
             });
 
         // The web view is a native layer over this area. GPUI draws the frame
@@ -1283,6 +1374,13 @@ impl Dent {
             bg: t.panel,
             // Links and pictures in a document are found from its folder.
             base: art_file(&a).and_then(|f| f.parent().map(|p| p.to_path_buf())),
+            session: Some((
+                art_session(a.id).to_string(),
+                a.dir
+                    .as_ref()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_default(),
+            )),
         };
         let area = crate::select::area(&format!("doc/{id}"));
         let page = {
@@ -1324,8 +1422,11 @@ impl Dent {
                                 cx.notify();
                             }))
                     })
-                    .when_some(art_file(&a), |d, full| {
+                    .when_some(art_file(&a).filter(|_| !art_far(&a)), |d, full| {
                         d.child(self.open_button("open-doc", full, cx))
+                    })
+                    .when_some(far_ask(&a), |d, ask| {
+                        d.child(self.open_far_button("open-doc", ask, cx))
                     }),
             )
             .child(
@@ -1768,10 +1869,24 @@ impl Dent {
                                     .child(if file.lines.is_empty() {
                                         // Nothing to compare line by line: a
                                         // picture shows itself, anything else says so.
-                                        let full = std::path::Path::new(&s.cwd).join(&file.path);
-                                        let picture = crate::data::Kind::of(&file.path)
-                                            == Some(crate::data::Kind::Image)
-                                            && full.exists();
+                                        // From the session's machine: this Mac's file,
+                                        // or the copy of another's.
+                                        let ask = crate::files::Ask::new(&s.id, &file.path, &s.cwd);
+                                        let shown = (crate::data::Kind::of(&file.path)
+                                            == Some(crate::data::Kind::Image))
+                                        .then(|| crate::files::picture(&ask).shown())
+                                        .flatten();
+                                        let picture = shown.is_some();
+                                        let full = shown.unwrap_or_default();
+                                        let file_size = match crate::files::stat(&ask) {
+                                            crate::files::Look::Here(
+                                                dent_protocol::FileStat::File { stamp, .. },
+                                            )
+                                            | crate::files::Look::Stale(
+                                                dent_protocol::FileStat::File { stamp, .. },
+                                            ) => Some(stamp.size),
+                                            _ => None,
+                                        };
                                         div()
                                             .id("diff")
                                             .size_full()
@@ -1801,9 +1916,7 @@ impl Dent {
                                             // What it is and how big; the
                                             // list beside says it changed.
                                             .child(div().ty(UI).text_color(t.quiet).child({
-                                                let size = std::fs::metadata(&full)
-                                                    .map(|m| bytes(m.len()))
-                                                    .ok();
+                                                let size = file_size.map(bytes);
                                                 let what =
                                                     if picture { "Picture" } else { "Binary file" };
                                                 match size {
@@ -2007,8 +2120,11 @@ impl Dent {
                                 cx.notify();
                             })),
                     )
-                    .when_some(art_file(&a), |d, full| {
+                    .when_some(art_file(&a).filter(|_| !art_far(&a)), |d, full| {
                         d.child(self.open_button("open-text", full, cx))
+                    })
+                    .when_some(far_ask(&a), |d, ask| {
+                        d.child(self.open_far_button("open-text", ask, cx))
                     }),
             )
             .child(
@@ -2361,6 +2477,7 @@ impl Dent {
                         scope: format!("{}/aside-{}", s.id, a.id),
                         bg: t.panel,
                         base: Some(std::path::PathBuf::from(&s.cwd)),
+                        session: Some((s.id.clone(), s.cwd.clone())),
                     };
                     let body = markdown::render(blocks.as_slice(), &t, false, &mut r);
                     div()
@@ -2677,3 +2794,193 @@ const TAB_STRIP_CHROME: f32 = 56.;
 const TAB_CHROME: f32 = 56.;
 /// About how wide a letter of a tab's name is.
 const TAB_LETTER: f32 = 7.;
+
+/// Each path's tab name: its file name, and when another has the same
+/// name, as many of its folders as it takes to tell them apart
+/// (`take.mp4 · clips`, `take.mp4 · raw`).
+fn tab_names(paths: &[&str]) -> Vec<String> {
+    let parts: Vec<Vec<&str>> = paths
+        .iter()
+        .map(|p| p.split('/').filter(|c| !c.is_empty()).rev().collect())
+        .collect();
+    // One path however it's written (`/w//f`, `/w/f/` are `/w/f`).
+    let key: Vec<String> = paths
+        .iter()
+        .zip(&parts)
+        .map(|(p, parts)| {
+            let joined: Vec<&str> = parts.iter().rev().copied().collect();
+            format!(
+                "{}{}",
+                if p.starts_with('/') { "/" } else { "" },
+                joined.join("/")
+            )
+        })
+        .collect();
+    let name = |i: usize| parts[i].first().copied().unwrap_or(paths[i]);
+    let names: Vec<String> = (0..paths.len())
+        .map(|i| {
+            let same: Vec<usize> = (0..paths.len())
+                .filter(|&j| j != i && name(j) == name(i) && key[j] != key[i])
+                .collect();
+            if same.is_empty() {
+                return name(i).to_string();
+            }
+            // The fewest folders, nearest first, that no other of the same
+            // name ends with too.
+            let folders = &parts[i][1..];
+            let n = (1..=folders.len())
+                .find(|&n| {
+                    same.iter()
+                        .all(|&j| parts[j].get(1..=n) != Some(&folders[..n]))
+                })
+                .unwrap_or(folders.len());
+            if n == 0 {
+                // At the very top, with nothing above it: the root, or
+                // the folder a relative path is taken from.
+                let top = if paths[i].starts_with('/') { "/" } else { "." };
+                return format!("{} · {top}", name(i));
+            }
+            let dir: Vec<&str> = folders[..n].iter().rev().copied().collect();
+            format!("{} · {}", name(i), dir.join("/"))
+        })
+        .collect();
+    // Still the same as another path's (one relative and one not, or a
+    // file whose own name has ` · ` in it): the whole path, as written.
+    (0..paths.len())
+        .map(|i| {
+            let clash = (0..paths.len()).any(|j| key[j] != key[i] && names[j] == names[i]);
+            if clash {
+                paths[i].to_string()
+            } else {
+                names[i].clone()
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tab_names;
+
+    #[test]
+    fn two_files_of_one_name_are_told_apart_by_their_folders() {
+        assert_eq!(
+            tab_names(&["/w/clips/take.mp4", "/w/raw/take.mp4", "/w/notes.md"]),
+            ["take.mp4 · clips", "take.mp4 · raw", "notes.md"]
+        );
+        // The same nearest folder: one more is shown.
+        assert_eq!(
+            tab_names(&["/a/out/x.png", "/b/out/x.png"]),
+            ["x.png · a/out", "x.png · b/out"]
+        );
+        // One folder inside the other.
+        assert_eq!(
+            tab_names(&["/w/x.png", "/w/sub/x.png"]),
+            ["x.png · w", "x.png · sub"]
+        );
+        assert_eq!(tab_names(&["/only.txt"]), ["only.txt"]);
+        assert_eq!(
+            tab_names(&["/x.png", "/w/x.png"]),
+            ["x.png · /", "x.png · w"]
+        );
+    }
+
+    /// Every name unique when every path is: the property tabs rely on.
+    fn unique(paths: &[&str]) -> Vec<String> {
+        let names = tab_names(paths);
+        assert_eq!(names.len(), paths.len());
+        let mut distinct: Vec<&str> = paths.to_vec();
+        distinct.sort();
+        distinct.dedup();
+        if distinct.len() == paths.len() {
+            let mut seen = std::collections::HashSet::new();
+            for (p, n) in paths.iter().zip(&names) {
+                assert!(
+                    seen.insert(n.clone()),
+                    "{n:?} twice (for {p:?}) in {names:?}"
+                );
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn many_of_one_name_are_all_told_apart() {
+        let three = ["/a/x/f.md", "/b/x/f.md", "/c/y/f.md"];
+        assert_eq!(unique(&three), ["f.md · a/x", "f.md · b/x", "f.md · y"]);
+        let ten: Vec<String> = (0..10).map(|i| format!("/w/d{i}/take.mp4")).collect();
+        let ten: Vec<&str> = ten.iter().map(|s| s.as_str()).collect();
+        unique(&ten);
+        let many: Vec<String> = (0..300)
+            .map(|i| format!("/r/{}/{}/same.txt", i % 7, i))
+            .collect();
+        let many: Vec<&str> = many.iter().map(|s| s.as_str()).collect();
+        unique(&many);
+    }
+
+    #[test]
+    fn the_same_path_twice_is_one_name() {
+        assert_eq!(
+            tab_names(&["/w/a.md", "/w/a.md", "/v/a.md"]),
+            ["a.md · w", "a.md · w", "a.md · v"]
+        );
+        assert_eq!(tab_names(&["/w/a.md", "/w/a.md"]), ["a.md", "a.md"]);
+    }
+
+    #[test]
+    fn deep_shared_folders_and_nested_suffixes() {
+        unique(&["/a/s/s/s/s/f", "/b/s/s/s/s/f"]);
+        unique(&["/x/w/f", "/w/f", "/y/x/w/f"]);
+        unique(&["/f", "/a/f", "/b/a/f", "/c/b/a/f"]);
+        unique(&["/w/x.png", "/w/sub/x.png", "/x.png", "/sub/x.png"]);
+    }
+
+    #[test]
+    fn unicode_and_odd_characters_dont_panic() {
+        unique(&[
+            "/写真/猫.png",
+            "/图片/猫.png",
+            "/é/🎬 take #1 %20.mp4",
+            "/ê/🎬 take #1 %20.mp4",
+        ]);
+        unique(&["/a b/c d.txt", "/a  b/c d.txt"]);
+    }
+
+    #[test]
+    fn empty_and_root_dont_panic() {
+        let _ = tab_names(&[]);
+        let _ = tab_names(&[""]);
+        let _ = tab_names(&["", "/", "//", "/x"]);
+        unique(&["/x.png", "/a/x.png", "/b/x.png"]);
+    }
+
+    // One file however it's written: one name, and not told apart from
+    // itself by a made-up folder.
+    #[test]
+    fn slashes_dont_make_two_tabs_of_one_name() {
+        assert_eq!(tab_names(&["/w/f.md", "/w//f.md"]), ["f.md", "f.md"]);
+        unique(&["/w/f.md", "/v//f.md"]);
+    }
+
+    #[test]
+    fn a_trailing_slash_doesnt_make_two_tabs_of_one_name() {
+        assert_eq!(tab_names(&["/w/f.md", "/w/f.md/"]), ["f.md", "f.md"]);
+    }
+
+    #[test]
+    fn relative_and_absolute_are_told_apart() {
+        unique(&["w/f.md", "/w/f.md"]);
+    }
+
+    #[test]
+    fn a_relative_file_at_the_top_isnt_said_to_be_at_the_root() {
+        let names = unique(&["x.png", "/x.png"]);
+        assert_ne!(names[0], "x.png · /", "{names:?}");
+    }
+
+    #[test]
+    fn a_name_with_the_separator_in_it_isnt_mistaken_for_another() {
+        // `f · x` the file, and `f` in `x` told apart from `f` in `y`.
+        unique(&["/x/f", "/y/f", "/z/f · x"]);
+    }
+}

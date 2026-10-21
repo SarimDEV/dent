@@ -194,8 +194,36 @@ pub struct Snapshot {
 
 type Shared<T> = Arc<Mutex<T>>;
 
+/// Another machine's page or video: its own files (pictures, styles, the
+/// video's ranges) are fetched through the link by the window, never
+/// looked for on this Mac's disk ([decision 0068]).
+///
+/// [decision 0068]: ../../../docs/decisions/0068-files-across-machines.md
+#[derive(Clone, Debug, PartialEq)]
+pub struct FarRoot {
+    /// The session, qualified with its machine.
+    pub session: String,
+    pub cwd: String,
+    /// The folder on that machine the page's own files are found from.
+    pub dir: String,
+}
+
+/// A file a far page asked for, waiting for the window to fetch it.
+pub struct FarAsk {
+    pub far: FarRoot,
+    /// Its path from `far.dir`.
+    pub rel: String,
+    /// The `Range` asked for (a player's), if any.
+    pub range: Option<String>,
+    pub ty: &'static str,
+    pub responder: wry::RequestAsyncResponder,
+}
+
 pub struct Preview {
     web: WebView,
+    /// The showing page's machine, when it's another.
+    far: Shared<Option<FarRoot>>,
+    far_asks: Shared<Vec<FarAsk>>,
     files: Shared<HashMap<String, Arc<[u8]>>>,
     /// The folder a page's own images, styles and scripts load from.
     root: Shared<Option<std::path::PathBuf>>,
@@ -307,6 +335,9 @@ impl Preview {
             }
         };
         let f = files.clone();
+        let far: Shared<Option<FarRoot>> = Arc::default();
+        let far_asks: Shared<Vec<FarAsk>> = Arc::default();
+        let (fr, fa, far_pending) = (far.clone(), far_asks.clone(), pending.clone());
         let root: Shared<Option<std::path::PathBuf>> = Arc::default();
         let r = root.clone();
         let page_dir: Shared<String> = Arc::default();
@@ -323,8 +354,52 @@ impl Preview {
             push.clone(),
         );
         let builder = WebViewBuilder::new()
-            .with_custom_protocol("dent".into(), move |_, req| {
+            .with_asynchronous_custom_protocol("dent".into(), move |_, req, responder| {
                 let mut path = req.uri().path().trim_start_matches('/').to_string();
+                // Another machine's page: what isn't the page itself is the
+                // window's to fetch from there.
+                if let Some(far) = fr.lock().ok().and_then(|f| f.clone()) {
+                    let own = f.lock().ok().and_then(|m| {
+                        m.get(&path)
+                            .or_else(|| m.get(&percent_decode(&path)))
+                            .cloned()
+                    });
+                    if let Some(b) = own {
+                        let resp = Response::builder()
+                            .status(200)
+                            .header(CONTENT_TYPE, kind(&path))
+                            .body(Cow::Owned(b.to_vec()))
+                            .unwrap_or_else(|_| Response::new(Cow::Borrowed(&[][..])));
+                        responder.respond(resp);
+                        return;
+                    }
+                    // `{version}/{path}` from the page; a link from the site's
+                    // root (`/styles.css`) comes without the version, and is
+                    // found from the page's folder.
+                    let rel = match path.split_once('/') {
+                        Some((v, r)) if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) => {
+                            r.to_string()
+                        }
+                        _ => path.clone(),
+                    };
+                    let range = req
+                        .headers()
+                        .get(RANGE)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    if let Ok(mut q) = fa.lock() {
+                        q.push(FarAsk {
+                            far,
+                            rel: percent_decode(&rel),
+                            range,
+                            ty: kind(&path),
+                            responder,
+                        });
+                    }
+                    far_pending.store(true, Ordering::Release);
+                    return;
+                }
+                let respond = |r: Response<Cow<'static, [u8]>>| responder.respond(r);
                 let root = r.lock().ok().and_then(|r| r.clone());
                 // Video and sound play from disk a piece at a time, as the
                 // player asks for them, so a long film never loads whole.
@@ -332,7 +407,7 @@ impl Preview {
                     && let Some(full) = root.as_deref().and_then(|r| disk_path(r, &path))
                 {
                     let range = req.headers().get(RANGE).and_then(|v| v.to_str().ok());
-                    return ranged(&full, range, kind(&path));
+                    return respond(ranged(&full, range, kind(&path)));
                 }
                 // A name with spaces arrives encoded (`Sign-ups%20by%20week`).
                 let mut body = f
@@ -358,11 +433,13 @@ impl Preview {
                     Some(b) => (200, b.to_vec()),
                     None => (404, b"Not found".to_vec()),
                 };
-                Response::builder()
-                    .status(status)
-                    .header(CONTENT_TYPE, kind(&path))
-                    .body(Cow::Owned(bytes))
-                    .unwrap_or_else(|_| Response::new(Cow::Borrowed(&[][..])))
+                respond(
+                    Response::builder()
+                        .status(status)
+                        .header(CONTENT_TYPE, kind(&path))
+                        .body(Cow::Owned(bytes))
+                        .unwrap_or_else(|_| Response::new(Cow::Borrowed(&[][..]))),
+                )
             })
             .with_initialization_script(SCRIPT)
             // Pages stay on their own origin; anything else opens in the browser.
@@ -495,6 +572,8 @@ impl Preview {
 
         Some(Self {
             web,
+            far,
+            far_asks,
             files,
             root,
             page_dir,
@@ -529,7 +608,44 @@ impl Preview {
     }
 
     /// Show `bytes` as `name`, version `v`. Loading the same thing again is a no-op.
+    /// Files far pages asked for since the last call.
+    pub fn take_far(&self) -> Vec<FarAsk> {
+        self.far_asks
+            .lock()
+            .map(|mut q| std::mem::take(&mut *q))
+            .unwrap_or_default()
+    }
+
+    /// Show a page of another machine's, its own files fetched from there.
+    pub fn show_far(&mut self, name: &str, v: usize, bytes: &[u8], far: FarRoot) {
+        self.set_far(Some(far));
+        self.show_page(name, v, bytes, None);
+    }
+
+    /// Show a video, a sound or a PDF of another machine's, played from
+    /// there a range at a time.
+    pub fn show_far_file(&mut self, name: &str, far: FarRoot) {
+        self.set_far(Some(far));
+        self.show_media(name, None);
+    }
+
+    fn set_far(&mut self, far: Option<FarRoot>) {
+        let moved = match self.far.lock() {
+            Ok(mut f) => std::mem::replace(&mut *f, far.clone()) != far,
+            Err(_) => false,
+        };
+        // Another page's files, or another machine's: shown afresh.
+        if moved {
+            self.showing = None;
+        }
+    }
+
     pub fn show(&mut self, name: &str, v: usize, bytes: &[u8], root: Option<&std::path::Path>) {
+        self.set_far(None);
+        self.show_page(name, v, bytes, root);
+    }
+
+    fn show_page(&mut self, name: &str, v: usize, bytes: &[u8], root: Option<&std::path::Path>) {
         // A page outside the project (a scratch folder, say) finds its
         // images and styles beside itself.
         let (name, root) = split_root(name, root);
@@ -564,8 +680,13 @@ impl Preview {
         let (Some(dir), Some(name)) = (file.parent(), file.file_name()) else {
             return;
         };
+        self.set_far(None);
         let name = name.to_string_lossy().into_owned();
-        let root = Some(dir.to_path_buf());
+        self.show_media(&name, Some(dir.to_path_buf()));
+    }
+
+    fn show_media(&mut self, name: &str, root: Option<std::path::PathBuf>) {
+        let name = name.to_string();
         let moved = match self.root.lock() {
             Ok(mut r) => std::mem::replace(&mut *r, root.clone()) != root,
             Err(_) => false,
@@ -1057,8 +1178,9 @@ fn from_site_root(root: &std::path::Path, dir: &str, path: &str) -> Option<(Arc<
                 full
             };
             if full.is_file() {
+                // this Mac's page
                 let name = full.file_name()?.to_string_lossy().into_owned();
-                return std::fs::read(&full).ok().map(|b| (b.into(), name));
+                return std::fs::read(&full).ok().map(|b| (b.into(), name)); // this Mac's page
             }
         }
         if at == root || !at.pop() {
@@ -1068,7 +1190,7 @@ fn from_site_root(root: &std::path::Path, dir: &str, path: &str) -> Option<(Arc<
 }
 
 fn from_disk(root: &std::path::Path, path: &str) -> Option<Arc<[u8]>> {
-    std::fs::read(disk_path(root, path)?).ok().map(Into::into)
+    std::fs::read(disk_path(root, path)?).ok().map(Into::into) // this Mac's page
 }
 
 /// The file a `{version}/{path}` address names under `root`, if it's there
@@ -1078,7 +1200,7 @@ fn disk_path(root: &std::path::Path, path: &str) -> Option<std::path::PathBuf> {
     let rel = percent_decode(rel);
     let root = root.canonicalize().ok()?;
     let full = root.join(rel).canonicalize().ok()?;
-    (full.starts_with(&root) && full.is_file()).then_some(full)
+    (full.starts_with(&root) && full.is_file()).then_some(full) // this Mac's page
 }
 
 /// The most of a file one answer carries when the player asks for "the rest".
@@ -1086,32 +1208,34 @@ const RANGE_CHUNK: u64 = 4 << 20;
 
 /// The bytes of `full` a `Range` header asks for (`bytes=a-b`, `bytes=a-`,
 /// `bytes=-n`): inclusive bounds, clamped to the file; `None` if it can't
-/// be met.
-fn byte_range(range: &str, total: u64) -> Option<(u64, u64)> {
+/// be met. Of several ranges, the first that can be met is answered.
+pub fn byte_range(range: &str, total: u64) -> Option<(u64, u64)> {
+    let range = range.trim();
+    // The unit is case-insensitive.
     let spec = range
-        .trim()
-        .strip_prefix("bytes=")?
-        .split(',')
-        .next()?
-        .trim();
-    let (a, b) = spec.split_once('-')?;
+        .get(..6)
+        .filter(|u| u.eq_ignore_ascii_case("bytes="))
+        .map(|_| &range[6..])?;
     let last = total.checked_sub(1)?;
-    let (start, end) = match (a.trim(), b.trim()) {
-        ("", n) => {
-            let n: u64 = n.parse().ok()?;
-            (total.saturating_sub(n), last)
-        }
-        (a, "") => {
-            let a: u64 = a.parse().ok()?;
-            (a, last)
-        }
-        (a, b) => (a.parse().ok()?, b.parse::<u64>().ok()?.min(last)),
+    // Digits only: `+5` isn't a number here.
+    let num = |s: &str| -> Option<u64> {
+        (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| s.parse().ok())
+            .flatten()
     };
-    // At most a chunk at a time, whatever was asked: a player asking for
-    // all of a long recording at once gets its start and asks on, rather
-    // than dent reading gigabytes into memory.
-    let end = end.min(start.saturating_add(RANGE_CHUNK - 1));
-    (start <= end).then_some((start, end))
+    spec.split(',').find_map(|one| {
+        let (a, b) = one.trim().split_once('-')?;
+        let (start, end) = match (a.trim(), b.trim()) {
+            ("", n) => (total.saturating_sub(num(n)?), last),
+            (a, "") => (num(a)?, last),
+            (a, b) => (num(a)?, num(b)?.min(last)),
+        };
+        // At most a chunk at a time, whatever was asked: a player asking
+        // for all of a long recording at once gets its start and asks on,
+        // rather than dent reading gigabytes into memory.
+        let end = end.min(start.saturating_add(RANGE_CHUNK - 1));
+        (start <= end).then_some((start, end))
+    })
 }
 
 /// A media file's answer: the piece asked for, or all of it when nothing
@@ -1224,6 +1348,100 @@ mod root_tests {
         );
         assert_eq!(byte_range("bytes=200-", 100), None);
         assert_eq!(byte_range("bytes=0-1", 0), None);
+    }
+
+    #[test]
+    fn ranges_at_the_edges_and_lying_ones() {
+        const C: u64 = 4 << 20;
+        // Open-ended and suffix ranges.
+        assert_eq!(byte_range("bytes=0-", 100), Some((0, 99)));
+        assert_eq!(byte_range("bytes=-500", 100), Some((0, 99)));
+        assert_eq!(byte_range("bytes=-500", 1000), Some((500, 999)));
+        assert_eq!(byte_range("bytes=500-", 1000), Some((500, 999)));
+        // Start at, and beyond, the end: not satisfiable.
+        assert_eq!(byte_range("bytes=100-", 100), None);
+        assert_eq!(byte_range("bytes=99-", 100), Some((99, 99)));
+        assert_eq!(byte_range("bytes=500-600", 100), None);
+        // End beyond the end: cut to it.
+        assert_eq!(byte_range("bytes=0-1000", 100), Some((0, 99)));
+        // Empty and one-byte files.
+        for r in ["bytes=0-", "bytes=-1", "bytes=0-0", "bytes=-0"] {
+            assert_eq!(byte_range(r, 0), None, "{r}");
+        }
+        assert_eq!(byte_range("bytes=0-", 1), Some((0, 0)));
+        assert_eq!(byte_range("bytes=0-0", 1), Some((0, 0)));
+        assert_eq!(byte_range("bytes=-1", 1), Some((0, 0)));
+        assert_eq!(byte_range("bytes=-5", 1), Some((0, 0)));
+        assert_eq!(byte_range("bytes=1-", 1), None);
+        // A suffix of none: nothing to give.
+        assert_eq!(byte_range("bytes=-0", 100), None);
+        // Backwards.
+        assert_eq!(byte_range("bytes=5-3", 100), None);
+        // Several ranges: the first.
+        assert_eq!(byte_range("bytes=0-1,5-6", 100), Some((0, 1)));
+        assert_eq!(byte_range("bytes=0-1, 5-6", 100), Some((0, 1)));
+        // An empty element of the list is let pass, as the standard says.
+        assert_eq!(byte_range("bytes=,0-1", 100), Some((0, 1)));
+        // Garbage.
+        for r in [
+            "",
+            "bytes",
+            "bytes=",
+            "bytes=-",
+            "bytes=a-b",
+            "bytes=1-b",
+            "items=0-1",
+            "bytes=0--1",
+            "bytes=-5-10",
+            "bytes=1.5-2",
+            "bytes=0x10-",
+        ] {
+            assert_eq!(byte_range(r, 100), None, "{r:?}");
+        }
+        // Whitespace around the whole and around the numbers.
+        assert_eq!(byte_range("  bytes=0-1  ", 100), Some((0, 1)));
+        assert_eq!(byte_range("bytes= 2 - 3 ", 100), Some((2, 3)));
+        // Numbers past u64: refused, not wrapped.
+        let big = "99999999999999999999999";
+        assert_eq!(byte_range(&format!("bytes={big}-"), 100), None);
+        assert_eq!(byte_range(&format!("bytes=0-{big}"), 100), None);
+        assert_eq!(byte_range(&format!("bytes=-{big}"), 100), None);
+        // At u64's edge.
+        let max = u64::MAX;
+        assert_eq!(
+            byte_range(&format!("bytes={}-", max - 1), max),
+            Some((max - 1, max - 1))
+        );
+        assert_eq!(byte_range(&format!("bytes=0-{max}"), max), Some((0, C - 1)));
+        assert_eq!(byte_range(&format!("bytes=-{max}"), max), Some((0, C - 1)));
+        // A chunk, exactly, and one byte past.
+        assert_eq!(
+            byte_range(&format!("bytes=0-{}", C - 1), C * 2),
+            Some((0, C - 1))
+        );
+        assert_eq!(
+            byte_range(&format!("bytes=0-{}", C), C * 2),
+            Some((0, C - 1))
+        );
+    }
+
+    #[test]
+    fn a_signed_number_isnt_a_range() {
+        // RFC 9110: digits only. Rust's parse takes a leading '+'.
+        assert_eq!(byte_range("bytes=+5-", 100), None);
+        assert_eq!(byte_range("bytes=-+5", 100), None);
+    }
+
+    #[test]
+    fn the_unit_is_case_insensitive() {
+        // RFC 9110: range units are case-insensitive.
+        assert_eq!(byte_range("Bytes=0-1", 100), Some((0, 1)));
+    }
+
+    #[test]
+    fn a_satisfiable_range_after_an_unsatisfiable_one_is_used() {
+        // RFC 9110: satisfiable when any range is.
+        assert_eq!(byte_range("bytes=500-600,0-1", 100), Some((0, 1)));
     }
 
     #[test]

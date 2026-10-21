@@ -32,24 +32,35 @@ impl Daemon {
             std::process::id(),
             rand_u64()
         ));
+        build_helpers();
         let state = root.join("state");
         std::fs::create_dir_all(&state).unwrap();
-        // A free port: bind, note it, let it go.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
         let mut d = Self {
             state,
-            port,
+            port: 0,
             child: None,
         };
-        d.spawn(env);
-        d
+        for _ in 0..20 {
+            d.port = free_port();
+            if d.try_spawn(env) {
+                return d;
+            }
+            if let Some(mut c) = d.child.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+        panic!("no free port");
     }
 
+    /// Restarted on the port it had, which must still be free.
     fn spawn(&mut self, env: &[(&str, &str)]) {
+        assert!(self.try_spawn(env), "port {} was taken", self.port);
+    }
+
+    fn try_spawn(&mut self, env: &[(&str, &str)]) -> bool {
+        let log = self.state.with_file_name("daemon.log");
+        let _ = std::fs::remove_file(&log);
         let mut c = Command::new(env!("CARGO_BIN_EXE_dent-daemon"));
         c.arg("--state")
             .arg(&self.state)
@@ -58,11 +69,14 @@ impl Daemon {
             .env("DENT_TAILSCALE_LOCALAPI", "127.0.0.1:1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(std::fs::File::create(&log).unwrap());
         for (k, v) in env {
             c.env(k, v);
         }
         self.child = Some(c.spawn().unwrap());
+        if !got_port(&log, self.port) {
+            return false;
+        }
         let until = Instant::now() + Duration::from_secs(10);
         while std::net::TcpStream::connect(("127.0.0.1", self.port)).is_err()
             || UnixStream::connect(dent_protocol::daemon_socket(&self.state)).is_err()
@@ -70,6 +84,7 @@ impl Daemon {
             assert!(Instant::now() < until, "daemon didn't start");
             std::thread::sleep(Duration::from_millis(20));
         }
+        true
     }
 
     /// One request over the local socket.
@@ -116,16 +131,72 @@ impl Daemon {
     }
 }
 
+/// Whether the daemon logging to `log` got `port`. Picking a free port and
+/// letting it go races the other tests doing the same; a daemon that lost
+/// runs without remote access, and the test would quietly talk to the
+/// winner instead, which the winner's test then kills mid-way.
+fn got_port(log: &std::path::Path, port: u16) -> bool {
+    let mine = format!("remote access on port {port} ");
+    // Generous: dozens start at once when test files run side by side.
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        let said = std::fs::read_to_string(log).unwrap_or_default();
+        if said.contains(&mine) {
+            return true;
+        }
+        if said.contains("remote access off") {
+            return false;
+        }
+        assert!(
+            Instant::now() < until,
+            "daemon never said whether it listens"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A port to try, from below the range the system hands out to outgoing
+/// connections. Never checked by binding it first: a check's listener on
+/// 127.0.0.1 can sit on top of another test's daemon listening on every
+/// address, take its connections and reset them as it closes. A port
+/// that's taken shows in the daemon's log instead ([`got_port`]).
+fn free_port() -> u16 {
+    10_000 + (rand_u64() % 22_000) as u16
+}
+
 impl Drop for Daemon {
     fn drop(&mut self) {
         if let Some(mut c) = self.child.take() {
             let _ = c.kill();
             let _ = c.wait();
         }
+        // A failing test shows what its daemon said.
+        if std::thread::panicking() {
+            let log = self.state.with_file_name("daemon.log");
+            eprintln!(
+                "daemon on port {} said:\n{}",
+                self.port,
+                std::fs::read_to_string(log).unwrap_or_default()
+            );
+        }
         if let Some(root) = self.state.parent() {
             let _ = std::fs::remove_dir_all(root);
         }
     }
+}
+
+/// The session holder, built once, before any daemon starts: building
+/// while daemons run can take it away for a moment from one starting a
+/// session.
+fn build_helpers() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let built = Command::new(env!("CARGO"))
+            .args(["build", "-q", "-p", "dent-session-holder"])
+            .status()
+            .unwrap();
+        assert!(built.success());
+    });
 }
 
 /// A different number each call, for unique temp folders.
@@ -385,11 +456,28 @@ async fn pair_then_use_the_daemon_remotely() {
         again.next_control().await,
         Control::Refuse(Refusal::Removed)
     );
-    let after = Device::connect(d.port, &keys).await;
+    // Coming back later, by any route, it's told it was removed (not
+    // greeted as a stranger to pair), and still after a restart.
+    let (_, _, first) = connect(d.port, &keys, &hello("phone", PROTOCOL_MIN, PROTOCOL)).await;
+    assert_eq!(first, Control::Refuse(Refusal::Removed));
+    let mut d = d;
+    if let Some(mut c) = d.child.take() {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+    d.spawn(&[]);
+    let (_, _, first) = connect(d.port, &keys, &hello("phone", PROTOCOL_MIN, PROTOCOL)).await;
+    assert_eq!(first, Control::Refuse(Refusal::Removed));
+    // Paired again on purpose, with a code, it's trusted again.
+    let code = d.code();
+    let mut back = Device::connect(d.port, &keys).await;
+    assert_eq!(back.trust, Trust::Untrusted { pairing_open: true });
+    assert!(matches!(back.pair(&code).await, Control::Paired { .. }));
+    let later = Device::connect(d.port, &keys).await;
     assert_eq!(
-        after.trust,
-        Trust::Untrusted {
-            pairing_open: false
+        later.trust,
+        Trust::Paired {
+            access: dent_link::Access::Full
         }
     );
 }
@@ -472,6 +560,112 @@ async fn a_large_reply_arrives_whole_while_pings_still_answer() {
             _ => {}
         }
     }
+}
+
+#[tokio::test]
+async fn file_bytes_never_hold_up_live_events() {
+    // Decision 0068: a big transfer goes on a lane of its own, behind live
+    // traffic; what a session streams keeps arriving all through it.
+    let fake =
+        std::path::Path::new(env!("CARGO_BIN_EXE_dent-daemon")).with_file_name("dent-fake-claude");
+    let built = Command::new(env!("CARGO"))
+        .args(["build", "-q", "-p", "dent-fake-claude"])
+        .status()
+        .unwrap();
+    assert!(built.success());
+    let d = Daemon::start(&[("DENT_CLAUDE", fake.to_str().unwrap())]);
+    let keys = Keys::generate().unwrap();
+    let mut dev = Device::connect(d.port, &keys).await;
+    let code = d.code();
+    dev.pair(&code).await;
+    // Trusted: big messages, as a real client takes them.
+    dev.t.limit = dent_link::LARGE;
+    dev.reply(Request::Hello {
+        proto: PROTOCOL,
+        client: "phone".into(),
+    })
+    .await;
+    dev.reply(Request::Subscribe {
+        after: 0,
+        epoch: None,
+    })
+    .await;
+    let work = d.state.parent().unwrap().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("big.bin"), vec![9u8; 48 << 20]).unwrap();
+    let session = match dev
+        .reply(Request::Create {
+            agent: None,
+            cwd: work.display().to_string(),
+            worktree: None,
+            model: None,
+            permission: Default::default(),
+            effort: None,
+            id: "m1".into(),
+            text: "long slowly".into(),
+            attachments: Vec::new(),
+            files: Vec::new(),
+            bring: None,
+        })
+        .await
+    {
+        Out::Reply {
+            reply: Reply::Created { session },
+        } => session,
+        o => panic!("{o:?}"),
+    };
+    // Streaming now.
+    loop {
+        if matches!(dev.out().await.body, Out::Delta { .. }) {
+            break;
+        }
+    }
+    // Many more in flight than a client keeps (the desktop keeps four).
+    let reads = (48 << 20) / dent_protocol::READ_MAX as u64;
+    let file = dent_protocol::FileRef {
+        session: session.clone(),
+        path: "big.bin".into(),
+        base: None,
+    };
+    let mut asked = std::collections::HashSet::new();
+    let mut next = 0u64;
+    let start = Instant::now();
+    let (mut live_during, mut last_live, mut worst) = (0, Instant::now(), Duration::ZERO);
+    let mut got = 0u64;
+    while next < reads || !asked.is_empty() {
+        while asked.len() < 32 && next < reads {
+            asked.insert(
+                dev.request(Request::Read {
+                    file: file.clone(),
+                    offset: next * dent_protocol::READ_MAX as u64,
+                    len: dent_protocol::READ_MAX,
+                    expect: None,
+                })
+                .await,
+            );
+            next += 1;
+        }
+        let e = dev.out().await;
+        if asked.remove(&e.req) {
+            match e.body {
+                Out::Reply {
+                    reply: Reply::Bytes { bytes_b64, .. },
+                } => got += dent_protocol::b64::decode(&bytes_b64).unwrap().len() as u64,
+                o => panic!("{o:?}"),
+            }
+        } else if e.req == 0 && matches!(e.body, Out::Delta { .. } | Out::Events { .. }) {
+            live_during += 1;
+            worst = worst.max(last_live.elapsed());
+            last_live = Instant::now();
+        }
+    }
+    assert_eq!(got, 48 << 20, "every byte, once");
+    eprintln!(
+        "48 MiB in {:?}; {live_during} live messages meanwhile, the longest gap {worst:?}",
+        start.elapsed()
+    );
+    assert!(live_during >= 3, "live events kept coming: {live_during}");
+    assert!(worst < Duration::from_secs(1), "longest gap {worst:?}");
 }
 
 #[tokio::test]
@@ -611,4 +805,51 @@ async fn a_client_pairs_and_its_requests_wait_out_a_restart() {
     })
     .await;
     r.stop();
+}
+
+/// The admin words work with `--state DIR` before or after them, and a
+/// `--state` missing its folder is refused rather than starting a daemon on
+/// the default one.
+#[tokio::test]
+async fn admin_commands_take_the_state_folder_anywhere() {
+    let d = Daemon::start(&[]);
+    let run = |args: &[&std::ffi::OsStr]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_dent-daemon"));
+        c.args(args)
+            .env("DENT_REMOTE_PORT", "0")
+            .stdin(Stdio::null());
+        let mut child = c
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() > until {
+                let _ = child.kill();
+                panic!("{args:?} kept running");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        child.wait_with_output().unwrap()
+    };
+    let state = d.state.as_os_str();
+    for args in [
+        vec!["--state".as_ref(), state, "pair".as_ref()],
+        vec!["pair".as_ref(), "--state".as_ref(), state],
+    ] {
+        let out = run(&args);
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(said.starts_with("Pairing code: "), "{args:?}: {said}");
+    }
+    // Both asked the one running daemon: the code it shows is the same.
+    let shown = match d.ask(Request::Pairing) {
+        Reply::Pairing { code, .. } => code,
+        other => panic!("unexpected {other:?}"),
+    };
+    assert_eq!(shown.len(), 6, "a code is showing: {shown:?}");
+    let out = run(&["pair".as_ref(), "--state".as_ref()]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--state needs a folder"));
 }

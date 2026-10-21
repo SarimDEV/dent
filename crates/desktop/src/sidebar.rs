@@ -605,17 +605,41 @@ impl Dent {
                                 .get(owner)
                                 .copied()
                                 .unwrap_or(crate::glyph::Shape::Circle);
+                            // Long names give way, ending in "…", rather than
+                            // run past the row.
                             div()
                                 .flex()
                                 .items_center()
                                 .gap(px(space::S1H))
                                 .min_w_0()
+                                .overflow_hidden()
                                 .ty(UI)
                                 .text_color(t.quiet)
-                                .child(div().flex_none().child(format!("{} ·", s.project)))
-                                .child(crate::glyph::glyph(shape, t.quiet, 9.))
-                                .child(div().flex_none().child(format!("{} ·", s.machine)))
-                                .child(div().min_w_0().truncate().child(one_line(&s.detail)))
+                                .child(
+                                    div()
+                                        .min_w(px(24.))
+                                        .flex_shrink(1.)
+                                        .truncate()
+                                        .child(format!("{} ·", s.project)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .child(crate::glyph::glyph(shape, t.quiet, 9.)),
+                                )
+                                .child(
+                                    div().flex_none().child(format!(
+                                        "{} ·",
+                                        crate::data::machine_short(&s.machine)
+                                    )),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_shrink(4.)
+                                        .truncate()
+                                        .child(one_line(&s.detail)),
+                                )
                         }
                         None => div().truncate().ty(UI).text_color(t.quiet).child(detail),
                     }),
@@ -708,7 +732,9 @@ impl Dent {
                     Standing::NeedsCode => "needs a code",
                     _ => "can't reach",
                 };
-                Some(format!("{} {word}", m.name()))
+                // A long name shortened in its middle, so what's become of
+                // it still shows.
+                Some(format!("{} {word}", crate::data::machine_short(m.name())))
             })
             .collect();
         let (link, link_tip) = match &self.connection {
@@ -743,9 +769,13 @@ impl Dent {
                     .flex()
                     .items_center()
                     .gap(px(space::S1H))
+                    // A long machine name gives way rather than push the
+                    // bar past the window.
+                    .min_w_0()
+                    .flex_shrink(1.)
                     .when(down, |d| d.text_color(t.ink))
                     .with_tip(crate::ui::tip_owned(link_tip, t))
-                    .child(link),
+                    .child(div().min_w_0().truncate().child(link)),
             )
             .when(needs > 0, |d| {
                 d.child(

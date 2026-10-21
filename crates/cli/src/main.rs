@@ -9,7 +9,18 @@
 //!   follows them, printing every change of state, route and catch-up.
 //! - `dent ask NAME TEXT [--file PATH]... [--cwd DIR]` starts a session on
 //!   a saved machine (in its scratch folder unless `--cwd`), its files
-//!   carried along, and prints the new session's id.
+//!   carried along, and prints the new session's id. With `--bring DIR`,
+//!   the project at DIR on this machine is cloned there first, with its
+//!   ignored environment files (`.env`), and the session works in it.
+//!
+//! - `dent call NAME JSON` sends one request (as JSON, `{"op": …}`) to a
+//!   saved machine and prints its reply, for scripts and for looking into
+//!   what a machine says.
+//! - `dent get NAME SESSION PATH [OUT]` copies a file a session names from
+//!   its machine (by what the session wrote: `~`, relative, absolute), in
+//!   ranges a few at a time, and says how fast it came.
+//! - `dent wake NAME` sends a sleeping machine a Wake-on-LAN packet, from
+//!   the same network, to the cards its last welcome named.
 //!
 //! Its own key and saved machines live in the client state folder
 //! (`DENT_CLIENT_STATE`, else `client/` beside the daemon's state).
@@ -61,9 +72,21 @@ async fn main() -> Result<()> {
         }
         Some("watch") => watch(&args[1..]).await,
         Some("ask") => ask(&args[1..]).await,
+        Some("call") => call(&args[1..]).await,
+        Some("get") => get(&args[1..]).await,
+        Some("wake") => {
+            let name = args.get(1).context("dent wake NAME")?;
+            let m = saved(name)?;
+            if m.wake.is_empty() {
+                bail!("{name} hasn't said how to wake it: connect to it once while it's awake");
+            }
+            let n = dent_remote::wake::wake(&m.wake)?;
+            println!("sent {n} wake-up packets to {name}");
+            Ok(())
+        }
         _ => {
             eprintln!(
-                "usage: dent machine add HOST:PORT [--code CODE] | dent machines | dent machine remove NAME | dent watch [NAME...] [--secs N] | dent ask NAME TEXT [--file PATH]... [--cwd DIR]"
+                "usage: dent machine add HOST:PORT [--code CODE] | dent machines | dent machine remove NAME | dent watch [NAME...] [--secs N] | dent ask NAME TEXT [--file PATH]... [--cwd DIR | --bring DIR] | dent wake NAME | dent call NAME JSON | dent get NAME SESSION PATH [OUT]"
             );
             Ok(())
         }
@@ -71,7 +94,13 @@ async fn main() -> Result<()> {
 }
 
 async fn add(args: &[String]) -> Result<()> {
-    let addr = args.first().context("dent machine add HOST:PORT")?.clone();
+    let typed = args.first().context("dent machine add HOST[:PORT]")?;
+    // Not an address at all: said at once, not tried for half a minute.
+    let Some(addr) = dent_client_core::machine::address(typed) else {
+        bail!(
+            "{typed:?} isn't an address: give a host, and a port if it isn't 7480, like 192.168.1.20 or mini.tail1234.ts.net:7480"
+        );
+    };
     let code = flag(args, "--code");
     let keys = device_keys()?;
     let m = Machine::new(&device_name(), keys, None, vec![addr.clone()]);
@@ -134,9 +163,31 @@ async fn add(args: &[String]) -> Result<()> {
                     break Ok((machine, id, addresses));
                 }
             }
-            Note::State(
-                s @ (State::Removed | State::Incompatible { .. } | State::TrustedElsewhere { .. }),
-            ) => break Err(anyhow::anyhow!("{s:?}")),
+            Note::State(State::Removed) => {
+                break Err(anyhow::anyhow!(
+                    "this device was removed from {addr}; pair again there with `dent-daemon pair` and --code"
+                ));
+            }
+            Note::State(State::Incompatible { daemon, client }) => {
+                break Err(anyhow::anyhow!(
+                    "no protocol in common: {addr} speaks {}–{}, this dent {}–{}; update {}",
+                    daemon.0,
+                    daemon.1,
+                    client.0,
+                    client.1,
+                    if daemon.1 < client.0 {
+                        "the machine"
+                    } else {
+                        "this dent"
+                    }
+                ));
+            }
+            Note::State(State::TrustedElsewhere { routes }) => {
+                break Err(anyhow::anyhow!(
+                    "{addr} trusts this device only over {}: add it by that address instead",
+                    routes.join(", ")
+                ));
+            }
             Note::State(State::Unreachable { why }) => eprintln!("  {why}; retrying"),
             _ => {}
         }
@@ -152,43 +203,69 @@ async fn add(args: &[String]) -> Result<()> {
         key: hex::encode(&key),
         routes: vec![addr],
         learned: addresses,
+        wake: Vec::new(),
     })?;
     println!("added {name} ({id})");
     Ok(())
 }
 
 fn remove(name: &str) -> Result<()> {
+    let gone = saved(name)?;
     let mut all = load();
-    let before = all.len();
-    all.retain(|s| s.name != name && s.id != name);
-    if all.len() == before {
-        bail!("no machine called {name}");
-    }
+    all.retain(|s| s.id != gone.id);
     save(&all)?;
-    println!("forgot {name}");
+    println!("forgot {} ({})", gone.name, gone.id);
     Ok(())
 }
 
+/// The saved machine `name` names: its id, or its name when only one
+/// machine has it. Two of one name are never guessed between.
+fn saved(name: &str) -> Result<Saved> {
+    let all = load();
+    if let Some(m) = all.iter().find(|s| s.id == name) {
+        return Ok(m.clone());
+    }
+    let named: Vec<&Saved> = all.iter().filter(|s| s.name == name).collect();
+    match named.as_slice() {
+        [] => bail!("no saved machine called {name}"),
+        [one] => Ok((*one).clone()),
+        many => bail!(
+            "{} machines are called {name}: use its id ({})",
+            many.len(),
+            many.iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 async fn ask(args: &[String]) -> Result<()> {
-    let usage = "dent ask NAME TEXT [--file PATH]... [--cwd DIR]";
+    let usage = "dent ask NAME TEXT [--file PATH]... [--cwd DIR | --bring DIR]";
     let mut plain = Vec::new();
     let mut files = Vec::new();
     let mut cwd = String::new();
+    let mut from = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--file" => files.push(it.next().context(usage)?.clone()),
             "--cwd" => cwd = it.next().context(usage)?.clone(),
+            "--bring" => from = Some(it.next().context(usage)?.clone()),
             _ => plain.push(a.clone()),
         }
     }
     let [name, text] = plain.as_slice() else {
         bail!(usage);
     };
-    let saved = load()
-        .into_iter()
-        .find(|s| s.name == *name || s.id == *name)
-        .with_context(|| format!("no saved machine called {name}"))?;
+    let saved = saved(name)?;
+    if from.is_some() && !cwd.is_empty() {
+        bail!("--bring makes the folder it works in: leave out --cwd");
+    }
+    let bring = match from {
+        Some(dir) => Some(pack(&dir)?),
+        None => None,
+    };
     let (tx, mut rx) = mpsc::unbounded_channel();
     let remote = dent_remote::remote::spawn(
         &tokio::runtime::Handle::current(),
@@ -213,6 +290,7 @@ async fn ask(args: &[String]) -> Result<()> {
             text: text.clone(),
             attachments: files,
             files: Vec::new(),
+            bring,
         },
     );
     let wait = tokio::time::sleep(Duration::from_secs(60));
@@ -232,6 +310,236 @@ async fn ask(args: &[String]) -> Result<()> {
                     }
                 }
                 Some(dent_remote::remote::Event::State(s)) => eprintln!("{name}: {s:?}"),
+                // What its welcome said (routes, how to wake it), kept.
+                Some(dent_remote::remote::Event::Saved(s)) => {
+                    let _ = dent_remote::store::upsert(&s);
+                }
+                Some(_) => {}
+                None => bail!("the connection ended"),
+            },
+            _ = &mut wait => bail!("{name} didn't answer within a minute"),
+        }
+    }
+}
+
+/// What another machine needs to bring the project at `dir` there, asked
+/// of this machine's daemon: its remotes and branch, and its ignored
+/// environment files.
+fn pack(dir: &str) -> Result<dent_protocol::Bring> {
+    let dir = std::fs::canonicalize(dir)
+        .with_context(|| format!("{dir} isn't a folder here"))?
+        .display()
+        .to_string();
+    let Reply::Pack { pack } = local(Request::Pack { dir: dir.clone() })? else {
+        bail!("unexpected answer from this machine's daemon");
+    };
+    let pack = pack.with_context(|| format!("{dir} isn't in a Git repository"))?;
+    if pack.remotes.is_empty() {
+        bail!("{dir} has no remote another machine can clone from");
+    }
+    if let Some(missing) = pack.missing() {
+        eprintln!("note: {missing}");
+    }
+    let paths: Vec<String> = pack
+        .ignored
+        .iter()
+        .filter(|i| i.carry)
+        .map(|i| i.path.clone())
+        .collect();
+    let files = if paths.is_empty() {
+        Vec::new()
+    } else {
+        for p in &paths {
+            eprintln!("bringing {p}");
+        }
+        match local(Request::ReadFiles { dir, paths })? {
+            Reply::Carried { files } => files,
+            _ => bail!("unexpected answer from this machine's daemon"),
+        }
+    };
+    Ok(dent_protocol::Bring {
+        name: pack.name,
+        remotes: pack.remotes,
+        branch: pack.branch,
+        files,
+    })
+}
+
+/// One request to this machine's daemon, over its socket.
+fn local(r: Request) -> Result<Reply> {
+    use std::io::{BufRead, Write};
+    let sock = dent_protocol::daemon_socket(&dent_remote::store::daemon_state());
+    let mut s = std::os::unix::net::UnixStream::connect(&sock)
+        .with_context(|| format!("dent isn't running on this machine ({})", sock.display()))?;
+    let mut hello = hello_line(1);
+    hello.push(b'\n');
+    s.write_all(&hello)?;
+    s.write_all(&encode(2, &r))?;
+    for line in std::io::BufReader::new(s.try_clone()?).lines() {
+        let env: Envelope<Out> = serde_json::from_str(&line?)?;
+        if env.req != 2 {
+            continue;
+        }
+        return match env.body {
+            Out::Reply { reply } => Ok(reply),
+            Out::Error { message } => bail!(message),
+            o => bail!("unexpected answer: {o:?}"),
+        };
+    }
+    bail!("this machine's daemon hung up")
+}
+
+/// The next answer to a request, past the feed's events.
+async fn next_reply(
+    rx: &mut mpsc::UnboundedReceiver<dent_remote::remote::Event>,
+) -> Result<(u64, Out)> {
+    // A minute with no answer, however much the link says meanwhile
+    // (tries, failures): the machine isn't answering, and that's said.
+    let by = tokio::time::Instant::now() + Duration::from_secs(60);
+    let mut last = None;
+    loop {
+        match tokio::time::timeout_at(by, rx.recv()).await {
+            Ok(Some(dent_remote::remote::Event::Out { req, out })) if req != 0 => {
+                return Ok((req, out));
+            }
+            Ok(Some(dent_remote::remote::Event::State(s))) => last = Some(s),
+            Ok(Some(_)) => {}
+            Ok(None) => bail!("the connection ended"),
+            Err(_) => match last {
+                Some(dent_client_core::machine::State::Unreachable { why }) => {
+                    bail!("no answer within a minute: {why}")
+                }
+                _ => bail!("no answer within a minute"),
+            },
+        }
+    }
+}
+
+async fn get(args: &[String]) -> Result<()> {
+    let (name, session, path, dest) = match args {
+        [n, s, p] => (n, s, p, p.rsplit('/').next().unwrap_or(p).to_string()),
+        [n, s, p, o] => (n, s, p, o.clone()),
+        _ => bail!("dent get NAME SESSION PATH [OUT]"),
+    };
+    let saved = saved(name)?;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let remote = dent_remote::remote::spawn_asking(
+        &tokio::runtime::Handle::current(),
+        device_keys()?,
+        "dent cli",
+        saved,
+        move |e| {
+            let _ = tx.send(e);
+        },
+    );
+    let file = dent_protocol::FileRef {
+        session: session.clone(),
+        path: path.clone(),
+        base: None,
+    };
+    remote.send(
+        9,
+        Request::Stat {
+            files: vec![file.clone()],
+        },
+    );
+    let (_, out) = next_reply(&mut rx).await?;
+    let (real, stamp) = match out {
+        Out::Reply {
+            reply: Reply::Stats { stats },
+        } => match stats.into_iter().next() {
+            Some(dent_protocol::FileStat::File { path, stamp, .. }) => (path, stamp),
+            other => bail!("{other:?}"),
+        },
+        Out::Error { message } => bail!(message),
+        o => bail!("unexpected answer: {o:?}"),
+    };
+    let total = stamp.size;
+    let mut bytes = vec![0u8; total as usize];
+    let step = dent_protocol::READ_MAX as u64;
+    let mut next = 0u64;
+    let mut got = 0u64;
+    let mut inflight = std::collections::HashMap::new();
+    let mut n = 10u64;
+    let started = Instant::now();
+    while got < total {
+        while inflight.len() < 4 && next < total {
+            remote.send(
+                n,
+                Request::Read {
+                    file: file.clone(),
+                    offset: next,
+                    len: dent_protocol::READ_MAX,
+                    expect: Some(stamp),
+                },
+            );
+            inflight.insert(n, next);
+            n += 1;
+            next += step;
+        }
+        let (req, out) = next_reply(&mut rx).await?;
+        let Some(at) = inflight.remove(&req) else {
+            continue;
+        };
+        match out {
+            Out::Reply {
+                reply: Reply::Bytes { bytes_b64, .. },
+            } => {
+                let b = dent_protocol::b64::decode(&bytes_b64).context("bad bytes")?;
+                bytes[at as usize..at as usize + b.len()].copy_from_slice(&b);
+                got += b.len() as u64;
+            }
+            Out::Reply {
+                reply: Reply::FileGone { changed, .. },
+            } => bail!(if changed {
+                "it changed while it came"
+            } else {
+                "it's gone"
+            }),
+            o => bail!("unexpected answer: {o:?}"),
+        }
+    }
+    remote.stop();
+    std::fs::write(&dest, &bytes)?;
+    let secs = started.elapsed().as_secs_f64();
+    eprintln!(
+        "{real}: {} bytes in {secs:.2} s ({:.1} MB/s) to {dest}",
+        total,
+        total as f64 / secs / 1e6
+    );
+    Ok(())
+}
+
+async fn call(args: &[String]) -> Result<()> {
+    let [name, json] = args else {
+        bail!("dent call NAME JSON");
+    };
+    let req: Request = serde_json::from_str(json).context("not a request")?;
+    let saved = saved(name)?;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let remote = dent_remote::remote::spawn_asking(
+        &tokio::runtime::Handle::current(),
+        device_keys()?,
+        "dent cli",
+        saved,
+        move |e| {
+            let _ = tx.send(e);
+        },
+    );
+    const REQ: u64 = 10;
+    let started = Instant::now();
+    remote.send(REQ, req);
+    let wait = tokio::time::sleep(Duration::from_secs(60));
+    tokio::pin!(wait);
+    loop {
+        tokio::select! {
+            e = rx.recv() => match e {
+                Some(dent_remote::remote::Event::Out { req: REQ, out }) => {
+                    remote.stop();
+                    eprintln!("answered in {:?}", started.elapsed());
+                    println!("{}", serde_json::to_string(&out)?);
+                    return Ok(());
+                }
                 Some(_) => {}
                 None => bail!("the connection ended"),
             },
@@ -348,6 +656,7 @@ async fn watch(args: &[String]) -> Result<()> {
                         for e in events {
                             if e.seq > tally[i].last + 1 && tally[i].last > 0 {
                                 tally[i].gaps += 1;
+                                println!("{t:7.2}s  {name}: gap, {} to {}", tally[i].last, e.seq);
                             }
                             tally[i].last = tally[i].last.max(e.seq);
                             tally[i].events += 1;

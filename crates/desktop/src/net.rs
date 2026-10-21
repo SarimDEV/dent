@@ -37,6 +37,10 @@ pub struct Net {
     rt: Option<Arc<tokio::runtime::Runtime>>,
     keys: Option<dent_link::Keys>,
     far: Arc<Mutex<HashMap<String, Far>>>,
+    /// Each machine's log, kept on this Mac ([decision 0068]).
+    ///
+    /// [decision 0068]: ../../../docs/decisions/0068-files-across-machines.md
+    history: Option<dent_remote::history::History>,
 }
 
 impl Net {
@@ -53,6 +57,9 @@ impl Net {
         let keys = dent_remote::store::device_keys()
             .map_err(|e| eprintln!("remote machines are off: {e}"))
             .ok();
+        let history = dent_remote::history::History::open(&dent_remote::store::state_dir())
+            .map_err(|e| eprintln!("history won't be kept: {e:#}"))
+            .ok();
         let net = Self {
             local,
             next: Arc::new(AtomicU64::new(100)),
@@ -60,10 +67,20 @@ impl Net {
             rt,
             keys,
             far: Arc::new(Mutex::new(HashMap::new())),
+            history,
         };
-        for s in dent_remote::store::load() {
-            net.follow(s);
-        }
+        // Off the window's thread: reading each machine's kept history
+        // can take a while, and each link starts only once its history is
+        // handed over, so nothing it says comes before what's kept.
+        let n = net.clone();
+        std::thread::spawn(move || {
+            for s in dent_remote::store::load() {
+                // One forgotten meanwhile isn't followed again.
+                if dent_remote::store::load().iter().any(|x| x.id == s.id) {
+                    n.follow(s);
+                }
+            }
+        });
         net
     }
 
@@ -164,7 +181,28 @@ impl Net {
         let (Some(rt), Some(keys)) = (&self.rt, &self.keys) else {
             return;
         };
+        // What's kept from its log goes to the window first, as if it had
+        // just come, so its sessions are there before any link (and while
+        // it's away); the link then resumes after it. A machine being
+        // added has nothing kept yet.
+        // Held while its kept history goes to the window and its link is
+        // made: a request for one of its sessions waits for the link
+        // instead of being dropped.
         let Ok(mut far) = self.far.lock() else { return };
+        let keeping = self.history.clone().map(|history| {
+            let kept = (!s.id.is_empty()).then(|| history.load(&s.id)).flatten();
+            let resume = kept.map(|k| {
+                let _ = self.ui.unbounded_send(Incoming::Remote {
+                    id: tag.clone(),
+                    event: dent_remote::Event::Out {
+                        req: 0,
+                        out: dent_protocol::Out::Events { events: k.events },
+                    },
+                });
+                (k.epoch, k.last_seq)
+            });
+            dent_remote::remote::Keeping { history, resume }
+        });
         if let Some(old) = far.remove(&tag) {
             old.remote.stop();
         }
@@ -173,8 +211,13 @@ impl Net {
         let t = Arc::new(Mutex::new(tag.clone()));
         let ui = self.ui.clone();
         let all = self.far.clone();
-        let remote =
-            dent_remote::spawn(rt.handle(), keys.clone(), "dent desktop", s, move |event| {
+        let remote = dent_remote::remote::spawn_kept(
+            rt.handle(),
+            keys.clone(),
+            "dent desktop",
+            s,
+            keeping,
+            move |event| {
                 if let dent_remote::Event::Saved(s) = &event
                     && let Err(e) = dent_remote::store::upsert(s)
                 {
@@ -200,7 +243,8 @@ impl Net {
                 }
                 let id = t.lock().map(|t| t.clone()).unwrap_or_default();
                 let _ = ui.unbounded_send(Incoming::Remote { id, event });
-            });
+            },
+        );
         far.insert(tag, Far { remote });
     }
 
@@ -213,6 +257,9 @@ impl Net {
         }
         if forget {
             let _ = dent_remote::store::forget(id);
+            if let Some(h) = &self.history {
+                h.forget(id);
+            }
         }
     }
 

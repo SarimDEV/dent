@@ -26,6 +26,21 @@ const WRITE_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Files the viewer may open are capped at this size.
 const FILE_CAP: u64 = 32 * 1024 * 1024;
 
+/// The most files one `Stat` asks about.
+const STAT_MAX: usize = 256;
+
+/// Why a file can't be read, in words, saying where it looked.
+fn said(s: &dent_protocol::FileStat) -> String {
+    use dent_protocol::FileStat as F;
+    match s {
+        F::Missing { checked } => format!("{checked} isn't there"),
+        F::Refused { checked } => format!("{checked} isn't shared"),
+        F::Unreadable { checked, error } => format!("{checked} can't be read: {error}"),
+        F::Dir { path } => format!("{path} is a folder"),
+        F::File { path, .. } => path.clone(),
+    }
+}
+
 pub async fn serve(d: Arc<Daemon>) -> Result<()> {
     let sock = d.paths.socket();
     let _ = std::fs::remove_file(&sock);
@@ -63,7 +78,29 @@ async fn conn(d: Arc<Daemon>, stream: UnixStream) -> Result<()> {
             }
         }
     });
-    session(d, lines_rx, tx).await
+    // Over the local socket, file bytes share the one lane.
+    let bulk = tx.clone();
+    session(d, lines_rx, tx, bulk).await
+}
+
+/// File reads at once across every client, and per client: they run beside
+/// the request loop, so a slow disk never holds up an approval or a send.
+static FILE_READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
+const FILE_READS_EACH: usize = 4;
+/// File reads one client may have waiting.
+const READS_QUEUED: usize = 64;
+
+/// Whether `r` only reads files: run beside the loop, its reply on the
+/// bulk lane.
+fn reads_files(r: &Request) -> bool {
+    matches!(
+        r,
+        Request::Stat { .. }
+            | Request::Read { .. }
+            | Request::ReadFile { .. }
+            | Request::ReadFiles { .. }
+            | Request::Pack { .. }
+    )
 }
 
 /// One client's requests in, its replies and events out: the same for the
@@ -72,8 +109,12 @@ pub async fn session(
     d: Arc<Daemon>,
     mut lines: mpsc::Receiver<String>,
     tx: mpsc::Sender<Vec<u8>>,
+    bulk: mpsc::Sender<Vec<u8>>,
 ) -> Result<()> {
     let mut hello = false;
+    let mine = Arc::new(tokio::sync::Semaphore::new(FILE_READS_EACH));
+    // Reads still running end with the session.
+    let mut reads = tokio::task::JoinSet::new();
     // Ends with the session, even one aborted mid-request.
     let mut sub: Option<AbortOnDrop> = None;
     while let Some(line) = lines.recv().await {
@@ -103,6 +144,43 @@ pub async fn session(
                 .await;
             continue;
         }
+        if reads_files(&env.body) {
+            // A client can't queue reads without end: past a point it's told
+            // to ask again, and the loop never waits on its reads (an
+            // approval behind them would).
+            while reads.try_join_next().is_some() {}
+            if reads.len() >= READS_QUEUED {
+                let _ = bulk.try_send(encode(
+                    req,
+                    &Out::Error {
+                        message: "busy reading files: ask again shortly".into(),
+                    },
+                ));
+                continue;
+            }
+            let (d, bulk, mine) = (d.clone(), bulk.clone(), mine.clone());
+            let body = env.body;
+            reads.spawn(async move {
+                let msg = {
+                    let (Ok(_each), Ok(_all)) = (mine.acquire().await, FILE_READS.acquire().await)
+                    else {
+                        return;
+                    };
+                    match handle(&d, body).await {
+                        Ok(reply) => Out::Reply { reply },
+                        Err(e) => Out::Error {
+                            message: format!("{e:#}"),
+                        },
+                    }
+                };
+                // Sent with the permits let go: a slow link holds up only
+                // its own replies, never other clients' reads.
+                let _ = bulk.send(encode(req, &msg)).await;
+            });
+            // Finished ones let go as it goes.
+            while reads.try_join_next().is_some() {}
+            continue;
+        }
         let out = match env.body {
             Request::Hello { proto, .. } => {
                 // The client names its newest protocol; it talks this
@@ -126,6 +204,7 @@ pub async fn session(
                         id: d.net.id(),
                         epoch: d.net.epoch.clone(),
                         addresses: d.net.addresses().await,
+                        wake: crate::remote::addrs::wake_targets(),
                     })
                 }
             }
@@ -157,10 +236,24 @@ pub async fn session(
                 .net
                 .open_pairing()
                 .map(|(code, expires)| Reply::Pairing { code, expires }),
+            Request::Pairing => Ok(match d.net.pairing_now() {
+                Some((code, expires)) => Reply::Pairing { code, expires },
+                None => Reply::Pairing {
+                    code: String::new(),
+                    expires: 0,
+                },
+            }),
             Request::Devices => Ok(Reply::Devices {
                 devices: d.net.devices(),
             }),
-            Request::RemoveDevice { id } => d.net.remove_device(&id).map(|_| Reply::Ok),
+            // One that isn't paired says so, rather than "removed".
+            Request::RemoveDevice { id } => d.net.remove_device(&id).and_then(|had| {
+                if had {
+                    Ok(Reply::Ok)
+                } else {
+                    anyhow::bail!("no device {id} is paired with this machine")
+                }
+            }),
             other => handle(&d, other).await,
         };
         let msg = match out {
@@ -190,6 +283,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
         Request::Hello { .. }
         | Request::Subscribe { .. }
         | Request::OpenPairing
+        | Request::Pairing
         | Request::Devices
         | Request::RemoveDevice { .. } => Reply::Ok,
         Request::Restart => {
@@ -212,6 +306,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             text,
             mut attachments,
             files,
+            bring,
         } => Reply::Created {
             session: d
                 .create(crate::daemon::NewSession {
@@ -227,6 +322,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
                     effort,
                     id,
                     text,
+                    bring,
                 })
                 .await?,
         },
@@ -365,6 +461,16 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             .map_err(|e| anyhow::anyhow!("{e}"))?;
             Reply::Ok
         }
+        Request::Pack { dir } => Reply::Pack {
+            pack: tokio::task::spawn_blocking(move || crate::bring::pack(Path::new(&dir))).await?,
+        },
+        Request::ReadFiles { dir, paths } => Reply::Carried {
+            files: tokio::task::spawn_blocking(move || {
+                crate::bring::read_files(Path::new(&dir), &paths)
+            })
+            .await?
+            .map_err(|e| anyhow::anyhow!(e))?,
+        },
         Request::Repo { dir } => Reply::Repo {
             repo: tokio::task::spawn_blocking(move || crate::workspace::repo(Path::new(&dir)))
                 .await?,
@@ -494,6 +600,12 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
         Request::Machine => Reply::Machine {
             machine: d.machine().await,
         },
+        Request::SetLan { on } => {
+            d.set_lan(on)?;
+            Reply::Machine {
+                machine: d.machine().await,
+            }
+        }
         Request::SetLoginItem { on } => {
             if on && let Some(why) = crate::login::blocked() {
                 bail!("{why}");
@@ -602,13 +714,83 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
                 tokio::task::spawn_blocking(move || crate::git::files(&dir, 20_000)).await?;
             Reply::Files { paths }
         }
+        // A session's file, by what the session wrote: wherever it is on this
+        // machine, but never the daemon's own secrets (decision 0068).
         Request::ReadFile { session, path } => {
             let cwd = cwd_of(d, &session)?;
-            let bytes =
-                tokio::task::spawn_blocking(move || read_inside(Path::new(&cwd), &path)).await??;
+            let policy = d.file_policy();
+            let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+                let home = crate::paths::home();
+                let at = dent_files::resolve(&path, Path::new(&cwd), &home)
+                    .ok_or_else(|| anyhow::anyhow!("{path} is on another computer"))?;
+                let o = dent_files::open(&at, &policy).map_err(|s| anyhow::anyhow!(said(&s)))?;
+                o.read_all(FILE_CAP)
+                    .map_err(|_| anyhow::anyhow!("{path} is too big to show"))
+            })
+            .await??;
             Reply::File {
                 bytes_b64: b64::encode(&bytes),
             }
+        }
+        Request::Stat { mut files } => {
+            files.truncate(STAT_MAX);
+            let mut bases = Vec::with_capacity(files.len());
+            for f in &files {
+                bases.push(match &f.base {
+                    Some(b) => Some(b.clone()),
+                    None => cwd_of(d, &f.session).ok(),
+                });
+            }
+            let policy = d.file_policy();
+            let stats = tokio::task::spawn_blocking(move || {
+                let home = crate::paths::home();
+                files
+                    .iter()
+                    .zip(bases)
+                    .map(|(f, base)| match base {
+                        Some(b) => dent_files::stat(&f.path, Path::new(&b), &home, &policy),
+                        None => dent_protocol::FileStat::Unreadable {
+                            checked: f.path.clone(),
+                            error: format!("no session {}", f.session),
+                        },
+                    })
+                    .collect()
+            })
+            .await?;
+            Reply::Stats { stats }
+        }
+        Request::Read {
+            file,
+            offset,
+            len,
+            expect,
+        } => {
+            let base = match &file.base {
+                Some(b) => b.clone(),
+                None => cwd_of(d, &file.session)?,
+            };
+            let policy = d.file_policy();
+            tokio::task::spawn_blocking(move || {
+                let home = crate::paths::home();
+                match dent_files::read(
+                    &file.path,
+                    Path::new(&base),
+                    &home,
+                    &policy,
+                    offset,
+                    len,
+                    expect,
+                ) {
+                    Ok((stamp, total, bytes)) => Reply::Bytes {
+                        stamp,
+                        offset,
+                        total,
+                        bytes_b64: b64::encode(&bytes),
+                    },
+                    Err((stat, changed)) => Reply::FileGone { stat, changed },
+                }
+            })
+            .await?
         }
     })
 }
@@ -633,7 +815,7 @@ fn hidden_projects(d: &Daemon) -> Result<std::collections::HashSet<String>> {
 }
 
 /// Keep a folder on the list, newest, and back on it if it was taken off.
-fn remember_project(d: &Daemon, path: &str) -> Result<()> {
+pub(crate) fn remember_project(d: &Daemon, path: &str) -> Result<()> {
     let mut added = added_projects(d)?;
     added.insert(path.to_string(), crate::daemon::now_ms());
     let mut hidden = hidden_projects(d)?;
@@ -681,7 +863,6 @@ fn cwd_of(d: &Daemon, session: &str) -> Result<String> {
         .cwd)
 }
 
-/// Read a file, refusing anything outside the session's directory.
 /// Write the files message `id` brought with it ([`Request::Send`]'s
 /// `files`) under the state folder, and their paths, to attach. Sent again,
 /// the same message writes the same files over themselves.
@@ -692,7 +873,7 @@ async fn carry(state: &Path, id: &str, files: Vec<dent_protocol::Carried>) -> Re
     let dir = state
         .join("attachments")
         .join("carried")
-        .join(safe_name(id));
+        .join(id_folder(id));
     tokio::task::spawn_blocking(move || {
         std::fs::create_dir_all(&dir)?;
         let mut paths = Vec::new();
@@ -710,6 +891,33 @@ async fn carry(state: &Path, id: &str, files: Vec<dent_protocol::Carried>) -> Re
         Ok(paths)
     })
     .await?
+}
+
+/// Message `id`'s own folder name: the whole id, so ids that differ
+/// anywhere (`web/m1`, `cli/m1`) never share a folder; when it has
+/// characters a folder name can't, they're replaced and a hash of the id
+/// keeps it apart. The same id is always the same folder, so a resend
+/// writes over itself.
+fn id_folder(id: &str) -> String {
+    let plain: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(100)
+        .collect();
+    if plain == id && !plain.is_empty() {
+        return plain;
+    }
+    // FNV-1a: stable across builds, unlike the standard hasher.
+    let hash = id.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+    });
+    format!("{plain}-{hash:016x}")
 }
 
 /// The last part of a name sent from elsewhere, as a file name here:
@@ -734,18 +942,6 @@ fn safe_name(name: &str) -> String {
         cut -= 1;
     }
     format!("{}{ext}", &last[..cut])
-}
-
-fn read_inside(cwd: &Path, path: &str) -> Result<Vec<u8>> {
-    let root = cwd.canonicalize()?;
-    let full = root.join(path).canonicalize()?;
-    if !full.starts_with(&root) {
-        bail!("{path} is outside the session's folder");
-    }
-    if std::fs::metadata(&full)?.len() > FILE_CAP {
-        bail!("{path} is too big to show");
-    }
-    Ok(std::fs::read(full)?)
 }
 
 /// Catch up from the log, then stream live. Live events that arrive during

@@ -17,6 +17,7 @@ dent-protocol = { path = "crates/protocol" }
 dent-client-core = { path = "crates/client-core" }
 dent-ambient = { path = "crates/ambient" }
 dent-link = { path = "crates/link" }
+dent-files = { path = "crates/files" }
 dent-remote = { path = "crates/remote" }
 
 anyhow = "=1.0.104"

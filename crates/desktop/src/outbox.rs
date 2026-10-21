@@ -35,10 +35,27 @@ fn path() -> std::path::PathBuf {
 }
 
 pub fn load() -> Vec<Outgoing> {
-    std::fs::read_to_string(path())
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+    let Ok(text) = std::fs::read_to_string(path()) else {
+        return Vec::new();
+    };
+    // Each message on its own: one that can't be read (another version's,
+    // or damaged) doesn't take the rest with it. What can't be read is
+    // kept beside, since the next save writes over the file.
+    let entries: Option<Vec<serde_json::Value>> = serde_json::from_str(&text).ok();
+    let all: Vec<Outgoing> = entries
+        .iter()
+        .flatten()
+        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+        .collect();
+    if entries.as_ref().is_none_or(|e| e.len() != all.len()) {
+        let kept = path().with_extension("json.unread");
+        eprintln!(
+            "some messages waiting for their machines couldn't be read; the file is kept at {}",
+            kept.display()
+        );
+        let _ = dent_remote::store::write_private(&kept, text.as_bytes());
+    }
+    all
 }
 
 pub fn save(all: &[Outgoing]) {
@@ -149,3 +166,7 @@ mod tests {
         assert_eq!(age(back[0].at, now), "14 h");
     }
 }
+
+#[cfg(test)]
+#[path = "outbox_break_b.rs"]
+mod break_b;

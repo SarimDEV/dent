@@ -15,11 +15,14 @@ use dent_link::{Keys, Trust};
 use dent_protocol::{AgentInfo, Envelope, Out, PROTOCOL, Reply, Request, encode};
 use tokio::sync::mpsc;
 
+use crate::history::History;
 use crate::host::{self, Ask};
 use crate::store::{self, Saved};
 
 const HELLO: u64 = 1;
 const SUBSCRIBE: u64 = 2;
+/// The first number a caller's request may take.
+pub const FIRST: u64 = 3;
 
 enum Cmd {
     /// Request `n`, already in [`Pending`], to go if the link is up.
@@ -38,6 +41,8 @@ pub enum Event {
         name: String,
         id: String,
         version: String,
+        /// The protocol it speaks.
+        proto: u32,
         agents: Vec<AgentInfo>,
         /// The route this link took, and how this device is trusted there.
         via: String,
@@ -113,7 +118,14 @@ impl Remote {
     /// the same number. While the machine is away it waits.
     /// Files on this device go inside it, read in on the way out (see
     /// [`carry`]).
+    ///
+    /// Numbers up to [`FIRST`] are the link's own (its hello and
+    /// subscribe); a reply to one of those would never reach the caller.
     pub fn send(&self, n: u64, r: Request) {
+        assert!(
+            n >= FIRST,
+            "request numbers below {FIRST} are the link's own"
+        );
         if let Ok(mut p) = self.pending.lock() {
             p.0.insert(n, (r, false));
         }
@@ -159,8 +171,56 @@ pub fn spawn(
     saved: Saved,
     events: impl FnMut(Event) + Send + 'static,
 ) -> Remote {
+    spawn_kept(rt, keys, client, saved, None, events)
+}
+
+/// The machine's log as this device keeps it ([`History`]): where a link
+/// resumes, and where what comes is kept.
+pub struct Keeping {
+    pub history: History,
+    /// The kept log's epoch and its newest event, already applied by the
+    /// client; `None` when nothing's kept.
+    pub resume: Option<(String, u64)>,
+}
+
+/// Like [`spawn`], keeping the machine's log on this device: a link
+/// subscribes after what's kept, and every event that comes is kept, in
+/// order, before the client hears it.
+pub fn spawn_kept(
+    rt: &tokio::runtime::Handle,
+    keys: Keys,
+    client: &str,
+    saved: Saved,
+    keeping: Option<Keeping>,
+    events: impl FnMut(Event) + Send + 'static,
+) -> Remote {
+    spawn_with(rt, keys, client, saved, keeping, true, events)
+}
+
+/// Like [`spawn`], for asking only: no link subscribes to the machine's
+/// log, so nothing of it comes, only answers (`dent call`, `dent get`).
+pub fn spawn_asking(
+    rt: &tokio::runtime::Handle,
+    keys: Keys,
+    client: &str,
+    saved: Saved,
+    events: impl FnMut(Event) + Send + 'static,
+) -> Remote {
+    spawn_with(rt, keys, client, saved, None, false, events)
+}
+
+fn spawn_with(
+    rt: &tokio::runtime::Handle,
+    keys: Keys,
+    client: &str,
+    saved: Saved,
+    keeping: Option<Keeping>,
+    follow: bool,
+    events: impl FnMut(Event) + Send + 'static,
+) -> Remote {
     let (tx, rx) = mpsc::unbounded_channel();
-    let seq = Arc::new(AtomicU64::new(0));
+    let resumed = keeping.as_ref().and_then(|k| k.resume.clone());
+    let seq = Arc::new(AtomicU64::new(resumed.as_ref().map_or(0, |r| r.1)));
     let pending = Arc::new(Mutex::new(Pending::default()));
     let theirs = Arc::new(Mutex::new(HashSet::new()));
     let m = Machine::new(
@@ -173,6 +233,8 @@ pub fn spawn(
         m,
         client.to_string(),
         saved,
+        keeping,
+        follow,
         seq.clone(),
         pending.clone(),
         theirs.clone(),
@@ -235,6 +297,11 @@ impl Cursor {
 /// The oldest protocol whose daemons take files inside a message.
 const CARRIES: u32 = 2;
 
+/// The oldest protocol whose daemons can bring a project from another
+/// machine (`Request::Create`'s `bring`). An older one would read the
+/// request as a session in its scratch folder.
+const BRINGS: u32 = 3;
+
 /// The paths a message attaches, if it's one that carries files.
 fn attached(r: &Request) -> Option<&Vec<String>> {
     match r {
@@ -279,13 +346,43 @@ fn carry(r: &mut Request, theirs: &HashSet<String>) -> Result<(), String> {
         let name = p
             .file_name()
             .map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
-        let bytes = std::fs::read(p).map_err(|e| format!("couldn't read {name}: {e}"))?;
-        total += bytes.len();
-        if total > dent_protocol::CARRIED_MAX {
-            return Err(format!(
+        let too_many = || {
+            format!(
                 "these files come to more than {} MB, too many to send to another machine at once",
                 dent_protocol::CARRIED_MAX >> 20
-            ));
+            )
+        };
+        // Opened without waiting (a pipe would hold this machine's link up
+        // for good), only a plain file, and its size known before any of it
+        // is read: a video of gigabytes is refused, not loaded first.
+        let f = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(p)
+                .map_err(|e| format!("couldn't read {name}: {e}"))?
+        };
+        let meta = f
+            .metadata()
+            .map_err(|e| format!("couldn't read {name}: {e}"))?;
+        if !meta.is_file() {
+            return Err(format!("{name} isn't a file that can be sent"));
+        }
+        if total + meta.len() as usize > dent_protocol::CARRIED_MAX {
+            return Err(too_many());
+        }
+        let mut bytes = Vec::with_capacity(meta.len() as usize);
+        {
+            use std::io::Read;
+            f.take((dent_protocol::CARRIED_MAX - total) as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|e| format!("couldn't read {name}: {e}"))?;
+        }
+        total += bytes.len();
+        // Grown while it was read.
+        if total > dent_protocol::CARRIED_MAX {
+            return Err(too_many());
         }
         files.push(dent_protocol::Carried {
             name,
@@ -306,6 +403,15 @@ async fn ready_up(
     name: &str,
     n: u64,
 ) -> Result<(), String> {
+    let brings = pending.lock().ok().is_some_and(|p| {
+        p.0.get(&n)
+            .is_some_and(|(r, _)| matches!(r, Request::Create { bring: Some(_), .. }))
+    });
+    if brings && proto < BRINGS {
+        return Err(format!(
+            "{name} runs an older dent, which can't bring a project from another machine: update dent there"
+        ));
+    }
     let known = theirs.lock().map(|t| t.clone()).unwrap_or_default();
     let Some(mut r) = pending.lock().ok().and_then(|p| p.to_carry(n, &known)) else {
         return Ok(());
@@ -338,6 +444,8 @@ async fn run(
     m: Machine,
     client: String,
     mut saved: Saved,
+    keeping: Option<Keeping>,
+    follow: bool,
     seq: Arc<AtomicU64>,
     pending: Arc<Mutex<Pending>>,
     theirs: Arc<Mutex<HashSet<String>>>,
@@ -368,10 +476,16 @@ async fn run(
             pairing_open: false,
         },
     );
+    // Resumed from the kept log: the client has applied it, so a link
+    // subscribes after it, in its epoch.
+    let (history, resume) = match keeping {
+        Some(k) => (Some(k.history), k.resume),
+        None => (None, None),
+    };
     let mut cursor = Cursor {
         applied: seq,
-        passed: 0,
-        epoch: None,
+        passed: resume.as_ref().map_or(0, |r| r.1),
+        epoch: resume.map(|r| r.0),
     };
     loop {
         tokio::select! {
@@ -387,7 +501,9 @@ async fn run(
                         let hello = Request::Hello { proto: PROTOCOL, client: client.clone() };
                         let sub = cursor.subscribe();
                         let _ = ask_tx.send(Ask::Send(line(HELLO, &hello)));
-                        let _ = ask_tx.send(Ask::Send(line(SUBSCRIBE, &sub)));
+                        if follow {
+                            let _ = ask_tx.send(Ask::Send(line(SUBSCRIBE, &sub)));
+                        }
                     }
                     Note::State(s) => {
                         if !matches!(s, State::Online | State::Slow) {
@@ -402,7 +518,7 @@ async fn run(
                         let (req, out) = (env.req, env.body);
                         if req == HELLO {
                             match out {
-                                Out::Reply { reply: Reply::Welcome { proto, machine, id, version, agents, addresses, epoch: e, .. } } => {
+                                Out::Reply { reply: Reply::Welcome { proto, machine, id, version, agents, addresses, wake, epoch: e, .. } } => {
                                     if !saved.id.is_empty() && !id.is_empty() && id != saved.id {
                                         events(Event::DifferentMachine(via.0.clone()));
                                         continue;
@@ -414,6 +530,12 @@ async fn run(
                                         saved.id = id.clone();
                                     }
                                     saved.learned = addresses;
+                                    // Kept from before when it says none: a
+                                    // machine waking up on another network
+                                    // still has its cards.
+                                    if !wake.is_empty() {
+                                        saved.wake = wake;
+                                    }
                                     if saved != before && !saved.id.is_empty() {
                                         events(Event::Saved(saved.clone()));
                                     }
@@ -421,6 +543,7 @@ async fn run(
                                         name: machine.clone(),
                                         id,
                                         version,
+                                        proto,
                                         agents,
                                         via: via.0.clone(),
                                         trust: via.1.clone(),
@@ -446,6 +569,19 @@ async fn run(
                             continue;
                         }
                         cursor.out(&out);
+                        // Kept before the client hears it, in the order it
+                        // came, tagged with the log it's from.
+                        if let (Some(h), Some(epoch)) = (&history, &cursor.epoch)
+                            && !saved.id.is_empty()
+                        {
+                            match &out {
+                                Out::Resync { epoch } => h.reset(&saved.id, epoch),
+                                Out::Events { events } => {
+                                    h.save(&saved.id, epoch, events.clone())
+                                }
+                                _ => {}
+                            }
+                        }
                         if req != 0
                             && let Ok(mut p) = pending.lock()
                         {
@@ -566,6 +702,32 @@ mod tests {
     }
 
     #[test]
+    fn a_project_is_brought_only_to_a_daemon_that_can_take_it() {
+        let bring = Request::Create {
+            agent: None,
+            cwd: String::new(),
+            worktree: None,
+            model: None,
+            permission: Default::default(),
+            effort: None,
+            id: "m1".into(),
+            text: "hi".into(),
+            attachments: Vec::new(),
+            files: Vec::new(),
+            bring: Some(Default::default()),
+        };
+        let pending = Arc::new(Mutex::new(Pending::default()));
+        pending.lock().unwrap().0.insert(1, (bring, false));
+        let theirs = Arc::new(Mutex::new(HashSet::new()));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let old = rt.block_on(ready_up(&pending, &theirs, 2, "vm", 1));
+        assert!(old.unwrap_err().contains("can't bring a project"));
+        assert!(rt.block_on(ready_up(&pending, &theirs, 3, "vm", 1)).is_ok());
+    }
+
+    #[test]
     fn a_cursor_stored_from_before_a_resync_isnt_resumed_in_the_new_log() {
         let applied = Arc::new(AtomicU64::new(0));
         let mut c = Cursor {
@@ -595,3 +757,7 @@ mod tests {
         assert_eq!(c.subscribe(), sub(1, "e2"));
     }
 }
+
+#[cfg(test)]
+#[path = "break_b_tests.rs"]
+mod break_b_tests;

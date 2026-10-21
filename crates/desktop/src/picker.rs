@@ -2,6 +2,8 @@
 //! type into. Words search the projects; a path (`/…` or `~…`) goes to a
 //! folder, with its subfolders to complete; "New project…" makes one from a
 //! name and "Clone a Git URL…" clones one, both into `~/dent/projects`.
+//! Your other machines' projects come after, to bring one here
+//! ([`crate::bring`]).
 
 use crate::ui::FocusField;
 use std::rc::Rc;
@@ -22,6 +24,8 @@ pub enum Mode {
     New,
     /// Paste a Git URL to clone.
     Clone,
+    /// Bring a project from another machine: what comes with it.
+    Bring,
 }
 
 /// A path is being typed rather than a search.
@@ -155,6 +159,7 @@ impl Dent {
                 false,
                 act(Box::new(move |this, _, _| this.clone_project(&q))),
             )),
+            Mode::Bring => self.bring_entries(&mut v),
             Mode::Pick if is_path(&q) => self.folder_entries(&q, &mut v),
             Mode::Pick => self.search_entries(&q, &mut v),
         }
@@ -204,6 +209,7 @@ impl Dent {
                 })),
             ));
         }
+        self.elsewhere_entries(q, v);
         if v.iter().all(|e| !e.choosable()) && !q.is_empty() && !is_url(q) {
             v.push(Entry::note(&format!("No project matches “{q}”")));
         }
@@ -343,6 +349,9 @@ impl Dent {
         self.project_mode = Mode::Pick;
         self.project_error = None;
         self.folders = None;
+        self.bring_draft = None;
+        self.bring_asked = None;
+        self.ask_elsewhere();
         self.menu_query.update(cx, |f, cx| {
             put(f, "", window, cx);
             f.focus_field(window, cx);

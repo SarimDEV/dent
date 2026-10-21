@@ -2113,6 +2113,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "dent-client-core",
+ "dent-files",
  "dent-link",
  "dent-protocol",
  "dent-remote",
@@ -2125,6 +2126,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+ "zbus",
 ]
 
 [[package]]
@@ -2137,6 +2139,7 @@ dependencies = [
  "cairo-rs",
  "dent-ambient",
  "dent-client-core",
+ "dent-files",
  "dent-link",
  "dent-protocol",
  "dent-remote",
@@ -2174,6 +2177,14 @@ name = "dent-fake-claude"
 version = "0.0.0"
 dependencies = [
  "serde_json",
+]
+
+[[package]]
+name = "dent-files"
+version = "0.0.0"
+dependencies = [
+ "dent-protocol",
+ "libc",
 ]
 
 [[package]]
@@ -2215,6 +2226,8 @@ dependencies = [
  "dent-protocol",
  "futures-util",
  "hex",
+ "libc",
+ "rusqlite",
  "serde",
  "serde_json",
  "tokio",
@@ -9307,6 +9320,7 @@ dependencies = [
  "signal-hook-registry",
  "socket2",
  "tokio-macros",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -11591,6 +11605,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",

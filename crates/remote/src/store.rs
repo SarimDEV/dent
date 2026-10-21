@@ -21,6 +21,9 @@ pub struct Saved {
     /// Routes the machine reported in its welcome.
     #[serde(default)]
     pub learned: Vec<String>,
+    /// How to wake it, as its welcome last said.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wake: Vec<dent_protocol::Wake>,
 }
 
 impl Saved {
@@ -38,6 +41,23 @@ impl Saved {
 
     pub fn known_key(&self) -> Option<Vec<u8>> {
         hex::decode(&self.key).ok().filter(|k| !k.is_empty())
+    }
+}
+
+/// The state folder of this machine's own daemon (`DENT_STATE`, else the
+/// platform's place for it), where its socket is.
+pub fn daemon_state() -> PathBuf {
+    if let Some(p) = std::env::var_os("DENT_STATE") {
+        return PathBuf::from(p);
+    }
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/dent")
+    } else {
+        std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/state"))
+            .join("dent")
     }
 }
 
@@ -64,8 +84,21 @@ pub fn device_keys() -> Result<Keys> {
     let dir = state_dir();
     std::fs::create_dir_all(&dir)?;
     let p = dir.join("device.key");
-    if let Ok(t) = std::fs::read_to_string(&p) {
-        return Keys::from_hex(&t).context("the device key is damaged");
+    // Made only when there's none: one that's there but can't be read is an
+    // error, since a new key in its place would unpair this device from
+    // every machine.
+    match std::fs::read(&p) {
+        Ok(b) => {
+            let t = String::from_utf8(b)
+                .map_err(|_| anyhow::anyhow!("the device key at {} is damaged", p.display()))?;
+            return Keys::from_hex(&t)
+                .with_context(|| format!("the device key at {} is damaged", p.display()));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("couldn't read the device key at {}", p.display()));
+        }
     }
     let k = Keys::generate()?;
     write_private(&p, k.to_hex().as_bytes())?;

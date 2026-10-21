@@ -1151,6 +1151,9 @@ pub struct R<'a> {
     /// The folder relative links and pictures are found from: the
     /// document's own, or the session's.
     pub base: Option<std::path::PathBuf>,
+    /// The session these blocks are from (qualified with its machine) and
+    /// its folder: its pictures are asked of its machine.
+    pub session: Option<(String, String)>,
     /// Find counts these blocks from their words, before they're laid out
     /// (the chat): a long table's rows past the tenth aren't counted, so
     /// they're not tinted either. Elsewhere (documents, side chat) Find
@@ -1192,7 +1195,10 @@ fn looks_like_path(c: &str) -> bool {
 }
 
 /// Where a link or picture in a document points: a web address as it is,
-/// a path made whole from the document's folder (`~` is home).
+/// a path made whole from the document's folder. `~/…`, `~name/…` and
+/// `file://…` stay as written: whose home it is, and whether a `file://`
+/// host is that machine, depend on the machine the session runs on, which
+/// the file layer asks ([`crate::files`]).
 pub fn resolve(href: &str, base: Option<&std::path::Path>) -> String {
     // A reference to an issue, in the repository `base` is in. One that
     // can't be found keeps its `github:` and is no link.
@@ -1204,12 +1210,7 @@ pub fn resolve(href: &str, base: Option<&std::path::Path>) -> String {
     }
     let path = href.split(['#', '?']).next().unwrap_or(href);
     let path = crate::web::percent_decode(path);
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Some(h) = std::env::var_os("HOME")
-    {
-        return std::path::Path::new(&h).join(rest).display().to_string();
-    }
-    if path.starts_with('/') {
+    if path.starts_with('/') || path.starts_with('~') {
         return path;
     }
     match base {
@@ -1231,26 +1232,72 @@ pub fn resolve(href: &str, base: Option<&std::path::Path>) -> String {
     }
 }
 
+/// A picture's box, as wide as the column allows, no taller than `max_h`,
+/// and in the picture's own proportions, so no empty band sits above or
+/// below it. One whose size can't be read is fitted inside those bounds.
+/// (The box is a wrapper's: an image given a relative width takes its
+/// height from its pixels, whatever its proportions say.)
+pub fn sized(i: Img, path: &std::path::Path, max_h: f32) -> Div {
+    match crate::data::picture_dims(path) {
+        Some((w, h)) => {
+            let ratio = w as f32 / h as f32;
+            div()
+                .w_full()
+                .max_w(px((w as f32).min(max_h * ratio)))
+                .aspect_ratio(ratio)
+                .child(i.size_full())
+        }
+        None => div().child(i.max_w_full().max_h(px(max_h))),
+    }
+}
+
 /// A picture on its own line: a local file is shown, fitted to the column;
 /// a web picture is a link to it.
 fn image_block(src: &str, alt: &str, t: &Theme, key: &str, r: &mut R) -> AnyElement {
     let at = resolve(src, r.base.as_deref());
-    if at.starts_with('/') && crate::data::is_file(std::path::Path::new(&at)) {
-        let path = std::path::PathBuf::from(&at);
+    let mut kept = None;
+    let here = match &r.session {
+        // A session's picture: from its machine, never this Mac's disk.
+        Some((id, cwd)) if !at.contains("://") || at.starts_with("file://") => {
+            let ask = crate::files::Ask::new(id, &at, cwd)
+                .based(r.base.as_ref().map(|b| b.display().to_string()));
+            kept = crate::files::kept(&ask);
+            crate::files::picture(&ask).shown()
+        }
+        _ => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let full = match at.strip_prefix("~/") {
+                Some(rest) => format!("{home}/{rest}"),
+                None => at.clone(),
+            };
+            // this Mac's: a document of no session
+            (full.starts_with('/') && crate::data::is_file(std::path::Path::new(&full)))
+                .then(|| std::path::PathBuf::from(full))
+        }
+    };
+    if let Some(path) = here {
         div()
             .id(SharedString::from(format!("{key}/img")))
             .flex()
             .flex_col()
             .gap(px(space::S1))
-            .child(crate::lightbox::picture(
-                &crate::lightbox::single(format!("{key}/pic"), path.clone()),
-                0,
-                img(path.clone())
-                    .max_w_full()
-                    .max_h(px(520.))
-                    .object_fit(ObjectFit::Contain)
-                    .rounded(px(radius::MD)),
-            ))
+            .child(
+                crate::lightbox::picture(
+                    &crate::lightbox::single(format!("{key}/pic"), path.clone()),
+                    0,
+                    sized(
+                        img(path.clone())
+                            .object_fit(ObjectFit::Contain)
+                            .rounded(px(radius::MD)),
+                        &path,
+                        520.,
+                    ),
+                )
+                // On the picture's own corner.
+                .when_some(kept, |d, m| {
+                    d.child(crate::ui::kept_mark(format!("{key}/kept"), &m, t))
+                }),
+            )
             .when(!alt.is_empty(), |d| {
                 d.child(div().ty(LABEL).text_color(t.quiet).child(alt.to_string()))
             })

@@ -49,6 +49,8 @@ pub enum Do {
     OpenLink(String),
     /// Open a file in its app (your pick for its kind, else the Mac's).
     OpenInApp(String),
+    /// Another machine's file, copied here first, then opened in its app.
+    OpenFarInApp(crate::files::Ask),
     /// Type a command into your terminal, for you to run.
     RunInTerminal(String),
     /// Put words into the reply box as a quote, under what's there.
@@ -79,6 +81,7 @@ impl Dent {
             Do::CloseTab(a) => self.close_tab(a, cx),
             Do::CloseOtherTabs(a) => self.close_other_tabs(a, cx),
             Do::CopyPath(p) => cx.write_to_clipboard(ClipboardItem::new_string(p)),
+            // this Mac's: callers give this Mac's paths
             Do::Reveal(p) => cx.reveal_path(std::path::Path::new(&p)),
             Do::Rename(id) => {
                 self.select(Some(id.clone()), window, cx);
@@ -127,7 +130,9 @@ impl Dent {
             }
             Do::Copy(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
             Do::OpenLink(url) => crate::select::open_link(&url, window, cx),
+            // this Mac's: callers give this Mac's paths
             Do::OpenInApp(path) => crate::open::open(&path, cx),
+            Do::OpenFarInApp(ask) => self.open_outside_far(ask, cx),
             Do::Quote(words) => self.quote(&words, window, cx),
             Do::SaveSkill(words, project) => self.save_skill(&words, project.as_deref(), cx),
             Do::RunInTerminal(command) => {
@@ -165,12 +170,31 @@ impl Dent {
     pub fn chat_context(&mut self, at: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
         let mut items: Vec<(&str, Do)> = Vec::new();
         if let Some(url) = crate::select::link_at(at, window) {
-            if url.starts_with('/') {
+            // A file is the session's machine's: another machine's opens
+            // from a copy here, and only this Mac's shows in Finder.
+            let far = self
+                .current()
+                .filter(|s| !dent_client_core::fleet::split(&s.id).0.is_empty())
+                .map(|s| (s.id.clone(), s.cwd.clone()));
+            if url.starts_with('/') || url.starts_with("~/") {
                 let (path, _) = crate::select::at_line(&url);
                 items.push(("Open", Do::OpenLink(url.clone())));
-                items.push(("Open in App", Do::OpenInApp(path.clone())));
-                items.push(("Show in Finder", Do::Reveal(path.clone())));
-                items.push(("Copy Path", Do::CopyPath(path)));
+                match far {
+                    Some((id, cwd)) => {
+                        let ask = crate::files::Ask::new(&id, &path, &cwd);
+                        items.push(("Open in App", Do::OpenFarInApp(ask)));
+                        items.push(("Copy Path", Do::CopyPath(path)));
+                    }
+                    None => {
+                        let path = match path.strip_prefix("~/") {
+                            Some(rest) => format!("{}/{rest}", crate::app::home()),
+                            None => path,
+                        };
+                        items.push(("Open in App", Do::OpenInApp(path.clone())));
+                        items.push(("Show in Finder", Do::Reveal(path.clone())));
+                        items.push(("Copy Path", Do::CopyPath(path)));
+                    }
+                }
             } else {
                 items.push(("Open Link", Do::OpenLink(url.clone())));
                 items.push(("Copy Link", Do::Copy(url)));
@@ -202,7 +226,25 @@ impl Dent {
         let Some(detail) = line.detail.as_ref() else {
             return;
         };
-        let items = tool_items(detail, |p| std::path::Path::new(p).exists());
+        // The file is the session's machine's: asked of it, and only this
+        // Mac's can be shown in Finder.
+        let Some(s) = self.current().cloned() else {
+            return;
+        };
+        let far = !dent_client_core::fleet::split(&s.id).0.is_empty();
+        let items = tool_items(
+            detail,
+            |p| {
+                matches!(
+                    crate::files::stat(&crate::files::Ask::new(&s.id, p, &s.cwd)),
+                    crate::files::Look::Loading
+                        | crate::files::Look::Here(dent_protocol::FileStat::File { .. })
+                        | crate::files::Look::Stale(dent_protocol::FileStat::File { .. })
+                        | crate::files::Look::Here(dent_protocol::FileStat::Dir { .. })
+                )
+            },
+            !far,
+        );
         if !items.is_empty() {
             self.open_context(at, items, cx);
         }
@@ -310,6 +352,26 @@ impl Dent {
     /// A file's Open, and beside it Open with: the apps that can open it,
     /// your pick for its kind ticked; picking one opens it there from now
     /// on.
+    /// Open, for another machine's file: copied here first, then opened in
+    /// its app.
+    pub fn open_far_button(
+        &self,
+        id: &'static str,
+        ask: crate::files::Ask,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.t;
+        crate::ui::ghost(id, "Open", &t)
+            .relative()
+            .child(crate::ui::probe(&self.probes, id))
+            .on_press(cx.listener(move |this, _, _, cx| this.open_outside_far(ask.clone(), cx)))
+            .with_tip(crate::ui::tip_owned(
+                "Copy it here and open it in its app".to_string(),
+                t,
+            ))
+            .into_any_element()
+    }
+
     pub fn open_button(
         &self,
         id: &'static str,
@@ -327,6 +389,7 @@ impl Dent {
                 crate::ui::ghost(id, "Open", &t)
                     .relative()
                     .child(crate::ui::probe(&self.probes, id))
+                    // this Mac's: callers give this Mac's paths
                     .on_press(move |_, _, cx| crate::open::open(&p1, cx))
                     .with_tip(crate::ui::tip_owned(
                         match &opens_in {
@@ -405,6 +468,7 @@ pub fn quote_block(words: &str) -> String {
 fn tool_items(
     detail: &crate::data::CallDetail,
     exists: impl Fn(&str) -> bool,
+    here: bool,
 ) -> Vec<(&'static str, Do)> {
     let mut items: Vec<(&str, Do)> = Vec::new();
     if let Some(command) = &detail.command {
@@ -414,7 +478,9 @@ fn tool_items(
     if let Some(path) = &detail.path {
         if exists(path) {
             items.push(("Open", Do::OpenLink(path.clone())));
-            items.push(("Show in Finder", Do::Reveal(path.clone())));
+            if here {
+                items.push(("Show in Finder", Do::Reveal(path.clone())));
+            }
         }
         items.push(("Copy Path", Do::CopyPath(path.clone())));
     }
@@ -443,7 +509,7 @@ mod tests {
             path: None,
             edits: false,
         };
-        let items = super::tool_items(&detail, |_| true);
+        let items = super::tool_items(&detail, |_| true, true);
         let labels: Vec<_> = items.iter().map(|(l, _)| *l).collect();
         assert_eq!(
             labels,
@@ -460,7 +526,7 @@ mod tests {
             path: Some("/p/a.rs".into()),
             edits: true,
         };
-        let labels: Vec<_> = super::tool_items(&file, |_| false)
+        let labels: Vec<_> = super::tool_items(&file, |_| false, true)
             .iter()
             .map(|(l, _)| *l)
             .collect();

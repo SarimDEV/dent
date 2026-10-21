@@ -1603,7 +1603,9 @@ thread_local! {
 /// Follow a link: web addresses in the browser; a file dent can show (a
 /// document, page or picture) in the viewer; any other file in its app.
 pub fn open_link(url: &str, window: &mut Window, cx: &mut App) {
-    if url.starts_with('/') {
+    // A path, `~/…`, `~name/…` and `file://…` too (whose home and which
+    // computer, the session's machine says).
+    if url.starts_with('/') || url.starts_with('~') || url.starts_with("file://") {
         // The window decides where it shows, and says so when it can't.
         OPEN.with(|o| *o.borrow_mut() = Some(at_line(url)));
         window.refresh();
@@ -1616,6 +1618,7 @@ pub fn open_link(url: &str, window: &mut Window, cx: &mut App) {
 /// (the column is let go). A path that really ends that way stays whole.
 pub fn at_line(path: &str) -> (String, Option<u32>) {
     if std::path::Path::new(path).exists() {
+        // this Mac's, if here: a name that ends in :12
         return (path.to_string(), None);
     }
     let mut rest = path;

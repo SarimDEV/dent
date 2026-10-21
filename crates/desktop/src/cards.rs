@@ -629,6 +629,7 @@ impl Dent {
                             scope: format!("{}/{ix}/command", s.id),
                             bg: t.surface,
                             base: Some(std::path::PathBuf::from(&s.cwd)),
+                            session: Some((s.id.clone(), s.cwd.clone())),
                         };
                         markdown::render_with(blocks.as_slice(), &t, false, true, &mut r)
                             .into_any_element()

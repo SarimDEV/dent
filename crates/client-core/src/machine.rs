@@ -264,6 +264,9 @@ pub struct Machine {
     state: State,
     foreground: bool,
     last_online: Option<u64>,
+    /// When this run of failed attempts began: past [`NEAR_MS`] of them,
+    /// the hourly budget holds. Cleared by a healthy link.
+    failing_since: Option<u64>,
     /// Redial fast until then, after an announced restart.
     restart_until: Option<u64>,
     /// An announced restart that didn't come back in time.
@@ -292,6 +295,7 @@ impl Machine {
             next_conn: 1,
             generation: 0,
             attempt: 0,
+            failing_since: None,
             io: VecDeque::new(),
             notes: Vec::new(),
             state: State::Off,
@@ -1145,6 +1149,7 @@ impl Machine {
         let healthy = now.saturating_sub(o.opened) >= STABLE_MS;
         if healthy {
             self.attempt = 0;
+            self.failing_since = None;
         } else if now < self.last_online.unwrap_or(0) + STABLE_MS {
             // Answered, then failed fast: leave that route alone for a while.
             self.cooldown.insert(o.addr.clone(), now + COOLDOWN_MS);
@@ -1341,7 +1346,17 @@ impl Machine {
         let steps = (self.attempt + 1 - QUICK.len()).min(16) as u32;
         let ceiling = (QUICK[QUICK.len() - 1] << steps).min(cap);
         let half = ceiling / 2;
-        half + self.random() % (half + 1)
+        let wait = half + self.random() % (half + 1);
+        // The budget (decision 0062): past the first ten minutes of failing,
+        // no more than 60 dials an hour, counting each route an attempt
+        // dials. It holds for every attempt that lands past the mark, so
+        // one scheduled just before it can't squeeze in an extra.
+        let since = *self.failing_since.get_or_insert(now);
+        if now + wait >= since + NEAR_MS {
+            wait.max(self.routes.len().max(1) as u64 * 60_000)
+        } else {
+            wait
+        }
     }
 
     fn random(&mut self) -> u64 {
@@ -1416,6 +1431,49 @@ fn race_deadline(r: &Race) -> Option<u64> {
 }
 
 /// A refusal in words a person can act on.
+/// A machine's address as typed, made whole: dent's port (7480) when none
+/// is given, brackets around a bare IPv6 address. `None` when it can't be
+/// an address at all, so it's said at once rather than tried.
+pub fn address(typed: &str) -> Option<String> {
+    let a = typed.trim();
+    let whole = if a.starts_with('[') {
+        if a.contains("]:") {
+            a.to_string()
+        } else {
+            format!("{a}:7480")
+        }
+    } else if a.matches(':').count() > 1 {
+        // A bare IPv6 address.
+        format!("[{a}]:7480")
+    } else if a.contains(':') {
+        a.to_string()
+    } else {
+        format!("{a}:7480")
+    };
+    looks_like_address(&whole).then_some(whole)
+}
+
+/// Whether `addr` could be a machine's address: a host (a name, an IPv4
+/// address or a bracketed IPv6 one) and a port.
+pub fn looks_like_address(addr: &str) -> bool {
+    let Some((host, port)) = addr.rsplit_once(':') else {
+        return false;
+    };
+    if port.parse::<u16>().map_or(true, |p| p == 0) {
+        return false;
+    }
+    if let Some(v6) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        return v6.parse::<std::net::Ipv6Addr>().is_ok();
+    }
+    !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
 pub fn refusal_words(r: &Refusal) -> String {
     match r {
         Refusal::Incompatible { daemon, client } => format!(
@@ -1432,7 +1490,7 @@ pub fn refusal_words(r: &Refusal) -> String {
         ),
         Refusal::NotTrusted => "this device isn't paired with that machine".into(),
         Refusal::TrustedOn { routes } => format!("trusted only over {}", routes.join(", ")),
-        Refusal::Removed => "the machine removed this device".into(),
+        Refusal::Removed => "this device was removed".into(),
         Refusal::Starting { .. } => "the machine is starting".into(),
         Refusal::Busy { .. } => "the machine is busy".into(),
         Refusal::RateLimited { .. } => "too many connections from here".into(),
@@ -1447,3 +1505,36 @@ pub fn refusal_words(r: &Refusal) -> String {
 #[cfg(test)]
 #[path = "machine_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod address_tests {
+    use super::address;
+
+    #[test]
+    fn an_address_is_made_whole_or_refused_at_once() {
+        assert_eq!(address(" mini ").as_deref(), Some("mini:7480"));
+        assert_eq!(
+            address("192.168.1.20").as_deref(),
+            Some("192.168.1.20:7480")
+        );
+        assert_eq!(
+            address("mini.tail12.ts.net:9000").as_deref(),
+            Some("mini.tail12.ts.net:9000")
+        );
+        assert_eq!(address("fe80::1").as_deref(), Some("[fe80::1]:7480"));
+        assert_eq!(address("[::1]").as_deref(), Some("[::1]:7480"));
+        assert_eq!(address("[::1]:7481").as_deref(), Some("[::1]:7481"));
+        for bad in [
+            "",
+            "not a host",
+            "host:0",
+            "host:99999",
+            "host:",
+            "a..b",
+            "[nope]:1",
+            "hö.st",
+        ] {
+            assert_eq!(address(bad), None, "{bad:?}");
+        }
+    }
+}

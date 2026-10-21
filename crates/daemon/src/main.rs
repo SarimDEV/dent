@@ -13,6 +13,7 @@
 //! devices; `dent-daemon reidentify` gives this machine a new identity.
 
 mod agent;
+mod bring;
 mod claude;
 mod daemon;
 mod env;
@@ -23,6 +24,7 @@ mod login;
 mod machine;
 mod paths;
 mod plan_tool;
+mod power;
 mod projects;
 mod remote;
 mod secrets;
@@ -38,6 +40,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
+const USAGE: &str = "usage: dent-daemon [--state DIR]   run the daemon
+       dent-daemon pair                 show a pairing code for a new device
+       dent-daemon devices [remove ID]  list paired devices, or remove one
+       dent-daemon reidentify           take a new identity (devices pair again)
+       dent-daemon login-item on|off    start at login, or stop doing so";
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let state = args
@@ -46,6 +54,24 @@ fn main() -> Result<()> {
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from);
     let paths = paths::Paths::new(state);
+    // What's asked, with `--state DIR` taken out wherever it was put, so
+    // `dent-daemon --state DIR pair` works as well as `pair --state DIR`.
+    let args: Vec<String> = {
+        let mut words = Vec::new();
+        let mut it = args.into_iter();
+        while let Some(a) = it.next() {
+            if a == "--state" {
+                // Without its folder, never the default one by mistake.
+                if it.next().is_none() {
+                    eprintln!("{USAGE}");
+                    anyhow::bail!("--state needs a folder");
+                }
+            } else {
+                words.push(a);
+            }
+        }
+        words
+    };
     // `dent-daemon login-item on|off`: start at login, or stop doing so.
     if args.first().map(String::as_str) == Some("login-item") {
         let on = match args.get(1).map(String::as_str) {
@@ -73,6 +99,16 @@ fn main() -> Result<()> {
     }
     if args.first().map(String::as_str) == Some("plan-tool") {
         return plan_tool::run();
+    }
+    // Anything else said to it (`--help`, a typo) is answered with how to
+    // use it, never by quietly starting a second daemon.
+    if let Some(a) = args.first() {
+        let help = matches!(a.as_str(), "--help" | "-h" | "help");
+        eprintln!("{USAGE}");
+        if help {
+            return Ok(());
+        }
+        anyhow::bail!("not something dent-daemon knows: {a}");
     }
     std::fs::create_dir_all(&paths.state)
         .with_context(|| format!("create {}", paths.state.display()))?;
@@ -127,6 +163,25 @@ fn main() -> Result<()> {
             tokio::spawn(async move {
                 if let Err(e) = remote::serve(d).await {
                     eprintln!("dent-daemon: remote access off: {e:#}");
+                }
+            });
+        }
+        // The machine going to sleep: every device is told, so it reads
+        // as asleep at once instead of gone quiet. The links close; they
+        // dial again once it wakes.
+        {
+            let d = d.clone();
+            power::watch(move |sleeping| {
+                // Set first, so a device that dials in after the goodbyes
+                // (sleep can take a while) is told too.
+                d.net
+                    .asleep
+                    .store(sleeping, std::sync::atomic::Ordering::Relaxed);
+                if sleeping {
+                    let _ = d.net.bye.send(dent_link::Goodbye::Sleep);
+                    // Time for the goodbyes to leave before the network
+                    // sleeps.
+                    std::thread::sleep(Duration::from_millis(300));
                 }
             });
         }
@@ -239,7 +294,7 @@ mod admin {
         match ask(paths, Request::Devices)? {
             Reply::Devices { devices } if devices.is_empty() => {
                 println!(
-                    "No paired devices. Devices on your own Tailscale account need no pairing."
+                    "No devices yet. Devices on your own Tailscale account connect without a code; others pair with `dent-daemon pair`."
                 );
                 Ok(())
             }

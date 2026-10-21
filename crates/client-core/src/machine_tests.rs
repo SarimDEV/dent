@@ -48,6 +48,8 @@ struct Sim {
     responsive: bool,
     notes: Vec<Note>,
     dials: Vec<String>,
+    /// When each of those dials began.
+    dialed_at: Vec<u64>,
     /// New dials never complete (the network is still down), while links
     /// already up stay as they are.
     hang: bool,
@@ -78,6 +80,7 @@ impl Sim {
             responsive: true,
             notes: Vec::new(),
             dials: Vec::new(),
+            dialed_at: Vec::new(),
             hang: false,
         }
     }
@@ -105,6 +108,7 @@ impl Sim {
         match op {
             Io::Connect { conn, addr } => {
                 self.dials.push(addr.clone());
+                self.dialed_at.push(self.now);
                 if self.hang {
                     return;
                 }
@@ -896,4 +900,69 @@ fn a_busy_listener_still_pings_so_the_daemon_hears_it() {
     }
     assert!(s.now - last <= 2_500);
     assert_eq!(s.m.state(), &State::Online);
+}
+
+/// Decision 0062: "after the first 10 minutes, no machine is dialled more
+/// than 60 times an hour". A machine that was online and then went away
+/// (a laptop closed), known by five routes as a real one is (LAN, the
+/// Tailscale name, its IPv4 and IPv6, a hand-added one): every retry dials
+/// every route, so the budget has to hold per machine, not per retry.
+#[test]
+fn an_unreachable_machine_stays_within_the_hourly_dial_budget() {
+    let routes = [
+        ("lan:7480", Addr::Up),
+        ("studio.ts.net:7480", Addr::Up),
+        ("100.64.0.9:7480", Addr::Up),
+        ("[fd7a::9]:7480", Addr::Up),
+        ("studio.local:7480", Addr::Up),
+    ];
+    // The waits are jittered from each device's own seed: many devices, so
+    // the budget holds for every one and not for a lucky draw.
+    for _ in 0..40 {
+        let mut s = Sim::new(&routes);
+        s.trust_device();
+        s.m.connect(0);
+        s.pump();
+        s.run_for(2_000);
+        assert_eq!(s.m.state(), &State::Online);
+        // Gone: some routes drop packets, some refuse at once.
+        for (i, (a, _)) in routes.iter().enumerate() {
+            s.addrs.insert(
+                a.to_string(),
+                if i % 2 == 0 {
+                    Addr::Silent
+                } else {
+                    Addr::Refused
+                },
+            );
+        }
+        let conns: Vec<u64> = s.conns.keys().copied().collect();
+        for c in conns {
+            s.conns.remove(&c);
+            s.m.closed(c, "reset", s.now);
+        }
+        s.pump();
+        let gone = s.now;
+        s.run_for(3 * 60 * 60_000);
+        // Every hour starting past the first ten minutes, wherever it
+        // starts: no more than 60 dials.
+        let after: Vec<u64> = s
+            .dialed_at
+            .iter()
+            .copied()
+            .filter(|&t| t >= gone + 10 * 60_000)
+            .collect();
+        for (i, &t) in after.iter().enumerate() {
+            let in_hour = after[i..]
+                .iter()
+                .take_while(|&&u| u < t + 60 * 60_000)
+                .count();
+            assert!(
+                in_hour <= 60,
+                "{in_hour} dials in the hour from {} min",
+                (t - gone) / 60_000
+            );
+        }
+        assert!(after.len() >= 100, "it kept trying: {}", after.len());
+    }
 }
