@@ -20,10 +20,19 @@ fn rand_u64() -> u64 {
     nanos ^ (N.fetch_add(1, Ordering::Relaxed) << 48)
 }
 
+/// The command line, the agent stand-in and the session holder, built once
+/// and before any daemon starts: building while daemons run can take the
+/// holder away for a moment from one starting a session.
 fn bins() -> (PathBuf, PathBuf) {
     let dir = Path::new(env!("CARGO_BIN_EXE_dent-daemon"))
         .parent()
         .unwrap();
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(build);
+    (dir.join("dent"), dir.join("dent-fake-claude"))
+}
+
+fn build() {
     let built = Command::new(env!("CARGO"))
         .args([
             "build",
@@ -38,7 +47,6 @@ fn bins() -> (PathBuf, PathBuf) {
         .status()
         .unwrap();
     assert!(built.success());
-    (dir.join("dent"), dir.join("dent-fake-claude"))
 }
 
 struct Daemon {
@@ -154,7 +162,8 @@ impl Daemon {
 /// winner instead, which the winner's test then kills mid-way.
 fn got_port(log: &std::path::Path, port: u16) -> bool {
     let mine = format!("remote access on port {port} ");
-    let until = Instant::now() + Duration::from_secs(10);
+    // Generous: dozens start at once when test files run side by side.
+    let until = Instant::now() + Duration::from_secs(30);
     loop {
         let said = std::fs::read_to_string(log).unwrap_or_default();
         if said.contains(&mine) {
@@ -171,12 +180,13 @@ fn got_port(log: &std::path::Path, port: u16) -> bool {
     }
 }
 
+/// A port to try, from below the range the system hands out to outgoing
+/// connections. Never checked by binding it first: a check's listener on
+/// 127.0.0.1 can sit on top of another test's daemon listening on every
+/// address, take its connections and reset them as it closes. A port
+/// that's taken shows in the daemon's log instead ([`got_port`]).
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    10_000 + (rand_u64() % 22_000) as u16
 }
 
 impl Drop for Daemon {

@@ -28,6 +28,7 @@ impl Daemon {
             std::process::id(),
             rand_u64()
         ));
+        build_helpers();
         let state = root.join("state");
         std::fs::create_dir_all(&state).unwrap();
         let mut d = Self {
@@ -55,6 +56,7 @@ impl Daemon {
             std::process::id(),
             rand_u64()
         ));
+        build_helpers();
         let state = root.join("state");
         std::fs::create_dir_all(&state).unwrap();
         let mut d = Self {
@@ -197,7 +199,8 @@ impl Daemon {
 /// winner instead, which the winner's test then kills mid-way.
 fn got_port(log: &std::path::Path, port: u16) -> bool {
     let mine = format!("remote access on port {port} ");
-    let until = Instant::now() + Duration::from_secs(10);
+    // Generous: dozens start at once when test files run side by side.
+    let until = Instant::now() + Duration::from_secs(30);
     loop {
         let said = std::fs::read_to_string(log).unwrap_or_default();
         if said.contains(&mine) {
@@ -214,12 +217,13 @@ fn got_port(log: &std::path::Path, port: u16) -> bool {
     }
 }
 
+/// A port to try, from below the range the system hands out to outgoing
+/// connections. Never checked by binding it first: a check's listener on
+/// 127.0.0.1 can sit on top of another test's daemon listening on every
+/// address, take its connections and reset them as it closes. A port
+/// that's taken shows in the daemon's log instead ([`got_port`]).
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    10_000 + (rand_u64() % 22_000) as u16
 }
 
 impl Drop for Daemon {
@@ -227,6 +231,15 @@ impl Drop for Daemon {
         if let Some(mut c) = self.child.take() {
             let _ = c.kill();
             let _ = c.wait();
+        }
+        // A failing test shows what its daemon said.
+        if std::thread::panicking() {
+            let log = self.state.with_file_name("daemon.log");
+            eprintln!(
+                "daemon on port {} said:\n{}",
+                self.port,
+                std::fs::read_to_string(log).unwrap_or_default()
+            );
         }
         if let Some(root) = self.state.parent() {
             let _ = std::fs::remove_dir_all(root);
@@ -245,21 +258,33 @@ fn rand_u64() -> u64 {
 }
 
 fn fake_claude() -> String {
-    let fake =
-        std::path::Path::new(env!("CARGO_BIN_EXE_dent-daemon")).with_file_name("dent-fake-claude");
-    let built = Command::new(env!("CARGO"))
-        .args([
-            "build",
-            "-q",
-            "-p",
-            "dent-fake-claude",
-            "-p",
-            "dent-session-holder",
-        ])
-        .status()
-        .unwrap();
-    assert!(built.success());
-    fake.to_str().unwrap().to_string()
+    build_helpers();
+    std::path::Path::new(env!("CARGO_BIN_EXE_dent-daemon"))
+        .with_file_name("dent-fake-claude")
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
+/// The agent stand-in and the session holder, built once, before any
+/// daemon starts: building while daemons run can take the holder away
+/// for a moment from one starting a session.
+fn build_helpers() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let built = Command::new(env!("CARGO"))
+            .args([
+                "build",
+                "-q",
+                "-p",
+                "dent-fake-claude",
+                "-p",
+                "dent-session-holder",
+            ])
+            .status()
+            .unwrap();
+        assert!(built.success());
+    });
 }
 
 type Ws =
