@@ -58,7 +58,9 @@ pub async fn run(args: &[String]) -> Result<()> {
                 rules.home_every = Some(Duration::from_secs(h));
             }
             let secs = get("--secs").and_then(|s| s.parse().ok()).unwrap_or(60);
-            let every = get("--prompt-every").and_then(|s| s.parse().ok()).unwrap_or(10);
+            let every = get("--prompt-every")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10);
             let session = get("--session").unwrap_or_else(|| format!("r-{}", std::process::id()));
             follow(&state, me, addrs, rules, session, secs, every).await
         }
@@ -106,8 +108,13 @@ async fn follow(
     // acknowledged, as the client core's outbox does.
     let sent = Arc::new(Mutex::new((0u64, 0u64)));
     let prompter = {
-        let (me, key, addrs, session, sent) =
-            (me.clone(), key.clone(), addrs.clone(), session.clone(), sent.clone());
+        let (me, key, addrs, session, sent) = (
+            me.clone(),
+            key.clone(),
+            addrs.clone(),
+            session.clone(),
+            sent.clone(),
+        );
         tokio::spawn(async move {
             let mut n = 0u64;
             loop {
@@ -169,6 +176,10 @@ async fn follow(
                 online = Some(now);
                 println!("{}", json!({"t": t(), "up": addr.to_string()}));
             }
+            // A swap moves to a link that is already up, so it isn't a drop.
+            Note::Down { reason } if client::SWAP_REASONS.contains(&reason.as_str()) => {
+                println!("{}", json!({"t": t(), "swap": reason}));
+            }
             Note::Down { reason } => {
                 if online.take().is_some() {
                     downs += 1;
@@ -206,6 +217,7 @@ async fn follow(
                 "dups": tl.dups,
                 "drops": downs,
                 "reconnects": tl.reconnects,
+                "swaps": tl.swaps,
                 "dials": tl.dials,
                 "down_total_s": down_total.as_secs_f64(),
                 "down_max_s": down_max.as_secs_f64(),

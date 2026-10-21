@@ -279,7 +279,12 @@ pub struct Tally {
     pub last: u64,
     pub dups: u64,
     pub gaps: u64,
+    /// Links reopened after a drop. A swap to a replacement that was already
+    /// up isn't one.
     pub reconnects: u64,
+    /// Moves to a replacement link that was already up (silence or coming
+    /// home).
+    pub swaps: u64,
     /// Connection attempts, successful or not.
     pub dials: u64,
 }
@@ -405,20 +410,37 @@ pub fn follow_with(
             if pre.is_none() {
                 tally.lock().await.dials += 1;
             }
-            let started = std::time::Instant::now();
-            let result = link(&rules, &me, &key, &addrs, pre, &session, &tally, &out, first).await;
-            // A link that stayed up long enough starts the ladder again.
-            if matches!(result, Ok(Ended::Lost(_))) && started.elapsed() >= rules.reset_after {
+            let mut healthy = Duration::ZERO;
+            let result = link(
+                &rules,
+                &me,
+                &key,
+                &addrs,
+                pre,
+                &session,
+                &tally,
+                &out,
+                first,
+                &mut healthy,
+            )
+            .await;
+            // A link that stayed healthy long enough starts the ladder again,
+            // whether it was lost or handed over to a replacement. Healthy
+            // time runs from the link opening to the last frame heard, so
+            // neither the dial nor the final silence counts.
+            if matches!(result, Ok(Ended::Lost(_) | Ended::Swap(..)))
+                && healthy >= rules.reset_after
+            {
                 attempt = 0;
             }
             let reason = match result {
-                Ok(Ended::Swap(o)) => {
-                    // A replacement is already up: move to it at once.
+                Ok(Ended::Swap(o, why)) => {
+                    // A replacement is already up: move to it at once. It is
+                    // counted as a swap, not a drop or a reconnect.
                     first = false;
                     ready = Some(*o);
-                    let _ = out.send(Note::Down {
-                        reason: "replaced a silent link".into(),
-                    });
+                    tally.lock().await.swaps += 1;
+                    let _ = out.send(Note::Down { reason: why.into() });
                     continue;
                 }
                 Ok(Ended::Denied) => return,
@@ -446,10 +468,27 @@ pub fn follow_with(
 
 enum Ended {
     Lost(String),
-    /// A replacement dialled during silence answered first.
-    Swap(Box<Opened>),
+    /// A replacement is up and ready: dialled during silence, or a faster
+    /// route found by the home check. The reason is one of [`SWAP_REASONS`].
+    Swap(Box<Opened>, &'static str),
     Denied,
     Incompatible,
+}
+
+/// The [`Note::Down`] reasons that mean "moved to a replacement link that is
+/// already up", not a drop.
+pub const SWAP_REASONS: [&str; 2] = ["replaced a silent link", "moved to a faster route"];
+
+/// Takes a ready replacement from `slot` once its dial has finished, if it
+/// is trusted and compatible. A failed dial empties the slot.
+async fn take_ready(slot: &mut Option<tokio::task::JoinHandle<Result<Opened>>>) -> Option<Opened> {
+    if !slot.as_ref().is_some_and(|h| h.is_finished()) {
+        return None;
+    }
+    match slot.take()?.await {
+        Ok(Ok(o)) if o.trusted && o.compatible() => Some(o),
+        _ => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -463,7 +502,9 @@ async fn link(
     tally: &Arc<Mutex<Tally>>,
     out: &mpsc::UnboundedSender<Note>,
     first: bool,
+    healthy: &mut Duration,
 ) -> Result<Ended> {
+    let swapped = pre.is_some();
     let o = match pre {
         Some(o) => o,
         None => open_any(addrs, me, Some(key)).await?,
@@ -484,7 +525,7 @@ async fn link(
         let _ = out.send(Note::Denied("removed".into()));
         return Ok(Ended::Denied);
     }
-    if !first {
+    if !first && !swapped {
         tally.lock().await.reconnects += 1;
     }
     let _ = out.send(Note::Up {
@@ -531,30 +572,28 @@ async fn link(
             }
         }
     });
-    let mut heard = std::time::Instant::now();
+    let up = std::time::Instant::now();
+    let mut heard = up;
     let mut swap: Option<tokio::task::JoinHandle<Result<Opened>>> = None;
     // Addresses ahead of the one in use are better routes to come home to.
     let better: Vec<SocketAddr> = addrs.iter().take_while(|a| **a != addr).copied().collect();
     let mut home_checked = std::time::Instant::now();
     let mut home: Option<tokio::task::JoinHandle<Result<Opened>>> = None;
+    // One steady tick, so a busy stream can't starve the silence, swap and
+    // home checks (a sleep made afresh each turn would never fire while
+    // frames arrive faster than it).
+    let mut tick = tokio::time::interval(Duration::from_millis(250));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let ended = loop {
         let m = tokio::select! {
             m = frx.recv() => m,
-            _ = tokio::time::sleep(Duration::from_millis(250)) => {
+            _ = tick.tick() => {
                 let quiet = heard.elapsed();
-                if let Some(h) = swap.as_ref().filter(|h| h.is_finished()) {
-                    let _ = h;
-                    match swap.take().expect("checked").await {
-                        Ok(Ok(o)) if o.trusted && o.compatible() => break Ended::Swap(Box::new(o)),
-                        _ => {}
-                    }
+                if let Some(o) = take_ready(&mut swap).await {
+                    break Ended::Swap(Box::new(o), SWAP_REASONS[0]);
                 }
-                if let Some(h) = home.as_ref().filter(|h| h.is_finished()) {
-                    let _ = h;
-                    match home.take().expect("checked").await {
-                        Ok(Ok(o)) if o.trusted && o.compatible() => break Ended::Swap(Box::new(o)),
-                        _ => {}
-                    }
+                if let Some(o) = take_ready(&mut home).await {
+                    break Ended::Swap(Box::new(o), SWAP_REASONS[1]);
                 }
                 if let Some(every) = rules.home_every
                     && !better.is_empty()
@@ -584,6 +623,7 @@ async fn link(
             break Ended::Lost("reader ended".into());
         };
         heard = std::time::Instant::now();
+        *healthy = heard - up;
         if let Some(h) = swap.take() {
             h.abort();
         }
