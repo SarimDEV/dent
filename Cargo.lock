@@ -2087,15 +2087,25 @@ version = "0.0.0"
 name = "dent-cli"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "dent-client-core",
+ "dent-link",
  "dent-protocol",
+ "futures-util",
+ "hex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]
 name = "dent-client-core"
 version = "0.0.0"
 dependencies = [
+ "dent-link",
  "dent-protocol",
+ "hex",
  "serde_json",
 ]
 

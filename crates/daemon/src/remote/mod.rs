@@ -473,10 +473,14 @@ async fn conn(
         };
         lock(&d.net.via_tailscale).insert(t.remote.clone());
     }
+    // Trusted through the Tailscale account but reached another way: say
+    // so, unless a code is showing here, when it may pair to use this route
+    // too ([decision 0061]).
     let seen_on_tailscale = lock(&d.net.via_tailscale).contains(&t.remote);
     if matches!(verdict, Verdict::Untrusted { .. })
         && route != Route::Tailscale
         && seen_on_tailscale
+        && !pairing_open
     {
         let _ = send_control(
             &mut ws,

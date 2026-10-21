@@ -18,6 +18,18 @@ Run on the rig with the spike code, not the real daemon (2026-10-20). Every test
   - R-D4 without dirty submodules or the size cap (spike 11).
 - **Not run yet:** the rest.
 
+## Stage 1 runs (the real code)
+
+Run 2026-10-20 with the real `dent-daemon` on dent-linux and the real `dent` CLI on studio (the client core's connection actor, hosted on tokio):
+
+- **R-B1, for real:** `dent machine add 100.70.46.115:7480` was trusted through the Tailscale account (the daemon asked the LocalAPI about studio's address) with no code, in 0.45 s.
+- **R-A1-style stall, IPv4 only:** while the link sat on the IPv4 route, the IPv4 port was blocked for 8 s. The client read "slow" at 2 s, and its replacement dial moved to Tailscale's IPv6 address at 4.6 s, without dropping. Sixty seconds later it came home to the preferred IPv4 route.
+- **A full 20 s blackout (IPv4 and IPv6) with events streaming:** 40 prompts went to the fake agent at 2.5 s intervals while studio watched.
+  - Slow at 2.7 s; torn down at 15 s; reconnected 0.26 s after the network returned, catching up from event 47.
+  - **85 events received, 85 logged by the daemon, 0 gaps, 0 repeats.**
+  - It came home to the IPv4 route later.
+- **R-A5, for real:** a SIGTERM showed as "away (quit)" at once, and the link was back 4 s after the daemon restarted.
+
 ## The rig
 
 - **studio:** the owner's Mac.

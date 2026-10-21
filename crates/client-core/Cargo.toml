@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 dent-protocol.workspace = true
+dent-link.workspace = true
+hex = "=0.4.3"
 serde_json.workspace = true
 [lints]
 workspace = true
