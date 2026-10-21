@@ -21,6 +21,9 @@ pub enum Incoming {
     /// Connected (again): the daemon's welcome.
     Up {
         machine: String,
+        /// Its id: its key's fingerprint, empty from a daemon older than
+        /// remote access.
+        id: String,
         /// The agents it drives, the default first; empty from a daemon
         /// older than agent ids.
         agents: Vec<dent_protocol::AgentInfo>,
@@ -159,6 +162,7 @@ fn run(
                                 machine,
                                 build,
                                 agents,
+                                id,
                                 ..
                             },
                     } if req == 1 => {
@@ -172,7 +176,11 @@ fn run(
                         if !installed.is_empty() && installed != build {
                             let _ = restart_tx.send(());
                         }
-                        Incoming::Up { machine, agents }
+                        Incoming::Up {
+                            machine,
+                            id,
+                            agents,
+                        }
                     }
                     Out::Error { message } if req == 1 => Incoming::Down(message),
                     out => Incoming::Out { req, out },

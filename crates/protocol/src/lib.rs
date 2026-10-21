@@ -1098,6 +1098,7 @@ pub enum Request {
         id: String,
     },
     Create {
+        /// Where it works; empty for the machine's scratch folder.
         cwd: String,
         /// Which agent runs it ([`AgentInfo::id`]); none means the default.
         #[serde(default, skip_serializing_if = "Option::is_none")]

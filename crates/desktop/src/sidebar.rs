@@ -597,6 +597,26 @@ impl Dent {
                                 },
                             )]),
                         ),
+                        // With more than one machine, which one it runs on.
+                        None if !self.machines.is_empty() && !s.closed => {
+                            let owner = dent_client_core::fleet::split(&s.id).0;
+                            let shape = self
+                                .shapes()
+                                .get(owner)
+                                .copied()
+                                .unwrap_or(crate::glyph::Shape::Circle);
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(space::S1H))
+                                .min_w_0()
+                                .ty(UI)
+                                .text_color(t.quiet)
+                                .child(div().flex_none().child(format!("{} ·", s.project)))
+                                .child(crate::glyph::glyph(shape, t.quiet, 9.))
+                                .child(div().flex_none().child(format!("{} ·", s.machine)))
+                                .child(div().min_w_0().truncate().child(one_line(&s.detail)))
+                        }
                         None => div().truncate().ty(UI).text_color(t.quiet).child(detail),
                     }),
             )
@@ -677,7 +697,27 @@ impl Dent {
             .filter_map(|agent| self.usage_group(&agent))
             .collect();
         let machine = crate::data::machine_shown(&self.machine);
+        // With other machines: how many, and only the ones that need a look.
+        let away: Vec<String> = self
+            .machines
+            .iter()
+            .filter_map(|m| {
+                use crate::machines_page::Standing;
+                let word = match Standing::of(m) {
+                    Standing::Online | Standing::Connecting => return None,
+                    Standing::Asleep => "asleep",
+                    Standing::NeedsCode => "needs a code",
+                    _ => "can't reach",
+                };
+                Some(format!("{} {word}", m.name()))
+            })
+            .collect();
         let (link, link_tip) = match &self.connection {
+            Ok(()) if !self.machines.is_empty() => {
+                let mut parts = away;
+                parts.push(format!("{} machines", self.machines.len() + 1));
+                (parts.join(" · "), "Settings › Machines".to_string())
+            }
             Ok(()) => (
                 format!("Sessions run on {machine}"),
                 "They keep going when dent closes".to_string(),

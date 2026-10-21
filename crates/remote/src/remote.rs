@@ -23,6 +23,7 @@ const SUBSCRIBE: u64 = 2;
 
 enum Cmd {
     Send(u64, Request),
+    Cancel(u64),
     Pair(String),
     Signal(Signal),
     Stop,
@@ -71,6 +72,12 @@ impl Remote {
     /// the same number. While the machine is away it waits.
     pub fn send(&self, n: u64, r: Request) {
         let _ = self.tx.send(Cmd::Send(n, r));
+    }
+
+    /// Take back request `n` if it hasn't gone: it won't be sent when the
+    /// machine is back.
+    pub fn cancel(&self, n: u64) {
+        let _ = self.tx.send(Cmd::Cancel(n));
     }
 
     /// Pair with the code shown on the machine.
@@ -267,6 +274,7 @@ async fn run(
                     }
                     pending.insert(n, r);
                 }
+                Some(Cmd::Cancel(n)) => { pending.remove(&n); }
                 Some(Cmd::Pair(code)) => { let _ = ask_tx.send(Ask::Pair(code)); }
                 Some(Cmd::Signal(s)) => { let _ = ask_tx.send(Ask::Signal(s)); }
                 Some(Cmd::Stop) | None => break,

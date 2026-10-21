@@ -100,7 +100,14 @@ pub fn apply(list: &mut Vec<MachineView>, id: &str, event: Event) {
             m.pair_error = None;
             m.impostor = None;
         }
-        Event::Rtt(ms) => m.rtt = Some(ms),
+        // Smoothed, so one slow ping doesn't throw the machine across the
+        // strip.
+        Event::Rtt(ms) => {
+            m.rtt = Some(match m.rtt {
+                Some(old) => (old * 3 + ms + 2) / 4,
+                None => ms,
+            })
+        }
         Event::Saved(s) => m.saved = s,
         Event::PairFailed(why) => m.pair_error = Some(why),
         Event::DifferentMachine(addr) => m.impostor = Some(addr),

@@ -16,7 +16,7 @@ use dent_protocol::{Gh, Machine, Mark, Request};
 
 use crate::agents::{Standing, standing};
 use crate::app::{Dent, Waiting};
-use crate::ds::{CODE, LABEL, Typed, UI, motion, radius, space};
+use crate::ds::{CODE, DISPLAY, LABEL, Typed, UI, motion, radius, space};
 use crate::ui::{self, Arrive, From, Press, Tipped, probe, tip_owned};
 
 /// Which sheet is open.
@@ -25,6 +25,26 @@ pub enum Pane {
     Settings,
     /// The first launch: what dent needs, and the choices worth making once.
     Welcome,
+}
+
+/// The pages of Settings.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tab {
+    General,
+    Agents,
+    Machines,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 3] = [Tab::General, Tab::Agents, Tab::Machines];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Tab::General => "General",
+            Tab::Agents => "Agents",
+            Tab::Machines => "Machines",
+        }
+    }
 }
 
 /// Where Git, the GitHub CLI and their sign-in are read about.
@@ -90,6 +110,9 @@ impl Dent {
     pub fn open_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
         self.pane = Some(pane);
         self.check_again();
+        if pane == Pane::Settings && self.settings_tab == Tab::Machines {
+            self.ask(Request::Devices, Waiting::Devices);
+        }
         cx.notify();
     }
 
@@ -619,9 +642,186 @@ impl Dent {
             .children(lines.into_iter().map(|l| self.draw_line(l)))
     }
 
-    /// Settings or the welcome, over everything, when open.
+    /// Settings, as a page of its own in place of the sessions: its pages
+    /// down the left, the open one beside them.
+    pub fn settings_page(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.pane != Some(Pane::Settings) {
+            return None;
+        }
+        let t = self.t;
+        let tab = self.settings_tab;
+        let nav = div()
+            .w(px(220.))
+            .flex_none()
+            .h_full()
+            .border_r_1()
+            .border_color(t.hairline)
+            .px(px(space::S3))
+            .pt(px(crate::ds::size::HEADER))
+            .flex()
+            .flex_col()
+            .gap(px(space::HALF))
+            .child(
+                div()
+                    .id("settings-back")
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S2))
+                    .h(px(crate::ds::size::CONTROL))
+                    .px(px(space::S2))
+                    .mb(px(space::S4))
+                    .rounded(px(radius::MD))
+                    .ty(UI)
+                    .text_color(t.quiet)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.hover()).text_color(t.ink))
+                    .child(ui::icon("chevron-left", 14., t.quiet))
+                    .child("Sessions")
+                    .child(probe(&self.probes, "settings-back"))
+                    .on_press(cx.listener(|this, _, _, cx| {
+                        this.close_pane(cx);
+                    })),
+            )
+            .child(
+                div()
+                    .px(px(space::S2))
+                    .pb(px(space::S1H))
+                    .child(ui::section_label("Settings", None, &t)),
+            )
+            .children(Tab::ALL.into_iter().map(|tb| {
+                let on = tb == tab;
+                div()
+                    .id(SharedString::from(format!(
+                        "settings-tab-{}",
+                        tb.name().to_lowercase()
+                    )))
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .h(px(crate::ds::size::CONTROL))
+                    .px(px(space::S2))
+                    .rounded(px(radius::MD))
+                    .ty(UI)
+                    .cursor_pointer()
+                    .when(on, |d| {
+                        d.bg(t.selected())
+                            .text_color(t.ink)
+                            .font_weight(FontWeight::MEDIUM)
+                    })
+                    .when(!on, |d| {
+                        d.text_color(t.quiet)
+                            .hover(|s| s.bg(t.hover()).text_color(t.ink))
+                    })
+                    .child(tb.name())
+                    .child(probe(
+                        &self.probes,
+                        format!("settings-tab-{}", tb.name().to_lowercase()),
+                    ))
+                    .on_press(cx.listener(move |this, _, _, cx| {
+                        this.open_tab(tb, cx);
+                    }))
+            }));
+        let body: AnyElement = match tab {
+            Tab::General => {
+                let machine = self.machine_lines(cx);
+                let general = self.general_lines(cx);
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(self.section("This Mac", None, machine, true))
+                    .child(self.section("dent", None, general, false))
+                    .into_any_element()
+            }
+            Tab::Agents => {
+                let agents = self.agent_lines(cx);
+                self.section("Agents", None, agents, true)
+                    .into_any_element()
+            }
+            Tab::Machines => self.machines_tab(window, cx),
+        };
+        let again = (tab != Tab::Machines).then(|| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::S2))
+                .when(self.checking, |d| {
+                    d.child(div().ty(LABEL).text_color(t.faint).child("Checking…"))
+                })
+                .child(
+                    ui::ghost("pane-again", "Check again", &t)
+                        .relative()
+                        .child(probe(&self.probes, "pane-again"))
+                        .on_press(cx.listener(|this, _, _, cx| {
+                            this.check_again();
+                            cx.notify();
+                        })),
+                )
+        });
+        let head = (tab != Tab::Machines).then(|| {
+            div()
+                .flex()
+                .items_end()
+                .pb(px(space::S6))
+                .child(
+                    div()
+                        .flex_1()
+                        .ty(DISPLAY)
+                        .text_color(t.ink)
+                        .child(tab.name()),
+                )
+                .children(again)
+        });
+        Some(
+            div()
+                .id("settings-page")
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .bg(t.surface)
+                .child(nav)
+                .child(
+                    div()
+                        .id("settings-body")
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .overflow_y_scroll()
+                        .restrict_scroll_to_axis()
+                        .child(
+                            div()
+                                .max_w(px(900.))
+                                .px(px(space::S12))
+                                .pt(px(crate::ds::size::HEADER))
+                                .pb(px(space::S12))
+                                // Marks hang in the margin, left of the names.
+                                .pl(px(space::S12 + space::S1))
+                                .children(head)
+                                .child(body),
+                        ),
+                )
+                .child(probe(&self.probes, "pane-settings"))
+                .into_any_element(),
+        )
+    }
+
+    /// Show a page of Settings; each asks again how things stand.
+    pub fn open_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        self.settings_tab = tab;
+        if tab == Tab::Machines {
+            self.ask(Request::Devices, Waiting::Devices);
+            self.live
+                .signal(None, dent_client_core::machine::Signal::Retry);
+        }
+        cx.notify();
+    }
+
+    /// The welcome, over everything, when open.
     pub fn pane_view(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let pane = self.pane?;
+        let pane = self.pane.filter(|p| *p == Pane::Welcome)?;
         let t = self.t;
         let agents = self.agent_lines(cx);
         let machine = self.machine_lines(cx);

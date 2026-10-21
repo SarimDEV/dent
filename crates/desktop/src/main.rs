@@ -24,6 +24,7 @@ mod ds;
 mod find;
 mod gitbar;
 mod github;
+mod glyph;
 mod highlight;
 mod hotkey;
 mod keys;
@@ -31,12 +32,14 @@ mod lightbox;
 mod live;
 mod lru;
 mod machines;
+mod machines_page;
 mod markdown;
 mod math;
 mod mdstream;
 mod net;
 mod notify;
 mod open;
+mod outbox;
 mod palette;
 mod pan_zoom;
 mod picker;
@@ -374,6 +377,7 @@ impl Render for Dent {
             prompt.update(cx, |f, cx| f.focus_field(window, cx));
         }
         let sidebar = (!self.sidebar_hidden).then(|| self.sidebar(cx));
+        let settings_page = self.settings_page(window, cx);
         let main = self.main_column(window, cx);
         let panel = self
             .current_rc()
@@ -650,6 +654,7 @@ impl Render for Dent {
                 // to the inbox, where arrows move and Enter opens.
                 if this.switch_cancel(cx)
                     || std::mem::take(&mut this.keys_open)
+                    || this.escape_adding(window, cx)
                     || this.close_pane(cx)
                     || this.close_lightbox(cx)
                     || this.context.take().is_some()
@@ -719,11 +724,14 @@ impl Render for Dent {
                 this.set_appearance(prefs::Appearance::Dark, window, cx)
             }))
             .on_action(cx.listener(|this, _: &app::ShowKeys, _, cx| this.toggle_keys(cx)))
-            .on_action(cx.listener(|this, _: &app::OpenSettings, _, cx| {
+            .on_action(cx.listener(|this, _: &app::OpenSettings, window, cx| {
                 if this.pane == Some(settings::Pane::Settings) {
                     this.close_pane(cx);
                 } else {
                     this.open_pane(settings::Pane::Settings, cx);
+                    // The page hides the field that had the keys: let go
+                    // of it, so Esc and the page's switches reach the page.
+                    window.blur(cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &app::SwitchNext, _, cx| this.switch_step(false, cx)))
@@ -860,15 +868,19 @@ impl Render for Dent {
             // First, so each frame starts its text afresh and its press runs
             // after every control's.
             .child(select::layer())
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .children(sidebar)
-                    .child(main)
-                    .children(panel),
-            )
+            // Settings is a page of its own, in place of the sessions.
+            .map(|d| match settings_page {
+                Some(page) => d.child(page),
+                None => d.child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .children(sidebar)
+                        .child(main)
+                        .children(panel),
+                ),
+            })
             .child(self.status_bar(cx))
             .children(toast)
             // Clicking anywhere outside an open menu closes it.
@@ -898,6 +910,7 @@ impl Render for Dent {
             .children(self.switcher_view(cx))
             .children(self.keys_view(cx))
             .children(self.pane_view(cx))
+            .children(self.adding_view(cx))
             .children(self.context_view(window, cx))
             .children(self.github_card(cx))
             // Over everything, menus painted late included.
