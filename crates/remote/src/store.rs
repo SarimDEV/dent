@@ -84,8 +84,21 @@ pub fn device_keys() -> Result<Keys> {
     let dir = state_dir();
     std::fs::create_dir_all(&dir)?;
     let p = dir.join("device.key");
-    if let Ok(t) = std::fs::read_to_string(&p) {
-        return Keys::from_hex(&t).context("the device key is damaged");
+    // Made only when there's none: one that's there but can't be read is an
+    // error, since a new key in its place would unpair this device from
+    // every machine.
+    match std::fs::read(&p) {
+        Ok(b) => {
+            let t = String::from_utf8(b)
+                .map_err(|_| anyhow::anyhow!("the device key at {} is damaged", p.display()))?;
+            return Keys::from_hex(&t)
+                .with_context(|| format!("the device key at {} is damaged", p.display()));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("couldn't read the device key at {}", p.display()));
+        }
     }
     let k = Keys::generate()?;
     write_private(&p, k.to_hex().as_bytes())?;

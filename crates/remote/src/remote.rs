@@ -346,13 +346,43 @@ fn carry(r: &mut Request, theirs: &HashSet<String>) -> Result<(), String> {
         let name = p
             .file_name()
             .map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
-        let bytes = std::fs::read(p).map_err(|e| format!("couldn't read {name}: {e}"))?;
-        total += bytes.len();
-        if total > dent_protocol::CARRIED_MAX {
-            return Err(format!(
+        let too_many = || {
+            format!(
                 "these files come to more than {} MB, too many to send to another machine at once",
                 dent_protocol::CARRIED_MAX >> 20
-            ));
+            )
+        };
+        // Opened without waiting (a pipe would hold this machine's link up
+        // for good), only a plain file, and its size known before any of it
+        // is read: a video of gigabytes is refused, not loaded first.
+        let f = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(p)
+                .map_err(|e| format!("couldn't read {name}: {e}"))?
+        };
+        let meta = f
+            .metadata()
+            .map_err(|e| format!("couldn't read {name}: {e}"))?;
+        if !meta.is_file() {
+            return Err(format!("{name} isn't a file that can be sent"));
+        }
+        if total + meta.len() as usize > dent_protocol::CARRIED_MAX {
+            return Err(too_many());
+        }
+        let mut bytes = Vec::with_capacity(meta.len() as usize);
+        {
+            use std::io::Read;
+            f.take((dent_protocol::CARRIED_MAX - total) as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|e| format!("couldn't read {name}: {e}"))?;
+        }
+        total += bytes.len();
+        // Grown while it was read.
+        if total > dent_protocol::CARRIED_MAX {
+            return Err(too_many());
         }
         files.push(dent_protocol::Carried {
             name,

@@ -1282,6 +1282,10 @@ pub enum Request {
     /// ([decision 0061](../../docs/decisions/0061-trust.md)). Answered with
     /// [`Reply::Pairing`].
     OpenPairing,
+    /// The pairing code showing now, which changes after wrong guesses and
+    /// goes once a device pairs or it expires: [`Reply::Pairing`], with an
+    /// empty code when none is showing.
+    Pairing,
     /// The devices this machine trusts.
     Devices,
     /// Stop trusting a device, and cut it off if it's connected.
@@ -1879,6 +1883,7 @@ impl Request {
             R::Hello { .. }
             | R::Subscribe { .. }
             | R::OpenPairing
+            | R::Pairing
             | R::Devices
             | R::RemoveDevice { .. }
             | R::Create { .. }

@@ -264,6 +264,9 @@ pub struct Machine {
     state: State,
     foreground: bool,
     last_online: Option<u64>,
+    /// When this run of failed attempts began: past [`NEAR_MS`] of them,
+    /// the hourly budget holds. Cleared by a healthy link.
+    failing_since: Option<u64>,
     /// Redial fast until then, after an announced restart.
     restart_until: Option<u64>,
     /// An announced restart that didn't come back in time.
@@ -292,6 +295,7 @@ impl Machine {
             next_conn: 1,
             generation: 0,
             attempt: 0,
+            failing_since: None,
             io: VecDeque::new(),
             notes: Vec::new(),
             state: State::Off,
@@ -1145,6 +1149,7 @@ impl Machine {
         let healthy = now.saturating_sub(o.opened) >= STABLE_MS;
         if healthy {
             self.attempt = 0;
+            self.failing_since = None;
         } else if now < self.last_online.unwrap_or(0) + STABLE_MS {
             // Answered, then failed fast: leave that route alone for a while.
             self.cooldown.insert(o.addr.clone(), now + COOLDOWN_MS);
@@ -1341,7 +1346,16 @@ impl Machine {
         let steps = (self.attempt + 1 - QUICK.len()).min(16) as u32;
         let ceiling = (QUICK[QUICK.len() - 1] << steps).min(cap);
         let half = ceiling / 2;
-        half + self.random() % (half + 1)
+        let wait = half + self.random() % (half + 1);
+        // The budget (decision 0062): past the first ten minutes of failing,
+        // no more than 60 dials an hour, counting each route an attempt
+        // dials.
+        let since = *self.failing_since.get_or_insert(now);
+        if now >= since + NEAR_MS {
+            wait.max(self.routes.len().max(1) as u64 * 60_000)
+        } else {
+            wait
+        }
     }
 
     fn random(&mut self) -> u64 {

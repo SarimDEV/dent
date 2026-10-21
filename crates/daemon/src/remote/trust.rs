@@ -157,6 +157,8 @@ struct Open {
     /// more than three guesses at a code.
     busy: bool,
     until: Instant,
+    /// `until`, in ms since the epoch, for saying.
+    expires_ms: u64,
     wrong_code: u32,
     wrong_window: u32,
     paused_until: Option<Instant>,
@@ -174,12 +176,21 @@ impl Window {
             nth: self.shown,
             busy: false,
             until: Instant::now() + CODE_TTL,
+            expires_ms,
             wrong_code: 0,
             wrong_window: 0,
             paused_until: None,
             pause: Duration::from_secs(1),
         });
         Ok((code, expires_ms))
+    }
+
+    /// The code showing now and when it expires, if one is.
+    pub fn showing(&self) -> Option<(String, u64)> {
+        self.open
+            .as_ref()
+            .filter(|o| Instant::now() < o.until)
+            .map(|o| (o.code.clone(), o.expires_ms))
     }
 
     pub fn is_open(&self) -> bool {

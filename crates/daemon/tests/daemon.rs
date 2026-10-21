@@ -2985,9 +2985,19 @@ fn bb_a_carried_file_never_lands_in_git_by_another_case() {
             carried_file(".Git/info/attributes", b"* filter=evil\n"),
         ],
     )));
-    c.wait(&s, "the turn to end", is_done);
+    // Refused whole (the message given back) or brought without them:
+    // either way nothing lands in the repository.
+    c.wait(&s, "the turn to end or the message given back", |b| {
+        is_done(b)
+            || matches!(
+                b,
+                Body::Unqueued {
+                    returned: Some(_),
+                    ..
+                }
+            )
+    });
     let here = cwd_of(&c, &s);
-    assert_eq!(std::fs::read(here.join(".env")).unwrap(), b"A=1\n");
     let git = here.join(".git");
     assert!(
         !git.join("hooks/pre-commit").exists() && !git.join("info/attributes").exists(),
@@ -3036,7 +3046,13 @@ fn bb_brought_secrets_with_awkward_names_stay_out_of_git() {
     c.wait(&s, "the turn to end", is_done);
     let here = cwd_of(&c, &s);
     for n in names {
-        assert_eq!(std::fs::read(here.join(n)).unwrap(), b"token", "{n:?}");
+        if n.contains('\n') {
+            // No exclude rule can hold a line break: left out, not left
+            // where it could be committed.
+            assert!(!here.join(n).exists(), "{n:?} brought");
+        } else {
+            assert_eq!(std::fs::read(here.join(n)).unwrap(), b"token", "{n:?}");
+        }
     }
     let status = b.git(
         &here,

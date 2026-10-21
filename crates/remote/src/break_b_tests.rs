@@ -86,8 +86,16 @@ fn an_attachment_that_never_ends_doesnt_stall_the_machine() {
         let _ = tx.send(rt.block_on(ready_up(&p, &theirs, PROTOCOL_FOR_TEST, "vm", 1)));
     });
     let got = rx.recv_timeout(std::time::Duration::from_secs(5));
-    // Unblock the stuck reader so the thread can end.
-    let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+    // Unblock a stuck reader, if there is one, so the thread can end;
+    // without waiting, since with none there an open for writing never
+    // returns.
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo);
+    }
     let _ = std::fs::remove_dir_all(&d);
     match got {
         Ok(r) => assert!(r.is_err(), "a pipe isn't a file to send: {r:?}"),

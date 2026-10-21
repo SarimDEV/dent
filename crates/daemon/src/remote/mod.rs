@@ -166,6 +166,10 @@ impl Net {
         lock(&self.window).open()
     }
 
+    pub fn pairing_now(&self) -> Option<(String, u64)> {
+        lock(&self.window).showing()
+    }
+
     pub fn devices(&self) -> Vec<dent_protocol::Device> {
         lock(&self.trust)
             .list()

@@ -236,6 +236,13 @@ pub async fn session(
                 .net
                 .open_pairing()
                 .map(|(code, expires)| Reply::Pairing { code, expires }),
+            Request::Pairing => Ok(match d.net.pairing_now() {
+                Some((code, expires)) => Reply::Pairing { code, expires },
+                None => Reply::Pairing {
+                    code: String::new(),
+                    expires: 0,
+                },
+            }),
             Request::Devices => Ok(Reply::Devices {
                 devices: d.net.devices(),
             }),
@@ -276,6 +283,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
         Request::Hello { .. }
         | Request::Subscribe { .. }
         | Request::OpenPairing
+        | Request::Pairing
         | Request::Devices
         | Request::RemoveDevice { .. } => Reply::Ok,
         Request::Restart => {
@@ -865,7 +873,7 @@ async fn carry(state: &Path, id: &str, files: Vec<dent_protocol::Carried>) -> Re
     let dir = state
         .join("attachments")
         .join("carried")
-        .join(safe_name(id));
+        .join(id_folder(id));
     tokio::task::spawn_blocking(move || {
         std::fs::create_dir_all(&dir)?;
         let mut paths = Vec::new();
@@ -883,6 +891,33 @@ async fn carry(state: &Path, id: &str, files: Vec<dent_protocol::Carried>) -> Re
         Ok(paths)
     })
     .await?
+}
+
+/// Message `id`'s own folder name: the whole id, so ids that differ
+/// anywhere (`web/m1`, `cli/m1`) never share a folder; when it has
+/// characters a folder name can't, they're replaced and a hash of the id
+/// keeps it apart. The same id is always the same folder, so a resend
+/// writes over itself.
+fn id_folder(id: &str) -> String {
+    let plain: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(100)
+        .collect();
+    if plain == id && !plain.is_empty() {
+        return plain;
+    }
+    // FNV-1a: stable across builds, unlike the standard hasher.
+    let hash = id.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+    });
+    format!("{plain}-{hash:016x}")
 }
 
 /// The last part of a name sent from elsewhere, as a file name here:

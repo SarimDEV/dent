@@ -76,10 +76,7 @@ async fn main() -> Result<()> {
         Some("get") => get(&args[1..]).await,
         Some("wake") => {
             let name = args.get(1).context("dent wake NAME")?;
-            let m = load()
-                .into_iter()
-                .find(|s| s.name == *name || s.id == *name)
-                .with_context(|| format!("no saved machine called {name}"))?;
+            let m = saved(name)?;
             if m.wake.is_empty() {
                 bail!("{name} hasn't said how to wake it: connect to it once while it's awake");
             }
@@ -213,15 +210,34 @@ async fn add(args: &[String]) -> Result<()> {
 }
 
 fn remove(name: &str) -> Result<()> {
+    let gone = saved(name)?;
     let mut all = load();
-    let before = all.len();
-    all.retain(|s| s.name != name && s.id != name);
-    if all.len() == before {
-        bail!("no machine called {name}");
-    }
+    all.retain(|s| s.id != gone.id);
     save(&all)?;
-    println!("forgot {name}");
+    println!("forgot {} ({})", gone.name, gone.id);
     Ok(())
+}
+
+/// The saved machine `name` names: its id, or its name when only one
+/// machine has it. Two of one name are never guessed between.
+fn saved(name: &str) -> Result<Saved> {
+    let all = load();
+    if let Some(m) = all.iter().find(|s| s.id == name) {
+        return Ok(m.clone());
+    }
+    let named: Vec<&Saved> = all.iter().filter(|s| s.name == name).collect();
+    match named.as_slice() {
+        [] => bail!("no saved machine called {name}"),
+        [one] => Ok((*one).clone()),
+        many => bail!(
+            "{} machines are called {name}: use its id ({})",
+            many.len(),
+            many.iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 async fn ask(args: &[String]) -> Result<()> {
@@ -242,10 +258,7 @@ async fn ask(args: &[String]) -> Result<()> {
     let [name, text] = plain.as_slice() else {
         bail!(usage);
     };
-    let saved = load()
-        .into_iter()
-        .find(|s| s.name == *name || s.id == *name)
-        .with_context(|| format!("no saved machine called {name}"))?;
+    let saved = saved(name)?;
     if from.is_some() && !cwd.is_empty() {
         bail!("--bring makes the folder it works in: leave out --cwd");
     }
@@ -408,10 +421,7 @@ async fn get(args: &[String]) -> Result<()> {
         [n, s, p, o] => (n, s, p, o.clone()),
         _ => bail!("dent get NAME SESSION PATH [OUT]"),
     };
-    let saved = load()
-        .into_iter()
-        .find(|s| s.name == *name || s.id == *name)
-        .with_context(|| format!("no saved machine called {name}"))?;
+    let saved = saved(name)?;
     let (tx, mut rx) = mpsc::unbounded_channel();
     let remote = dent_remote::remote::spawn_asking(
         &tokio::runtime::Handle::current(),
@@ -505,10 +515,7 @@ async fn call(args: &[String]) -> Result<()> {
         bail!("dent call NAME JSON");
     };
     let req: Request = serde_json::from_str(json).context("not a request")?;
-    let saved = load()
-        .into_iter()
-        .find(|s| s.name == *name || s.id == *name)
-        .with_context(|| format!("no saved machine called {name}"))?;
+    let saved = saved(name)?;
     let (tx, mut rx) = mpsc::unbounded_channel();
     let remote = dent_remote::remote::spawn_asking(
         &tokio::runtime::Handle::current(),

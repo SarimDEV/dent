@@ -150,12 +150,15 @@ fn is_env(path: &str) -> bool {
 }
 
 /// A path relative to a checkout that stays inside it, and out of its
-/// repository (`.git`).
+/// repository (`.git`, however it's cased: the Mac's disk reads `.GIT` as
+/// `.git`).
 fn inside(rel: &str) -> Option<PathBuf> {
     let p = Path::new(rel);
     let ok = !rel.is_empty()
-        && p.components()
-            .all(|c| matches!(c, Component::Normal(n) if n != ".git"));
+        && p.components().all(|c| {
+            matches!(c, Component::Normal(n)
+                if !n.to_string_lossy().trim_end_matches(['.', ' ']).eq_ignore_ascii_case(".git"))
+        });
     ok.then(|| p.to_path_buf())
 }
 
@@ -172,6 +175,9 @@ fn plain_name(name: &str) -> bool {
 /// way is a link (a clone can hold `web -> ~/.ssh`). `None` also when
 /// something's already at the end, link or not: the project's own.
 fn writable(dest: &Path, rel: &Path) -> Option<PathBuf> {
+    // However a name reaches it (another case, another spelling the disk
+    // reads as the same), nothing goes into the repository.
+    let git = dest.join(".git").canonicalize().ok();
     let mut at = dest.to_path_buf();
     let parts: Vec<_> = rel.components().collect();
     for (i, c) in parts.iter().enumerate() {
@@ -179,6 +185,13 @@ fn writable(dest: &Path, rel: &Path) -> Option<PathBuf> {
         match std::fs::symlink_metadata(&at) {
             Err(_) => return Some(dest.join(rel)),
             Ok(m) if i + 1 == parts.len() || m.file_type().is_symlink() || !m.is_dir() => {
+                return None;
+            }
+            Ok(_)
+                if git
+                    .as_ref()
+                    .is_some_and(|g| at.canonicalize().is_ok_and(|r| r.starts_with(g))) =>
+            {
                 return None;
             }
             Ok(_) => {}
@@ -352,6 +365,16 @@ pub fn clone_into(dest: &Path, b: &Bring, staging: &Path) -> Result<(String, Vec
     for (rel, from) in walk(staging) {
         // A file the clone has is the project's own, not the one carried;
         // and nothing's written through a link out of the checkout.
+        // A name with a line break in it can't be kept out of Git (an
+        // exclude rule is one line): it isn't brought, rather than left
+        // where it could be committed.
+        if rel.to_string_lossy().contains(['\n', '\r']) {
+            notes.push(format!(
+                "left out {:?}: Git can't keep a name with a line break out",
+                rel.to_string_lossy()
+            ));
+            continue;
+        }
         let Some(to) = writable(dest, &rel) else {
             notes.push(format!("kept the project's own {}", rel.display()));
             continue;
@@ -467,6 +490,11 @@ fn exclude(dest: &Path, paths: &[String]) -> Result<(), String> {
             }
             line.push(c);
         }
+        // Git drops trailing spaces unless each is escaped.
+        let kept = line.trim_end_matches(' ').len();
+        let spaces = line.len() - kept;
+        line.truncate(kept);
+        line.push_str(&"\\ ".repeat(spaces));
         text.push_str(&line);
         text.push('\n');
     }
@@ -553,6 +581,10 @@ mod tests {
     #[test]
     fn only_paths_inside() {
         assert!(inside("a/.env").is_some());
+        // The repository however it's cased, as the Mac's disk reads it.
+        for git in [".GIT/hooks/pre-commit", "a/.Git/config", ".git./x"] {
+            assert!(inside(git).is_none(), "{git}");
+        }
         for bad in [
             "",
             "/etc/passwd",

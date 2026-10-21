@@ -652,6 +652,8 @@ pub enum Waiting {
     Devices,
     /// A pairing code to show.
     Pairing,
+    /// The code showing now, checked while one is.
+    PairingNow,
     /// A session's changes: all of them, or one turn's.
     Changes(String, Option<String>),
     /// Putting back a file or hunk, in this session.
@@ -3426,6 +3428,25 @@ impl Dent {
                 self.watch_pairing(code, cx);
             }
             (
+                Waiting::PairingNow,
+                Out::Reply {
+                    reply: Reply::Pairing { code, expires },
+                },
+            ) => match &self.pairing {
+                // A new one after wrong guesses: shown in its place.
+                Some((shown, _)) if !code.is_empty() && *shown != code => {
+                    self.pairing = Some((code.clone(), expires));
+                    self.watch_pairing(code, cx);
+                }
+                // None any more (a device paired, or it was used up):
+                // shown as done with, offering a new one.
+                Some((shown, at)) if code.is_empty() && *at > crate::cards::now_ms() => {
+                    self.pairing = Some((shown.clone(), crate::cards::now_ms()));
+                    cx.notify();
+                }
+                _ => {}
+            },
+            (
                 Waiting::Files(id),
                 Out::Reply {
                     reply: Reply::Files { paths },
@@ -5099,10 +5120,15 @@ impl Dent {
                             let left = expires.saturating_sub(crate::cards::now_ms());
                             // To the next whole minute, so "4 more minutes"
                             // turns to 3 on time.
-                            (left > 0).then_some(match left % 60_000 {
-                                0 => 60_000,
-                                r => r,
-                            })
+                            // And every couple of seconds, so a code changed
+                            // by wrong guesses, or used, shows as it is.
+                            (left > 0).then_some(
+                                match left % 60_000 {
+                                    0 => 60_000,
+                                    r => r,
+                                }
+                                .min(2_000),
+                            )
                         }
                         _ => None,
                     })
@@ -5112,7 +5138,13 @@ impl Dent {
                 cx.background_executor()
                     .timer(Duration::from_millis(ms + 20))
                     .await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                if this
+                    .update(cx, |this, cx| {
+                        this.ask(dent_protocol::Request::Pairing, Waiting::PairingNow);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }

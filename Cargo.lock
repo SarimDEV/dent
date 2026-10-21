@@ -2226,6 +2226,7 @@ dependencies = [
  "dent-protocol",
  "futures-util",
  "hex",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",

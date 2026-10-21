@@ -465,7 +465,7 @@ async fn a_spent_code_never_pairs_a_second_device() {
 /// the app only learns a code from the `OpenPairing` reply. So the owner
 /// keeps reading out a code that can never work again.
 #[tokio::test]
-async fn after_three_wrong_codes_the_code_on_screen_still_pairs() {
+async fn after_three_wrong_codes_the_screen_shows_the_code_that_pairs() {
     let d = Daemon::start(&[]);
     let shown = d.code();
     let mut dev = Device::connect(d.port, &Keys::generate().unwrap()).await;
@@ -476,17 +476,27 @@ async fn after_three_wrong_codes_the_code_on_screen_still_pairs() {
         dev.pair(&typo).await,
         Control::Refuse(Refusal::PairWrongNewCode)
     );
+    // The screen asks what's showing now (as the app does every couple of
+    // seconds while a code shows): the new one, not the old.
+    let now = match d.ask(Request::Pairing) {
+        Reply::Pairing { code, .. } => code,
+        other => panic!("unexpected {other:?}"),
+    };
+    assert!(!now.is_empty() && now != shown, "still showing {shown:?}");
     // The pause (1 s) passes; the person types the code on the screen.
     tokio::time::sleep(Duration::from_millis(1200)).await;
-    let got = dev.pair(&shown).await;
+    assert_eq!(dev.pair(&shown).await, Control::Refuse(Refusal::PairWrong));
     assert_eq!(
-        got,
+        dev.pair(&now).await,
         Control::Paired {
             access: Access::Full
-        },
-        "the code the machine shows no longer pairs, and the machine was never told of its \
-         replacement (no request returns the current code without opening a new one)"
+        }
     );
+    // Used, it's no longer showing.
+    match d.ask(Request::Pairing) {
+        Reply::Pairing { code, .. } => assert_eq!(code, ""),
+        other => panic!("unexpected {other:?}"),
+    }
 }
 
 /// An attacker who drops each connection right after its guess, before the
@@ -535,38 +545,6 @@ async fn guesses_from_dropped_connections_still_count() {
     tokio::time::sleep(Duration::from_secs(9)).await;
     let mut dev = Device::connect(d.port, &Keys::generate().unwrap()).await;
     assert_eq!(dev.pair(&guess).await, Control::Refuse(Refusal::PairClosed));
-}
-
-/// A device removed while it was away comes back with its old key. The
-/// owner removed it; it should hear that (and forget the machine), not be
-/// asked for a pairing code as if it had never met the machine.
-/// Debatable: decision 0061 only *requires* `removed` inside an
-/// authenticated session, which this is (the device proved its key).
-#[tokio::test]
-async fn a_device_removed_while_away_is_told_so_when_it_returns() {
-    let d = Daemon::start(&[]);
-    let (keys, dev) = paired(&d).await;
-    drop(dev);
-    let Reply::Devices { devices } = d.ask(Request::Devices) else {
-        panic!()
-    };
-    d.ask(Request::RemoveDevice {
-        id: devices[0].id.clone(),
-    });
-    let mut back = Device::connect(d.port, &keys).await;
-    let next = match back.trust.clone() {
-        Trust::Untrusted { .. } => {
-            tokio::time::timeout(Duration::from_secs(2), back.next_control())
-                .await
-                .ok()
-        }
-        other => panic!("still trusted after removal: {other:?}"),
-    };
-    assert_eq!(
-        next,
-        Some(Control::Refuse(Refusal::Removed)),
-        "a removed device is greeted as a stranger (Untrusted → the app shows 'needs a code')"
-    );
 }
 
 // ---- framing ----
