@@ -495,3 +495,37 @@ async fn the_launchers_stop_reason_is_read_from_this_state_folder() {
     }
     assert!(!d.state.join("stop-reason").exists(), "used once");
 }
+
+#[tokio::test]
+async fn one_pairing_exchange_at_a_time() {
+    let d = Daemon::start(&[]);
+    let code = d.code();
+    // The first device starts an exchange and stalls before confirming.
+    let mut first = Device::connect(d.port, &Keys::generate().unwrap()).await;
+    let p = dent_link::pair::Pairing::start("000000");
+    first
+        .control(&Control::Pair {
+            spake: hex::encode(&p.outbound),
+        })
+        .await;
+    assert!(matches!(first.next_control().await, Control::Pair { .. }));
+    // Meanwhile another can't start one, so parallel connections never get
+    // more guesses than the window allows.
+    let mut second = Device::connect(d.port, &Keys::generate().unwrap()).await;
+    assert!(matches!(
+        second.pair(&code).await,
+        Control::Refuse(Refusal::Busy { .. })
+    ));
+    // The first going away frees it, without costing a guess.
+    drop(first);
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        match second.pair(&code).await {
+            Control::Paired { .. } => break,
+            Control::Refuse(Refusal::Busy { .. }) if Instant::now() < until => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+}

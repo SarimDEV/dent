@@ -49,9 +49,26 @@ const HANDSHAKE: Duration = Duration::from_secs(5);
 /// [decision 0062]: ../../../docs/decisions/0062-liveness-and-retry.md
 /// [spike 12]: ../../../docs/spikes/12-link-under-real-networks.md
 const IDLE: Duration = Duration::from_secs(30);
-/// Connections still in their handshake, per address and in all.
+/// Connections not yet trusted, per address, and handshakes in progress in
+/// all.
 const PREAUTH_PER_ADDR: usize = 8;
 const PREAUTH_ALL: usize = 64;
+/// Untrusted connections waiting to pair, in all. Separate from handshakes
+/// in progress, so strangers lingering here can't keep trusted devices from
+/// finishing theirs.
+const UNTRUSTED_ALL: usize = 32;
+/// The longest an untrusted connection stays, pings or not: as long as a
+/// code lasts.
+const UNTRUSTED: Duration = trust::CODE_TTL;
+/// Longest wait to hand one frame to a remote client before it's dropped,
+/// as for the local socket.
+const WRITE_LIMIT: Duration = Duration::from_secs(30);
+/// Control messages waiting to go to one remote client. A client sending
+/// pings faster than it reads pongs loses pongs, not memory.
+const CTL_QUEUE: usize = 64;
+/// How often trust through the Tailscale account is checked again on a
+/// live connection ([decision 0061]).
+const RECHECK: Duration = Duration::from_secs(300);
 /// Lines waiting to go to one remote client.
 const OUT_QUEUE: usize = 256;
 /// How long Tailscale's view of this machine is reused.
@@ -80,6 +97,7 @@ pub struct Net {
     pub bye: broadcast::Sender<Goodbye>,
     preauth: Mutex<HashMap<IpAddr, usize>>,
     preauth_all: Arc<Semaphore>,
+    untrusted: Arc<Semaphore>,
 }
 
 impl Net {
@@ -120,6 +138,7 @@ impl Net {
             bye: broadcast::channel(4).0,
             preauth: Mutex::new(HashMap::new()),
             preauth_all: Arc::new(Semaphore::new(PREAUTH_ALL)),
+            untrusted: Arc::new(Semaphore::new(UNTRUSTED_ALL)),
         }
     }
 
@@ -215,19 +234,22 @@ pub async fn serve(d: Arc<Daemon>) -> Result<()> {
     // Every address, then filtered by route ([remote-plan.md]): binding an
     // interface address at startup fails when that interface (Tailscale)
     // comes up later ([spike 14]).
-    let listener = match TcpListener::bind(("::", d.net.port)).await {
-        Ok(l) => l,
-        Err(_) => TcpListener::bind(("0.0.0.0", d.net.port))
-            .await
-            .with_context(|| format!("listen on port {}", d.net.port))?,
-    };
+    let listener = listen(d.net.port).with_context(|| format!("listen on port {}", d.net.port))?;
     eprintln!(
         "dent-daemon: remote access on port {} as {}",
         d.net.port,
         identity.keys.id()
     );
     loop {
-        let (stream, peer) = listener.accept().await?;
+        let (stream, peer) = match listener.accept().await {
+            Ok(a) => a,
+            // Out of descriptors, or a connection reset before it was
+            // taken: wait a moment rather than stop listening for good.
+            Err(_) => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
         let ip = addrs::unmap(peer.ip());
         // Caps on handshakes in progress, per address and in all, so a
         // flood of silent connections can't crowd anyone out.
@@ -249,19 +271,65 @@ pub async fn serve(d: Arc<Daemon>) -> Result<()> {
     }
 }
 
-/// Releases one address's handshake slot when dropped.
+/// A listener on every address, IPv6 and IPv4 alike. Dual-stack is asked
+/// for rather than assumed: some systems make IPv6 sockets IPv6-only by
+/// default, which would leave IPv4 devices out. Without IPv6, IPv4 alone.
+fn listen(port: u16) -> std::io::Result<TcpListener> {
+    use std::os::fd::AsRawFd;
+    let dual = (|| {
+        let s = tokio::net::TcpSocket::new_v6()?;
+        s.set_reuseaddr(true)?;
+        let off: libc::c_int = 0;
+        // SAFETY: a valid socket, and an int option passed with its size.
+        let r = unsafe {
+            libc::setsockopt(
+                s.as_raw_fd(),
+                libc::IPPROTO_IPV6,
+                libc::IPV6_V6ONLY,
+                (&off as *const libc::c_int).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if r != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        s.bind(SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)))?;
+        s.listen(1024)
+    })();
+    match dual {
+        Ok(l) => Ok(l),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Err(e),
+        Err(_) => {
+            let s = tokio::net::TcpSocket::new_v4()?;
+            s.set_reuseaddr(true)?;
+            s.bind(SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, port)))?;
+            s.listen(1024)
+        }
+    }
+}
+
+/// One connection's place under the caps: a handshake in progress (in all)
+/// until [`Slot::handshaken`], and a connection not yet trusted (per
+/// address) until [`Slot::release`]. Whatever is still held is given back
+/// when dropped.
 struct Slot<'a> {
     net: &'a Net,
     ip: IpAddr,
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    counted: bool,
 }
 
 impl Slot<'_> {
+    fn handshaken(&mut self) {
+        self.permit = None;
+    }
+
     fn release(&mut self) {
-        if self.permit.take().is_some() {
+        self.permit = None;
+        if std::mem::take(&mut self.counted) {
             let mut p = lock(&self.net.preauth);
             if let Some(n) = p.get_mut(&self.ip) {
-                *n -= 1;
+                *n = n.saturating_sub(1);
                 if *n == 0 {
                     p.remove(&self.ip);
                 }
@@ -296,9 +364,13 @@ async fn recv_bin(ws: &mut Ws) -> Result<Vec<u8>> {
     }
 }
 
+/// Seals and sends one control message. Before trust only: afterwards the
+/// writer task is the only sealer.
 async fn send_control(ws: &mut Ws, t: &mut Transport, c: &Control) -> Result<()> {
     let f = t.seal_control(c)?;
-    ws.send(Message::Binary(f.into())).await?;
+    tokio::time::timeout(WRITE_LIMIT, ws.send(Message::Binary(f.into())))
+        .await
+        .context("the device isn't reading")??;
     Ok(())
 }
 
@@ -314,6 +386,7 @@ async fn conn(
         net: &d.net,
         ip,
         permit: Some(permit),
+        counted: true,
     };
     let _ = stream.set_nodelay(true);
     let me = Hello {
@@ -355,7 +428,18 @@ async fn conn(
     } else {
         None
     };
-    let route = addrs::route(ip, ts_peer.is_some());
+    let me_ts = match ts_peer {
+        Some(_) => d.net.tailscale().await,
+        None => None,
+    };
+    // This machine's own Tailscale address is this machine, like loopback:
+    // any local process can connect from it, and it's no peer.
+    let from_self = me_ts.as_ref().is_some_and(|m| m.addresses.contains(&ip));
+    let route = if from_self {
+        Route::Loopback
+    } else {
+        addrs::route(ip, ts_peer.is_some())
+    };
     let paired = lock(&d.net.trust).get(&t.remote).cloned();
     if route == Route::Lan && !d.net.lan.load(Ordering::Relaxed) && paired.is_none() {
         let _ = send_control(&mut ws, &mut t, &Control::Refuse(Refusal::LanOff)).await;
@@ -371,8 +455,8 @@ async fn conn(
     };
     if matches!(verdict, Verdict::Untrusted { .. })
         && route == Route::Tailscale
-        && let (Some(me_ts), Some(p)) = (d.net.tailscale().await, ts_peer.as_ref())
-        && tailnet::same_account(&me_ts, p)
+        && let (Some(me_ts), Some(p)) = (me_ts.as_ref(), ts_peer.as_ref())
+        && tailnet::same_account(me_ts, p)
     {
         verdict = Verdict::Tailscale {
             access: Access::Full,
@@ -394,23 +478,47 @@ async fn conn(
         .await;
         return Ok(());
     }
+    // The handshake is over; from here an untrusted connection counts
+    // against its own cap, not the one trusted devices handshake under.
+    slot.handshaken();
+    let lingering = match verdict {
+        Verdict::Untrusted { .. } if !hello.probe => {
+            match d.net.untrusted.clone().try_acquire_owned() {
+                Ok(p) => Some(p),
+                Err(_) => {
+                    let _ = send_control(
+                        &mut ws,
+                        &mut t,
+                        &Control::Refuse(Refusal::Busy { retry_ms: 5000 }),
+                    )
+                    .await;
+                    return Ok(());
+                }
+            }
+        }
+        _ => None,
+    };
     send_control(&mut ws, &mut t, &Control::Trust(verdict.clone())).await?;
     if hello.probe {
         // Discovery: who's there, and nothing else.
         return Ok(());
     }
     if let Verdict::Untrusted { .. } = verdict {
-        match pairing(&d, &mut ws, &mut t, &hello).await? {
-            true => {}
-            false => return Ok(()),
+        let paired = tokio::time::timeout(UNTRUSTED, pairing(&d, &mut ws, &mut t, &hello))
+            .await
+            .context("untrusted for too long")??;
+        if !paired {
+            return Ok(());
         }
     } else {
         lock(&d.net.trust).seen(&t.remote);
     }
+    drop(lingering);
     slot.release();
     t.limit = dent_link::LARGE;
     let id = dent_link::fingerprint(&t.remote);
-    trusted(d.clone(), ws, t, id).await
+    let recheck = matches!(verdict, Verdict::Tailscale { .. }).then_some(ip);
+    trusted(d.clone(), ws, t, id, recheck).await
 }
 
 fn access(s: &str) -> Access {
@@ -419,6 +527,39 @@ fn access(s: &str) -> Access {
         _ => Access::Unknown,
     }
 }
+
+/// One pairing exchange in flight. Dropped without an outcome (the
+/// connection went away), it frees the window without counting a guess.
+struct Exchange<'a> {
+    net: &'a Net,
+    ticket: Option<trust::Ticket>,
+}
+
+impl Exchange<'_> {
+    fn wrong(mut self) -> Refusal {
+        match self.ticket.take() {
+            Some(t) => lock(&self.net.window).wrong(t),
+            None => Refusal::PairClosed,
+        }
+    }
+
+    fn succeeded(mut self) -> bool {
+        self.ticket
+            .take()
+            .is_some_and(|t| lock(&self.net.window).succeeded(t))
+    }
+}
+
+impl Drop for Exchange<'_> {
+    fn drop(&mut self) {
+        if let Some(t) = self.ticket.take() {
+            lock(&self.net.window).abandon(t);
+        }
+    }
+}
+
+/// Longest device name kept from a pairing.
+const NAME_MAX: usize = 64;
 
 /// An untrusted device may pair while a code shows. Returns whether it's
 /// now trusted. Only a completed exchange with a wrong code counts as a
@@ -435,13 +576,17 @@ async fn pairing(d: &Daemon, ws: &mut Ws, t: &mut Transport, hello: &Hello) -> R
         match c {
             Control::Ping { t: n } => send_control(ws, t, &Control::Pong { t: n }).await?,
             Control::Pair { spake } => {
-                let showing = lock(&d.net.window).code();
-                let code = match showing {
+                let begun = lock(&d.net.window).begin();
+                let (code, ticket) = match begun {
                     Ok(c) => c,
                     Err(r) => {
                         send_control(ws, t, &Control::Refuse(r)).await?;
                         continue;
                     }
+                };
+                let exchange = Exchange {
+                    net: &d.net,
+                    ticket: Some(ticket),
                 };
                 let mut p = dent_link::pair::Pairing::start(&code);
                 let out = p.outbound.clone();
@@ -465,17 +610,23 @@ async fn pairing(d: &Daemon, ws: &mut Ws, t: &mut Transport, hello: &Hello) -> R
                     dent_link::pair::verify(&key, &t.hash, dent_link::pair::Role::Client, &m)
                 });
                 if !ok {
-                    let r = { lock(&d.net.window).wrong() };
+                    let r = exchange.wrong();
                     send_control(ws, t, &Control::Refuse(r)).await?;
                     continue;
                 }
-                let name = if hello.name.is_empty() {
+                // The right code, but it may have been replaced or expired
+                // while the exchange ran.
+                if !exchange.succeeded() {
+                    send_control(ws, t, &Control::Refuse(Refusal::PairClosed)).await?;
+                    continue;
+                }
+                let name: String = hello.name.trim().chars().take(NAME_MAX).collect();
+                let name = if name.is_empty() {
                     "a device".into()
                 } else {
-                    hello.name.clone()
+                    name
                 };
                 lock(&d.net.trust).add(&t.remote, &name)?;
-                lock(&d.net.window).succeeded();
                 let mine = dent_link::pair::confirm(&key, &t.hash, dent_link::pair::Role::Daemon);
                 send_control(
                     ws,
@@ -500,34 +651,66 @@ async fn pairing(d: &Daemon, ws: &mut Ws, t: &mut Transport, hello: &Hello) -> R
     }
 }
 
+/// Whether a device trusted through the Tailscale account still is: `false`
+/// only when Tailscale says so, never when it can't be asked.
+async fn still_same_account(net: &Net, ip: IpAddr) -> bool {
+    let Ok(peer) = tailnet::whois(ip).await else {
+        return true;
+    };
+    let Some(me) = net.tailscale().await else {
+        return true;
+    };
+    peer.is_some_and(|p| tailnet::same_account(&me, &p))
+}
+
 /// A trusted connection: the same session as the local socket, framed.
-async fn trusted(d: Arc<Daemon>, ws: Ws, t: Transport, id: String) -> Result<()> {
+/// `recheck` is the peer address when trust came from the Tailscale
+/// account, which is checked again every [`RECHECK`].
+async fn trusted(
+    d: Arc<Daemon>,
+    ws: Ws,
+    t: Transport,
+    id: String,
+    recheck: Option<IpAddr>,
+) -> Result<()> {
     let t = Arc::new(Mutex::new(t));
     let (mut sink, mut stream) = ws.split();
     let (lines_tx, lines_rx) = mpsc::channel::<String>(64);
     let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(OUT_QUEUE);
-    let (ctl_tx, mut ctl_rx) = mpsc::unbounded_channel::<Control>();
+    let (ctl_tx, mut ctl_rx) = mpsc::channel::<Control>(CTL_QUEUE);
     let session = tokio::spawn(crate::server::session(d.clone(), lines_rx, out_tx));
     let mut removed = d.net.removed.subscribe();
     let mut bye = d.net.bye.subscribe();
 
     // The writer alone seals and sends, so frames go out in nonce order.
     // Control messages go first, and between the parts of a large message.
-    let writer = {
+    // A goodbye or refusal is the last thing sent.
+    let mut writer = {
         let t = t.clone();
         tokio::spawn(async move {
             let send = async |sink: &mut futures_util::stream::SplitSink<Ws, Message>,
                               f: Vec<u8>| {
-                sink.send(Message::Binary(f.into())).await
+                matches!(
+                    tokio::time::timeout(WRITE_LIMIT, sink.send(Message::Binary(f.into()))).await,
+                    Ok(Ok(()))
+                )
             };
-            loop {
+            // Sends one control message; whether to go on.
+            let control = async |sink: &mut futures_util::stream::SplitSink<Ws, Message>,
+                                 c: Control| {
+                let end = matches!(c, Control::Goodbye(_) | Control::Refuse(_));
+                let f = lock(&t).seal_control(&c);
+                match f {
+                    Ok(f) => send(sink, f).await && !end,
+                    Err(_) => false,
+                }
+            };
+            'run: loop {
                 tokio::select! {
                     biased;
                     c = ctl_rx.recv() => {
                         let Some(c) = c else { break };
-                        let end = matches!(c, Control::Goodbye(_) | Control::Refuse(_));
-                        let f = match lock(&t).seal_control(&c) { Ok(f) => f, Err(_) => break };
-                        if send(&mut sink, f).await.is_err() || end {
+                        if !control(&mut sink, c).await {
                             break;
                         }
                     }
@@ -539,27 +722,29 @@ async fn trusted(d: Arc<Daemon>, ws: Ws, t: Transport, id: String) -> Result<()>
                         let mut i = 0;
                         loop {
                             while let Ok(c) = ctl_rx.try_recv() {
-                                let Ok(f) = lock(&t).seal_control(&c) else { return };
-                                if send(&mut sink, f).await.is_err() {
-                                    return;
+                                if !control(&mut sink, c).await {
+                                    break 'run;
                                 }
                             }
-                            let part = match lock(&t).seal_part(&line, i) {
+                            let part = lock(&t).seal_part(&line, i);
+                            let part = match part {
                                 Ok(Some(p)) => p,
                                 Ok(None) => break,
-                                Err(_) => return,
+                                Err(_) => break 'run,
                             };
-                            if send(&mut sink, part).await.is_err() {
-                                return;
+                            if !send(&mut sink, part).await {
+                                break 'run;
                             }
                             i += 1;
                         }
                     }
                 }
             }
-            let _ = sink.close().await;
+            let _ = tokio::time::timeout(Duration::from_secs(1), sink.close()).await;
         })
     };
+    let mut writer_done = false;
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + RECHECK, RECHECK);
 
     let result: Result<()> = async {
         loop {
@@ -571,18 +756,32 @@ async fn trusted(d: Arc<Daemon>, ws: Ws, t: Transport, id: String) -> Result<()>
                     Ok(Some(Ok(_))) => continue,
                     Ok(Some(Err(e))) => return Err(e.into()),
                 },
+                // The device stopped reading, or the socket failed.
+                _ = &mut writer => {
+                    writer_done = true;
+                    return Ok(());
+                }
                 r = removed.recv() => {
                     if matches!(r, Ok(ref gone) if *gone == id) {
-                        let _ = ctl_tx.send(Control::Refuse(Refusal::Removed));
+                        let _ = ctl_tx.try_send(Control::Refuse(Refusal::Removed));
                         return Ok(());
                     }
                     continue;
                 }
                 b = bye.recv() => {
                     if let Ok(g) = b {
-                        let _ = ctl_tx.send(Control::Goodbye(g));
+                        let _ = ctl_tx.try_send(Control::Goodbye(g));
                     }
                     return Ok(());
+                }
+                _ = tick.tick(), if recheck.is_some() => {
+                    if let Some(ip) = recheck
+                        && !still_same_account(&d.net, ip).await
+                    {
+                        let _ = ctl_tx.try_send(Control::Refuse(Refusal::NotTrusted));
+                        return Ok(());
+                    }
+                    continue;
                 }
             };
             let opened = lock(&t).open(&frame);
@@ -592,7 +791,7 @@ async fn trusted(d: Arc<Daemon>, ws: Ws, t: Transport, id: String) -> Result<()>
                 // Answered here, before any app work, so a busy daemon still
                 // looks alive ([remote-plan.md]).
                 Ok(Some(Opened::Control(Control::Ping { t: n }))) => {
-                    let _ = ctl_tx.send(Control::Pong { t: n });
+                    let _ = ctl_tx.try_send(Control::Pong { t: n });
                 }
                 Ok(Some(Opened::Control(_))) => {}
                 Ok(Some(Opened::Data(bytes))) => {
@@ -608,8 +807,15 @@ async fn trusted(d: Arc<Daemon>, ws: Ws, t: Transport, id: String) -> Result<()>
     }
     .await;
     drop(lines_tx);
+    drop(ctl_tx);
     // Let a final goodbye or refusal go out before closing.
-    let _ = tokio::time::timeout(Duration::from_millis(500), writer).await;
+    if !writer_done
+        && tokio::time::timeout(Duration::from_millis(500), &mut writer)
+            .await
+            .is_err()
+    {
+        writer.abort();
+    }
     session.abort();
     result
 }

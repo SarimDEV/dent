@@ -128,10 +128,19 @@ const WRONG_PER_WINDOW: u32 = 10;
 #[derive(Default)]
 pub struct Window {
     open: Option<Open>,
+    /// Counts codes shown, so an exchange begun on one code can't finish on
+    /// another.
+    shown: u64,
 }
 
 struct Open {
     code: String,
+    /// Which code this is, from [`Window::shown`].
+    nth: u64,
+    /// An exchange is in flight. One at a time: otherwise many connections
+    /// could each start one before any wrong guess is counted, and get far
+    /// more than three guesses at a code.
+    busy: bool,
     until: Instant,
     wrong_code: u32,
     wrong_window: u32,
@@ -144,8 +153,11 @@ impl Window {
     pub fn open(&mut self) -> Result<(String, u64)> {
         let code = dent_link::pair::new_code()?;
         let expires_ms = now_ms() + CODE_TTL.as_millis() as u64;
+        self.shown += 1;
         self.open = Some(Open {
             code: code.clone(),
+            nth: self.shown,
+            busy: false,
             until: Instant::now() + CODE_TTL,
             wrong_code: 0,
             wrong_window: 0,
@@ -159,8 +171,10 @@ impl Window {
         self.open.as_ref().is_some_and(|o| Instant::now() < o.until)
     }
 
-    /// The code to pair against now, or why not.
-    pub fn code(&mut self) -> Result<String, Refusal> {
+    /// Starts an exchange: the code to pair against now and a ticket for
+    /// it, or why not. Every ticket ends in [`Window::wrong`],
+    /// [`Window::succeeded`] or [`Window::abandon`].
+    pub fn begin(&mut self) -> Result<(String, Ticket), Refusal> {
         let now = Instant::now();
         let Some(o) = self.open.as_mut() else {
             return Err(Refusal::PairClosed);
@@ -176,16 +190,40 @@ impl Window {
                 secs: (p - now).as_secs().max(1),
             });
         }
-        Ok(o.code.clone())
+        if o.busy {
+            return Err(Refusal::Busy { retry_ms: 1000 });
+        }
+        o.busy = true;
+        Ok((o.code.clone(), Ticket { nth: o.nth }))
     }
 
-    /// A pairing finished: the code is spent.
-    pub fn succeeded(&mut self) {
-        self.open = None;
+    /// The open window, if `t` was begun on its current code.
+    fn current(&mut self, t: &Ticket) -> Option<&mut Open> {
+        self.open.as_mut().filter(|o| o.nth == t.nth)
+    }
+
+    /// An exchange ended without a guess (the connection dropped).
+    pub fn abandon(&mut self, t: Ticket) {
+        if let Some(o) = self.current(&t) {
+            o.busy = false;
+        }
+    }
+
+    /// A completed exchange with the right code. Whether it still counts:
+    /// the code must still be showing, unexpired. If so, it's spent.
+    pub fn succeeded(&mut self, t: Ticket) -> bool {
+        let live = self.current(&t).is_some_and(|o| Instant::now() < o.until);
+        if live {
+            self.open = None;
+        }
+        live
     }
 
     /// A completed exchange with the wrong code. Returns the refusal to send.
-    pub fn wrong(&mut self) -> Refusal {
+    pub fn wrong(&mut self, t: Ticket) -> Refusal {
+        if let Some(o) = self.current(&t) {
+            o.busy = false;
+        }
         let Some(o) = self.open.as_mut() else {
             return Refusal::PairClosed;
         };
@@ -200,6 +238,8 @@ impl Window {
             if let Ok(code) = dent_link::pair::new_code() {
                 o.code = code;
             }
+            self.shown += 1;
+            o.nth = self.shown;
             o.wrong_code = 0;
             o.paused_until = Some(Instant::now() + o.pause);
             o.pause = (o.pause * 2).min(Duration::from_secs(300));
@@ -207,6 +247,12 @@ impl Window {
         }
         Refusal::PairWrong
     }
+}
+
+/// One pairing exchange in flight, from [`Window::begin`].
+#[derive(Debug)]
+pub struct Ticket {
+    nth: u64,
 }
 
 pub fn now_ms() -> u64 {
@@ -220,28 +266,32 @@ pub fn now_ms() -> u64 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn guesses_are_capped() {
-        let mut w = Window::default();
-        assert_eq!(w.code(), Err(Refusal::PairClosed));
-        let (first, _) = w.open().unwrap();
-        assert_eq!(w.code(), Ok(first.clone()));
-        assert_eq!(w.wrong(), Refusal::PairWrong);
-        assert_eq!(w.wrong(), Refusal::PairWrong);
-        assert_eq!(w.wrong(), Refusal::PairWrongNewCode);
-        // Paused: even the right code waits.
-        assert!(matches!(w.code(), Err(Refusal::PairLocked { .. })));
-        // Ten wrong in one window closes it.
+    fn guess(w: &mut Window) -> Refusal {
         if let Some(o) = w.open.as_mut() {
             o.paused_until = None;
         }
+        let (_, t) = w.begin().unwrap();
+        w.wrong(t)
+    }
+
+    #[test]
+    fn guesses_are_capped() {
+        let mut w = Window::default();
+        assert_eq!(w.begin().unwrap_err(), Refusal::PairClosed);
+        let (first, _) = w.open().unwrap();
+        let (code, t) = w.begin().unwrap();
+        assert_eq!(code, first);
+        assert_eq!(w.wrong(t), Refusal::PairWrong);
+        assert_eq!(guess(&mut w), Refusal::PairWrong);
+        let (_, t) = w.begin().unwrap();
+        assert_eq!(w.wrong(t), Refusal::PairWrongNewCode);
+        // Paused: even the right code waits.
+        assert!(matches!(w.begin(), Err(Refusal::PairLocked { .. })));
+        // Ten wrong in one window closes it.
         for _ in 0..6 {
-            if let Some(o) = w.open.as_mut() {
-                o.paused_until = None;
-            }
-            let _ = w.wrong();
+            guess(&mut w);
         }
-        assert_eq!(w.wrong(), Refusal::PairClosed);
+        assert_eq!(guess(&mut w), Refusal::PairClosed);
         assert!(!w.is_open());
     }
 
@@ -249,8 +299,28 @@ mod tests {
     fn a_code_works_once() {
         let mut w = Window::default();
         w.open().unwrap();
-        w.succeeded();
-        assert_eq!(w.code(), Err(Refusal::PairClosed));
+        let (_, t) = w.begin().unwrap();
+        assert!(w.succeeded(t));
+        assert_eq!(w.begin().unwrap_err(), Refusal::PairClosed);
+    }
+
+    #[test]
+    fn exchanges_run_one_at_a_time_on_the_code_they_began_with() {
+        let mut w = Window::default();
+        w.open().unwrap();
+        let (_, first) = w.begin().unwrap();
+        // A second connection can't start a guess while one is in flight.
+        assert!(matches!(w.begin(), Err(Refusal::Busy { .. })));
+        // A dropped exchange frees the window without counting.
+        w.abandon(first);
+        let (_, t) = w.begin().unwrap();
+        // A code shown again meanwhile: the exchange begun on the old one
+        // no longer pairs, and its end doesn't free the new code's slot.
+        w.open().unwrap();
+        let (_, newer) = w.begin().unwrap();
+        assert!(!w.succeeded(t));
+        assert!(matches!(w.begin(), Err(Refusal::Busy { .. })));
+        assert!(w.succeeded(newer));
     }
 
     #[test]
