@@ -292,7 +292,7 @@ fn pack(dir: &str) -> Result<dent_protocol::Bring> {
 /// One request to this machine's daemon, over its socket.
 fn local(r: Request) -> Result<Reply> {
     use std::io::{BufRead, Write};
-    let sock = dent_protocol::daemon_socket(&dent_remote::store::state_dir());
+    let sock = dent_protocol::daemon_socket(&dent_remote::store::daemon_state());
     let mut s = std::os::unix::net::UnixStream::connect(&sock)
         .with_context(|| format!("dent isn't running on this machine ({})", sock.display()))?;
     let mut hello = hello_line(1);

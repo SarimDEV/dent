@@ -4317,11 +4317,14 @@ impl Dent {
         let text = self.starter.read(cx).value();
         let empty = text.trim().is_empty() && self.attachments.is_empty();
         let d = self.defaults.clone();
-        let project = d
-            .project
-            .as_deref()
-            .map(Self::project_name)
-            .unwrap_or_else(|| "No project".into());
+        let project = match self.bringing_here() {
+            Some(c) => c.bring.name.clone(),
+            None => d
+                .project
+                .as_deref()
+                .map(Self::project_name)
+                .unwrap_or_else(|| "No project".into()),
+        };
         let model = crate::bridge::model_name(self.new_models(), d.model.as_deref());
         // Everything is already chosen; each choice is one click to change.
         // Sessions from a terminal wait behind one chip at the row's end;

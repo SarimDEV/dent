@@ -836,9 +836,10 @@ impl Daemon {
                 // The agent still needs its folder to start in.
                 let _ = std::fs::create_dir_all(&dest);
                 format!(
-                    "Couldn't bring {} here: {e}. What you sent is waiting: take it back, \
-                     or send on to work in an empty folder",
-                    bring.name
+                    "Couldn't bring {} here: {}. What you sent is back in the reply box; \
+                     sent again, it works in an empty folder",
+                    bring.name,
+                    e.trim_end_matches('.')
                 )
             }
         };
@@ -850,6 +851,12 @@ impl Daemon {
         }
         let _ = self.store().del(&key);
         let _ = std::fs::remove_dir_all(&staging);
+        // Done: what waited goes. Failed: it goes back to whoever sent it,
+        // before the session stops holding messages, so it never reaches
+        // an agent in an empty folder.
+        if !ok && let Err(e) = self.command(id, Op::GiveBack).await {
+            eprintln!("dent-daemon: {id}: couldn't give back what waited: {e:#}");
+        }
         lock(&self.setting_up).remove(id);
         if ok && let Err(e) = self.command(id, Op::SetUp).await {
             eprintln!("dent-daemon: {id}: couldn't carry on after the clone: {e:#}");

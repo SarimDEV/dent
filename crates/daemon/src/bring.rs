@@ -100,6 +100,34 @@ fn cloneable(url: &str) -> bool {
         || (url.contains(':') && !url.starts_with('/') && !url.contains("://"))
 }
 
+/// What git said, in one line for the chat.
+fn first_line(e: &str) -> String {
+    e.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("git failed")
+        .trim_end_matches('.')
+        .to_string()
+}
+
+/// The HTTPS address of a repository named by SSH: `git@github.com:a/b.git`
+/// and `ssh://git@github.com/a/b.git` are `https://github.com/a/b.git`.
+fn https_of(url: &str) -> Option<String> {
+    let (host, path) = if let Some(rest) = url.strip_prefix("ssh://") {
+        let rest = rest.split_once('@').map_or(rest, |(_, r)| r);
+        let (host, path) = rest.split_once('/')?;
+        // A port is SSH's, not the web's.
+        (host.split(':').next()?, path)
+    } else if !url.contains("://") {
+        let rest = url.split_once('@').map_or(url, |(_, r)| r);
+        rest.split_once(':')?
+    } else {
+        return None;
+    };
+    // An SSH config alias (`studio:repos/b`) names no web host.
+    (host.contains('.') && !path.is_empty()).then(|| format!("https://{host}/{path}"))
+}
+
 /// An environment file: `.env`, `.env.local`, `apps/web/.env.production`.
 fn is_env(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
@@ -185,12 +213,25 @@ pub fn clone_into(dest: &Path, b: &Bring, staging: &Path) -> Result<String, Stri
     let parent = dest.parent().ok_or("no folder to clone into")?;
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let to = dest.display().to_string();
-    run(
-        parent,
-        &["clone", "-q", "-o", &first.name, "--", &first.url, &to],
-    )
-    .map_err(|e| format!("couldn't clone {}: {e}", first.url))?;
     let mut notes = Vec::new();
+    let clone = |url: &str| {
+        run(parent, &["clone", "-q", "-o", &first.name, "--", url, &to]).map_err(|e| {
+            let _ = std::fs::remove_dir_all(dest);
+            first_line(&e)
+        })
+    };
+    if let Err(e) = clone(&first.url) {
+        // This machine often has no SSH key for the host the other one
+        // pushes to over SSH; a public repository clones over HTTPS all
+        // the same, and stays that way here.
+        let https =
+            https_of(&first.url).ok_or_else(|| format!("couldn't clone {}: {e}", first.url))?;
+        clone(&https).map_err(|_| format!("couldn't clone {}: {e}", first.url))?;
+        notes.push(format!(
+            "{} over HTTPS, as SSH to it didn't work here",
+            first.name
+        ));
+    }
     for r in &b.remotes[1..] {
         if let Err(e) = run(dest, &["remote", "add", "--", &r.name, &r.url]) {
             notes.push(format!("couldn't add the remote {}: {e}", r.name));
@@ -212,6 +253,7 @@ pub fn clone_into(dest: &Path, b: &Bring, staging: &Path) -> Result<String, Stri
         }
     }
     let mut brought = 0;
+    let mut unignored = Vec::new();
     for (rel, from) in walk(staging) {
         let to = dest.join(&rel);
         // A file the clone has is the project's own, not the one carried.
@@ -224,6 +266,17 @@ pub fn clone_into(dest: &Path, b: &Bring, staging: &Path) -> Result<String, Stri
         }
         std::fs::copy(&from, &to).map_err(|e| format!("{}: {e}", rel.display()))?;
         brought += 1;
+        // Ignored where it came from by that checkout's own rules
+        // (`.git/info/exclude`, a global excludes file), which a clone
+        // doesn't have: it stays ignored here, so it's never committed.
+        let rel = rel.to_string_lossy();
+        if run(dest, &["check-ignore", "-q", "--", &rel]).is_err() {
+            unignored.push(format!("/{rel}"));
+        }
+    }
+    if !unignored.is_empty() {
+        exclude(dest, &unignored)
+            .map_err(|e| format!("couldn't keep the files out of Git: {e}"))?;
     }
     let branch = crate::workspace::branch(dest).unwrap_or_else(|| "its default branch".into());
     let mut line = format!("Cloned {} from {} on {branch}", b.name, first.name);
@@ -237,6 +290,34 @@ pub fn clone_into(dest: &Path, b: &Bring, staging: &Path) -> Result<String, Stri
         line.push_str(&n);
     }
     Ok(line)
+}
+
+/// Add `paths` to the checkout's own ignore list, `.git/info/exclude`,
+/// which is never committed.
+fn exclude(dest: &Path, paths: &[String]) -> Result<(), String> {
+    let file = run(dest, &["rev-parse", "--git-path", "info/exclude"])?;
+    let file = dest.join(file.trim());
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut text = std::fs::read_to_string(&file).unwrap_or_default();
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str("# Brought by dent from another machine, where Git ignores them\n");
+    for p in paths {
+        // Glob characters in a name are matched as themselves.
+        let mut line = String::new();
+        for c in p.chars() {
+            if matches!(c, '*' | '?' | '[' | '\\' | '!' | '#') {
+                line.push('\\');
+            }
+            line.push(c);
+        }
+        text.push_str(&line);
+        text.push('\n');
+    }
+    std::fs::write(&file, text).map_err(|e| e.to_string())
 }
 
 /// Every file under `dir`, with its path relative to it.
@@ -275,6 +356,20 @@ mod tests {
         assert!(!is_env(".env.example"));
         assert!(!is_env("notes.env"));
         assert!(!is_env(".envrc"));
+    }
+
+    #[test]
+    fn ssh_addresses_have_an_https_twin() {
+        assert_eq!(
+            https_of("git@github.com:a/b.git").as_deref(),
+            Some("https://github.com/a/b.git")
+        );
+        assert_eq!(
+            https_of("ssh://git@gitlab.com:2222/a/b").as_deref(),
+            Some("https://gitlab.com/a/b")
+        );
+        assert_eq!(https_of("studio:repos/b"), None);
+        assert_eq!(https_of("https://github.com/a/b"), None);
     }
 
     #[test]

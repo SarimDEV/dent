@@ -826,7 +826,7 @@ impl SessionView {
                 }
                 self.working_since = Some(e.at);
             }
-            Body::Unqueued { id } => {
+            Body::Unqueued { id, .. } => {
                 if let Some(ix) = self.user_ix(id) {
                     self.entries.remove(ix);
                     self.reindex(ix);
@@ -1805,7 +1805,10 @@ mod tests {
                 }],
                 uuid: None,
             },
-            Body::Unqueued { id: "c".into() },
+            Body::Unqueued {
+                id: "c".into(),
+                returned: false,
+            },
             Body::Delivered { id: "b".into() },
         ]);
         let v = &s.list["s"];

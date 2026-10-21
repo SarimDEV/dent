@@ -41,6 +41,23 @@ impl Saved {
     }
 }
 
+/// The state folder of this machine's own daemon (`DENT_STATE`, else the
+/// platform's place for it), where its socket is.
+pub fn daemon_state() -> PathBuf {
+    if let Some(p) = std::env::var_os("DENT_STATE") {
+        return PathBuf::from(p);
+    }
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/dent")
+    } else {
+        std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/state"))
+            .join("dent")
+    }
+}
+
 pub fn state_dir() -> PathBuf {
     if let Some(p) = std::env::var_os("DENT_CLIENT_STATE") {
         return PathBuf::from(p);

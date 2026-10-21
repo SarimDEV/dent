@@ -753,9 +753,11 @@ fn a_project_is_brought_from_another_machine_with_its_ignored_files() {
     git(&there, &["init", "-q", "-b", "main"]);
     std::fs::write(
         there.join(".gitignore"),
-        ".env*\n!.env.example\nnode_modules/\n*.bin\n",
+        ".env*\n!.env.example\nnode_modules/\n",
     )
     .unwrap();
+    // Ignored by this checkout alone: the clone won't have the rule.
+    std::fs::write(there.join(".git/info/exclude"), "*.bin\n").unwrap();
     std::fs::write(there.join(".env.example"), "KEY=\n").unwrap();
     git(&there, &["add", "."]);
     git(&there, &["commit", "-q", "-m", "first"]);
@@ -911,6 +913,14 @@ fn a_project_is_brought_from_another_machine_with_its_ignored_files() {
     );
     assert_eq!(std::fs::read(here.join("blob.bin")).unwrap(), odd);
     assert!(!here.join("node_modules").exists());
+    // Every file brought stays out of Git, even one only that checkout
+    // ignored.
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&here)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&status.stdout), "");
     let remotes = std::process::Command::new("git")
         .args(["remote"])
         .current_dir(&here)
@@ -946,6 +956,14 @@ fn a_project_is_brought_from_another_machine_with_its_ignored_files() {
         "the failure",
         |b| matches!(b, Body::Notice { text } if text.starts_with("Couldn't bring app here")),
     );
+    // It's given back, never sent to an agent in an empty folder.
+    c.wait(
+        &bad,
+        "what was sent comes back",
+        |b| matches!(b, Body::Unqueued { id, returned: true } if id == "m-bad"),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(c.count(&bad, |b| matches!(b, Body::Delivered { .. })), 0);
     assert_eq!(c.count(&bad, |b| matches!(b, Body::TurnStarted)), 0);
     assert!(home.join("dent/projects/app-2").is_dir());
 }
@@ -1221,7 +1239,10 @@ fn stop_stops_within_two_seconds_and_returns_held_messages() {
         t.elapsed()
     );
     assert_eq!(
-        c.count(&s, |b| matches!(b, Body::Unqueued { id } if id == "held")),
+        c.count(
+            &s,
+            |b| matches!(b, Body::Unqueued { id, .. } if id == "held")
+        ),
         1
     );
     c.pump(Duration::from_millis(500));

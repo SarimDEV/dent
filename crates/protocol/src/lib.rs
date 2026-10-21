@@ -91,6 +91,11 @@ pub enum Body {
     /// A held message was taken back before it went.
     Unqueued {
         id: String,
+        /// Given back by the daemon itself, not asked for (the project its
+        /// session was to work in couldn't be brought here): a client puts
+        /// it back in the session's reply box.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        returned: bool,
     },
     /// A held message moved in the queue: to just before held message
     /// `before`, or to the end.
