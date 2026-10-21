@@ -29,12 +29,14 @@ pub struct Binding {
 impl Binding {
     /// Whether `now` is the machine this binding was made on. One card
     /// changing (a new USB adapter) doesn't count; all of them changing
-    /// does.
+    /// does. No cards now (not yet up at boot) proves nothing either way.
     pub fn matches(&self, now: &Binding) -> bool {
         if self.hardware != now.hardware || self.state != now.state {
             return false;
         }
-        self.cards.is_empty() || self.cards.iter().any(|c| now.cards.contains(c))
+        self.cards.is_empty()
+            || now.cards.is_empty()
+            || self.cards.iter().any(|c| now.cards.contains(c))
     }
 }
 
@@ -52,6 +54,9 @@ pub enum Problem {
         now: Box<Binding>,
     },
     Damaged(String),
+    /// This machine's hardware id couldn't be read just now, so a copy
+    /// can't be ruled out.
+    Unverified(String),
 }
 
 impl std::fmt::Display for Problem {
@@ -64,6 +69,10 @@ impl std::fmt::Display for Problem {
                 was.state,
                 short(&now.hardware),
                 now.state
+            ),
+            Problem::Unverified(why) => write!(
+                f,
+                "couldn't check this machine's identity ({why}); remote access stays off until the daemon restarts"
             ),
             Problem::Damaged(why) => write!(
                 f,
@@ -98,11 +107,16 @@ pub fn load(state: &Path) -> Result<Identity, Problem> {
         return Ok(Identity { keys });
     }
     let text = std::fs::read_to_string(&kp).map_err(|e| Problem::Damaged(e.to_string()))?;
+
     let keys = Keys::from_hex(&text).map_err(|e| Problem::Damaged(format!("{e:#}")))?;
     match std::fs::read_to_string(binding_path(state)) {
         Ok(b) => {
             let was: Binding =
                 serde_json::from_str(&b).map_err(|e| Problem::Damaged(format!("binding: {e}")))?;
+            if !was.hardware.is_empty() && now.hardware.is_empty() {
+                // A failed read isn't a different machine.
+                return Err(Problem::Unverified("no hardware id".into()));
+            }
             if !was.matches(&now) {
                 return Err(Problem::Copied {
                     was: Box::new(was),
@@ -216,6 +230,14 @@ fn physical_cards() -> Vec<String> {
             if !p.join("device").exists() {
                 continue;
             }
+            // Only addresses burned into the card. A random or set one
+            // (Wi-Fi privacy addresses) changes on its own and would look
+            // like a new machine.
+            let permanent =
+                std::fs::read_to_string(p.join("addr_assign_type")).is_ok_and(|t| t.trim() == "0");
+            if !permanent {
+                continue;
+            }
             if let Ok(a) = std::fs::read_to_string(p.join("address")) {
                 let a = a.trim().to_string();
                 if !a.is_empty() && a != "00:00:00:00:00:00" {
@@ -263,6 +285,10 @@ mod tests {
         assert!(
             b("m1", &[], "/s").matches(&b("m1", &["zz"], "/s")),
             "no cards recorded"
+        );
+        assert!(
+            orig.matches(&b("m1", &[], "/s")),
+            "cards not up yet at boot"
         );
     }
 
