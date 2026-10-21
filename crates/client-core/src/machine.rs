@@ -126,6 +126,9 @@ pub enum Note {
         generation: u64,
         addr: String,
         trust: Trust,
+        /// The machine's public key, proven in the handshake: keep it to
+        /// catch a different machine at a known address later.
+        key: Vec<u8>,
     },
     /// One data message from the daemon: a JSON line.
     Data {
@@ -812,6 +815,7 @@ impl Machine {
         }
         self.generation += 1;
         self.cooldown.remove(&addr);
+        let key = t.remote.clone();
         if self.known.is_none() || matches!(trust, Trust::Paired { .. }) {
             self.known = Some(t.remote.clone());
         }
@@ -834,6 +838,7 @@ impl Machine {
             generation: self.generation,
             addr,
             trust,
+            key,
         });
         self.set_state(State::Online);
     }

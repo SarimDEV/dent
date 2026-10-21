@@ -192,7 +192,8 @@ async fn add(args: &[String]) -> Result<()> {
                 ));
             }
             Note::Paired { key: k } => key = Some(k),
-            Note::Up { trust, .. } => {
+            Note::Up { trust, key: k, .. } => {
+                key.get_or_insert(k);
                 println!("connected ({trust:?})");
                 let _ = ask_tx.send(host::Ask::Send(hello_line(1)));
             }
@@ -324,6 +325,7 @@ async fn watch(args: &[String]) -> Result<()> {
                 generation,
                 addr,
                 trust,
+                ..
             } => {
                 tally[i].ups += 1;
                 println!("{t:7.2}s  {name}: up via {addr} (link {generation}, {trust:?})");
