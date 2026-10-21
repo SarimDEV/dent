@@ -57,26 +57,37 @@ impl Daemon {
         ));
         let state = root.join("state");
         std::fs::create_dir_all(&state).unwrap();
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let child = Command::new(env!("CARGO_BIN_EXE_dent-daemon"))
-            .arg("--state")
-            .arg(&state)
-            .env("DENT_REMOTE_PORT", port.to_string())
-            .env("DENT_TAILSCALE_LOCALAPI", "127.0.0.1:1")
-            .env("DENT_CLAUDE", fake)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+        let log = root.join("daemon.log");
+        let mut tries = 0;
+        let (port, mut child) = loop {
+            let port = free_port();
+            let child = Command::new(env!("CARGO_BIN_EXE_dent-daemon"))
+                .arg("--state")
+                .arg(&state)
+                .env("DENT_REMOTE_PORT", port.to_string())
+                .env("DENT_TAILSCALE_LOCALAPI", "127.0.0.1:1")
+                .env("DENT_CLAUDE", fake)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(std::fs::File::create(&log).unwrap())
+                .spawn()
+                .unwrap();
+            if got_port(&log, port) {
+                break (port, child);
+            }
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
+            tries += 1;
+            assert!(tries < 20, "no free port");
+        };
         let until = Instant::now() + Duration::from_secs(10);
         while std::net::TcpStream::connect(("127.0.0.1", port)).is_err()
             || UnixStream::connect(dent_protocol::daemon_socket(&state)).is_err()
         {
+            if let Ok(Some(_)) = child.try_wait() {
+                panic!("daemon exited");
+            }
             assert!(Instant::now() < until, "daemon didn't start");
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -135,6 +146,37 @@ impl Daemon {
             o => panic!("{o:?}"),
         }
     }
+}
+
+/// Whether the daemon logging to `log` got `port`. Picking a free port and
+/// letting it go races the other tests doing the same; a daemon that lost
+/// runs without remote access, and the test would quietly talk to the
+/// winner instead, which the winner's test then kills mid-way.
+fn got_port(log: &std::path::Path, port: u16) -> bool {
+    let mine = format!("remote access on port {port} ");
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        let said = std::fs::read_to_string(log).unwrap_or_default();
+        if said.contains(&mine) {
+            return true;
+        }
+        if said.contains("remote access off") {
+            return false;
+        }
+        assert!(
+            Instant::now() < until,
+            "daemon never said whether it listens"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 impl Drop for Daemon {

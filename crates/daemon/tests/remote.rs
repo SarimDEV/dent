@@ -34,22 +34,32 @@ impl Daemon {
         ));
         let state = root.join("state");
         std::fs::create_dir_all(&state).unwrap();
-        // A free port: bind, note it, let it go.
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
         let mut d = Self {
             state,
-            port,
+            port: 0,
             child: None,
         };
-        d.spawn(env);
-        d
+        for _ in 0..20 {
+            d.port = free_port();
+            if d.try_spawn(env) {
+                return d;
+            }
+            if let Some(mut c) = d.child.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+        panic!("no free port");
     }
 
+    /// Restarted on the port it had, which must still be free.
     fn spawn(&mut self, env: &[(&str, &str)]) {
+        assert!(self.try_spawn(env), "port {} was taken", self.port);
+    }
+
+    fn try_spawn(&mut self, env: &[(&str, &str)]) -> bool {
+        let log = self.state.with_file_name("daemon.log");
+        let _ = std::fs::remove_file(&log);
         let mut c = Command::new(env!("CARGO_BIN_EXE_dent-daemon"));
         c.arg("--state")
             .arg(&self.state)
@@ -58,11 +68,14 @@ impl Daemon {
             .env("DENT_TAILSCALE_LOCALAPI", "127.0.0.1:1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(std::fs::File::create(&log).unwrap());
         for (k, v) in env {
             c.env(k, v);
         }
         self.child = Some(c.spawn().unwrap());
+        if !got_port(&log, self.port) {
+            return false;
+        }
         let until = Instant::now() + Duration::from_secs(10);
         while std::net::TcpStream::connect(("127.0.0.1", self.port)).is_err()
             || UnixStream::connect(dent_protocol::daemon_socket(&self.state)).is_err()
@@ -70,6 +83,7 @@ impl Daemon {
             assert!(Instant::now() < until, "daemon didn't start");
             std::thread::sleep(Duration::from_millis(20));
         }
+        true
     }
 
     /// One request over the local socket.
@@ -114,6 +128,37 @@ impl Daemon {
             unsafe { libc::kill(c.id() as i32, sig) };
         }
     }
+}
+
+/// Whether the daemon logging to `log` got `port`. Picking a free port and
+/// letting it go races the other tests doing the same; a daemon that lost
+/// runs without remote access, and the test would quietly talk to the
+/// winner instead, which the winner's test then kills mid-way.
+fn got_port(log: &std::path::Path, port: u16) -> bool {
+    let mine = format!("remote access on port {port} ");
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        let said = std::fs::read_to_string(log).unwrap_or_default();
+        if said.contains(&mine) {
+            return true;
+        }
+        if said.contains("remote access off") {
+            return false;
+        }
+        assert!(
+            Instant::now() < until,
+            "daemon never said whether it listens"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 impl Drop for Daemon {
@@ -734,4 +779,51 @@ async fn a_client_pairs_and_its_requests_wait_out_a_restart() {
     })
     .await;
     r.stop();
+}
+
+/// The admin words work with `--state DIR` before or after them, and a
+/// `--state` missing its folder is refused rather than starting a daemon on
+/// the default one.
+#[tokio::test]
+async fn admin_commands_take_the_state_folder_anywhere() {
+    let d = Daemon::start(&[]);
+    let run = |args: &[&std::ffi::OsStr]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_dent-daemon"));
+        c.args(args)
+            .env("DENT_REMOTE_PORT", "0")
+            .stdin(Stdio::null());
+        let mut child = c
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() > until {
+                let _ = child.kill();
+                panic!("{args:?} kept running");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        child.wait_with_output().unwrap()
+    };
+    let state = d.state.as_os_str();
+    for args in [
+        vec!["--state".as_ref(), state, "pair".as_ref()],
+        vec!["pair".as_ref(), "--state".as_ref(), state],
+    ] {
+        let out = run(&args);
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(said.starts_with("Pairing code: "), "{args:?}: {said}");
+    }
+    // Both asked the one running daemon: the code it shows is the same.
+    let shown = match d.ask(Request::Pairing) {
+        Reply::Pairing { code, .. } => code,
+        other => panic!("unexpected {other:?}"),
+    };
+    assert_eq!(shown.len(), 6, "a code is showing: {shown:?}");
+    let out = run(&["pair".as_ref(), "--state".as_ref()]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--state needs a folder"));
 }

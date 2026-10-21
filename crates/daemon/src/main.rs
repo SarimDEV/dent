@@ -54,6 +54,24 @@ fn main() -> Result<()> {
         .and_then(|i| args.get(i + 1))
         .map(PathBuf::from);
     let paths = paths::Paths::new(state);
+    // What's asked, with `--state DIR` taken out wherever it was put, so
+    // `dent-daemon --state DIR pair` works as well as `pair --state DIR`.
+    let args: Vec<String> = {
+        let mut words = Vec::new();
+        let mut it = args.into_iter();
+        while let Some(a) = it.next() {
+            if a == "--state" {
+                // Without its folder, never the default one by mistake.
+                if it.next().is_none() {
+                    eprintln!("{USAGE}");
+                    anyhow::bail!("--state needs a folder");
+                }
+            } else {
+                words.push(a);
+            }
+        }
+        words
+    };
     // `dent-daemon login-item on|off`: start at login, or stop doing so.
     if args.first().map(String::as_str) == Some("login-item") {
         let on = match args.get(1).map(String::as_str) {
@@ -84,11 +102,7 @@ fn main() -> Result<()> {
     }
     // Anything else said to it (`--help`, a typo) is answered with how to
     // use it, never by quietly starting a second daemon.
-    let mut rest = args.iter();
-    while let Some(a) = rest.next() {
-        if a == "--state" && rest.next().is_some() {
-            continue;
-        }
+    if let Some(a) = args.first() {
         let help = matches!(a.as_str(), "--help" | "-h" | "help");
         eprintln!("{USAGE}");
         if help {
@@ -280,7 +294,7 @@ mod admin {
         match ask(paths, Request::Devices)? {
             Reply::Devices { devices } if devices.is_empty() => {
                 println!(
-                    "No paired devices. Devices on your own Tailscale account need no pairing."
+                    "No devices yet. Devices on your own Tailscale account connect without a code; others pair with `dent-daemon pair`."
                 );
                 Ok(())
             }
