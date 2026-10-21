@@ -374,7 +374,7 @@ mod tests {
             "github.com/ada/app"
         );
         assert_eq!(short("git@github.com:ada/app.git"), "github.com/ada/app");
-        assert_eq!(short("ssh://git@host/x/"), "git@host/x");
+        assert_eq!(short("ssh://git@host/x/"), "host/x");
     }
 
     #[test]

@@ -623,24 +623,8 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
         }
         Request::ReadFile { session, path } => {
             let cwd = cwd_of(d, &session)?;
-            // A file the session's own log names (a picture the agent
-            // read, a file sent with a message) can be read wherever it
-            // is, for a client on another machine to show it.
-            let named = Path::new(&path).is_absolute() && {
-                let quoted = serde_json::to_string(&path)?;
-                d.store()
-                    .session_events(&session)?
-                    .iter()
-                    .any(|e| serde_json::to_string(&e.body).is_ok_and(|b| b.contains(&quoted)))
-            };
-            let bytes = tokio::task::spawn_blocking(move || {
-                if named {
-                    read_named(&path)
-                } else {
-                    read_inside(Path::new(&cwd), &path)
-                }
-            })
-            .await??;
+            let bytes =
+                tokio::task::spawn_blocking(move || read_inside(Path::new(&cwd), &path)).await??;
             Reply::File {
                 bytes_b64: b64::encode(&bytes),
             }
@@ -769,17 +753,6 @@ fn safe_name(name: &str) -> String {
         cut -= 1;
     }
     format!("{}{ext}", &last[..cut])
-}
-
-fn read_named(path: &str) -> Result<Vec<u8>> {
-    let meta = std::fs::metadata(path)?;
-    if !meta.is_file() {
-        bail!("{path} isn't a file");
-    }
-    if meta.len() > FILE_CAP {
-        bail!("{path} is too big to show");
-    }
-    Ok(std::fs::read(path)?)
 }
 
 fn read_inside(cwd: &Path, path: &str) -> Result<Vec<u8>> {

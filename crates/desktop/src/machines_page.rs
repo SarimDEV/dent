@@ -801,13 +801,25 @@ impl Dent {
                 )
                 .on_press(cx.listener(move |this, _, _, cx| {
                     if wakes {
-                        let said = match dent_remote::wake::wake(&cards) {
-                            Ok(_) => {
-                                format!("Sent {name} a wake-up; it works from the same network")
-                            }
-                            Err(e) => format!("Couldn't send {name} a wake-up: {e}"),
-                        };
-                        this.toast(crate::app::ToastAction::Info, said);
+                        // Sent off the window's thread; it says how it went.
+                        let (cards, name) = (cards.clone(), name.clone());
+                        cx.spawn(async move |this, cx| {
+                            let sent = cx
+                                .background_executor()
+                                .spawn(async move { dent_remote::wake::wake(&cards) })
+                                .await;
+                            let said = match sent {
+                                Ok(_) => {
+                                    format!("Sent {name} a wake-up; it works from the same network")
+                                }
+                                Err(e) => format!("Couldn't send {name} a wake-up: {e}"),
+                            };
+                            let _ = this.update(cx, |this, cx| {
+                                this.toast(crate::app::ToastAction::Info, said);
+                                cx.notify();
+                            });
+                        })
+                        .detach();
                     }
                     this.live.signal(Some(&id), Signal::Retry);
                     cx.notify();

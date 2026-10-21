@@ -692,8 +692,6 @@ pub enum Waiting {
     /// The files a project brings, read on its machine, and the machine
     /// it's for.
     BringFiles(dent_protocol::Bring, String),
-    /// A picture another machine's session names, by session and path.
-    Mirror(String, String),
 }
 
 /// A message the daemon gave back longer ago than this isn't put back in
@@ -876,8 +874,6 @@ pub struct Dent {
     pub bring_asked: Option<(String, String)>,
     /// The project from another machine the next session brings.
     pub bringing: Option<crate::bring::Chosen>,
-    /// Pictures copied from other machines' sessions.
-    pub mirror: crate::mirror::Mirror,
     /// Messages given back that went back in their reply box, by id.
     given_back: std::collections::HashSet<String>,
     /// Requests whose replies matter, by request number.
@@ -1703,7 +1699,6 @@ impl Dent {
             bring_draft: None,
             bring_asked: None,
             bringing: None,
-            mirror: HashMap::new(),
             given_back: Default::default(),
             waiting: HashMap::new(),
             changes: HashMap::new(),
@@ -3132,13 +3127,6 @@ impl Dent {
             (Waiting::BringFiles(bring, to), Out::Error { message }) => {
                 self.bring_files_came(bring, to, Err(message), cx)
             }
-            (
-                Waiting::Mirror(id, path),
-                Out::Reply {
-                    reply: Reply::File { bytes_b64 },
-                },
-            ) => self.mirror_came(id, path, dent_protocol::b64::decode(&bytes_b64)),
-            (Waiting::Mirror(id, path), Out::Error { .. }) => self.mirror_came(id, path, None),
             (Waiting::ProjectMade, Out::Error { message }) => {
                 self.project_busy = None;
                 self.project_error = Some(message);
@@ -5333,9 +5321,6 @@ impl Dent {
             s.versions = crate::bridge::versions(v, Some(b));
             s.old = Some(v.branches[b].seq);
         }
-        // Another machine's pictures, drawn from this Mac's copies.
-        self.mirror_pictures(id, &mut s);
-        let v = &self.core.list[id];
         // Messages still waiting for this session's machine show as its
         // last ones, waiting. While it's online one is on its way, not
         // waiting: it shows once the daemon logs it, as anywhere else.

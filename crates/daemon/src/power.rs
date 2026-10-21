@@ -5,15 +5,16 @@
 //! On macOS it comes from IOKit's system power notifications; elsewhere
 //! there's nothing yet, and a sleeping machine reads as unreachable.
 
-/// Call `will_sleep` each time the machine is about to sleep. It has a
-/// moment (sleep waits for it, up to IOKit's 30 s) and should be quick.
+/// Call `changed(true)` each time the machine is about to sleep, and
+/// `changed(false)` once it's awake again. Sleep waits for it (up to
+/// IOKit's 30 s), so it should be quick.
 #[cfg(target_os = "macos")]
-pub fn watch(will_sleep: impl Fn() + Send + Sync + 'static) {
-    mac::watch(Box::new(will_sleep));
+pub fn watch(changed: impl Fn(bool) + Send + Sync + 'static) {
+    mac::watch(Box::new(changed));
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn watch(_will_sleep: impl Fn() + Send + Sync + 'static) {}
+pub fn watch(_changed: impl Fn(bool) + Send + Sync + 'static) {}
 
 #[cfg(target_os = "macos")]
 mod mac {
@@ -28,6 +29,7 @@ mod mac {
 
     const CAN_SYSTEM_SLEEP: u32 = 0xe000_0270;
     const SYSTEM_WILL_SLEEP: u32 = 0xe000_0280;
+    const SYSTEM_HAS_POWERED_ON: u32 = 0xe000_0300;
 
     #[link(name = "IOKit", kind = "framework")]
     unsafe extern "C" {
@@ -50,7 +52,7 @@ mod mac {
     }
 
     static ROOT: AtomicU32 = AtomicU32::new(0);
-    static WILL_SLEEP: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+    static CHANGED: OnceLock<Box<dyn Fn(bool) + Send + Sync>> = OnceLock::new();
 
     extern "C" fn on_power(_: *mut c_void, _: IoObject, kind: u32, arg: *mut c_void) {
         let root = ROOT.load(Ordering::Relaxed);
@@ -61,19 +63,24 @@ mod mac {
                 IOAllowPowerChange(root, arg as isize);
             },
             SYSTEM_WILL_SLEEP => {
-                if let Some(f) = WILL_SLEEP.get() {
-                    f();
+                if let Some(f) = CHANGED.get() {
+                    f(true);
                 }
                 unsafe {
                     IOAllowPowerChange(root, arg as isize);
+                }
+            }
+            SYSTEM_HAS_POWERED_ON => {
+                if let Some(f) = CHANGED.get() {
+                    f(false);
                 }
             }
             _ => {}
         }
     }
 
-    pub fn watch(will_sleep: Box<dyn Fn() + Send + Sync>) {
-        if WILL_SLEEP.set(will_sleep).is_err() {
+    pub fn watch(changed: Box<dyn Fn(bool) + Send + Sync>) {
+        if CHANGED.set(changed).is_err() {
             return;
         }
         let spawned = std::thread::Builder::new()

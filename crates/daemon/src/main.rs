@@ -136,11 +136,19 @@ fn main() -> Result<()> {
         // as asleep at once instead of gone quiet. The links close; they
         // dial again once it wakes.
         {
-            let bye = d.net.bye.clone();
-            power::watch(move || {
-                let _ = bye.send(dent_link::Goodbye::Sleep);
-                // Time for the goodbyes to leave before the network sleeps.
-                std::thread::sleep(Duration::from_millis(300));
+            let d = d.clone();
+            power::watch(move |sleeping| {
+                // Set first, so a device that dials in after the goodbyes
+                // (sleep can take a while) is told too.
+                d.net
+                    .asleep
+                    .store(sleeping, std::sync::atomic::Ordering::Relaxed);
+                if sleeping {
+                    let _ = d.net.bye.send(dent_link::Goodbye::Sleep);
+                    // Time for the goodbyes to leave before the network
+                    // sleeps.
+                    std::thread::sleep(Duration::from_millis(300));
+                }
             });
         }
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;

@@ -95,6 +95,9 @@ pub struct Net {
     removed: broadcast::Sender<String>,
     /// Goodbyes for every remote connection, as the daemon goes away.
     pub bye: broadcast::Sender<Goodbye>,
+    /// The machine is on its way to sleep: a device that connects now is
+    /// told so at once, not left to find it gone.
+    pub asleep: AtomicBool,
     preauth: Mutex<HashMap<IpAddr, usize>>,
     preauth_all: Arc<Semaphore>,
     untrusted: Arc<Semaphore>,
@@ -121,12 +124,13 @@ impl Net {
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(PORT);
-        let lan = std::env::var("DENT_REMOTE_LAN").is_ok_and(|v| v == "1")
-            || store
-                .get("remote.lan")
-                .ok()
-                .flatten()
-                .is_some_and(|v| v == "on");
+        // Once set from a client (`SetLan`), the setting wins; until then
+        // `DENT_REMOTE_LAN=1` turns it on.
+        let lan = match store.get("remote.lan").ok().flatten().as_deref() {
+            Some("on") => true,
+            Some("off") => false,
+            _ => std::env::var("DENT_REMOTE_LAN").is_ok_and(|v| v == "1"),
+        };
         Self {
             identity,
             problem,
@@ -139,6 +143,7 @@ impl Net {
             via_tailscale: Mutex::new(HashSet::new()),
             removed: broadcast::channel(16).0,
             bye: broadcast::channel(4).0,
+            asleep: AtomicBool::new(false),
             preauth: Mutex::new(HashMap::new()),
             preauth_all: Arc::new(Semaphore::new(PREAUTH_ALL)),
             untrusted: Arc::new(Semaphore::new(UNTRUSTED_ALL)),
@@ -518,9 +523,18 @@ async fn conn(
         return Ok(());
     }
     if let Verdict::Untrusted { .. } = verdict {
-        let paired = tokio::time::timeout(UNTRUSTED, pairing(&d, &mut ws, &mut t, &hello))
-            .await
-            .context("untrusted for too long")??;
+        let paired = tokio::time::timeout(
+            UNTRUSTED,
+            pairing(
+                &d,
+                &mut ws,
+                &mut t,
+                &hello,
+                matches!(route, Route::Lan | Route::Other),
+            ),
+        )
+        .await
+        .context("untrusted for too long")??;
         if !paired {
             return Ok(());
         }
@@ -578,7 +592,15 @@ const NAME_MAX: usize = 64;
 /// An untrusted device may pair while a code shows. Returns whether it's
 /// now trusted. Only a completed exchange with a wrong code counts as a
 /// guess; a dropped connection doesn't.
-async fn pairing(d: &Daemon, ws: &mut Ws, t: &mut Transport, hello: &Hello) -> Result<bool> {
+/// `by_lan`: the device came in by the local network, which LAN access
+/// lets in; turned off meanwhile, it can't finish pairing.
+async fn pairing(
+    d: &Daemon,
+    ws: &mut Ws,
+    t: &mut Transport,
+    hello: &Hello,
+    by_lan: bool,
+) -> Result<bool> {
     loop {
         let frame = tokio::time::timeout(HANDSHAKE * 6, recv_bin(ws))
             .await
@@ -640,6 +662,10 @@ async fn pairing(d: &Daemon, ws: &mut Ws, t: &mut Transport, hello: &Hello) -> R
                 } else {
                     name
                 };
+                if by_lan && !d.net.lan.load(Ordering::Relaxed) {
+                    send_control(ws, t, &Control::Refuse(Refusal::LanOff)).await?;
+                    return Ok(false);
+                }
                 lock(&d.net.trust).add(&t.remote, &name)?;
                 let mine = dent_link::pair::confirm(&key, &t.hash, dent_link::pair::Role::Daemon);
                 send_control(
@@ -761,6 +787,10 @@ async fn trusted(
     let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + RECHECK, RECHECK);
 
     let result: Result<()> = async {
+        if d.net.asleep.load(Ordering::Relaxed) {
+            let _ = ctl_tx.try_send(Control::Goodbye(Goodbye::Sleep));
+            return Ok(());
+        }
         loop {
             let frame = tokio::select! {
                 f = tokio::time::timeout(IDLE, stream.next()) => match f {

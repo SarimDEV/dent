@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize};
 /// sends files that way only to a daemon of 2 or later.
 ///
 /// 3: a project can be brought to the machine (`Request::Pack`,
-/// `Request::ReadFiles`, and `Request::Create`'s `bring`).
+/// `Request::ReadFiles`, and `Request::Create`'s `bring`); LAN access is
+/// set from a client (`Request::SetLan`); the welcome says how to wake the
+/// machine (`wake`).
 pub const PROTOCOL: u32 = 3;
 /// The oldest protocol this build still speaks. Two sides talk when their
 /// ranges overlap ([decision 0060]).

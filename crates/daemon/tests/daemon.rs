@@ -718,25 +718,6 @@ fn files_a_message_carries_are_written_here_and_attached() {
     // A name too long for a disk is cut, keeping its extension.
     assert!(paths[2].ends_with(".png"), "{}", paths[2]);
     assert_eq!(std::fs::read(&paths[2]).unwrap(), b"three");
-    // A client on another machine reads them back to show them: a file
-    // the session's log names, though it's outside the session's folder.
-    let read = |c: &mut Client, path: &str| {
-        c.call(Request::ReadFile {
-            session: s.clone(),
-            path: path.into(),
-        })
-    };
-    match read(&mut c, &paths[0]).unwrap() {
-        Out::Reply {
-            reply: dent_protocol::Reply::File { bytes_b64 },
-        } => assert_eq!(dent_protocol::b64::decode(&bytes_b64).unwrap(), b"one"),
-        o => panic!("{o:?}"),
-    }
-    // One it doesn't name isn't, nor one that only starts the same.
-    let beside = Path::new(&paths[0]).with_file_name("unnamed.txt");
-    std::fs::write(&beside, "no").unwrap();
-    assert!(read(&mut c, &beside.display().to_string()).is_err());
-    assert!(read(&mut c, &paths[0][..paths[0].len() - 2]).is_err());
 }
 
 #[test]

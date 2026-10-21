@@ -213,8 +213,16 @@ unsafe fn hardware(sa: *const libc::sockaddr) -> Option<[u8; 6]> {
     #[cfg(target_os = "macos")]
     if family == libc::AF_LINK {
         let dl = sa as *const libc::sockaddr_dl;
-        let (nlen, alen) = unsafe { ((*dl).sdl_nlen as usize, (*dl).sdl_alen as usize) };
-        if alen != 6 {
+        let (len, nlen, alen) = unsafe {
+            (
+                (*dl).sdl_len as usize,
+                (*dl).sdl_nlen as usize,
+                (*dl).sdl_alen as usize,
+            )
+        };
+        // The record says how long it is: the address must fit inside it.
+        let start = std::mem::offset_of!(libc::sockaddr_dl, sdl_data);
+        if alen != 6 || start + nlen + alen > len {
             return None;
         }
         // The address follows the name, in a field longer than declared.
