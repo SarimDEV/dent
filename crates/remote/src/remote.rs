@@ -109,6 +109,51 @@ pub fn spawn(
     Remote { tx, seq }
 }
 
+/// Where a new link subscribes from: the client's cursor and the log epoch
+/// it counts in.
+struct Cursor {
+    /// What the client says it applied ([`Remote::seq`]).
+    applied: Arc<AtomicU64>,
+    /// The newest event passed to the client from this log. The client
+    /// can't have applied more, so a cursor it stored from before a resync
+    /// (its window still on older events) never resumes in the new log.
+    passed: u64,
+    /// The log epoch goes with the cursor: a new one is taken only from
+    /// the resync that resets it, or a link would resume an old cursor in a
+    /// new log.
+    epoch: Option<String>,
+}
+
+impl Cursor {
+    fn subscribe(&self) -> Request {
+        Request::Subscribe {
+            after: self.applied.load(Ordering::Relaxed).min(self.passed),
+            epoch: self.epoch.clone(),
+        }
+    }
+
+    fn welcome(&mut self, epoch: String) {
+        self.epoch.get_or_insert(epoch);
+    }
+
+    /// A message from the daemon, before the client hears it.
+    fn out(&mut self, out: &Out) {
+        match out {
+            Out::Resync { epoch } => {
+                self.epoch = Some(epoch.clone());
+                self.passed = 0;
+                self.applied.store(0, Ordering::Relaxed);
+            }
+            Out::Events { events } => {
+                if let Some(e) = events.last() {
+                    self.passed = self.passed.max(e.seq);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn line(n: u64, r: &Request) -> Vec<u8> {
     let mut l = encode(n, r);
     l.pop();
@@ -136,10 +181,11 @@ async fn run(
             pairing_open: false,
         },
     );
-    // The log epoch goes with the cursor: a new one is taken only from the
-    // resync that resets it, or a link would resume an old cursor in a new
-    // log.
-    let mut epoch: Option<String> = None;
+    let mut cursor = Cursor {
+        applied: seq,
+        passed: 0,
+        epoch: None,
+    };
     loop {
         tokio::select! {
             n = notes.recv() => {
@@ -152,10 +198,7 @@ async fn run(
                             saved.key = hex::encode(&key);
                         }
                         let hello = Request::Hello { proto: PROTOCOL, client: client.clone() };
-                        let sub = Request::Subscribe {
-                            after: seq.load(Ordering::Relaxed),
-                            epoch: epoch.clone(),
-                        };
+                        let sub = cursor.subscribe();
                         let _ = ask_tx.send(Ask::Send(line(HELLO, &hello)));
                         let _ = ask_tx.send(Ask::Send(line(SUBSCRIBE, &sub)));
                         for (n, r) in &pending {
@@ -178,7 +221,7 @@ async fn run(
                                         events(Event::DifferentMachine(via.0.clone()));
                                         continue;
                                     }
-                                    epoch.get_or_insert(e);
+                                    cursor.welcome(e);
                                     let before = saved.clone();
                                     saved.name = machine.clone();
                                     if !id.is_empty() {
@@ -205,10 +248,7 @@ async fn run(
                         if req == SUBSCRIBE {
                             continue;
                         }
-                        if let Out::Resync { epoch: e } = &out {
-                            epoch = Some(e.clone());
-                            seq.store(0, Ordering::Relaxed);
-                        }
+                        cursor.out(&out);
                         if req != 0 {
                             pending.remove(&req);
                         }
@@ -235,4 +275,54 @@ async fn run(
     }
     let _ = ask_tx.send(Ask::Stop);
     let _ = host.await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dent_protocol::{Body, Event};
+
+    fn events(seqs: &[u64]) -> Out {
+        Out::Events {
+            events: seqs
+                .iter()
+                .map(|&seq| Event {
+                    seq,
+                    session: "s1".into(),
+                    at: 0,
+                    body: Body::Delivered { id: "m".into() },
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_cursor_stored_from_before_a_resync_isnt_resumed_in_the_new_log() {
+        let applied = Arc::new(AtomicU64::new(0));
+        let mut c = Cursor {
+            applied: applied.clone(),
+            passed: 0,
+            epoch: None,
+        };
+        c.welcome("e1".into());
+        c.out(&events(&[1, 2, 7]));
+        applied.store(7, Ordering::Relaxed);
+        let sub = |after: u64, epoch: &str| Request::Subscribe {
+            after,
+            epoch: Some(epoch.into()),
+        };
+        assert_eq!(c.subscribe(), sub(7, "e1"));
+        // The log started again. The window, not there yet, stores where it
+        // was in the old one.
+        c.out(&Out::Resync { epoch: "e2".into() });
+        applied.store(7, Ordering::Relaxed);
+        assert_eq!(c.subscribe(), sub(0, "e2"));
+        // Events passed on but not yet applied are still the window's to
+        // apply: a link resumes from what it applied.
+        c.out(&events(&[1, 2]));
+        applied.store(1, Ordering::Relaxed);
+        assert_eq!(c.subscribe(), sub(1, "e2"));
+        c.welcome("e3".into());
+        assert_eq!(c.subscribe(), sub(1, "e2"));
+    }
 }
