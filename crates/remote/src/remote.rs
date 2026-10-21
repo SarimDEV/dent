@@ -7,8 +7,8 @@
 //! ([decision 0063](../../docs/decisions/0063-queued-prompts.md)).
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use dent_client_core::machine::{Machine, Note, Signal, State};
 use dent_link::{Keys, Trust};
@@ -22,7 +22,8 @@ const HELLO: u64 = 1;
 const SUBSCRIBE: u64 = 2;
 
 enum Cmd {
-    Send(u64, Request),
+    /// Request `n`, already in [`Pending`], to go if the link is up.
+    Send(u64),
     Pair(String),
     Signal(Signal),
     Stop,
@@ -57,10 +58,47 @@ pub enum Event {
     DifferentMachine(String),
 }
 
+/// Unanswered requests, resent on each new link, each with whether it has
+/// gone out on any link yet: one that has may have reached the daemon, so
+/// it can't be taken back here.
+#[derive(Default)]
+struct Pending(BTreeMap<u64, (Request, bool)>);
+
+impl Pending {
+    /// Everything to send on a new link, now marked gone.
+    fn on_link(&mut self) -> Vec<Vec<u8>> {
+        self.0
+            .iter_mut()
+            .map(|(n, (r, gone))| {
+                *gone = true;
+                line(*n, r)
+            })
+            .collect()
+    }
+
+    /// Request `n` on a link that's up, now marked gone; none if it went
+    /// already (the link came up after it was asked, and took it).
+    fn go(&mut self, n: u64) -> Option<Vec<u8>> {
+        let (r, gone) = self.0.get_mut(&n).filter(|(_, gone)| !*gone)?;
+        *gone = true;
+        Some(line(n, r))
+    }
+
+    /// Take back request `n`; only one that never went can be.
+    fn cancel(&mut self, n: u64) -> bool {
+        if self.0.get(&n).is_some_and(|(_, gone)| !gone) {
+            self.0.remove(&n);
+            return true;
+        }
+        false
+    }
+}
+
 /// A handle on one remote machine's session.
 #[derive(Clone)]
 pub struct Remote {
     tx: mpsc::UnboundedSender<Cmd>,
+    pending: Arc<Mutex<Pending>>,
     /// The last event the client applied from this machine; a new link
     /// subscribes from here.
     pub seq: Arc<AtomicU64>,
@@ -70,7 +108,17 @@ impl Remote {
     /// Send request number `n`; its reply comes back as [`Event::Out`] with
     /// the same number. While the machine is away it waits.
     pub fn send(&self, n: u64, r: Request) {
-        let _ = self.tx.send(Cmd::Send(n, r));
+        if let Ok(mut p) = self.pending.lock() {
+            p.0.insert(n, (r, false));
+        }
+        let _ = self.tx.send(Cmd::Send(n));
+    }
+
+    /// Take back request `n` if it hasn't gone out on any link: it won't be
+    /// sent when the machine is back. Whether it was taken back; one that
+    /// went may have reached the daemon.
+    pub fn cancel(&self, n: u64) -> bool {
+        self.pending.lock().is_ok_and(|mut p| p.cancel(n))
     }
 
     /// Pair with the code shown on the machine.
@@ -99,14 +147,23 @@ pub fn spawn(
 ) -> Remote {
     let (tx, rx) = mpsc::unbounded_channel();
     let seq = Arc::new(AtomicU64::new(0));
+    let pending = Arc::new(Mutex::new(Pending::default()));
     let m = Machine::new(
         &store::device_name(),
         keys,
         saved.known_key(),
         saved.all_routes(),
     );
-    rt.spawn(run(m, client.to_string(), saved, seq.clone(), rx, events));
-    Remote { tx, seq }
+    rt.spawn(run(
+        m,
+        client.to_string(),
+        saved,
+        seq.clone(),
+        pending.clone(),
+        rx,
+        events,
+    ));
+    Remote { tx, pending, seq }
 }
 
 /// Where a new link subscribes from: the client's cursor and the log epoch
@@ -165,14 +222,13 @@ async fn run(
     client: String,
     mut saved: Saved,
     seq: Arc<AtomicU64>,
+    pending: Arc<Mutex<Pending>>,
     mut cmds: mpsc::UnboundedReceiver<Cmd>,
     mut events: impl FnMut(Event) + Send + 'static,
 ) {
     let (ask_tx, ask_rx) = mpsc::unbounded_channel();
     let (note_tx, mut notes) = mpsc::unbounded_channel();
     let host = tokio::spawn(host::run(m, ask_rx, note_tx));
-    // Unanswered requests, resent on each new link.
-    let mut pending: BTreeMap<u64, Request> = BTreeMap::new();
     let mut up = false;
     // The link the last Up named, and how it was trusted.
     let mut via = (
@@ -201,8 +257,9 @@ async fn run(
                         let sub = cursor.subscribe();
                         let _ = ask_tx.send(Ask::Send(line(HELLO, &hello)));
                         let _ = ask_tx.send(Ask::Send(line(SUBSCRIBE, &sub)));
-                        for (n, r) in &pending {
-                            let _ = ask_tx.send(Ask::Send(line(*n, r)));
+                        let resend = pending.lock().map(|mut p| p.on_link()).unwrap_or_default();
+                        for l in resend {
+                            let _ = ask_tx.send(Ask::Send(l));
                         }
                     }
                     Note::State(s) => {
@@ -249,8 +306,10 @@ async fn run(
                             continue;
                         }
                         cursor.out(&out);
-                        if req != 0 {
-                            pending.remove(&req);
+                        if req != 0
+                            && let Ok(mut p) = pending.lock()
+                        {
+                            p.0.remove(&req);
                         }
                         events(Event::Out { req, out });
                     }
@@ -261,11 +320,10 @@ async fn run(
                 }
             }
             c = cmds.recv() => match c {
-                Some(Cmd::Send(n, r)) => {
-                    if up {
-                        let _ = ask_tx.send(Ask::Send(line(n, &r)));
+                Some(Cmd::Send(n)) => {
+                    if up && let Some(l) = pending.lock().ok().and_then(|mut p| p.go(n)) {
+                        let _ = ask_tx.send(Ask::Send(l));
                     }
-                    pending.insert(n, r);
                 }
                 Some(Cmd::Pair(code)) => { let _ = ask_tx.send(Ask::Pair(code)); }
                 Some(Cmd::Signal(s)) => { let _ = ask_tx.send(Ask::Signal(s)); }
@@ -294,6 +352,26 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn only_a_request_that_never_went_out_is_taken_back() {
+        let mut p = Pending::default();
+        let r = || Request::Projects;
+        p.0.insert(3, (r(), false));
+        p.0.insert(4, (r(), false));
+        // Away: 3 waits and is taken back; it never goes.
+        assert!(p.cancel(3));
+        assert!(p.go(3).is_none());
+        // The link comes up first: 4 goes, and may have reached the daemon.
+        assert_eq!(p.on_link().len(), 1);
+        assert!(!p.cancel(4));
+        assert!(p.go(4).is_none(), "the link took it: it doesn't go twice");
+        // Sent while up, it went at once.
+        p.0.insert(5, (r(), false));
+        assert!(p.go(5).is_some());
+        assert!(!p.cancel(5));
+        assert!(!p.cancel(9), "answered or never asked");
     }
 
     #[test]

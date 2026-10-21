@@ -623,6 +623,15 @@ impl Daemon {
             text,
             attachments,
         } = new;
+        // No folder: this machine's scratch folder, which a client on
+        // another machine can't name.
+        let cwd = if cwd.is_empty() {
+            let scratch = crate::paths::home().join("dent/scratch");
+            std::fs::create_dir_all(&scratch)?;
+            scratch.display().to_string()
+        } else {
+            cwd
+        };
         if !std::path::Path::new(&cwd).is_dir() {
             bail!("{cwd} isn't a folder");
         }

@@ -21,7 +21,6 @@ use futures::channel::mpsc::UnboundedSender;
 use crate::live::{Incoming, Live};
 
 /// The tag a machine being added goes by until its welcome names it.
-#[allow(dead_code)] // Settings › Machines and the new-session picker use it next.
 pub fn adding_tag(addr: &str) -> String {
     format!("+{addr}")
 }
@@ -84,7 +83,6 @@ impl Net {
     }
 
     /// Send a request that names no session to `machine` ("" is this one).
-    #[allow(dead_code)] // Settings › Machines and the new-session picker use it next.
     pub fn send_to(&self, machine: &str, r: Request) -> u64 {
         let n = self.number();
         self.deliver(machine, n, r);
@@ -102,6 +100,14 @@ impl Net {
         {
             f.send(n, r);
         }
+    }
+
+    /// Take back request `n` to `machine` if it never went out: whether it
+    /// was. A machine not followed was never sent anything.
+    pub fn cancel(&self, machine: &str, n: u64) -> bool {
+        self.far
+            .lock()
+            .is_ok_and(|f| f.get(machine).is_none_or(|f| f.remote.cancel(n)))
     }
 
     /// Where this machine's feed is: reconnects subscribe from here.
@@ -125,13 +131,17 @@ impl Net {
 
     /// Follow a saved machine, under its id.
     pub fn follow(&self, s: Saved) {
+        // "" is this machine: a record with no id (hand-edited, or very old)
+        // would mix its sessions into this machine's.
+        if s.id.is_empty() {
+            return;
+        }
         let tag = s.id.clone();
         self.spawn(tag, s);
     }
 
     /// Start adding the machine at `addr`: events come tagged
     /// [`adding_tag`] until its welcome names it, then by its id.
-    #[allow(dead_code)] // Settings › Machines and the new-session picker use it next.
     pub fn add(&self, addr: &str) {
         let s = Saved {
             routes: vec![addr.to_string()],
@@ -167,7 +177,11 @@ impl Net {
                     && let Ok(mut far) = all.lock()
                     && let Some(f) = far.remove(&*tag)
                 {
-                    far.insert(s.id.clone(), f);
+                    // A machine already saved, added again by another
+                    // address: this link takes over from the old one.
+                    if let Some(old) = far.insert(s.id.clone(), f) {
+                        old.remote.stop();
+                    }
                     let _ = ui.unbounded_send(Incoming::Renamed {
                         from: tag.clone(),
                         to: s.id.clone(),
@@ -181,7 +195,6 @@ impl Net {
     }
 
     /// Stop following a machine; with `forget`, it's no longer saved.
-    #[allow(dead_code)] // Settings › Machines and the new-session picker use it next.
     pub fn stop(&self, id: &str, forget: bool) {
         if let Ok(mut far) = self.far.lock()
             && let Some(f) = far.remove(id)
@@ -194,7 +207,6 @@ impl Net {
     }
 
     /// Pair the machine with the code shown on it.
-    #[allow(dead_code)] // Settings › Machines and the new-session picker use it next.
     pub fn pair(&self, id: &str, code: &str) {
         if let Ok(far) = self.far.lock()
             && let Some(f) = far.get(id)

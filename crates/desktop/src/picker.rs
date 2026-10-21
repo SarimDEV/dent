@@ -164,12 +164,11 @@ impl Dent {
     /// Projects matching a search, "No project", then the ways to add one.
     fn search_entries(&self, q: &str, v: &mut Vec<Entry>) {
         let d = &self.defaults;
-        let scratch = crate::scratch_dir().display().to_string();
         let projects: Vec<Project> = self
             .projects
             .iter()
-            // The scratch folder is "No project", below.
-            .filter(|p| p.path != scratch)
+            // The machine's scratch folder is "No project", below.
+            .filter(|p| !crate::app::is_scratch(&d.machine, &p.path))
             .cloned()
             .collect();
         for (n, p) in search(&projects, q).into_iter().enumerate() {
@@ -375,7 +374,7 @@ impl Dent {
         let q = self.menu_query.read(cx).value().trim().to_string();
         self.project_error = None;
         if self.project_mode == Mode::Pick && is_path(&q) {
-            self.ask(Request::Folders { partial: q.clone() }, Waiting::Folders(q));
+            self.ask_here(Request::Folders { partial: q.clone() }, Waiting::Folders(q));
         }
         self.menu_ix = self.project_entries(cx).iter().position(|e| e.choosable());
         self.menu_scroll.scroll_to_item(0);
@@ -402,24 +401,26 @@ impl Dent {
 
     /// Use a folder for the new session, and keep it on the list.
     pub fn use_project(&mut self, path: &str, create: bool) {
-        self.ask(
+        let here = self.defaults.machine.clone();
+        self.ask_here(
             Request::AddProject {
                 path: path.to_string(),
                 create,
             },
-            Waiting::Projects,
+            Waiting::Projects(here),
         );
         self.set_project(Some(path.to_string()));
     }
 
     /// Take a project off the list, or put it back (Undo).
     pub fn hide_project(&mut self, path: &str, hidden: bool, cx: &mut Context<Self>) {
-        self.ask(
+        let here = self.defaults.machine.clone();
+        self.ask_here(
             Request::HideProject {
                 path: path.to_string(),
                 hidden,
             },
-            Waiting::Projects,
+            Waiting::Projects(here),
         );
         if hidden {
             // Gone from the list now, not when the daemon answers.
@@ -445,7 +446,7 @@ impl Dent {
     /// Make a project from a name; the picker waits, then picks it.
     pub fn new_project(&mut self, name: &str) {
         self.project_busy = Some(format!("Making {name}…"));
-        self.ask(
+        self.ask_here(
             Request::NewProject {
                 name: name.to_string(),
             },
@@ -457,7 +458,7 @@ impl Dent {
     pub fn clone_project(&mut self, url: &str) {
         let short = repo(url);
         self.project_busy = Some(format!("Cloning {short}…"));
-        self.ask(
+        self.ask_here(
             Request::CloneProject {
                 url: url.to_string(),
             },

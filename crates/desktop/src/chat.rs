@@ -1218,9 +1218,91 @@ impl Dent {
             .flex()
             .flex_col()
             .child(self.header(s, cx))
+            .children(self.away_banner(s, cx))
             .child(transcript)
             .child(footer)
             .into_any_element()
+    }
+
+    /// Under the header while the session's machine is away: what that
+    /// means for it, and Retry. Messages written meanwhile wait here.
+    fn away_banner(&self, s: &Session, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = self.t;
+        let owner = dent_client_core::fleet::split(&s.id).0;
+        let m = self.machines.iter().find(|m| m.id == owner)?;
+        let standing = crate::machines_page::Standing::of(m);
+        let (strong, rest) = match standing {
+            crate::machines_page::Standing::Online | crate::machines_page::Standing::Connecting => {
+                return None;
+            }
+            crate::machines_page::Standing::Asleep => (
+                format!("{} is asleep", m.name()),
+                "The agent paused there and carries on when it wakes. Messages wait here till then.",
+            ),
+            _ => (
+                format!("{} can't be reached", m.name()),
+                "Its sessions keep their place there. Messages wait here till it's back.",
+            ),
+        };
+        let shape = self
+            .shapes()
+            .get(owner)
+            .copied()
+            .unwrap_or(crate::glyph::Shape::Circle);
+        let id = owner.to_string();
+        let tint = t
+            .signal(Status::Waiting)
+            .0
+            .opacity(if t.dark { 0.12 } else { 0.10 });
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(space::S3))
+                .px(px(space::S4))
+                .py(px(space::S2))
+                .bg(tint)
+                .border_b_1()
+                .border_color(t.hairline)
+                .ty(UI)
+                .child(crate::machines_page::holder(
+                    shape,
+                    Some(if standing == crate::machines_page::Standing::Asleep {
+                        t.waiting.0
+                    } else {
+                        t.idle.0
+                    }),
+                    22.,
+                    false,
+                    &t,
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .gap(px(space::S1H))
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(t.ink)
+                                .child(strong),
+                        )
+                        .child(div().min_w_0().truncate().text_color(t.quiet).child(rest)),
+                )
+                .child(ghost("away-retry", "Retry", &t).on_press(cx.listener(
+                    move |this, _, _, cx| {
+                        this.live
+                            .signal(Some(&id), dent_client_core::machine::Signal::Retry);
+                        cx.notify();
+                    },
+                )))
+                .child(probe(&self.probes, "away-banner"))
+                .arrive("away-banner", From::Above, motion::BASE)
+                .into_any_element(),
+        )
     }
 
     /// The last line while the agent works: what it's doing, and for how
@@ -2739,11 +2821,17 @@ impl Dent {
                 text,
                 attachments,
             } => {
+                // Waiting on this device for its machine (decision 0063): it
+                // can't move ahead of anything or go into a turn.
+                let outgoing = self.outbox.iter().find(|o| o.id == *msg).cloned();
                 // The waiting message before this one, which it can go ahead of.
-                let ahead = ix.checked_sub(1).and_then(|p| match s.items.get(p) {
-                    Some(Item::Queued { id, .. }) => Some(id.clone()),
-                    _ => None,
-                });
+                let ahead = ix
+                    .checked_sub(1)
+                    .and_then(|p| match s.items.get(p) {
+                        Some(Item::Queued { id, .. }) => Some(id.clone()),
+                        _ => None,
+                    })
+                    .filter(|_| outgoing.is_none());
                 // Folded pastes show as their chips again, and long text
                 // folds as a sent message does.
                 let open = self.is_open(&Fold::Message(msg));
@@ -2848,15 +2936,27 @@ impl Dent {
                                     .truncate()
                                     .ty(LABEL)
                                     .text_color(t.faint)
-                                    .child(if ahead.is_some() {
-                                        "Queued · sends after the one above"
+                                    .child(if let Some(o) = &outgoing {
+                                        if o.held {
+                                            format!(
+                                                "Written {} ago · sends when you say",
+                                                crate::outbox::age(o.at, crate::cards::now_ms())
+                                            )
+                                        } else {
+                                            format!(
+                                                "Waiting for {} · sends when it's back",
+                                                s.machine
+                                            )
+                                        }
+                                    } else if ahead.is_some() {
+                                        "Queued · sends after the one above".into()
                                     } else if matches!(
                                         s.activity,
                                         Some(dent_protocol::Activity::SettingUp { .. })
                                     ) {
-                                        "Queued · sends once the worktree is set up"
+                                        "Queued · sends once the worktree is set up".into()
                                     } else {
-                                        "Queued · sends when this reply finishes"
+                                        "Queued · sends when this reply finishes".into()
                                     }),
                             )
                             // The actions keep together: a narrow column
@@ -2898,6 +2998,7 @@ impl Dent {
                                     .children(
                                         // Nor into an agent that can't be steered.
                                         (s.caps.steer
+                                            && outgoing.is_none()
                                             && !matches!(
                                                 s.activity,
                                                 Some(dent_protocol::Activity::SettingUp { .. })
@@ -2915,6 +3016,20 @@ impl Dent {
                                             .child(probe(&self.probes, format!("steer-{ix}")))
                                         }),
                                     )
+                                    // Written long ago: it goes when you say.
+                                    .children(outgoing.as_ref().filter(|o| o.held).map(|o| {
+                                        let id = o.id.clone();
+                                        ghost(
+                                            SharedString::from(format!("send-held-{ix}")),
+                                            "Send now",
+                                            &t,
+                                        )
+                                        .on_press(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.send_held(&id, cx)
+                                            }),
+                                        )
+                                    }))
                                     .child(
                                         ghost(
                                             SharedString::from(format!("remove-{ix}")),
@@ -3339,7 +3454,15 @@ impl Dent {
             .map_or(s.agent.as_str(), |(_, m)| m)
             .to_string();
         let permission = self.permission_shown(s).label().to_string();
-        let hint_text = if s.status == Status::Needs {
+        // On a machine that's away, whatever is typed waits here for it.
+        let away = self
+            .machines
+            .iter()
+            .find(|m| m.id == dent_client_core::fleet::split(&s.id).0)
+            .is_some_and(|m| m.away().is_some());
+        let hint_text = if away {
+            "↩ waits for it"
+        } else if s.status == Status::Needs {
             s.items
                 .iter()
                 .rev()
@@ -4465,6 +4588,10 @@ impl Dent {
             .border_t_0()
             .border_color(t.hairline)
             .rounded_b(px(radius::LG))
+            .children(self.has_machines().then(|| {
+                let name = self.machine_name(&self.defaults.machine.clone());
+                keep(true, self.chip(Menu::Machine, "", &name, false, cx))
+            }))
             .child(keep(
                 true,
                 self.chip(Menu::Project, "folder", project, no_project, cx),
@@ -4708,15 +4835,27 @@ impl Dent {
                             this.open_menu(which, window, cx);
                         }
                     }))
-                    .child(icon(
-                        icon_name,
-                        13.,
-                        if icon_name == "claude" {
-                            crate::theme::CLAUDE
+                    // The machine chip wears the machine's shape.
+                    .map(|d| {
+                        if which == Menu::Machine {
+                            let shape = self
+                                .shapes()
+                                .get(self.defaults.machine.as_str())
+                                .copied()
+                                .unwrap_or(crate::glyph::Shape::Circle);
+                            d.child(crate::glyph::glyph(shape, t.ink, 10.))
                         } else {
-                            t.quiet
-                        },
-                    ))
+                            d.child(icon(
+                                icon_name,
+                                13.,
+                                if icon_name == "claude" {
+                                    crate::theme::CLAUDE
+                                } else {
+                                    t.quiet
+                                },
+                            ))
+                        }
+                    })
                     .when(!label.is_empty(), |d| {
                         d.child(
                             div()
@@ -4763,6 +4902,7 @@ impl Dent {
                                 Menu::Pickup => "Pick up from terminal".into(),
                                 Menu::Stash => "Drafts put aside".into(),
                                 Menu::Agent => "The agent it runs".into(),
+                                Menu::Machine => "The machine it runs on".into(),
                             },
                             t,
                         ))
@@ -4849,6 +4989,7 @@ impl Dent {
             Menu::Base => self.base_entries(cx),
             Menu::Actions => self.action_entries(),
             Menu::Pickup => self.pickup_entries(),
+            Menu::Machine => self.machine_entries(),
             Menu::Stash => self.stash_entries(),
             Menu::Agent => {
                 let current = self.agent_id(self.new_agent().as_deref());

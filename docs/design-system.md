@@ -172,6 +172,8 @@ Each motion has one name and one job.
 | **Drift** | The working square, a small rounded square, breathes from its paler partner to the full signal and back over `dur.working` (and grows a touch), at 12 fps, which a slow fade of a small square reads as smooth (GPUI redraws the whole window for it, so not at the display's rate; measured in [0047](decisions/0047-calmer-work.md)); every working square shares one clock. With Reduce Motion it holds still as Working's checker | Working status |
 | **Hand-over** | The working line's words stay up at least 650 ms (a plan step 2 s, unless the plan's next step replaces it) and change only once the new words have held 250 ms; the old rise 3 px out, the new rise 3 px in, `dur.base` in all | Working line |
 | **Breathe** | After 3 s of work the working line's words ease between full and 60% opacity over 2 s | Working line |
+| **Glide** | A machine on the strip moves to its new round trip on a spring (0.5 s, no bounce), from where it is; round trips are smoothed first, so one slow ping doesn't throw it | Settings › Machines |
+| **Pulse** | One dot rides each live link from this Mac out to the machine every 1.8 s, brightest midway; still with Reduce Motion | Settings › Machines |
 | **Press** | See States | Buttons, rows |
 
 ### Never animated
@@ -188,7 +190,7 @@ With the system's reduce-motion setting on (read at launch and whenever the wind
 
 - Allowed per frame: opacity, offsets, colours, flat quads, and remeasuring at most the one row that is changing.
 - The dither is a grid of flat quads, so it is for small surfaces only. Across a whole window it measured far over budget, which is why the theme switch is a colour tween.
-- Only the working line repaints a quiet window (its square's drift, its words' breath and hand-over; the working squares in the sidebar and plan card too), and only while a session is working and visible. The one exception is an ambient background you chose for the new-session page, which redraws every frame while that page is visible ([0049](decisions/0049-ambient-backgrounds.md)).
+- Only the working line repaints a quiet window (its square's drift, its words' breath and hand-over; the working squares in the sidebar and plan card too), and only while a session is working and visible. The exceptions: an ambient background you chose for the new-session page, which redraws every frame while that page is visible ([0049](decisions/0049-ambient-backgrounds.md)), and Settings › Machines' Pulse, while the page is in front with a machine connected ([0067](decisions/0067-settings-page-and-machines.md)).
 - Every new motion is measured with the frame-timing bench before it lands (Reliability requirements).
 
 ## Lists of things you act on

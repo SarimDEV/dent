@@ -238,6 +238,9 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("project-defaults", &[project_defaults]),
     ("scripts", &[scripts]),
     ("settings", &[settings]),
+    ("machines", &[machines]),
+    ("machines-live", &[machines_live]),
+    ("away", &[away]),
     ("welcome", &[welcome]),
     // These three need the agent set up so (walk.sh does it by name).
     ("signed-out", &[signed_out]),
