@@ -589,6 +589,7 @@ impl Session {
             } => self.send(id, text, steer, attachments).await,
             // A new worktree is ready: what waited for it goes.
             Op::SetUp => {
+                self.d.set_up_done(&self.id);
                 if !self.in_turn && self.asked.is_empty() {
                     self.deliver_held().await;
                 }
@@ -606,15 +607,16 @@ impl Session {
                 if self.held.len() == before {
                     bail!("that message has already gone to the agent");
                 }
-                self.log(Body::Unqueued {
-                    id,
-                    returned: false,
-                });
+                self.log(Body::Unqueued { id, returned: None });
                 Ok(())
             }
             Op::GiveBack => {
-                for (id, _, _) in std::mem::take(&mut self.held) {
-                    self.log(Body::Unqueued { id, returned: true });
+                self.d.set_up_done(&self.id);
+                for (id, text, attachments) in std::mem::take(&mut self.held) {
+                    self.log(Body::Unqueued {
+                        id,
+                        returned: Some(dent_protocol::Returned { text, attachments }),
+                    });
                 }
                 Ok(())
             }
@@ -1093,10 +1095,7 @@ impl Session {
         self.retire_proc().await;
         self.idle_at = None;
         for (id, _, _) in std::mem::take(&mut self.held) {
-            self.log(Body::Unqueued {
-                id,
-                returned: false,
-            });
+            self.log(Body::Unqueued { id, returned: None });
         }
         self.settled = Status::Done;
         self.log(Body::Rewound { to, files });
@@ -1285,10 +1284,7 @@ impl Session {
         // left waiting across a restart (about to go) too.
         self.release_at = None;
         for (id, _, _) in std::mem::take(&mut self.held) {
-            self.log(Body::Unqueued {
-                id,
-                returned: false,
-            });
+            self.log(Body::Unqueued { id, returned: None });
         }
         if !self.in_turn {
             return Ok(());

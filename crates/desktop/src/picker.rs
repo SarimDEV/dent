@@ -350,6 +350,7 @@ impl Dent {
         self.project_error = None;
         self.folders = None;
         self.bring_draft = None;
+        self.bring_asked = None;
         self.ask_elsewhere();
         self.menu_query.update(cx, |f, cx| {
             put(f, "", window, cx);

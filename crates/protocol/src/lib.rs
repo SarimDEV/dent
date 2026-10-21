@@ -92,10 +92,10 @@ pub enum Body {
     Unqueued {
         id: String,
         /// Given back by the daemon itself, not asked for (the project its
-        /// session was to work in couldn't be brought here): a client puts
-        /// it back in the session's reply box.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        returned: bool,
+        /// session was to work in couldn't be brought here), with what it
+        /// said: a client puts it back in the session's reply box.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        returned: Option<Returned>,
     },
     /// A held message moved in the queue: to just before held message
     /// `before`, or to the end.
@@ -580,6 +580,14 @@ pub struct Carried {
     /// Its name where it came from; only the last part is kept.
     pub name: String,
     pub bytes_b64: String,
+}
+
+/// A message given back ([`Body::Unqueued`]'s `returned`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Returned {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<String>,
 }
 
 /// What another machine needs to make its own checkout of a project

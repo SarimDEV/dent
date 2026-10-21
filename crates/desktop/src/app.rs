@@ -686,13 +686,19 @@ pub enum Waiting {
     RemoveWorktree(String, bool),
     /// Another machine's projects, to bring one here.
     Elsewhere(String),
-    /// What bringing the project at a folder on a machine needs.
-    Pack(String, String),
-    /// The files a project brings, read on its machine.
-    BringFiles(dent_protocol::Bring),
+    /// What bringing the project at a folder on a machine needs: from
+    /// where, the folder, and the machine it's for.
+    Pack(String, String, String),
+    /// The files a project brings, read on its machine, and the machine
+    /// it's for.
+    BringFiles(dent_protocol::Bring, String),
     /// A picture another machine's session names, by session and path.
     Mirror(String, String),
 }
+
+/// A message the daemon gave back longer ago than this isn't put back in
+/// its reply box when it's read again (a log read from the start).
+const GIVEN_BACK_FOR: u64 = 60 * 60 * 1000;
 
 /// How long a Git action's "Push to main?" waits for the second press.
 const GIT_CONFIRM_FOR: std::time::Duration = std::time::Duration::from_secs(5);
@@ -866,10 +872,14 @@ pub struct Dent {
     pub elsewhere: HashMap<String, Vec<Project>>,
     /// A project from another machine being looked at in the picker.
     pub bring_draft: Option<crate::bring::Draft>,
+    /// The project (machine, folder) whose pack is being asked for.
+    pub bring_asked: Option<(String, String)>,
     /// The project from another machine the next session brings.
     pub bringing: Option<crate::bring::Chosen>,
     /// Pictures copied from other machines' sessions.
     pub mirror: crate::mirror::Mirror,
+    /// Messages given back that went back in their reply box, by id.
+    given_back: std::collections::HashSet<String>,
     /// Requests whose replies matter, by request number.
     waiting: HashMap<u64, Waiting>,
     /// Each session's changes, from the daemon.
@@ -1691,8 +1701,10 @@ impl Dent {
             projects: Vec::new(),
             elsewhere: HashMap::new(),
             bring_draft: None,
+            bring_asked: None,
             bringing: None,
             mirror: HashMap::new(),
+            given_back: Default::default(),
             waiting: HashMap::new(),
             changes: HashMap::new(),
             picks: HashMap::new(),
@@ -2790,23 +2802,15 @@ impl Dent {
                     dent_protocol::Body::Unqueued { id, returned } => {
                         if let Some(tb) = self.taking_back.remove(id) {
                             self.took_back(tb);
-                        } else if *returned && self.core.feed(machine).live {
+                        } else if let Some(r) = returned
+                            && crate::cards::now_ms().saturating_sub(e.at) < GIVEN_BACK_FOR
+                            && self.given_back.insert(id.clone())
+                        {
                             // Given back by the daemon (its project couldn't
-                            // be brought there): back in the reply box.
-                            let back = self.session(&e.session).and_then(|s| {
-                                s.items.iter().find_map(|i| match i {
-                                    Item::Queued {
-                                        id: q,
-                                        text,
-                                        attachments,
-                                    } if q == id => Some((text.clone(), attachments.clone())),
-                                    _ => None,
-                                })
-                            });
-                            if let Some((text, files)) = back {
-                                let d = self.back_draft(id, &text, &files);
-                                self.restores.push((Some(e.session.clone()), d));
-                            }
+                            // be brought there): back in the reply box, once,
+                            // though it's read again on catching up.
+                            let d = self.back_draft(id, &r.text, &r.attachments);
+                            self.restores.push((Some(e.session.clone()), d));
                         }
                     }
                     dent_protocol::Body::Delivered { id } => {
@@ -3111,22 +3115,22 @@ impl Dent {
             }
             (Waiting::Elsewhere(_), Out::Error { .. }) => {}
             (
-                Waiting::Pack(from, dir),
+                Waiting::Pack(from, dir, to),
                 Out::Reply {
                     reply: Reply::Pack { pack },
                 },
-            ) => self.pack_came(from, dir, Ok(pack), cx),
-            (Waiting::Pack(from, dir), Out::Error { message }) => {
-                self.pack_came(from, dir, Err(message), cx)
+            ) => self.pack_came(from, dir, to, Ok(pack), cx),
+            (Waiting::Pack(from, dir, to), Out::Error { message }) => {
+                self.pack_came(from, dir, to, Err(message), cx)
             }
             (
-                Waiting::BringFiles(bring),
+                Waiting::BringFiles(bring, to),
                 Out::Reply {
                     reply: Reply::Carried { files },
                 },
-            ) => self.bring_files_came(bring, Ok(files), cx),
-            (Waiting::BringFiles(bring), Out::Error { message }) => {
-                self.bring_files_came(bring, Err(message), cx)
+            ) => self.bring_files_came(bring, to, Ok(files), cx),
+            (Waiting::BringFiles(bring, to), Out::Error { message }) => {
+                self.bring_files_came(bring, to, Err(message), cx)
             }
             (
                 Waiting::Mirror(id, path),
@@ -3173,12 +3177,17 @@ impl Dent {
                 self.rebuild(&id);
             }
             (
-                Waiting::Create(_),
+                Waiting::Create(typed),
                 Out::Reply {
                     reply: Reply::Created { session },
                 },
             ) => {
                 self.creating = false;
+                // Started from the new-session page: what it brought is
+                // spent.
+                if typed.is_some() {
+                    self.bringing = None;
+                }
                 if let Some(agent) = self.adopting.take() {
                     self.recent.retain(|r| r.agent_session != agent);
                 }
@@ -5195,7 +5204,12 @@ impl Dent {
         self.waiting.retain(|_, w| {
             !matches!(
                 w,
-                Waiting::Folders(_) | Waiting::ProjectMade | Waiting::Repo(_)
+                Waiting::Folders(_)
+                    | Waiting::ProjectMade
+                    | Waiting::Repo(_)
+                    | Waiting::Elsewhere(_)
+                    | Waiting::Pack(..)
+                    | Waiting::BringFiles(..)
             )
         });
         self.folders = None;
@@ -5957,13 +5971,13 @@ impl Dent {
         }
         self.ambient.borrow_mut().submit();
         let d = self.defaults.clone();
-        // A project from another machine is cloned there first.
+        // A project from another machine is cloned there first. The choice
+        // stands until the session's made, for another try if it isn't.
         let bring = self.bringing_here().map(|c| c.bring.clone());
         let (cwd, worktree) = match bring {
             Some(_) => (String::new(), None),
             None => d.place(d.project.clone(), self.new_worktree()),
         };
-        self.bringing = None;
         // The project keeps what it was started with, for next time.
         self.project_prefs.insert(
             d.project.clone().unwrap_or_default(),

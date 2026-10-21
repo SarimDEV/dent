@@ -145,6 +145,7 @@ impl Dent {
     /// Ask a project's machine what bringing it needs.
     fn look_to_bring(&mut self, from: &str, dir: &str, name: &str, cx: &mut Context<Self>) {
         self.project_error = None;
+        self.bring_asked = Some((from.to_string(), dir.to_string()));
         self.project_busy = Some(format!("Looking at {name} on {}…", self.machine_name(from)));
         let n = self.live.send_to(
             from,
@@ -152,7 +153,8 @@ impl Dent {
                 dir: dir.to_string(),
             },
         );
-        self.waiting_insert(n, Waiting::Pack(from.to_string(), dir.to_string()));
+        let to = self.defaults.machine.clone();
+        self.waiting_insert(n, Waiting::Pack(from.to_string(), dir.to_string(), to));
         cx.notify();
     }
 
@@ -162,9 +164,19 @@ impl Dent {
         &mut self,
         from: String,
         dir: String,
+        to: String,
         pack: Result<Option<Pack>, String>,
         cx: &mut Context<Self>,
     ) {
+        // Asked for another machine, or the picker's closed or moved on:
+        // old news.
+        let looking = self.menu == Some(crate::app::Menu::Project)
+            && self.project_mode == Mode::Pick
+            && self.bring_asked.as_ref() == Some(&(from.clone(), dir.clone()));
+        if to != self.defaults.machine || from == to || !looking {
+            return;
+        }
+        self.bring_asked = None;
         self.project_busy = None;
         let there = self.machine_name(&from);
         let here = self.machine_name(&self.defaults.machine);
@@ -267,6 +279,10 @@ impl Dent {
 
     /// Bring: read the ticked files on their machine, then it's chosen.
     fn bring_chosen(&mut self, cx: &mut Context<Self>) {
+        // Its files are already being read.
+        if self.project_busy.is_some() {
+            return;
+        }
         let Some(d) = &self.bring_draft else {
             return;
         };
@@ -287,7 +303,8 @@ impl Dent {
                 n => format!("Reading {n} files on {}…", self.machine_name(&from)),
             });
             let n = self.live.send_to(&from, Request::ReadFiles { dir, paths });
-            self.waiting_insert(n, Waiting::BringFiles(bring));
+            let to = self.defaults.machine.clone();
+            self.waiting_insert(n, Waiting::BringFiles(bring, to));
         }
         cx.notify();
     }
@@ -296,9 +313,21 @@ impl Dent {
     pub fn bring_files_came(
         &mut self,
         mut bring: Bring,
+        to: String,
         files: Result<Vec<dent_protocol::Carried>, String>,
         cx: &mut Context<Self>,
     ) {
+        // Only while that project's still being looked at in the picker,
+        // for the machine it was asked for.
+        let looking = self.menu == Some(crate::app::Menu::Project)
+            && self.project_mode == Mode::Bring
+            && self
+                .bring_draft
+                .as_ref()
+                .is_some_and(|d| d.pack.name == bring.name);
+        if to != self.defaults.machine || !looking {
+            return;
+        }
         self.project_busy = None;
         match files {
             Ok(files) => {

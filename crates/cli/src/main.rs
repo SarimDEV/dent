@@ -193,6 +193,9 @@ async fn ask(args: &[String]) -> Result<()> {
         .into_iter()
         .find(|s| s.name == *name || s.id == *name)
         .with_context(|| format!("no saved machine called {name}"))?;
+    if from.is_some() && !cwd.is_empty() {
+        bail!("--bring makes the folder it works in: leave out --cwd");
+    }
     let bring = match from {
         Some(dir) => Some(pack(&dir)?),
         None => None,

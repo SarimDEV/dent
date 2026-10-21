@@ -1807,7 +1807,7 @@ mod tests {
             },
             Body::Unqueued {
                 id: "c".into(),
-                returned: false,
+                returned: None,
             },
             Body::Delivered { id: "b".into() },
         ]);

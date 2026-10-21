@@ -979,7 +979,7 @@ fn a_project_is_brought_from_another_machine_with_its_ignored_files() {
     c.wait(
         &bad,
         "what was sent comes back",
-        |b| matches!(b, Body::Unqueued { id, returned: true } if id == "m-bad"),
+        |b| matches!(b, Body::Unqueued { id, returned: Some(r) } if id == "m-bad" && r.text == "hello"),
     );
     std::thread::sleep(std::time::Duration::from_millis(500));
     assert_eq!(c.count(&bad, |b| matches!(b, Body::Delivered { .. })), 0);

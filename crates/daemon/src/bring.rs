@@ -134,11 +134,42 @@ fn is_env(path: &str) -> bool {
     name == ".env" || (name.starts_with(".env.") && !name.ends_with(".example"))
 }
 
-/// A path relative to a checkout that stays inside it.
+/// A path relative to a checkout that stays inside it, and out of its
+/// repository (`.git`).
 fn inside(rel: &str) -> Option<PathBuf> {
     let p = Path::new(rel);
-    let ok = !rel.is_empty() && p.components().all(|c| matches!(c, Component::Normal(_)));
+    let ok = !rel.is_empty()
+        && p.components()
+            .all(|c| matches!(c, Component::Normal(n) if n != ".git"));
     ok.then(|| p.to_path_buf())
+}
+
+/// A remote's name that git reads as a name: no option, no path.
+fn plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with(['-', '.'])
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// `rel` under `dest`, if writing it there stays there: no folder on the
+/// way is a link (a clone can hold `web -> ~/.ssh`). `None` also when
+/// something's already at the end, link or not: the project's own.
+fn writable(dest: &Path, rel: &Path) -> Option<PathBuf> {
+    let mut at = dest.to_path_buf();
+    let parts: Vec<_> = rel.components().collect();
+    for (i, c) in parts.iter().enumerate() {
+        at.push(c);
+        match std::fs::symlink_metadata(&at) {
+            Err(_) => return Some(dest.join(rel)),
+            Ok(m) if i + 1 == parts.len() || m.file_type().is_symlink() || !m.is_dir() => {
+                return None;
+            }
+            Ok(_) => {}
+        }
+    }
+    None
 }
 
 /// The ignored files `paths` of the checkout at `dir`, for another
@@ -161,14 +192,20 @@ pub fn read_files(dir: &Path, paths: &[String]) -> Result<Vec<Carried>, String> 
         if !full.starts_with(&real) {
             return Err(format!("{rel} isn't inside the project"));
         }
-        let bytes = std::fs::read(&full).map_err(|e| format!("{rel}: {e}"))?;
-        total += bytes.len();
-        if total > CARRIED_MAX {
+        // Only what Git ignores, as `pack` offered: the rest comes with
+        // the clone.
+        if run(&root, &["check-ignore", "-q", "--", rel]).is_err() {
+            return Err(format!("{rel} isn't a file Git ignores"));
+        }
+        let meta = std::fs::metadata(&full).map_err(|e| format!("{rel}: {e}"))?;
+        total += meta.len() as usize;
+        if !meta.is_file() || total > CARRIED_MAX {
             return Err(format!(
                 "the files come to more than {} MB",
                 CARRIED_MAX >> 20
             ));
         }
+        let bytes = std::fs::read(&full).map_err(|e| format!("{rel}: {e}"))?;
         files.push(Carried {
             name: rel.clone(),
             bytes_b64: b64::encode(&bytes),
@@ -230,8 +267,11 @@ pub fn clone_into(dest: &Path, b: &Bring, staging: &Path) -> Result<(String, Vec
     let temp = parent.join(format!("{tag}{nanos}"));
     let to = temp.display().to_string();
     let mut notes = Vec::new();
+    if !plain_name(&first.name) {
+        return Err(format!("{} isn't a remote's name", first.name));
+    }
     let clone = |url: &str| {
-        run(parent, &["clone", "-q", "-o", &first.name, "--", url, &to]).map_err(|e| {
+        quiet_git(parent, &["clone", "-q", "-o", &first.name, "--", url, &to]).map_err(|e| {
             let _ = std::fs::remove_dir_all(&temp);
             first_line(&e)
         })
@@ -253,19 +293,22 @@ pub fn clone_into(dest: &Path, b: &Bring, staging: &Path) -> Result<(String, Vec
         std::fs::remove_dir_all(dest).map_err(|e| e.to_string())?;
     }
     std::fs::rename(&temp, dest).map_err(|e| e.to_string())?;
-    for r in &b.remotes[1..] {
-        if let Err(e) = run(dest, &["remote", "add", "--", &r.name, &r.url]) {
-            notes.push(format!("couldn't add the remote {}: {e}", r.name));
-        }
-    }
-    if b.remotes.len() > 1 {
-        let _ = run(dest, &["fetch", "-q", "--all"]);
-    }
+    // The branch first, while the clone's remote is the only one that
+    // could have it.
     let on = crate::workspace::branch(dest);
     if let Some(want) = b.branch.as_deref().filter(|w| on.as_deref() != Some(*w)) {
+        let named =
+            !want.starts_with('-') && run(dest, &["check-ref-format", "--branch", want]).is_ok();
         // A branch the remote has comes down tracking it; one only the
         // other machine has stays there.
-        if run(dest, &["checkout", "-q", want]).is_err() {
+        let tracked = format!("{}/{want}", first.name);
+        if !named
+            || run(
+                dest,
+                &["checkout", "-q", "--track", "-b", want, &tracked, "--"],
+            )
+            .is_err()
+        {
             notes.push(format!(
                 "{want} isn't on {}, so this is {}",
                 first.name,
@@ -273,15 +316,31 @@ pub fn clone_into(dest: &Path, b: &Bring, staging: &Path) -> Result<(String, Vec
             ));
         }
     }
+    for r in &b.remotes[1..] {
+        if !plain_name(&r.name) {
+            notes.push(format!("left out the remote {}", r.name));
+            continue;
+        }
+        if let Err(e) = run(dest, &["remote", "add", "--", &r.name, &r.url]) {
+            notes.push(format!(
+                "couldn't add the remote {}: {}",
+                r.name,
+                first_line(&e)
+            ));
+        }
+    }
+    if b.remotes.len() > 1 {
+        let _ = quiet_git(dest, &["fetch", "-q", "--all"]);
+    }
     let mut brought = 0;
     let mut unignored = Vec::new();
     for (rel, from) in walk(staging) {
-        let to = dest.join(&rel);
-        // A file the clone has is the project's own, not the one carried.
-        if to.exists() {
+        // A file the clone has is the project's own, not the one carried;
+        // and nothing's written through a link out of the checkout.
+        let Some(to) = writable(dest, &rel) else {
             notes.push(format!("kept the project's own {}", rel.display()));
             continue;
-        }
+        };
         if let Some(parent) = to.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
@@ -307,6 +366,68 @@ pub fn clone_into(dest: &Path, b: &Bring, staging: &Path) -> Result<(String, Vec
         n => line.push_str(&format!(" and brought {n} ignored files")),
     }
     Ok((line, notes))
+}
+
+/// The longest a clone or fetch may take.
+const GIT_FOR: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// git for a clone or fetch, which talks to another host: never waiting on
+/// a prompt (SSH's included), given up when the link stalls for a minute,
+/// and stopped after [`GIT_FOR`] in all.
+fn quiet_git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env(
+            "GIT_SSH_COMMAND",
+            "ssh -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4",
+        )
+        .env("GIT_HTTP_LOW_SPEED_LIMIT", "1000")
+        .env("GIT_HTTP_LOW_SPEED_TIME", "60")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("couldn't run git: {e}"))?;
+    // Read as it goes, so a full pipe never stalls it.
+    let mut out = child.stdout.take();
+    let mut err = child.stderr.take();
+    let reading = std::thread::spawn(move || {
+        use std::io::Read;
+        let (mut o, mut e) = (String::new(), String::new());
+        if let Some(s) = err.as_mut() {
+            let _ = s.read_to_string(&mut e);
+        }
+        if let Some(s) = out.as_mut() {
+            let _ = s.read_to_string(&mut o);
+        }
+        (o, e)
+    });
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if start.elapsed() > GIT_FOR => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "git took more than {} minutes",
+                    GIT_FOR.as_secs() / 60
+                ));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    let (o, e) = reading.join().unwrap_or_default();
+    if status.success() {
+        Ok(o)
+    } else {
+        Err(e.trim().trim_start_matches("fatal: ").to_string())
+    }
 }
 
 /// Add `paths` to the checkout's own ignore list, `.git/info/exclude`,
@@ -390,9 +511,42 @@ mod tests {
     }
 
     #[test]
+    fn nothing_is_written_through_a_link() {
+        let d = std::env::temp_dir().join(format!("dent-writable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("web")).unwrap();
+        std::os::unix::fs::symlink("/tmp", d.join("out")).unwrap();
+        std::os::unix::fs::symlink("/nowhere/x", d.join(".env")).unwrap();
+        std::fs::write(d.join("kept"), "").unwrap();
+        assert!(writable(&d, Path::new("web/.env")).is_some());
+        assert!(writable(&d, Path::new("new/dir/.env")).is_some());
+        assert!(writable(&d, Path::new("out/.env")).is_none());
+        assert!(writable(&d, Path::new(".env")).is_none(), "a dangling link");
+        assert!(writable(&d, Path::new("kept")).is_none());
+        assert!(writable(&d, Path::new("kept/x")).is_none());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn remote_names_are_names() {
+        assert!(plain_name("origin") && plain_name("up-stream_2"));
+        for bad in ["", "-x", "--upload-pack=x", "a/b", ".x", "a b"] {
+            assert!(!plain_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
     fn only_paths_inside() {
         assert!(inside("a/.env").is_some());
-        for bad in ["", "/etc/passwd", "../x", "a/../../x", "./a"] {
+        for bad in [
+            "",
+            "/etc/passwd",
+            "../x",
+            "a/../../x",
+            "./a",
+            ".git/config",
+            "a/.git/x",
+        ] {
             assert!(inside(bad).is_none(), "{bad}");
         }
     }
