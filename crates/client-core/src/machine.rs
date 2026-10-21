@@ -255,6 +255,8 @@ pub struct Machine {
     last_online: Option<u64>,
     /// Redial fast until then, after an announced restart.
     restart_until: Option<u64>,
+    /// An announced restart that didn't come back in time.
+    missed_restart: bool,
     /// Routes that answered then failed, until when they're left alone.
     cooldown: HashMap<String, u64>,
     code: Option<String>,
@@ -283,6 +285,7 @@ impl Machine {
             foreground: true,
             last_online: None,
             restart_until: None,
+            missed_restart: false,
             cooldown: HashMap::new(),
             code: None,
             rng,
@@ -382,6 +385,8 @@ impl Machine {
                 self.attempt = 0;
                 self.race(now);
             }
+            // An attempt in flight carries on, but the ladder starts again.
+            Phase::Racing(_) => self.attempt = 0,
             Phase::Open(o) => {
                 // Probe the live link rather than replace it; check better
                 // routes too.
@@ -840,6 +845,7 @@ impl Machine {
             self.known = Some(t.remote.clone());
         }
         self.restart_until = None;
+        self.missed_restart = false;
         self.last_online = Some(now);
         self.phase = Phase::Open(Box::new(Open {
             conn,
@@ -979,6 +985,7 @@ impl Machine {
                 self.set_state(State::Away(g));
                 if back_soon {
                     self.restart_until = Some(now + RESTART_FOR_MS);
+                    self.missed_restart = false;
                     self.phase = Phase::Waiting {
                         until: now + RESTART_EVERY_MS,
                     };
@@ -1028,11 +1035,19 @@ impl Machine {
             self.step_race(now, Slot::Main);
             return;
         }
-        // A lost live link tries again at once, through every route; if
-        // that fails, `why` is what the person sees.
-        self.race(now);
-        if let Phase::Racing(r) = &mut self.phase {
-            r.why = Some(why);
+        if healthy {
+            // A lost healthy link tries again at once, through every route;
+            // if that fails, `why` is what the person sees.
+            self.race(now);
+            if let Phase::Racing(r) = &mut self.phase {
+                r.why = Some(why);
+            }
+        } else {
+            // One that opened and died keeps climbing the ladder, or a
+            // machine that accepts and drops would be redialled in a loop.
+            let wait = self.wait(now);
+            self.attempt += 1;
+            self.phase = Phase::Waiting { until: now + wait };
         }
     }
 
@@ -1139,11 +1154,17 @@ impl Machine {
             };
             return;
         }
-        self.restart_until = None;
+        // The restart window ran out: back to the ladder, and say so until
+        // it's back.
+        self.missed_restart |= self.restart_until.take().is_some();
         let wait = self.wait(now);
         self.attempt += 1;
         self.phase = Phase::Waiting { until: now + wait };
-        if !matches!(self.state, State::Away(_)) {
+        if self.missed_restart {
+            self.set_state(State::Unreachable {
+                why: format!("didn't come back ({why})"),
+            });
+        } else if !matches!(self.state, State::Away(_)) {
             self.set_state(State::Unreachable { why });
         }
     }
@@ -1180,8 +1201,9 @@ impl Machine {
         }
         let near = self.foreground && self.last_online.is_some_and(|t| now < t + NEAR_MS);
         let cap = if near { CAP_NEAR_MS } else { CAP_FAR_MS };
+        // Doubling from the last quick wait: steps of 2, 4, 8 s and on.
         let steps = (self.attempt + 1 - QUICK.len()).min(16) as u32;
-        let ceiling = (2_000u64.saturating_mul(1 << steps)).min(cap);
+        let ceiling = (QUICK[QUICK.len() - 1] << steps).min(cap);
         let half = ceiling / 2;
         half + self.random() % (half + 1)
     }

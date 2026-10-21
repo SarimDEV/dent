@@ -609,3 +609,88 @@ fn the_replacement_carries_on_when_the_old_link_closes() {
         "the dial in flight was kept"
     );
 }
+
+#[test]
+fn the_ladder_doubles_from_two_seconds_up_to_its_caps() {
+    let mut s = Sim::new(&[("lan:7480", Addr::Up)]);
+    let waits = |attempt: usize, s: &mut Sim| {
+        s.m.attempt = attempt;
+        (0..50).map(|_| s.m.wait(s.now)).collect::<Vec<_>>()
+    };
+    assert_eq!(waits(0, &mut s)[0], 100);
+    assert_eq!(waits(3, &mut s)[0], 1_000);
+    // Each wait in the upper half of its step.
+    assert!(waits(4, &mut s).iter().all(|w| (1_000..=2_000).contains(w)));
+    assert!(waits(5, &mut s).iter().all(|w| (2_000..=4_000).contains(w)));
+    // In front and online lately: 60 s; otherwise 5 minutes.
+    s.m.last_online = Some(0);
+    assert!(
+        waits(30, &mut s)
+            .iter()
+            .all(|w| (30_000..=60_000).contains(w))
+    );
+    s.m.signal(Signal::Background, 0);
+    assert!(
+        waits(30, &mut s)
+            .iter()
+            .all(|w| (150_000..=300_000).contains(w))
+    );
+}
+
+#[test]
+fn a_link_that_opens_and_dies_keeps_escalating() {
+    let mut s = Sim::new(&[("lan:7480", Addr::Up)]);
+    s.trust_device();
+    s.m.connect(0);
+    s.pump();
+    for _ in 0..8 {
+        while s.m.state() != &State::Online {
+            s.run_for(50);
+            assert!(s.now < 60_000, "never came back");
+        }
+        // The machine accepts, then drops the link at once.
+        let Phase::Open(o) = &s.m.phase else {
+            panic!("not open")
+        };
+        let c = o.conn;
+        s.m.closed(c, "reset", s.now);
+        s.pump();
+    }
+    // 0.1 + 0.25 + 0.5 + 1 + (1-2) + (2-4) + (4-8) s at least.
+    assert!(s.now > 8_000, "redialled in a loop: {} ms", s.now);
+}
+
+#[test]
+fn a_signal_mid_attempt_restarts_the_ladder_without_cancelling() {
+    let mut s = Sim::new(&[("lan:7480", Addr::Silent)]);
+    s.trust_device();
+    s.m.connect(0);
+    s.pump();
+    s.m.attempt = 10;
+    let dials = s.dials.len();
+    s.m.signal(Signal::NetworkChanged, s.now);
+    s.pump();
+    assert_eq!(s.dials.len(), dials, "the attempt in flight carries on");
+    s.run_for(3_000);
+    let Phase::Waiting { until } = s.m.phase else {
+        panic!("not waiting")
+    };
+    assert_eq!(until - s.now, 100, "back to the first quick step");
+}
+
+#[test]
+fn a_restart_that_never_comes_back_says_so() {
+    let mut s = Sim::new(&[("lan:7480", Addr::Up)]);
+    s.trust_device();
+    online(&mut s);
+    s.addrs.insert("lan:7480".into(), Addr::Refused);
+    s.daemon_says(Control::Goodbye(Goodbye::Restart {
+        expected_down_ms: 3000,
+    }));
+    s.run_for(125_000);
+    assert!(
+        matches!(s.m.state(), State::Unreachable { why } if why.starts_with("didn't come back")),
+        "{:?}",
+        s.m.state()
+    );
+}
