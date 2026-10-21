@@ -2103,7 +2103,6 @@ dependencies = [
 name = "dent-client-core"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "dent-link",
  "dent-protocol",
  "hex",
