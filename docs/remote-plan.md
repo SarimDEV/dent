@@ -71,7 +71,7 @@ The test rig is the owner's Mac plus `dent-linux`, a Lima VM on it. The VM is on
    - hours unreachable;
    - an hour-long soak.
 
-   This decides doors 3 and 5. (R-A1–A10: A1 and A3 **done**, [spike 12](spikes/12-link-under-real-networks.md))
+   This decides doors 3 and 5. (R-A1–A10: A1 and A3 **done**, [spike 12](spikes/12-link-under-real-networks.md); A6 **done**, [spike 14](spikes/14-routes-identity-and-boot.md))
 4. **Git across machines.** A script that packs a worktree as a snapshot commit in a bundle and applies it on the VM. It must reproduce `git status` exactly:
    - binaries, deletions, renames and file modes;
    - staged, untracked and force-added ignored files.

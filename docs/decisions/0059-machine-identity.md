@@ -1,12 +1,12 @@
 # 0059. A machine is its key, bound to its install; everything is keyed by machine
 
-Status: proposed (2026-10-20) · confirmed by [R-B6, R-B7](../remote-tests.md#b-trust-and-identity) · Builds on [0033](0033-direct-websocket-hub-on-hold.md), [spike 05](../spikes/05-direct-links.md) · Plan: [remote-plan.md](../remote-plan.md)
+Status: proposed (2026-10-20) · R-B7's clone check run ([spike 14](../spikes/14-routes-identity-and-boot.md)); still to confirm: [R-B6, R-B7](../remote-tests.md#b-trust-and-identity) · Builds on [0033](0033-direct-websocket-hub-on-hold.md), [spike 05](../spikes/05-direct-links.md) · Plan: [remote-plan.md](../remote-plan.md)
 
 ## Decision
 
 **A machine's identity is its X25519 key** (spike 05), and its id is the key's fingerprint. Addresses, names and Bonjour instances are only hints.
 
-**The key is bound to the install.** Beside the key, the daemon stores a binding: the hardware id (`IOPlatformUUID` on macOS, `/etc/machine-id` on Linux) and the state folder's real path. At startup:
+**The key is bound to the install.** Beside the key, the daemon stores a binding: the hardware id and the state folder's real path. The hardware id is `IOPlatformUUID` on macOS. On Linux it is `/etc/machine-id` plus the permanent addresses of the physical network cards, because a cloned VM keeps the same machine id ([spike 14](../spikes/14-routes-identity-and-boot.md)); only all of the cards changing counts. At startup:
 - A matching binding means it starts.
 - A mismatch means the state folder was copied (Migration Assistant, a restored backup, a cloned VM or a baked cloud image). The daemon refuses to serve under the old identity, and says so in its log and in `dent doctor`. `dent daemon reidentify` makes it a new machine, keeping its sessions as history.
 - A missing binding is written once, on the first start after this record ships.
