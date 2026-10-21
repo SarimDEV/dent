@@ -349,14 +349,24 @@ fn local(r: Request) -> Result<Reply> {
 async fn next_reply(
     rx: &mut mpsc::UnboundedReceiver<dent_remote::remote::Event>,
 ) -> Result<(u64, Out)> {
+    // A minute with no answer, however much the link says meanwhile
+    // (tries, failures): the machine isn't answering, and that's said.
+    let by = tokio::time::Instant::now() + Duration::from_secs(60);
+    let mut last = None;
     loop {
-        match tokio::time::timeout(Duration::from_secs(60), rx.recv()).await {
+        match tokio::time::timeout_at(by, rx.recv()).await {
             Ok(Some(dent_remote::remote::Event::Out { req, out })) if req != 0 => {
                 return Ok((req, out));
             }
+            Ok(Some(dent_remote::remote::Event::State(s))) => last = Some(s),
             Ok(Some(_)) => {}
             Ok(None) => bail!("the connection ended"),
-            Err(_) => bail!("no answer within a minute"),
+            Err(_) => match last {
+                Some(dent_client_core::machine::State::Unreachable { why }) => {
+                    bail!("no answer within a minute: {why}")
+                }
+                _ => bail!("no answer within a minute"),
+            },
         }
     }
 }
