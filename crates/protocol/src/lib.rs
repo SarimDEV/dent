@@ -21,7 +21,12 @@ use serde::{Deserialize, Serialize};
 /// `Request::ReadFiles`, and `Request::Create`'s `bring`); LAN access is
 /// set from a client (`Request::SetLan`); the welcome says how to wake the
 /// machine (`wake`).
-pub const PROTOCOL: u32 = 3;
+///
+/// 4: a session's files can be read from anywhere by what the session
+/// wrote (`Request::Stat`, `Request::Read`; [decision 0068]).
+///
+/// [decision 0068]: ../../docs/decisions/0068-files-across-machines.md
+pub const PROTOCOL: u32 = 4;
 /// The oldest protocol this build still speaks. Two sides talk when their
 /// ranges overlap ([decision 0060]).
 ///
@@ -583,6 +588,67 @@ pub struct Carried {
     pub name: String,
     pub bytes_b64: String,
 }
+
+/// A file a session names, as it was written: absolute, `~/…`,
+/// `file://…` or relative. The daemon resolves it, with its own home, against
+/// `base` (the folder of the document it was written in) or else the
+/// session's folder ([decision 0068]).
+///
+/// [decision 0068]: ../../docs/decisions/0068-files-across-machines.md
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FileRef {
+    pub session: SessionId,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+}
+
+/// One version of a file: equal stamps are the same bytes, as far as the
+/// machine can tell.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Stamp {
+    pub dev: u64,
+    pub ino: u64,
+    pub size: u64,
+    /// Modification time, in nanoseconds since the epoch.
+    pub mtime_ns: i64,
+}
+
+/// How a file a session names stands on its machine. Every answer but
+/// `File` carries the path that was checked, to say where it looked.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FileStat {
+    File {
+        /// The full path it resolved to.
+        path: String,
+        stamp: Stamp,
+        /// A picture's size, from its header, so a place can be kept for it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<u32>,
+    },
+    Dir {
+        path: String,
+    },
+    Missing {
+        checked: String,
+    },
+    /// The machine won't share it with this device.
+    Refused {
+        checked: String,
+    },
+    /// There, but not readable as a file: no permission, a pipe, a device.
+    Unreadable {
+        checked: String,
+        error: String,
+    },
+}
+
+/// The most one [`Request::Read`] returns, so a reply never holds up live
+/// events for long.
+pub const READ_MAX: u32 = 256 * 1024;
 
 /// A network card a sleeping machine can be woken through: a magic packet
 /// to `broadcast` (its subnet's) naming `mac`.
@@ -1506,6 +1572,20 @@ pub enum Request {
         session: SessionId,
         path: String,
     },
+    /// How each file stands, in order. Answered with [`Reply::Stats`].
+    Stat {
+        files: Vec<FileRef>,
+    },
+    /// Up to `len` bytes (at most [`READ_MAX`]) from `offset`. With
+    /// `expect`, only from that version: a file rewritten since answers
+    /// [`Reply::FileGone`] with `changed`. Answered with [`Reply::Bytes`].
+    Read {
+        file: FileRef,
+        offset: u64,
+        len: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect: Option<Stamp>,
+    },
     /// Do what a sheet's row offers. `command` names the sheet, which
     /// arrives again as [`Out::Sheet`] once it's done.
     Act {
@@ -1683,6 +1763,23 @@ pub enum Reply {
     File {
         bytes_b64: String,
     },
+    Stats {
+        stats: Vec<FileStat>,
+    },
+    Bytes {
+        stamp: Stamp,
+        offset: u64,
+        /// The file's whole size.
+        total: u64,
+        bytes_b64: String,
+    },
+    /// A read that couldn't be done, and why; `changed` when the file is
+    /// there but isn't the version expected.
+    FileGone {
+        stat: FileStat,
+        #[serde(default)]
+        changed: bool,
+    },
     /// `None` when the folder isn't in a Git repository.
     Repo {
         repo: Option<Repo>,
@@ -1747,6 +1844,8 @@ impl Request {
             | R::Git { session, .. }
             | R::ReadFile { session, .. }
             | R::Act { session, .. } => vec![session],
+            R::Stat { files } => files.iter_mut().map(|f| &mut f.session).collect(),
+            R::Read { file, .. } => vec![&mut file.session],
             R::Commands { session } => session.iter_mut().collect(),
             R::Hello { .. }
             | R::Subscribe { .. }
@@ -1815,6 +1914,9 @@ impl Out {
                 | Reply::Changes { .. }
                 | Reply::Files { .. }
                 | Reply::File { .. }
+                | Reply::Stats { .. }
+                | Reply::Bytes { .. }
+                | Reply::FileGone { .. }
                 | Reply::Repo { .. }
                 | Reply::Pack { .. }
                 | Reply::Carried { .. }

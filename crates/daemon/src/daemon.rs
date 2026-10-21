@@ -306,6 +306,16 @@ impl Daemon {
         m
     }
 
+    /// What no device may read, whatever it asks: this daemon's own state
+    /// (its key, trust list, secrets, database), except the files it
+    /// wrote for sessions to show.
+    pub fn file_policy(&self) -> dent_files::Policy {
+        dent_files::Policy {
+            deny: vec![self.paths.state.clone()],
+            allow: vec![self.paths.state.join("attachments")],
+        }
+    }
+
     /// Let devices on the local network connect, or not, from now and
     /// after a restart.
     pub fn set_lan(&self, on: bool) -> Result<()> {

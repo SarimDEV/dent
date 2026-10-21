@@ -26,6 +26,21 @@ const WRITE_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Files the viewer may open are capped at this size.
 const FILE_CAP: u64 = 32 * 1024 * 1024;
 
+/// The most files one `Stat` asks about.
+const STAT_MAX: usize = 256;
+
+/// Why a file can't be read, in words, saying where it looked.
+fn said(s: &dent_protocol::FileStat) -> String {
+    use dent_protocol::FileStat as F;
+    match s {
+        F::Missing { checked } => format!("{checked} isn't there"),
+        F::Refused { checked } => format!("{checked} isn't shared"),
+        F::Unreadable { checked, error } => format!("{checked} can't be read: {error}"),
+        F::Dir { path } => format!("{path} is a folder"),
+        F::File { path, .. } => path.clone(),
+    }
+}
+
 pub async fn serve(d: Arc<Daemon>) -> Result<()> {
     let sock = d.paths.socket();
     let _ = std::fs::remove_file(&sock);
@@ -63,7 +78,27 @@ async fn conn(d: Arc<Daemon>, stream: UnixStream) -> Result<()> {
             }
         }
     });
-    session(d, lines_rx, tx).await
+    // Over the local socket, file bytes share the one lane.
+    let bulk = tx.clone();
+    session(d, lines_rx, tx, bulk).await
+}
+
+/// File reads at once across every client, and per client: they run beside
+/// the request loop, so a slow disk never holds up an approval or a send.
+static FILE_READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
+const FILE_READS_EACH: usize = 4;
+
+/// Whether `r` only reads files: run beside the loop, its reply on the
+/// bulk lane.
+fn reads_files(r: &Request) -> bool {
+    matches!(
+        r,
+        Request::Stat { .. }
+            | Request::Read { .. }
+            | Request::ReadFile { .. }
+            | Request::ReadFiles { .. }
+            | Request::Pack { .. }
+    )
 }
 
 /// One client's requests in, its replies and events out: the same for the
@@ -72,8 +107,12 @@ pub async fn session(
     d: Arc<Daemon>,
     mut lines: mpsc::Receiver<String>,
     tx: mpsc::Sender<Vec<u8>>,
+    bulk: mpsc::Sender<Vec<u8>>,
 ) -> Result<()> {
     let mut hello = false;
+    let mine = Arc::new(tokio::sync::Semaphore::new(FILE_READS_EACH));
+    // Reads still running end with the session.
+    let mut reads = tokio::task::JoinSet::new();
     // Ends with the session, even one aborted mid-request.
     let mut sub: Option<AbortOnDrop> = None;
     while let Some(line) = lines.recv().await {
@@ -101,6 +140,26 @@ pub async fn session(
                     },
                 ))
                 .await;
+            continue;
+        }
+        if reads_files(&env.body) {
+            let (d, bulk, mine) = (d.clone(), bulk.clone(), mine.clone());
+            let body = env.body;
+            reads.spawn(async move {
+                let (Ok(_each), Ok(_all)) = (mine.acquire().await, FILE_READS.acquire().await)
+                else {
+                    return;
+                };
+                let msg = match handle(&d, body).await {
+                    Ok(reply) => Out::Reply { reply },
+                    Err(e) => Out::Error {
+                        message: format!("{e:#}"),
+                    },
+                };
+                let _ = bulk.send(encode(req, &msg)).await;
+            });
+            // Finished ones let go as it goes.
+            while reads.try_join_next().is_some() {}
             continue;
         }
         let out = match env.body {
@@ -621,13 +680,82 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
                 tokio::task::spawn_blocking(move || crate::git::files(&dir, 20_000)).await?;
             Reply::Files { paths }
         }
+        // A session's file, by what the session wrote: wherever it is on this
+        // machine, but never the daemon's own secrets (decision 0068).
         Request::ReadFile { session, path } => {
             let cwd = cwd_of(d, &session)?;
-            let bytes =
-                tokio::task::spawn_blocking(move || read_inside(Path::new(&cwd), &path)).await??;
+            let policy = d.file_policy();
+            let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+                let home = crate::paths::home();
+                let at = dent_files::resolve(&path, Path::new(&cwd), &home);
+                let o = dent_files::open(&at, &policy).map_err(|s| anyhow::anyhow!(said(&s)))?;
+                o.read_all(FILE_CAP)
+                    .map_err(|_| anyhow::anyhow!("{path} is too big to show"))
+            })
+            .await??;
             Reply::File {
                 bytes_b64: b64::encode(&bytes),
             }
+        }
+        Request::Stat { mut files } => {
+            files.truncate(STAT_MAX);
+            let mut bases = Vec::with_capacity(files.len());
+            for f in &files {
+                bases.push(match &f.base {
+                    Some(b) => Some(b.clone()),
+                    None => cwd_of(d, &f.session).ok(),
+                });
+            }
+            let policy = d.file_policy();
+            let stats = tokio::task::spawn_blocking(move || {
+                let home = crate::paths::home();
+                files
+                    .iter()
+                    .zip(bases)
+                    .map(|(f, base)| match base {
+                        Some(b) => dent_files::stat(&f.path, Path::new(&b), &home, &policy),
+                        None => dent_protocol::FileStat::Unreadable {
+                            checked: f.path.clone(),
+                            error: format!("no session {}", f.session),
+                        },
+                    })
+                    .collect()
+            })
+            .await?;
+            Reply::Stats { stats }
+        }
+        Request::Read {
+            file,
+            offset,
+            len,
+            expect,
+        } => {
+            let base = match &file.base {
+                Some(b) => b.clone(),
+                None => cwd_of(d, &file.session)?,
+            };
+            let policy = d.file_policy();
+            tokio::task::spawn_blocking(move || {
+                let home = crate::paths::home();
+                match dent_files::read(
+                    &file.path,
+                    Path::new(&base),
+                    &home,
+                    &policy,
+                    offset,
+                    len,
+                    expect,
+                ) {
+                    Ok((stamp, total, bytes)) => Reply::Bytes {
+                        stamp,
+                        offset,
+                        total,
+                        bytes_b64: b64::encode(&bytes),
+                    },
+                    Err((stat, changed)) => Reply::FileGone { stat, changed },
+                }
+            })
+            .await?
         }
     })
 }
@@ -700,7 +828,6 @@ fn cwd_of(d: &Daemon, session: &str) -> Result<String> {
         .cwd)
 }
 
-/// Read a file, refusing anything outside the session's directory.
 /// Write the files message `id` brought with it ([`Request::Send`]'s
 /// `files`) under the state folder, and their paths, to attach. Sent again,
 /// the same message writes the same files over themselves.
@@ -753,18 +880,6 @@ fn safe_name(name: &str) -> String {
         cut -= 1;
     }
     format!("{}{ext}", &last[..cut])
-}
-
-fn read_inside(cwd: &Path, path: &str) -> Result<Vec<u8>> {
-    let root = cwd.canonicalize()?;
-    let full = root.join(path).canonicalize()?;
-    if !full.starts_with(&root) {
-        bail!("{path} is outside the session's folder");
-    }
-    if std::fs::metadata(&full)?.len() > FILE_CAP {
-        bail!("{path} is too big to show");
-    }
-    Ok(std::fs::read(full)?)
 }
 
 /// Catch up from the log, then stream live. Live events that arrive during

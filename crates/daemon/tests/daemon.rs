@@ -989,6 +989,182 @@ fn the_lan_switch_holds_across_a_restart() {
 }
 
 #[test]
+fn a_sessions_files_are_stat_and_read_by_what_it_wrote() {
+    use dent_protocol::{FileRef, FileStat};
+    let home = std::env::temp_dir().join(format!("dent-files-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(home.join("Movies")).unwrap();
+    std::fs::write(home.join("Movies/take.mov"), b"movie bytes").unwrap();
+    let h = home.canonicalize().unwrap().display().to_string();
+    let w = World::new(&[("HOME", h.as_str())]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "first");
+    c.wait(&s, "the turn to end", is_done);
+    let cwd = Path::new(&w.cwd()).canonicalize().unwrap();
+    std::fs::write(
+        cwd.join("chart.png"),
+        b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR\0\0\x02\x80\0\0\x01\xe0",
+    )
+    .unwrap();
+    std::fs::create_dir_all(cwd.join("out")).unwrap();
+    let outside = std::env::temp_dir().join(format!("dent-outside-{}.txt", std::process::id()));
+    std::fs::write(&outside, b"outside").unwrap();
+    let state = w.state.canonicalize().unwrap();
+    std::fs::create_dir_all(state.join("attachments/x")).unwrap();
+    std::fs::write(state.join("attachments/x/pic.png"), b"pic").unwrap();
+    let r = |p: &str| FileRef {
+        session: s.clone(),
+        path: p.into(),
+        base: None,
+    };
+    let stats = match c
+        .call(Request::Stat {
+            files: vec![
+                r("chart.png"),
+                r("~/Movies/take.mov"),
+                r(&outside.display().to_string()),
+                r(&state.join("dent.db").display().to_string()),
+                r(&state.join("attachments/x/pic.png").display().to_string()),
+                r("missing.png"),
+                r("out"),
+                FileRef {
+                    session: "no-such-session".into(),
+                    path: "x".into(),
+                    base: None,
+                },
+            ],
+        })
+        .unwrap()
+    {
+        Out::Reply {
+            reply: dent_protocol::Reply::Stats { stats },
+        } => stats,
+        o => panic!("{o:?}"),
+    };
+    assert_eq!(stats.len(), 8);
+    match &stats[0] {
+        FileStat::File {
+            path,
+            width,
+            height,
+            ..
+        } => {
+            assert_eq!(Path::new(path), cwd.join("chart.png"));
+            assert_eq!((*width, *height), (Some(640), Some(480)));
+        }
+        s => panic!("{s:?}"),
+    }
+    // `~` is the daemon's home, not the asker's.
+    assert!(matches!(&stats[1], FileStat::File { path, .. } if path.starts_with(&h)));
+    // Outside the session's folder: readable, by a trusted device.
+    assert!(matches!(&stats[2], FileStat::File { .. }), "{:?}", stats[2]);
+    // The daemon's own state isn't, but the files it wrote for sessions are.
+    assert!(
+        matches!(&stats[3], FileStat::Refused { .. }),
+        "{:?}",
+        stats[3]
+    );
+    assert!(matches!(&stats[4], FileStat::File { .. }), "{:?}", stats[4]);
+    assert!(
+        matches!(&stats[5], FileStat::Missing { checked } if Path::new(checked) == Path::new(&w.cwd()).join("missing.png"))
+    );
+    assert!(matches!(&stats[6], FileStat::Dir { .. }));
+    assert!(matches!(&stats[7], FileStat::Unreadable { .. }));
+
+    // A range, pinned to its version; rewritten, it says so.
+    let read = |c: &mut Client, p: &str, offset: u64, expect| {
+        c.call(Request::Read {
+            file: r(p),
+            offset,
+            len: 5,
+            expect,
+        })
+        .unwrap()
+    };
+    let stamp = match read(&mut c, "~/Movies/take.mov", 0, None) {
+        Out::Reply {
+            reply:
+                dent_protocol::Reply::Bytes {
+                    stamp,
+                    total,
+                    bytes_b64,
+                    ..
+                },
+        } => {
+            assert_eq!(total, 11);
+            assert_eq!(dent_protocol::b64::decode(&bytes_b64).unwrap(), b"movie");
+            stamp
+        }
+        o => panic!("{o:?}"),
+    };
+    match read(&mut c, "~/Movies/take.mov", 6, Some(stamp)) {
+        Out::Reply {
+            reply: dent_protocol::Reply::Bytes { bytes_b64, .. },
+        } => assert_eq!(dent_protocol::b64::decode(&bytes_b64).unwrap(), b"bytes"),
+        o => panic!("{o:?}"),
+    }
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    std::fs::write(home.join("Movies/take.mov"), b"other movie").unwrap();
+    assert!(matches!(
+        read(&mut c, "~/Movies/take.mov", 6, Some(stamp)),
+        Out::Reply {
+            reply: dent_protocol::Reply::FileGone { changed: true, .. }
+        }
+    ));
+    assert!(matches!(
+        read(
+            &mut c,
+            &state.join("identity.key").display().to_string(),
+            0,
+            None
+        ),
+        Out::Reply {
+            reply: dent_protocol::Reply::FileGone {
+                stat: FileStat::Refused { .. } | FileStat::Missing { .. },
+                ..
+            }
+        }
+    ));
+    // The viewer's whole-file read follows the same rule.
+    assert!(
+        c.call(Request::ReadFile {
+            session: s.clone(),
+            path: outside.display().to_string(),
+        })
+        .is_ok()
+    );
+    assert!(
+        c.call(Request::ReadFile {
+            session: s.clone(),
+            path: state.join("dent.db").display().to_string(),
+        })
+        .is_err()
+    );
+
+    // Many reads at once never hold up the rest.
+    let big = cwd.join("big.bin");
+    std::fs::write(&big, vec![7u8; 8 << 20]).unwrap();
+    let mut asked = Vec::new();
+    for i in 0..32u64 {
+        asked.push(c.send_req(Request::Read {
+            file: r("big.bin"),
+            offset: i * dent_protocol::READ_MAX as u64,
+            len: dent_protocol::READ_MAX,
+            expect: None,
+        }));
+    }
+    let t = std::time::Instant::now();
+    assert!(c.call(Request::Projects).is_ok());
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(2),
+        "{:?}",
+        t.elapsed()
+    );
+    let _ = std::fs::remove_file(&outside);
+}
+
+#[test]
 fn projects_are_made_added_taken_off_and_put_back() {
     // Its own home: another test clears `dent-home-<pid>` while running.
     let home = std::env::temp_dir().join(format!("dent-projects-home-{}", std::process::id()));

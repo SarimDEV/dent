@@ -2113,6 +2113,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "dent-client-core",
+ "dent-files",
  "dent-link",
  "dent-protocol",
  "dent-remote",
@@ -2174,6 +2175,14 @@ name = "dent-fake-claude"
 version = "0.0.0"
 dependencies = [
  "serde_json",
+]
+
+[[package]]
+name = "dent-files"
+version = "0.0.0"
+dependencies = [
+ "dent-protocol",
+ "libc",
 ]
 
 [[package]]

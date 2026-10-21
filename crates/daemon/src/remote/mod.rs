@@ -70,6 +70,11 @@ const CTL_QUEUE: usize = 64;
 /// live connection ([decision 0061]).
 const RECHECK: Duration = Duration::from_secs(300);
 /// Lines waiting to go to one remote client.
+/// File replies waiting to go to one device: each up to [`READ_MAX`]
+/// bytes, so a few is plenty.
+///
+/// [`READ_MAX`]: dent_protocol::READ_MAX
+const BULK_QUEUE: usize = 8;
 const OUT_QUEUE: usize = 256;
 /// How long Tailscale's view of this machine is reused.
 const TAILSCALE_TTL: Duration = Duration::from_secs(30);
@@ -717,14 +722,18 @@ async fn trusted(
     let (mut sink, mut stream) = ws.split();
     let (lines_tx, lines_rx) = mpsc::channel::<String>(64);
     let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(OUT_QUEUE);
+    // File bytes go on a lane of their own, after live traffic.
+    let (bulk_tx, mut bulk_rx) = mpsc::channel::<Vec<u8>>(BULK_QUEUE);
     let (ctl_tx, mut ctl_rx) = mpsc::channel::<Control>(CTL_QUEUE);
-    let session = tokio::spawn(crate::server::session(d.clone(), lines_rx, out_tx));
+    let session = tokio::spawn(crate::server::session(d.clone(), lines_rx, out_tx, bulk_tx));
     let mut removed = d.net.removed.subscribe();
     let mut bye = d.net.bye.subscribe();
 
     // The writer alone seals and sends, so frames go out in nonce order.
-    // Control messages go first, and between the parts of a large message.
-    // A goodbye or refusal is the last thing sent.
+    // Control messages go first, and between the parts of a large message;
+    // then replies and live events; file bytes last (each one small, so a
+    // live event waits for one at most). A goodbye or refusal is the last
+    // thing sent.
     let mut writer = {
         let t = t.clone();
         tokio::spawn(async move {
@@ -745,6 +754,33 @@ async fn trusted(
                     Err(_) => false,
                 }
             };
+            // Sends one data line in parts, control first between them;
+            // whether to go on.
+            let data = async |sink: &mut futures_util::stream::SplitSink<Ws, Message>,
+                              ctl_rx: &mut mpsc::Receiver<Control>,
+                              mut line: Vec<u8>| {
+                if line.last() == Some(&b'\n') {
+                    line.pop();
+                }
+                let mut i = 0;
+                loop {
+                    while let Ok(c) = ctl_rx.try_recv() {
+                        if !control(sink, c).await {
+                            return false;
+                        }
+                    }
+                    let part = lock(&t).seal_part(&line, i);
+                    let part = match part {
+                        Ok(Some(p)) => p,
+                        Ok(None) => return true,
+                        Err(_) => return false,
+                    };
+                    if !send(sink, part).await {
+                        return false;
+                    }
+                    i += 1;
+                }
+            };
             'run: loop {
                 tokio::select! {
                     biased;
@@ -755,27 +791,15 @@ async fn trusted(
                         }
                     }
                     line = out_rx.recv() => {
-                        let Some(mut line) = line else { break };
-                        if line.last() == Some(&b'\n') {
-                            line.pop();
+                        let Some(line) = line else { break };
+                        if !data(&mut sink, &mut ctl_rx, line).await {
+                            break 'run;
                         }
-                        let mut i = 0;
-                        loop {
-                            while let Ok(c) = ctl_rx.try_recv() {
-                                if !control(&mut sink, c).await {
-                                    break 'run;
-                                }
-                            }
-                            let part = lock(&t).seal_part(&line, i);
-                            let part = match part {
-                                Ok(Some(p)) => p,
-                                Ok(None) => break,
-                                Err(_) => break 'run,
-                            };
-                            if !send(&mut sink, part).await {
-                                break 'run;
-                            }
-                            i += 1;
+                    }
+                    line = bulk_rx.recv() => {
+                        let Some(line) = line else { break };
+                        if !data(&mut sink, &mut ctl_rx, line).await {
+                            break 'run;
                         }
                     }
                 }
