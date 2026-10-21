@@ -1,9 +1,9 @@
 //! A device's long-lived key pair. Its fingerprint is the device's id.
 
-use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
 use crate::noise::PATTERN;
+use crate::{Error, Result};
 
 #[derive(Clone)]
 pub struct Keys {
@@ -37,16 +37,16 @@ impl Keys {
     /// Reads [`Keys::to_hex`] back. A damaged key is an error, never a new
     /// identity.
     pub fn from_hex(text: &str) -> Result<Self> {
-        let raw = hex::decode(text.trim()).context("key isn't hex")?;
+        let raw = hex::decode(text.trim()).map_err(|_| Error::BadKey("not hex".into()))?;
         if raw.len() != 64 {
-            bail!("key has {} bytes, not 64", raw.len());
+            return Err(Error::BadKey(format!("{} bytes, not 64", raw.len())));
         }
         let keys = Self {
             private: raw[..32].to_vec(),
             public: raw[32..].to_vec(),
         };
         if derive_public(&keys.private)? != keys.public {
-            bail!("key's halves don't match");
+            return Err(Error::BadKey("the halves don't match".into()));
         }
         Ok(keys)
     }
@@ -72,10 +72,9 @@ fn derive_public(private: &[u8]) -> Result<Vec<u8>> {
     res.read_message(&buf[..n], &mut out)?;
     let n = res.write_message(&[], &mut buf)?;
     ini.read_message(&buf[..n], &mut out)?;
-    Ok(ini
-        .get_remote_static()
-        .context("no static key in message 2")?
-        .to_vec())
+    ini.get_remote_static()
+        .map(<[u8]>::to_vec)
+        .ok_or_else(|| Error::Malformed("no static key in message 2".into()))
 }
 
 /// A short id for a public key: the first 6 bytes of its SHA-256, in hex.

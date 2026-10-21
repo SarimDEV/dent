@@ -14,12 +14,11 @@
 //! of a data message, so pings, stops and approvals never wait behind a
 //! large payload.
 
-use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::SMALL;
 use crate::control::Control;
 use crate::keys::Keys;
+use crate::{Error, Result, SMALL};
 
 pub const PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 
@@ -108,19 +107,16 @@ impl Initiator {
     /// [`WrongKey`] error and this side writes nothing more.
     pub fn read(mut self, msg2: &[u8], expect: Option<&[u8]>) -> Result<Answered> {
         let mut buf = vec![0u8; NOISE_MAX];
-        let n = self
-            .hs
-            .read_message(msg2, &mut buf)
-            .map_err(|e| anyhow!("handshake: {e}"))?;
+        let n = self.hs.read_message(msg2, &mut buf)?;
         let remote = self
             .hs
             .get_remote_static()
-            .context("no static key in message 2")?
+            .ok_or_else(|| Error::Malformed("no static key in message 2".into()))?
             .to_vec();
         if let Some(want) = expect
             && want != remote
         {
-            return Err(WrongKey { got: remote }.into());
+            return Err(Error::WrongKey(WrongKey { got: remote }));
         }
         let hello: Hello = parse_small(&buf[..n])?;
         Ok(Answered {
@@ -155,8 +151,7 @@ impl Responder {
             .local_private_key(&keys.private)
             .build_responder()?;
         let mut buf = vec![0u8; NOISE_MAX];
-        hs.read_message(msg1, &mut buf)
-            .map_err(|e| anyhow!("handshake: {e}"))?;
+        hs.read_message(msg1, &mut buf)?;
         let n = hs.write_message(&serde_json::to_vec(hello)?, &mut buf)?;
         buf.truncate(n);
         Ok((Self { hs }, buf))
@@ -165,15 +160,12 @@ impl Responder {
     /// Reads message 3: the caller's proven key and hello.
     pub fn finish(mut self, msg3: &[u8]) -> Result<(Transport, Hello)> {
         let mut buf = vec![0u8; NOISE_MAX];
-        let n = self
-            .hs
-            .read_message(msg3, &mut buf)
-            .map_err(|e| anyhow!("handshake: {e}"))?;
+        let n = self.hs.read_message(msg3, &mut buf)?;
         let hello: Hello = parse_small(&buf[..n])?;
         let remote = self
             .hs
             .get_remote_static()
-            .context("no static key in message 3")?
+            .ok_or_else(|| Error::Malformed("no static key in message 3".into()))?
             .to_vec();
         Ok((Transport::new(self.hs, remote)?, hello))
     }
@@ -181,9 +173,9 @@ impl Responder {
 
 fn parse_small<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     if bytes.len() > SMALL {
-        bail!("handshake payload over {SMALL} bytes");
+        return Err(Error::TooLarge { limit: SMALL });
     }
-    serde_json::from_slice(bytes).context("bad handshake payload")
+    Ok(serde_json::from_slice(bytes)?)
 }
 
 /// What one received frame completed.
@@ -265,7 +257,7 @@ impl Transport {
     pub fn seal_control(&mut self, c: &Control) -> Result<Vec<u8>> {
         let body = serde_json::to_vec(c)?;
         if body.len() > PART {
-            bail!("control message over one frame");
+            return Err(Error::TooLarge { limit: PART });
         }
         self.seal_frame(CONTROL, &body)
     }
@@ -273,11 +265,10 @@ impl Transport {
     /// One frame in; a whole message once it's complete.
     pub fn open(&mut self, frame: &[u8]) -> Result<Option<Opened>> {
         let mut out = vec![0u8; frame.len()];
-        let n = self
-            .noise
-            .read_message(frame, &mut out)
-            .map_err(|e| anyhow!("decrypt: {e}"))?;
-        let (kind, body) = out[..n].split_first().context("empty frame")?;
+        let n = self.noise.read_message(frame, &mut out)?;
+        let (kind, body) = out[..n]
+            .split_first()
+            .ok_or_else(|| Error::Malformed("empty frame".into()))?;
         match *kind {
             CONTROL => {
                 // An unknown control message is skipped, not fatal: a newer
@@ -289,12 +280,12 @@ impl Transport {
             DATA_MORE | DATA_LAST => {
                 if self.partial.len() + body.len() > self.limit {
                     self.partial.clear();
-                    bail!("message over {} bytes", self.limit);
+                    return Err(Error::TooLarge { limit: self.limit });
                 }
                 self.partial.extend_from_slice(body);
                 Ok((*kind == DATA_LAST).then(|| Opened::Data(std::mem::take(&mut self.partial))))
             }
-            k => bail!("unknown frame kind {k}"),
+            k => Err(Error::Malformed(format!("unknown frame kind {k}"))),
         }
     }
 }
@@ -346,7 +337,9 @@ mod tests {
             Err(e) => e,
             Ok(_) => panic!("accepted the wrong key"),
         };
-        let wrong = err.downcast_ref::<WrongKey>().expect("a WrongKey error");
+        let Error::WrongKey(wrong) = err else {
+            panic!("expected a WrongKey error, got {err}")
+        };
         assert_eq!(wrong.got, d.public);
         // Message 1 carries only an ephemeral key, never our static one.
         assert!(!m1.windows(32).any(|w| w == c.public.as_slice()));

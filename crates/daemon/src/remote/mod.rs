@@ -791,7 +791,7 @@ async fn trusted(
             };
             let opened = lock(&t).open(&frame);
             match opened {
-                Err(e) => return Err(e),
+                Err(e) => return Err(e.into()),
                 Ok(None) => {}
                 // Answered here, before any app work, so a busy daemon still
                 // looks alive ([remote-plan.md]).

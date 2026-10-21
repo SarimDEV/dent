@@ -5,7 +5,7 @@
 //! code to the keys of this exact channel and so rules out a man in the
 //! middle.
 
-use anyhow::{Result, anyhow};
+use crate::{Error, Result};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use spake2::{Ed25519Group, Identity, Password, Spake2};
@@ -29,8 +29,13 @@ impl Pairing {
 
     /// The shared key, from the other side's SPAKE2 message.
     pub fn finish(&mut self, inbound: &[u8]) -> Result<Vec<u8>> {
-        let state = self.state.take().ok_or_else(|| anyhow!("pairing reused"))?;
-        state.finish(inbound).map_err(|e| anyhow!("spake2: {e:?}"))
+        let state = self
+            .state
+            .take()
+            .ok_or_else(|| Error::Pairing("reused".into()))?;
+        state
+            .finish(inbound)
+            .map_err(|e| Error::Pairing(format!("spake2: {e:?}")))
     }
 }
 
@@ -71,7 +76,7 @@ pub fn new_code() -> Result<String> {
     // Rejection sampling keeps every code equally likely.
     loop {
         let mut b = [0u8; 4];
-        getrandom::getrandom(&mut b).map_err(|e| anyhow!("randomness: {e}"))?;
+        getrandom::getrandom(&mut b).map_err(|e| Error::Random(e.to_string()))?;
         let n = u32::from_le_bytes(b);
         if n < 4_294_000_000 {
             return Ok(format!("{:06}", n % 1_000_000));

@@ -5,11 +5,13 @@
 //! [decision 0060]: ../../docs/decisions/0060-remote-wire.md
 
 pub mod control;
+mod error;
 pub mod keys;
 pub mod noise;
 pub mod pair;
 
 pub use control::{Access, Control, Goodbye, Refusal, Trust};
+pub use error::{Error, Result};
 pub use keys::{Keys, fingerprint};
 pub use noise::{Answered, Hello, Initiator, Opened, Responder, Transport, WrongKey};
 
