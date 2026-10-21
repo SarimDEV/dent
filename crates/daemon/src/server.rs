@@ -7,7 +7,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use dent_protocol::{BATCH_BYTES, Body, Envelope, Out, PROTOCOL, Reply, Request, b64, encode};
+use dent_protocol::{
+    BATCH_BYTES, Body, Envelope, Out, PROTOCOL, PROTOCOL_MIN, Reply, Request, b64, encode,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
@@ -52,10 +54,28 @@ async fn conn(d: Arc<Daemon>, stream: UnixStream) -> Result<()> {
             }
         }
     });
-    let mut lines = BufReader::new(r).lines();
+    let (lines_tx, lines_rx) = mpsc::channel::<String>(64);
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(r).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if lines_tx.send(line).await.is_err() {
+                break;
+            }
+        }
+    });
+    session(d, lines_rx, tx).await
+}
+
+/// One client's requests in, its replies and events out: the same for the
+/// local socket and for remote devices ([`crate::remote`]).
+pub async fn session(
+    d: Arc<Daemon>,
+    mut lines: mpsc::Receiver<String>,
+    tx: mpsc::Sender<Vec<u8>>,
+) -> Result<()> {
     let mut hello = false;
     let mut sub: Option<tokio::task::JoinHandle<()>> = None;
-    while let Some(line) = lines.next_line().await? {
+    while let Some(line) = lines.recv().await {
         let env: Envelope<Request> = match serde_json::from_str(&line) {
             Ok(e) => e,
             Err(e) => {
@@ -84,9 +104,11 @@ async fn conn(d: Arc<Daemon>, stream: UnixStream) -> Result<()> {
         }
         let out = match env.body {
             Request::Hello { proto, .. } => {
-                if proto != PROTOCOL {
+                // The client names its newest protocol; it talks this
+                // daemon's when that's within its range.
+                if proto < PROTOCOL_MIN {
                     Err(anyhow::anyhow!(
-                        "this daemon speaks protocol {PROTOCOL}, the app {proto}; update the older one"
+                        "this daemon speaks protocols {PROTOCOL_MIN} to {PROTOCOL}, the app {proto}; update the app"
                     ))
                 } else {
                     hello = true;
@@ -100,17 +122,41 @@ async fn conn(d: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                             .iter()
                             .map(|a| crate::agent::brief(*a))
                             .collect(),
+                        id: d.net.id(),
+                        epoch: d.net.epoch.clone(),
+                        addresses: d.net.addresses().await,
                     })
                 }
             }
-            Request::Subscribe { after } => {
+            Request::Subscribe { mut after, epoch } => {
                 if let Some(old) = sub.take() {
                     old.abort();
+                }
+                // A different epoch means this log isn't the one the
+                // client's `after` counts in: start over, and say so.
+                if epoch.as_ref().is_some_and(|e| *e != d.net.epoch) {
+                    after = 0;
+                    let _ = tx
+                        .send(encode(
+                            0,
+                            &Out::Resync {
+                                epoch: d.net.epoch.clone(),
+                            },
+                        ))
+                        .await;
                 }
                 let rx = d.live.subscribe();
                 sub = Some(tokio::spawn(subscribe(d.clone(), after, rx, tx.clone())));
                 Ok(Reply::Ok)
             }
+            Request::OpenPairing => d
+                .net
+                .open_pairing()
+                .map(|(code, expires)| Reply::Pairing { code, expires }),
+            Request::Devices => Ok(Reply::Devices {
+                devices: d.net.devices(),
+            }),
+            Request::RemoveDevice { id } => d.net.remove_device(&id).map(|_| Reply::Ok),
             other => handle(&d, other).await,
         };
         let msg = match out {
@@ -131,7 +177,11 @@ async fn conn(d: Arc<Daemon>, stream: UnixStream) -> Result<()> {
 
 async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
     Ok(match req {
-        Request::Hello { .. } | Request::Subscribe { .. } => Reply::Ok,
+        Request::Hello { .. }
+        | Request::Subscribe { .. }
+        | Request::OpenPairing
+        | Request::Devices
+        | Request::RemoveDevice { .. } => Reply::Ok,
         Request::Restart => {
             eprintln!("dent-daemon: restarting for a newer build");
             // Reply first, then go; the client starts the new daemon.

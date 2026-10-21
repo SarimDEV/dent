@@ -65,7 +65,11 @@ pub struct WrongKey {
 
 impl std::fmt::Display for WrongKey {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "answered with a different key ({})", crate::fingerprint(&self.got))
+        write!(
+            f,
+            "answered with a different key ({})",
+            crate::fingerprint(&self.got)
+        )
     }
 }
 
@@ -91,7 +95,9 @@ pub struct Answered {
 
 impl Initiator {
     pub fn start(keys: &Keys) -> Result<(Self, Vec<u8>)> {
-        let mut hs = builder()?.local_private_key(&keys.private).build_initiator()?;
+        let mut hs = builder()?
+            .local_private_key(&keys.private)
+            .build_initiator()?;
         let mut buf = vec![0u8; NOISE_MAX];
         let n = hs.write_message(&[], &mut buf)?;
         buf.truncate(n);
@@ -102,7 +108,10 @@ impl Initiator {
     /// [`WrongKey`] error and this side writes nothing more.
     pub fn read(mut self, msg2: &[u8], expect: Option<&[u8]>) -> Result<Answered> {
         let mut buf = vec![0u8; NOISE_MAX];
-        let n = self.hs.read_message(msg2, &mut buf).map_err(|e| anyhow!("handshake: {e}"))?;
+        let n = self
+            .hs
+            .read_message(msg2, &mut buf)
+            .map_err(|e| anyhow!("handshake: {e}"))?;
         let remote = self
             .hs
             .get_remote_static()
@@ -126,7 +135,9 @@ impl Answered {
     /// Writes message 3 with this side's hello, and the transport is ready.
     pub fn finish(mut self, hello: &Hello) -> Result<(Transport, Vec<u8>)> {
         let mut buf = vec![0u8; NOISE_MAX];
-        let n = self.hs.write_message(&serde_json::to_vec(hello)?, &mut buf)?;
+        let n = self
+            .hs
+            .write_message(&serde_json::to_vec(hello)?, &mut buf)?;
         buf.truncate(n);
         Ok((Transport::new(self.hs, self.remote)?, buf))
     }
@@ -140,9 +151,12 @@ pub struct Responder {
 impl Responder {
     /// Reads message 1 and writes message 2, which carries `hello`.
     pub fn accept(keys: &Keys, msg1: &[u8], hello: &Hello) -> Result<(Self, Vec<u8>)> {
-        let mut hs = builder()?.local_private_key(&keys.private).build_responder()?;
+        let mut hs = builder()?
+            .local_private_key(&keys.private)
+            .build_responder()?;
         let mut buf = vec![0u8; NOISE_MAX];
-        hs.read_message(msg1, &mut buf).map_err(|e| anyhow!("handshake: {e}"))?;
+        hs.read_message(msg1, &mut buf)
+            .map_err(|e| anyhow!("handshake: {e}"))?;
         let n = hs.write_message(&serde_json::to_vec(hello)?, &mut buf)?;
         buf.truncate(n);
         Ok((Self { hs }, buf))
@@ -151,7 +165,10 @@ impl Responder {
     /// Reads message 3: the caller's proven key and hello.
     pub fn finish(mut self, msg3: &[u8]) -> Result<(Transport, Hello)> {
         let mut buf = vec![0u8; NOISE_MAX];
-        let n = self.hs.read_message(msg3, &mut buf).map_err(|e| anyhow!("handshake: {e}"))?;
+        let n = self
+            .hs
+            .read_message(msg3, &mut buf)
+            .map_err(|e| anyhow!("handshake: {e}"))?;
         let hello: Hello = parse_small(&buf[..n])?;
         let remote = self
             .hs
@@ -265,7 +282,9 @@ impl Transport {
             CONTROL => {
                 // An unknown control message is skipped, not fatal: a newer
                 // peer may send kinds this side doesn't know.
-                Ok(serde_json::from_slice::<Control>(body).ok().map(Opened::Control))
+                Ok(serde_json::from_slice::<Control>(body)
+                    .ok()
+                    .map(Opened::Control))
             }
             DATA_MORE | DATA_LAST => {
                 if self.partial.len() + body.len() > self.limit {
@@ -361,7 +380,10 @@ mod tests {
                 got.push(o);
             }
         }
-        assert_eq!(got, vec![Opened::Control(Control::Ping { t: 7 }), Opened::Data(big)]);
+        assert_eq!(
+            got,
+            vec![Opened::Control(Control::Ping { t: 7 }), Opened::Data(big)]
+        );
     }
 
     #[test]
@@ -393,14 +415,18 @@ mod tests {
     #[test]
     fn unknown_control_kinds_are_skipped() {
         let (mut ct, mut dt, ..) = pair();
-        let f = ct.seal_frame(CONTROL, br#"{"type":"from_the_future","x":1}"#).unwrap();
+        let f = ct
+            .seal_frame(CONTROL, br#"{"type":"from_the_future","x":1}"#)
+            .unwrap();
         assert_eq!(dt.open(&f).unwrap(), None);
         let f = ct
             .seal_control(&Control::Refuse(Refusal::Starting { retry_ms: 500 }))
             .unwrap();
         assert_eq!(
             dt.open(&f).unwrap(),
-            Some(Opened::Control(Control::Refuse(Refusal::Starting { retry_ms: 500 })))
+            Some(Opened::Control(Control::Refuse(Refusal::Starting {
+                retry_ms: 500
+            })))
         );
     }
 

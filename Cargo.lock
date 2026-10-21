@@ -2104,13 +2104,17 @@ name = "dent-daemon"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "dent-link",
  "dent-protocol",
  "dent-session-holder",
+ "futures-util",
+ "hex",
  "libc",
  "rusqlite",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

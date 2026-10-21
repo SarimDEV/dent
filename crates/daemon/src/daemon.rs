@@ -91,6 +91,8 @@ pub struct Daemon {
     awake: Mutex<Awake>,
     /// Sessions whose new worktree is being set up.
     setting_up: Mutex<std::collections::HashSet<String>>,
+    /// Identity, trust and pairing for devices on other machines.
+    pub net: crate::remote::Net,
 }
 
 /// Keeping the machine awake while agents work: the sessions working now,
@@ -133,7 +135,9 @@ impl Daemon {
             })
             .collect();
         let (live, _) = broadcast::channel(4096);
+        let net = crate::remote::Net::new(&paths, &store);
         Arc::new(Self {
+            net,
             paths,
             env: Mutex::new(Arc::new(env)),
             version: env!("CARGO_PKG_VERSION").into(),

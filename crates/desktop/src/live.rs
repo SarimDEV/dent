@@ -122,7 +122,7 @@ fn run(
             continue;
         }
         let after = seq.load(Ordering::Relaxed);
-        if w.write_all(&encode(2, &Request::Subscribe { after }))
+        if w.write_all(&encode(2, &Request::Subscribe { after, epoch: None }))
             .is_err()
         {
             continue;

@@ -257,7 +257,8 @@ impl Client {
     }
 
     fn subscribe(&mut self, after: u64) {
-        self.call(Request::Subscribe { after }).unwrap();
+        self.call(Request::Subscribe { after, epoch: None })
+            .unwrap();
     }
 
     fn create(&mut self, cwd: &str, permission: Permission, text: &str) -> String {
