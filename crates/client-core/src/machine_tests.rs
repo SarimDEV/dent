@@ -897,3 +897,50 @@ fn a_busy_listener_still_pings_so_the_daemon_hears_it() {
     assert!(s.now - last <= 2_500);
     assert_eq!(s.m.state(), &State::Online);
 }
+
+/// Decision 0062: "after the first 10 minutes, no machine is dialled more
+/// than 60 times an hour". A machine that was online and then went away
+/// (a laptop closed), known by five routes as a real one is (LAN, the
+/// Tailscale name, its IPv4 and IPv6, a hand-added one): every retry dials
+/// every route, so the budget has to hold per machine, not per retry.
+#[test]
+fn an_unreachable_machine_stays_within_the_hourly_dial_budget() {
+    let routes = [
+        ("lan:7480", Addr::Up),
+        ("studio.ts.net:7480", Addr::Up),
+        ("100.64.0.9:7480", Addr::Up),
+        ("[fd7a::9]:7480", Addr::Up),
+        ("studio.local:7480", Addr::Up),
+    ];
+    let mut s = Sim::new(&routes);
+    s.trust_device();
+    s.m.connect(0);
+    s.pump();
+    s.run_for(2_000);
+    assert_eq!(s.m.state(), &State::Online);
+    // Gone: some routes drop packets, some refuse at once.
+    for (i, (a, _)) in routes.iter().enumerate() {
+        s.addrs.insert(
+            a.to_string(),
+            if i % 2 == 0 {
+                Addr::Silent
+            } else {
+                Addr::Refused
+            },
+        );
+    }
+    let conns: Vec<u64> = s.conns.keys().copied().collect();
+    for c in conns {
+        s.conns.remove(&c);
+        s.m.closed(c, "reset", s.now);
+    }
+    s.pump();
+    s.run_for(10 * 60_000);
+    let before = s.dials.len();
+    s.run_for(60 * 60_000);
+    let in_hour = s.dials.len() - before;
+    assert!(
+        in_hour <= 60,
+        "{in_hour} dials in an hour, past the 10-minute mark"
+    );
+}
