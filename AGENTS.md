@@ -14,11 +14,11 @@ daemon (one per machine) ── session-holder (owns agent processes + PTYs, sur
    │  SQLite event log per daemon, monotonic seq; clients subscribe "everything after N"
    ▼
 agents (claude -p stream-json · codex app-server · ACP)
-hub: accounts, devices, relay, shared state (E2E encrypted), backup
+hub (on hold): relay and backup; machines share no state (0058)
 dent-push: stateless Cloudflare Worker forwarding E2E-encrypted phone notifications to APNs
 ```
 
-- The daemon is the source of truth for anything it runs; the hub is the record for shared state (projects, settings, UI state). Clients never hold authority.
+- The daemon is the source of truth for anything it runs. Machines share no state: each daemon owns its sessions, checkouts and machine settings, each client device owns its preferences and inbox state, and the view across machines is built in the client ([0058](docs/decisions/0058-independent-machines.md)). Clients never hold authority over a daemon's data.
 - Everything is an event in an append-only log. Reconnecting = subscribing from the last seq.
 - Agents sit behind one `Driver` trait (`crates/daemon/src/agent`). Nothing above a driver knows which agent it is: an agent's wire format, flags, names and files live in its own folder (`daemon/src/claude/`), and a test fails if anything else reaches in. Clients ask a session's `Caps` before offering something ([0055](docs/decisions/0055-agent-layer.md)).
 - Borrow hard engines, own thin layers (event model, block tree, sync format, UI). Every borrowed piece is pinned and wrapped. See [docs/durability.md](docs/durability.md).

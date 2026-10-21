@@ -1,6 +1,8 @@
 # Hub, sync and networking
 
 > **On hold** ([0033](decisions/0033-direct-websocket-hub-on-hold.md)). For now clients connect straight to each daemon over Tailscale or the LAN. This file describes where the hub fits once it returns.
+>
+> **Superseded in part (2026-10-20):** machines share no state ([0058](decisions/0058-independent-machines.md)), so the "shared state" rows below no longer apply, and prompts for an away machine wait on the device instead of being refused ([0063](decisions/0063-queued-prompts.md)). The plan for many machines is [remote-plan.md](remote-plan.md).
 
 **Three ways to connect.** The first two work today, without the hub ([spike 05](spikes/05-direct-links.md)):
 1. **LAN:** found with Bonjour, paired once with a 6-digit code shown on the other machine.
@@ -45,9 +47,9 @@ All traffic is one protocol over QUIC, with a stream per subscription so a large
 
 A remote client must never show an idle session as working or leave a dead session on screen, so liveness is designed in rather than inferred.
 
-- Each machine shows online, reconnecting, asleep, restarting, quit, offline, removed this device, or needs an update, with the time it changed. Asleep, restarting and quit are announced by the machine as it goes; offline means 10 s with no word. Last seen survives restarts of the app ([spike 05](spikes/05-direct-links.md#when-machines-go-away)).
+- Each machine shows online, reconnecting, asleep, restarting, quit, offline, removed this device, or needs an update, with the time it changed. Asleep, restarting and quit are announced by the machine as it goes; offline means 15 s with no word ([0062](decisions/0062-liveness-and-retry.md)). Last seen survives restarts of the app ([spike 05](spikes/05-direct-links.md#when-machines-go-away)).
 - A session on a sleeping machine shows "paused, machine asleep", never "working".
-- A prompt for a machine that's away is refused on the spot, never queued; one the machine never confirmed says so, and Retry runs it exactly once.
+- A prompt for a machine that's away waits on the device, shown as waiting, and sends exactly once when the machine is back ([0063](decisions/0063-queued-prompts.md)).
 - An approval answered on one device disappears from every other device immediately.
 - Stop is acknowledged by the daemon only once the agent process has actually stopped.
 
