@@ -16,3 +16,4 @@ Each spike is a small crate under `spikes/` plus a findings note here.
 | 10 | [Tailscale trust through the LocalAPI (remote stage 0, R-B1/B2)](10-tailscale-trust.md) | Done |
 | 11 | [Moving a worktree's git state to another machine (remote stage 0, R-D2/D4)](11-moving-git.md) | Done |
 | 12 | [The link under real network trouble (remote stage 0, R-A1/A3)](12-link-under-real-networks.md) | Done |
+| 13 | [Running as a service, and updating without breaking (remote stage 0, R-E1–E6)](13-service-and-updates.md) | Done |

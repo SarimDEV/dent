@@ -79,7 +79,7 @@ The test rig is the owner's Mac plus `dent-linux`, a Lima VM on it. The VM is on
    It must also refuse diverged branches, nested repositories and dirty submodules. (R-D2, D4: **done**, [spike 11](spikes/11-moving-git.md))
 5. **A daemon under a service manager.**
    - A systemd user service in the VM: linger, surviving SSH logout, the agent PATH, one agent running out of memory.
-   - A launcher prototype that trials an update with a failing migration and rolls back. (R-E1–E6)
+   - A launcher prototype that trials an update with a failing migration and rolls back. (R-E1–E6) (**done** on Linux, [spike 13](spikes/13-service-and-updates.md))
 
 Output: a findings note per spike in `docs/spikes/`, and each record moved from proposed to accepted or rewritten.
 

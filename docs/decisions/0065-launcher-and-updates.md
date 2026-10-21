@@ -1,6 +1,6 @@
 # 0065. A small launcher owns which daemon version runs: trial, snapshot, commit or roll back
 
-Status: proposed (2026-10-20) · confirmed by [R-E1–E7](../remote-tests.md#e-install-service-and-updates) · Supersedes the self-update half of [0022](0022-install-service-manager-cargo-dist.md) (cargo-dist still builds the installers) · Plan: [remote-plan.md](../remote-plan.md)
+Status: proposed (2026-10-20) · R-E1–E6 passed on Linux ([spike 13](../spikes/13-service-and-updates.md)); still to confirm: [R-E7] on macOS(../remote-tests.md#e-install-service-and-updates) · Supersedes the self-update half of [0022](0022-install-service-manager-cargo-dist.md) (cargo-dist still builds the installers) · Plan: [remote-plan.md](../remote-plan.md)
 
 ## Decision
 
@@ -37,8 +37,8 @@ Status: proposed (2026-10-20) · confirmed by [R-E1–E7](../remote-tests.md#e-i
 
 - **macOS: a per-user LaunchAgent.** Claude Code's login lives in the user's keychain, and the agents need the user's file permissions. It runs while the user is logged in. `dent doctor` and onboarding say so, and point a Mac server at automatic login.
 - **Linux: a systemd user unit.** Install enables linger, or prints the exact `sudo loginctl enable-linger` line first.
-  - Each agent runs in its own scope under the daemon's slice, so running out of memory kills that agent and the session says so.
-  - A restart started from inside the service goes through the service manager without waiting (`--no-block`, or a transient unit).
+  - Each agent runs in its own scope under a dedicated agents slice, so running out of memory kills only that agent. The slice's `memory.events` `oom_kill` counter, read before and after an agent dies, tells "out of memory" from a plain kill. A scope's own `Result` can't ([spike 13](../spikes/13-service-and-updates.md)).
+  - A restart started from inside the service is handed to a transient unit (`systemd-run --user --collect`), which runs the restart and any follow-up step. Anything after a restart call made inside the service never runs, `--no-block` or not.
 - **Environment:** `service.env` (0600, literal `KEY=VALUE`) holds the person's environment, outside the generated unit or plist, and survives reinstalls. PATH is captured at install and re-read from the login shell with markers and a 5 s timeout. `dent doctor` shows where it came from.
 - **Install safety:**
   - Install writes an intent marker before swapping and clears it only once the service runs.
