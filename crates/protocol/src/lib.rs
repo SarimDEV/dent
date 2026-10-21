@@ -16,7 +16,10 @@ use serde::{Deserialize, Serialize};
 ///
 /// 2: a message can carry its files (`Request::Send`'s `files`); a client
 /// sends files that way only to a daemon of 2 or later.
-pub const PROTOCOL: u32 = 2;
+///
+/// 3: a project can be brought to the machine (`Request::Pack`,
+/// `Request::ReadFiles`, and `Request::Create`'s `bring`).
+pub const PROTOCOL: u32 = 3;
 /// The oldest protocol this build still speaks. Two sides talk when their
 /// ranges overlap ([decision 0060]).
 ///
@@ -572,6 +575,56 @@ pub struct Carried {
     /// Its name where it came from; only the last part is kept.
     pub name: String,
     pub bytes_b64: String,
+}
+
+/// What another machine needs to make its own checkout of a project
+/// ([`Request::Pack`]).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct Pack {
+    /// The checkout's folder name.
+    pub name: String,
+    /// Its Git remotes another machine can clone from, the one to clone
+    /// first (`origin` when there is one) first. Remotes that are paths on
+    /// this machine are left out.
+    #[serde(default)]
+    pub remotes: Vec<GitRemote>,
+    /// The branch checked out here.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Files Git ignores, which a clone won't have (`.env`), as paths
+    /// relative to the checkout. Ignored folders (`node_modules/`) aren't
+    /// listed.
+    #[serde(default)]
+    pub ignored: Vec<Ignored>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct GitRemote {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Ignored {
+    pub path: String,
+    pub size: u64,
+    /// Offered ticked: an environment file (`.env`, `.env.local`).
+    #[serde(default)]
+    pub carry: bool,
+}
+
+/// A project to bring to the machine a new session starts on
+/// ([`Request::Create`]'s `bring`): cloned from its remotes into the
+/// machine's projects folder, on its branch, with the ignored files it
+/// carries (each [`Carried::name`] a path relative to the checkout).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct Bring {
+    pub name: String,
+    pub remotes: Vec<GitRemote>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<Carried>,
 }
 
 /// The most a message's files may come to, so the message stays well
@@ -1135,6 +1188,12 @@ pub enum Request {
         /// As for [`Request::Send`].
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         files: Vec<Carried>,
+        /// Clone this project here first and work in it (`cwd` is then
+        /// empty). The session exists at once; its first message waits
+        /// until the clone's done. A daemon restarted meanwhile starts the
+        /// clone over.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bring: Option<Bring>,
     },
     /// While the agent works, the message waits for the turn to end,
     /// unless `steer` sends it into the running turn.
@@ -1366,6 +1425,18 @@ pub enum Request {
     CloneProject {
         url: String,
     },
+    /// What another machine needs to bring the project at `dir` there.
+    /// Answered with [`Reply::Pack`].
+    Pack {
+        dir: String,
+    },
+    /// Ignored files of the checkout at `dir`, read for another machine
+    /// ([`Pack::ignored`] paths), up to [`CARRIED_MAX`] in all. Answered
+    /// with [`Reply::Carried`].
+    ReadFiles {
+        dir: String,
+        paths: Vec<String>,
+    },
     /// A folder's repository, for the new session's worktree and branch
     /// choices.
     Repo {
@@ -1580,6 +1651,13 @@ pub enum Reply {
     Repo {
         repo: Option<Repo>,
     },
+    /// `None` when the folder isn't in a Git repository.
+    Pack {
+        pack: Option<Pack>,
+    },
+    Carried {
+        files: Vec<Carried>,
+    },
     /// `None` when the session's folder isn't in a Git repository.
     GitStatus {
         status: Option<GitStatus>,
@@ -1656,6 +1734,8 @@ impl Request {
             | R::HideProject { .. }
             | R::NewProject { .. }
             | R::CloneProject { .. }
+            | R::Pack { .. }
+            | R::ReadFiles { .. }
             | R::Repo { .. } => Vec::new(),
         }
     }
@@ -1699,6 +1779,8 @@ impl Out {
                 | Reply::Files { .. }
                 | Reply::File { .. }
                 | Reply::Repo { .. }
+                | Reply::Pack { .. }
+                | Reply::Carried { .. }
                 | Reply::GitStatus { .. }
                 | Reply::PrBrief { .. }
                 | Reply::GitDone { .. } => Vec::new(),

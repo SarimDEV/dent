@@ -116,6 +116,8 @@ pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// Where `made_once` keeps its claims in the store's key-value table.
 const MADE: &str = "made.";
+/// A session's project still being brought here: [`Bringing`].
+const BRINGING: &str = "bringing.";
 
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -622,19 +624,8 @@ impl Daemon {
             id,
             text,
             attachments,
+            bring,
         } = new;
-        // No folder: this machine's scratch folder, which a client on
-        // another machine can't name.
-        let cwd = if cwd.is_empty() {
-            let scratch = crate::paths::home().join("dent/scratch");
-            std::fs::create_dir_all(&scratch)?;
-            scratch.display().to_string()
-        } else {
-            cwd
-        };
-        if !std::path::Path::new(&cwd).is_dir() {
-            bail!("{cwd} isn't a folder");
-        }
         let agent = crate::agent::named(agent.as_deref())?;
         let key = (!id.is_empty()).then(|| format!("create.{id}"));
         let (session, made) = self.made_once(key.as_deref())?;
@@ -653,6 +644,46 @@ impl Daemon {
             .await?;
             return Ok(session);
         }
+        if bring.is_some() && worktree.is_some() {
+            bail!("a project brought from another machine starts in its own checkout");
+        }
+        // A project from another machine: its folder is made now and the
+        // clone fills it while the first message waits. What it carries
+        // waits under the state folder, so a restart can start over.
+        let cwd = match bring {
+            Some(mut b) => {
+                let dest = crate::projects::free_in_root(&crate::projects::slug(&b.name))?;
+                std::fs::create_dir_all(&dest)?;
+                let staging = crate::bring::staging(&self.paths.state, &session);
+                let files = std::mem::take(&mut b.files);
+                tokio::task::spawn_blocking(move || crate::bring::stage(&staging, &files))
+                    .await?
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let dest = dest.display().to_string();
+                self.store().put(
+                    &format!("{BRINGING}{session}"),
+                    &serde_json::to_string(&Bringing {
+                        dest: dest.clone(),
+                        bring: b,
+                    })?,
+                )?;
+                dest
+            }
+            None => cwd,
+        };
+        // No folder: this machine's scratch folder, which a client on
+        // another machine can't name.
+        let cwd = if cwd.is_empty() {
+            let scratch = crate::paths::home().join("dent/scratch");
+            std::fs::create_dir_all(&scratch)?;
+            scratch.display().to_string()
+        } else {
+            cwd
+        };
+        if !std::path::Path::new(&cwd).is_dir() {
+            bail!("{cwd} isn't a folder");
+        }
+        let bringing = self.bringing(&session);
         // A new worktree is made before the session exists, so one that
         // can't be made leaves nothing behind.
         let made = match worktree {
@@ -707,7 +738,7 @@ impl Daemon {
         let setup = made
             .as_ref()
             .and_then(|(path, _, root)| crate::workspace::setup_script(path, root));
-        if setup.is_some() {
+        if setup.is_some() || bringing {
             lock(&self.setting_up).insert(session.clone());
         }
         let row = self
@@ -723,6 +754,10 @@ impl Daemon {
         };
         let Some((path, branch, root)) = made else {
             self.command(&session, first).await?;
+            if bringing {
+                let (d, session) = (self.clone(), session.clone());
+                tokio::spawn(async move { d.bring(&session).await });
+            }
             return Ok(session);
         };
         // The branch gets a name from the task while the worktree readies.
@@ -748,6 +783,77 @@ impl Daemon {
             });
         }
         Ok(session)
+    }
+
+    /// Session `id`'s project is still to be brought here.
+    fn bringing(&self, id: &str) -> bool {
+        self.store()
+            .get(&format!("{BRINGING}{id}"))
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    /// Clone the project session `id` waits on, saying so while it runs and
+    /// in the chat when it's done; then what waited goes. One that fails
+    /// says why and leaves what was sent waiting, for you to take back or
+    /// send on into the empty folder.
+    async fn bring(self: &Arc<Self>, id: &str) {
+        let key = format!("{BRINGING}{id}");
+        let job = self
+            .store()
+            .get(&key)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_str::<Bringing>(&v).ok());
+        let Some(Bringing { dest, bring }) = job else {
+            lock(&self.setting_up).remove(id);
+            return;
+        };
+        let started = now_ms();
+        self.set_activity(
+            id,
+            Some(dent_protocol::Activity::SettingUp {
+                since: started,
+                what: format!("Cloning {}", bring.name),
+            }),
+        );
+        let staging = crate::bring::staging(&self.paths.state, id);
+        let (to, b, st) = (
+            std::path::PathBuf::from(&dest),
+            bring.clone(),
+            staging.clone(),
+        );
+        let got = tokio::task::spawn_blocking(move || crate::bring::clone_into(&to, &b, &st))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
+        self.set_activity(id, None);
+        let secs = now_ms().saturating_sub(started).div_ceil(1000);
+        let ok = got.is_ok();
+        let text = match got {
+            Ok(line) => format!("{line} in {secs}s"),
+            Err(e) => {
+                // The agent still needs its folder to start in.
+                let _ = std::fs::create_dir_all(&dest);
+                format!(
+                    "Couldn't bring {} here: {e}. What you sent is waiting: take it back, \
+                     or send on to work in an empty folder",
+                    bring.name
+                )
+            }
+        };
+        if let Err(e) = self.append(id, Body::Notice { text }, None) {
+            eprintln!("dent-daemon: {id}: {e:#}");
+        }
+        if ok && let Err(e) = crate::server::remember_project(self, &dest) {
+            eprintln!("dent-daemon: {id}: couldn't keep {dest} on the list: {e:#}");
+        }
+        let _ = self.store().del(&key);
+        let _ = std::fs::remove_dir_all(&staging);
+        lock(&self.setting_up).remove(id);
+        if ok && let Err(e) = self.command(id, Op::SetUp).await {
+            eprintln!("dent-daemon: {id}: couldn't carry on after the clone: {e:#}");
+        }
     }
 
     /// Session `id`'s new worktree is being set up: what's sent waits.
@@ -1560,8 +1666,23 @@ impl Daemon {
                 }
             });
         }
+        // A clone cut short by the restart starts over; what was sent to
+        // its session goes on waiting.
+        let bringing: Vec<String> = self
+            .store()
+            .with_prefix(BRINGING)?
+            .into_iter()
+            .filter_map(|(k, _)| k.strip_prefix(BRINGING).map(str::to_string))
+            .collect();
+        for id in &bringing {
+            lock(&self.setting_up).insert(id.clone());
+        }
         for row in rows {
             session::start(self.clone(), row, live.clone());
+        }
+        for id in bringing {
+            let d = self.clone();
+            tokio::spawn(async move { d.bring(&id).await });
         }
         Ok(())
     }
@@ -1675,6 +1796,16 @@ pub struct NewSession {
     pub id: String,
     pub text: String,
     pub attachments: Vec<String>,
+    /// A project to clone here first, with `cwd` empty.
+    pub bring: Option<dent_protocol::Bring>,
+}
+
+/// A clone a session waits on, kept until it's done so a restart starts it
+/// over ([`Daemon::bring`]).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Bringing {
+    dest: String,
+    bring: dent_protocol::Bring,
 }
 
 /// A short title from the first message.

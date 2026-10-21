@@ -13,6 +13,7 @@
 //! devices; `dent-daemon reidentify` gives this machine a new identity.
 
 mod agent;
+mod bring;
 mod claude;
 mod daemon;
 mod env;
