@@ -20,6 +20,20 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Every call is bounded, so a stuck tailscaled never holds a connection up.
 const LIMIT: Duration = Duration::from_secs(2);
+/// Largest answer read.
+const MAX_BODY: u64 = 4 << 20;
+
+/// Tailscale answered, but not with 200.
+#[derive(Debug)]
+struct Status(String);
+
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "tailscale answered {}", self.0)
+    }
+}
+
+impl std::error::Error for Status {}
 
 /// What Tailscale says about this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,7 +88,9 @@ struct WhoisNode {
 }
 
 pub async fn status() -> Result<SelfNode> {
-    let body = get("/localapi/v0/status").await?;
+    // Without peers: only this node is needed, and a large tailnet's full
+    // status is big.
+    let body = get("/localapi/v0/status?peers=false").await?;
     let s: StatusJson = serde_json::from_slice(&body).context("status json")?;
     let me = s.me.context("no Self in status")?;
     Ok(SelfNode {
@@ -88,13 +104,14 @@ pub async fn status() -> Result<SelfNode> {
 /// Who owns a peer address. `None` when Tailscale doesn't know it: a
 /// loopback forward, a LAN address, anything not a tailnet peer.
 pub async fn whois(ip: IpAddr) -> Result<Option<Peer>> {
+    // Percent-encoded: `[`, `]` and `:` in a query.
     let addr = match ip {
-        IpAddr::V4(v) => format!("{v}:1"),
-        IpAddr::V6(v) => format!("[{v}]:1"),
+        IpAddr::V4(v) => format!("{v}%3A1"),
+        IpAddr::V6(v) => format!("%5B{}%5D%3A1", v.to_string().replace(':', "%3A")),
     };
     let body = match get(&format!("/localapi/v0/whois?addr={addr}")).await {
         Ok(b) => b,
-        Err(e) if e.to_string().contains("404") => return Ok(None),
+        Err(e) if e.downcast_ref::<Status>().is_some_and(|s| s.0 == "404") => return Ok(None),
         Err(e) => return Err(e),
     };
     let w: WhoisJson = serde_json::from_slice(&body).context("whois json")?;
@@ -131,7 +148,8 @@ async fn get_inner(path: &str) -> Result<Vec<u8>> {
     req.push_str("\r\n");
     stream.write_all(req.as_bytes()).await?;
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).await?;
+    // HTTP/1.0: the answer ends when tailscaled closes the connection.
+    (&mut stream).take(MAX_BODY).read_to_end(&mut raw).await?;
     let split = raw
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -139,7 +157,7 @@ async fn get_inner(path: &str) -> Result<Vec<u8>> {
     let head = String::from_utf8_lossy(&raw[..split]);
     let status = head.split_whitespace().nth(1).unwrap_or("");
     if status != "200" {
-        bail!("tailscale answered {status}");
+        return Err(Status(status.to_string()).into());
     }
     Ok(raw[split + 4..].to_vec())
 }
