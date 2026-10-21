@@ -7,6 +7,9 @@
 //!   forgets one.
 //! - `dent watch [NAME...] [--secs N]` connects to saved machines and
 //!   follows them, printing every change of state, route and catch-up.
+//! - `dent ask NAME TEXT [--file PATH]... [--cwd DIR]` starts a session on
+//!   a saved machine (in its scratch folder unless `--cwd`), its files
+//!   carried along, and prints the new session's id.
 //!
 //! Its own key and saved machines live in the client state folder
 //! (`DENT_CLIENT_STATE`, else `client/` beside the daemon's state).
@@ -57,9 +60,10 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some("watch") => watch(&args[1..]).await,
+        Some("ask") => ask(&args[1..]).await,
         _ => {
             eprintln!(
-                "usage: dent machine add HOST:PORT [--code CODE] | dent machines | dent machine remove NAME | dent watch [NAME...] [--secs N]"
+                "usage: dent machine add HOST:PORT [--code CODE] | dent machines | dent machine remove NAME | dent watch [NAME...] [--secs N] | dent ask NAME TEXT [--file PATH]... [--cwd DIR]"
             );
             Ok(())
         }
@@ -163,6 +167,77 @@ fn remove(name: &str) -> Result<()> {
     save(&all)?;
     println!("forgot {name}");
     Ok(())
+}
+
+async fn ask(args: &[String]) -> Result<()> {
+    let usage = "dent ask NAME TEXT [--file PATH]... [--cwd DIR]";
+    let mut plain = Vec::new();
+    let mut files = Vec::new();
+    let mut cwd = String::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--file" => files.push(it.next().context(usage)?.clone()),
+            "--cwd" => cwd = it.next().context(usage)?.clone(),
+            _ => plain.push(a.clone()),
+        }
+    }
+    let [name, text] = plain.as_slice() else {
+        bail!(usage);
+    };
+    let saved = load()
+        .into_iter()
+        .find(|s| s.name == *name || s.id == *name)
+        .with_context(|| format!("no saved machine called {name}"))?;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let remote = dent_remote::remote::spawn(
+        &tokio::runtime::Handle::current(),
+        device_keys()?,
+        "dent cli",
+        saved,
+        move |e| {
+            let _ = tx.send(e);
+        },
+    );
+    const REQ: u64 = 10;
+    remote.send(
+        REQ,
+        Request::Create {
+            agent: None,
+            cwd,
+            worktree: None,
+            model: None,
+            permission: Default::default(),
+            effort: None,
+            id: format!("cli-{}", std::process::id()),
+            text: text.clone(),
+            attachments: files,
+            files: Vec::new(),
+        },
+    );
+    let wait = tokio::time::sleep(Duration::from_secs(60));
+    tokio::pin!(wait);
+    loop {
+        tokio::select! {
+            e = rx.recv() => match e {
+                Some(dent_remote::remote::Event::Out { req: REQ, out }) => {
+                    remote.stop();
+                    match out {
+                        Out::Reply { reply: Reply::Created { session } } => {
+                            println!("{session}");
+                            return Ok(());
+                        }
+                        Out::Error { message } => bail!(message),
+                        o => bail!("unexpected answer: {o:?}"),
+                    }
+                }
+                Some(dent_remote::remote::Event::State(s)) => eprintln!("{name}: {s:?}"),
+                Some(_) => {}
+                None => bail!("the connection ended"),
+            },
+            _ = &mut wait => bail!("{name} didn't answer within a minute"),
+        }
+    }
 }
 
 async fn watch(args: &[String]) -> Result<()> {

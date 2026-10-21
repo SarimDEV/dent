@@ -435,6 +435,9 @@ pub struct Session {
     /// Its branch's pull request, as the daemon last said.
     pub pr: Option<dent_protocol::PullRequest>,
     pub machine: String,
+    /// Working on a machine that's away: it carries on when that machine
+    /// is back, and waits in the sidebar's Paused meanwhile.
+    pub paused: bool,
     /// "Claude · Opus", for the composer.
     pub agent: String,
     /// Its agent's id, full name ("Claude Code") and short name
@@ -528,6 +531,7 @@ impl Session {
             root: None,
             pr: None,
             machine: String::new(),
+            paused: false,
             agent: String::new(),
             agent_id: dent_protocol::DEFAULT_AGENT.into(),
             agent_name: "Claude Code".into(),

@@ -102,6 +102,16 @@ impl Net {
         }
     }
 
+    /// Paths `machine` named in its own events: its files, which a
+    /// message sent back there names rather than carries.
+    pub fn theirs(&self, machine: &str, paths: Vec<String>) {
+        if let Ok(f) = self.far.lock()
+            && let Some(f) = f.get(machine)
+        {
+            f.remote.theirs(paths);
+        }
+    }
+
     /// Take back request `n` to `machine` if it never went out: whether it
     /// was. A machine not followed was never sent anything.
     pub fn cancel(&self, machine: &str, n: u64) -> bool {

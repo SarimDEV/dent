@@ -232,8 +232,8 @@ impl Render for Dent {
             && (self.animating() || toast_arriving)
         {
             eprintln!(
-                "      frame: animating={} toast={toast_arriving}",
-                self.animating()
+                "      frame: animating={:?} toast={toast_arriving}",
+                self.animating_why()
             );
         }
         if self.animating() || toast_arriving || walking || ambient::wants_frames(self) {

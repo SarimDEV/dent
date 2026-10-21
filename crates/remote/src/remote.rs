@@ -6,7 +6,7 @@
 //! the machine is away wait here and go when it's back
 //! ([decision 0063](../../docs/decisions/0063-queued-prompts.md)).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -65,15 +65,11 @@ pub enum Event {
 struct Pending(BTreeMap<u64, (Request, bool)>);
 
 impl Pending {
-    /// Everything to send on a new link, now marked gone.
-    fn on_link(&mut self) -> Vec<Vec<u8>> {
-        self.0
-            .iter_mut()
-            .map(|(n, (r, gone))| {
-                *gone = true;
-                line(*n, r)
-            })
-            .collect()
+    /// Request `n` to send on a new link, gone or not, now marked gone.
+    fn resend(&mut self, n: u64) -> Option<Vec<u8>> {
+        let (r, gone) = self.0.get_mut(&n)?;
+        *gone = true;
+        Some(line(n, r))
     }
 
     /// Request `n` on a link that's up, now marked gone; none if it went
@@ -82,6 +78,12 @@ impl Pending {
         let (r, gone) = self.0.get_mut(&n).filter(|(_, gone)| !*gone)?;
         *gone = true;
         Some(line(n, r))
+    }
+
+    /// Request `n`, if it has files on this device still to read in.
+    fn to_carry(&self, n: u64, theirs: &HashSet<String>) -> Option<Request> {
+        let (r, _) = self.0.get(&n)?;
+        local_files(r, theirs).then(|| r.clone())
     }
 
     /// Take back request `n`; only one that never went can be.
@@ -102,11 +104,15 @@ pub struct Remote {
     /// The last event the client applied from this machine; a new link
     /// subscribes from here.
     pub seq: Arc<AtomicU64>,
+    /// Paths the machine's own events named: its files, which stay paths.
+    theirs: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Remote {
     /// Send request number `n`; its reply comes back as [`Event::Out`] with
     /// the same number. While the machine is away it waits.
+    /// Files on this device go inside it, read in on the way out (see
+    /// [`carry`]).
     pub fn send(&self, n: u64, r: Request) {
         if let Ok(mut p) = self.pending.lock() {
             p.0.insert(n, (r, false));
@@ -119,6 +125,14 @@ impl Remote {
     /// went may have reached the daemon.
     pub fn cancel(&self, n: u64) -> bool {
         self.pending.lock().is_ok_and(|mut p| p.cancel(n))
+    }
+
+    /// Paths the machine named in its own events (files of its messages):
+    /// sent back, they stay paths, never read here.
+    pub fn theirs(&self, paths: impl IntoIterator<Item = String>) {
+        if let Ok(mut t) = self.theirs.lock() {
+            t.extend(paths);
+        }
     }
 
     /// Pair with the code shown on the machine.
@@ -148,6 +162,7 @@ pub fn spawn(
     let (tx, rx) = mpsc::unbounded_channel();
     let seq = Arc::new(AtomicU64::new(0));
     let pending = Arc::new(Mutex::new(Pending::default()));
+    let theirs = Arc::new(Mutex::new(HashSet::new()));
     let m = Machine::new(
         &store::device_name(),
         keys,
@@ -160,10 +175,16 @@ pub fn spawn(
         saved,
         seq.clone(),
         pending.clone(),
+        theirs.clone(),
         rx,
         events,
     ));
-    Remote { tx, pending, seq }
+    Remote {
+        tx,
+        pending,
+        seq,
+        theirs,
+    }
 }
 
 /// Where a new link subscribes from: the client's cursor and the log epoch
@@ -211,25 +232,135 @@ impl Cursor {
     }
 }
 
+/// The oldest protocol whose daemons take files inside a message.
+const CARRIES: u32 = 2;
+
+/// The paths a message attaches, if it's one that carries files.
+fn attached(r: &Request) -> Option<&Vec<String>> {
+    match r {
+        Request::Send { attachments, .. } | Request::Create { attachments, .. } => {
+            Some(attachments)
+        }
+        _ => None,
+    }
+}
+
+/// Whether `r` attaches a file of this device's: any path but the
+/// machine's own.
+fn local_files(r: &Request, theirs: &HashSet<String>) -> bool {
+    attached(r).is_some_and(|a| a.iter().any(|p| !theirs.contains(p)))
+}
+
+/// A message's files from this device go inside it: the machine it's for
+/// can't read this device's paths. Its own files (paths its events named)
+/// stay paths. A file of this device's that's gone or unreadable stops the
+/// message, rather than sending a path that means nothing there.
+fn carry(r: &mut Request, theirs: &HashSet<String>) -> Result<(), String> {
+    let (Request::Send {
+        attachments, files, ..
+    }
+    | Request::Create {
+        attachments, files, ..
+    }) = r
+    else {
+        return Ok(());
+    };
+    let mut total = files
+        .iter()
+        .map(|f| f.bytes_b64.len() / 4 * 3)
+        .sum::<usize>();
+    let mut keep = Vec::new();
+    for path in std::mem::take(attachments) {
+        if theirs.contains(&path) {
+            keep.push(path);
+            continue;
+        }
+        let p = std::path::Path::new(&path);
+        let name = p
+            .file_name()
+            .map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
+        let bytes = std::fs::read(p).map_err(|e| format!("couldn't read {name}: {e}"))?;
+        total += bytes.len();
+        if total > dent_protocol::CARRIED_MAX {
+            return Err(format!(
+                "these files come to more than {} MB, too many to send to another machine at once",
+                dent_protocol::CARRIED_MAX >> 20
+            ));
+        }
+        files.push(dent_protocol::Carried {
+            name,
+            bytes_b64: dent_protocol::b64::encode(&bytes),
+        });
+    }
+    *attachments = keep;
+    Ok(())
+}
+
+/// Read request `n`'s files in, once, off the async threads, before it
+/// first goes; the carried request replaces it, so a resend reads nothing
+/// again. `Err`: it can't go, and why.
+async fn ready_up(
+    pending: &Arc<Mutex<Pending>>,
+    theirs: &Arc<Mutex<HashSet<String>>>,
+    proto: u32,
+    name: &str,
+    n: u64,
+) -> Result<(), String> {
+    let known = theirs.lock().map(|t| t.clone()).unwrap_or_default();
+    let Some(mut r) = pending.lock().ok().and_then(|p| p.to_carry(n, &known)) else {
+        return Ok(());
+    };
+    if proto < CARRIES {
+        return Err(format!(
+            "{name} runs an older dent, which can't take files from another machine: update dent there"
+        ));
+    }
+    let r = tokio::task::spawn_blocking(move || carry(&mut r, &known).map(|()| r))
+        .await
+        .map_err(|e| e.to_string())??;
+    if let Ok(mut p) = pending.lock()
+        && let Some((was, false)) = p.0.get_mut(&n)
+    {
+        *was = r;
+    }
+    Ok(())
+}
+
 fn line(n: u64, r: &Request) -> Vec<u8> {
     let mut l = encode(n, r);
     l.pop();
     l
 }
 
+// The actor's state, each piece shared with the handle or the host.
+#[allow(clippy::too_many_arguments)]
 async fn run(
     m: Machine,
     client: String,
     mut saved: Saved,
     seq: Arc<AtomicU64>,
     pending: Arc<Mutex<Pending>>,
+    theirs: Arc<Mutex<HashSet<String>>>,
     mut cmds: mpsc::UnboundedReceiver<Cmd>,
     mut events: impl FnMut(Event) + Send + 'static,
 ) {
     let (ask_tx, ask_rx) = mpsc::unbounded_channel();
     let (note_tx, mut notes) = mpsc::unbounded_channel();
     let host = tokio::spawn(host::run(m, ask_rx, note_tx));
-    let mut up = false;
+    // The daemon's protocol, once it has answered the hello on this link:
+    // requests wait for it, since whether a message's files can go inside
+    // it depends on it.
+    let mut ready: Option<u32> = None;
+    // Request `n` can't go: it's answered with why, and dropped.
+    let refuse = |n: u64, message: String, events: &mut dyn FnMut(Event)| {
+        if let Ok(mut p) = pending.lock() {
+            p.0.remove(&n);
+        }
+        events(Event::Out {
+            req: n,
+            out: Out::Error { message },
+        });
+    };
     // The link the last Up named, and how it was trusted.
     let mut via = (
         String::new(),
@@ -248,7 +379,7 @@ async fn run(
                 let Some(n) = n else { break };
                 match n {
                     Note::Up { addr, trust, key, .. } => {
-                        up = true;
+                        ready = None;
                         via = (addr, trust);
                         if saved.key.is_empty() {
                             saved.key = hex::encode(&key);
@@ -257,13 +388,11 @@ async fn run(
                         let sub = cursor.subscribe();
                         let _ = ask_tx.send(Ask::Send(line(HELLO, &hello)));
                         let _ = ask_tx.send(Ask::Send(line(SUBSCRIBE, &sub)));
-                        let resend = pending.lock().map(|mut p| p.on_link()).unwrap_or_default();
-                        for l in resend {
-                            let _ = ask_tx.send(Ask::Send(l));
-                        }
                     }
                     Note::State(s) => {
-                        up = matches!(s, State::Online | State::Slow) && up;
+                        if !matches!(s, State::Online | State::Slow) {
+                            ready = None;
+                        }
                         events(Event::State(s));
                     }
                     Note::Data { line, .. } => {
@@ -273,7 +402,7 @@ async fn run(
                         let (req, out) = (env.req, env.body);
                         if req == HELLO {
                             match out {
-                                Out::Reply { reply: Reply::Welcome { machine, id, version, agents, addresses, epoch: e, .. } } => {
+                                Out::Reply { reply: Reply::Welcome { proto, machine, id, version, agents, addresses, epoch: e, .. } } => {
                                     if !saved.id.is_empty() && !id.is_empty() && id != saved.id {
                                         events(Event::DifferentMachine(via.0.clone()));
                                         continue;
@@ -289,13 +418,24 @@ async fn run(
                                         events(Event::Saved(saved.clone()));
                                     }
                                     events(Event::Welcome {
-                                        name: machine,
+                                        name: machine.clone(),
                                         id,
                                         version,
                                         agents,
                                         via: via.0.clone(),
                                         trust: via.1.clone(),
                                     });
+                                    // What's still unanswered goes again, in
+                                    // order: a resend changes nothing twice.
+                                    ready = Some(proto);
+                                    let all: Vec<u64> = pending.lock().map(|p| p.0.keys().copied().collect()).unwrap_or_default();
+                                    for n in all {
+                                        if let Err(why) = ready_up(&pending, &theirs, proto, &machine, n).await {
+                                            refuse(n, why, &mut events);
+                                        } else if let Some(l) = pending.lock().ok().and_then(|mut p| p.resend(n)) {
+                                            let _ = ask_tx.send(Ask::Send(l));
+                                        }
+                                    }
                                 }
                                 Out::Error { message } => events(Event::State(State::Unreachable { why: message })),
                                 _ => {}
@@ -321,8 +461,12 @@ async fn run(
             }
             c = cmds.recv() => match c {
                 Some(Cmd::Send(n)) => {
-                    if up && let Some(l) = pending.lock().ok().and_then(|mut p| p.go(n)) {
-                        let _ = ask_tx.send(Ask::Send(l));
+                    if let Some(proto) = ready {
+                        if let Err(why) = ready_up(&pending, &theirs, proto, &saved.name, n).await {
+                            refuse(n, why, &mut events);
+                        } else if let Some(l) = pending.lock().ok().and_then(|mut p| p.go(n)) {
+                            let _ = ask_tx.send(Ask::Send(l));
+                        }
                     }
                 }
                 Some(Cmd::Pair(code)) => { let _ = ask_tx.send(Ask::Pair(code)); }
@@ -364,7 +508,8 @@ mod tests {
         assert!(p.cancel(3));
         assert!(p.go(3).is_none());
         // The link comes up first: 4 goes, and may have reached the daemon.
-        assert_eq!(p.on_link().len(), 1);
+        assert!(p.resend(4).is_some());
+        assert!(p.resend(3).is_none());
         assert!(!p.cancel(4));
         assert!(p.go(4).is_none(), "the link took it: it doesn't go twice");
         // Sent while up, it went at once.
@@ -372,6 +517,52 @@ mod tests {
         assert!(p.go(5).is_some());
         assert!(!p.cancel(5));
         assert!(!p.cancel(9), "answered or never asked");
+    }
+
+    #[test]
+    fn files_here_travel_inside_the_message_and_the_machines_own_stay_paths() {
+        let dir = std::env::temp_dir().join(format!("dent-carry-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let here = dir.join("shot.png");
+        std::fs::write(&here, b"png bytes").unwrap();
+        let theirs = "/home/ada/.local/state/dent/attachments/carried/m1/plan.md".to_string();
+        let mut r = Request::Send {
+            session: "s1".into(),
+            id: "m2".into(),
+            text: "look".into(),
+            steer: false,
+            attachments: vec![here.display().to_string(), theirs.clone()],
+            files: Vec::new(),
+        };
+        let known: HashSet<String> = [theirs.clone()].into();
+        assert!(local_files(&r, &known));
+        carry(&mut r, &known).unwrap();
+        let Request::Send {
+            attachments, files, ..
+        } = &r
+        else {
+            unreachable!()
+        };
+        assert_eq!(attachments, &vec![theirs]);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "shot.png");
+        assert_eq!(
+            dent_protocol::b64::decode(&files[0].bytes_b64).unwrap(),
+            b"png bytes"
+        );
+        // Carried once: nothing's left to read.
+        assert!(!local_files(&r, &known));
+        // A file of this device's that's gone stops the message.
+        let mut gone = Request::Send {
+            session: "s1".into(),
+            id: "m3".into(),
+            text: "look".into(),
+            steer: false,
+            attachments: vec![dir.join("moved.png").display().to_string()],
+            files: Vec::new(),
+        };
+        assert!(carry(&mut gone, &known).unwrap_err().contains("moved.png"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -398,10 +398,12 @@ impl Dent {
     fn pairing_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = self.t;
         let (code, expires) = self.pairing.clone()?;
-        let left = (expires.saturating_sub(crate::cards::now_ms()) / 60_000).max(1);
-        if expires <= crate::cards::now_ms() {
-            return None;
-        }
+        let left_ms = expires.saturating_sub(crate::cards::now_ms());
+        // Rounded up: the last seconds still say "1 more minute".
+        let left = left_ms.div_ceil(60_000);
+        // An expired code stays, faded, with a new one a click away: the
+        // other device may still be waiting on it.
+        let expired = left_ms == 0;
         // After its third character, whatever the daemon sent.
         let cut = code.char_indices().nth(3).map_or(code.len(), |(i, _)| i);
         let spaced = format!("{} {}", &code[..cut], &code[cut..]);
@@ -421,14 +423,29 @@ impl Dent {
                         .font_family(crate::theme::mono())
                         .text_size(px(28.))
                         .line_height(px(32.))
-                        .text_color(t.ink)
+                        .text_color(if expired { t.faint } else { t.ink })
+                        .when(expired, |d| d.line_through())
                         .child(spaced),
                 )
-                .child(div().flex_1().ty(UI).text_color(t.quiet).child(format!(
-                    "Type it on the other device. Works once, for {} more minute{}.",
-                    left,
-                    if left == 1 { "" } else { "s" }
-                )))
+                .child(div().flex_1().ty(UI).text_color(t.quiet).child(if expired {
+                    "This code has expired. Codes work for a few minutes, once.".to_string()
+                } else {
+                    format!(
+                        "Type it on the other device. Works once, for {} more minute{}.",
+                        left,
+                        if left == 1 { "" } else { "s" }
+                    )
+                }))
+                .when(expired, |d| {
+                    d.child(
+                        ui::button("pairing-new", "New code", true, &t).on_press(cx.listener(
+                            |this, _, _, cx| {
+                                this.ask(dent_protocol::Request::OpenPairing, Waiting::Pairing);
+                                cx.notify();
+                            },
+                        )),
+                    )
+                })
                 .child(ui::ghost("pairing-done", "Done", &t).on_press(cx.listener(
                     |this, _, _, cx| {
                         this.pairing = None;

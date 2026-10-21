@@ -30,7 +30,9 @@ pub(super) static CPU_FROM: std::sync::Mutex<Option<(Instant, f64)>> = std::sync
 /// redraws the whole window for it. `DENT_BREATH_FPS=0 scripts/walk.sh
 /// breath` measures it drawn every frame, for comparison.
 pub(super) fn breath() -> Vec<(f32, Act)> {
-    let mut v = new_session("make a plan slowly");
+    // Nothing else may change meanwhile: a turn with steps would end, or
+    // move on, inside the measurement.
+    let mut v = new_session("work quietly");
     v.extend([
         (
             0.1,

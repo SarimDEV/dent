@@ -15,6 +15,8 @@
 //! - `dev server`: serves a page on a free port and prints its address
 //! - `long`: a long reply, for stopping halfway (`slowly`: ten times slower;
 //!   with `make a plan`, each step holds ten times longer)
+//! - `work quietly`: works for a minute with nothing new to show, until
+//!   stopped (a working square alone, for measuring what it costs)
 //! - `keep watching`: two pieces of background work (a dev server, a test
 //!   watcher) writing output files, running until stopped or 20 s pass
 //! - `long table`: a reply with a 60-row table (`/api/needle` in row 48)
@@ -1247,6 +1249,12 @@ impl Agent {
                 &format!("The dev server is up at http://localhost:{port}/."),
                 None,
             )?;
+            self.end("done", false);
+            return Ok(());
+        }
+        if lower.contains("work quietly") {
+            self.pause(60_000)?;
+            self.say("Done.", None)?;
             self.end("done", false);
             return Ok(());
         }

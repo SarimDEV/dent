@@ -23,10 +23,10 @@ pub const MAX_WIDTH: f32 = 440.;
 impl Dent {
     pub fn sidebar(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = self.t;
-        let [needs, done, working] = self.shown_sections();
+        let [needs, done, working, paused] = self.shown_sections();
         // Hold these places while the pointer is here; let go when it leaves.
         self.inbox_hold = self.sidebar_hovered.then(|| {
-            [&needs, &done, &working]
+            [&needs, &done, &working, &paused]
                 .iter()
                 .enumerate()
                 .flat_map(|(sec, list)| {
@@ -44,7 +44,7 @@ impl Dent {
         let new_selected = self.selected.is_none();
 
         // Only the rows on screen are laid out, however many sessions there are.
-        let rows = self.inbox_rows(&pinned, &needs, &done, &working, &closed, clear);
+        let rows = self.inbox_rows(&pinned, [&needs, &done, &working, &paused], &closed, clear);
         self.sync_inbox(&rows);
         // A selection moved by the keyboard stays in view.
         if let Some(id) = self.reveal_row.take()
@@ -159,9 +159,7 @@ impl Dent {
     fn inbox_rows(
         &self,
         pinned: &[std::rc::Rc<Session>],
-        needs: &[std::rc::Rc<Session>],
-        done: &[std::rc::Rc<Session>],
-        working: &[std::rc::Rc<Session>],
+        [needs, done, working, paused]: [&[std::rc::Rc<Session>]; 4],
         closed: &[std::rc::Rc<Session>],
         clear: bool,
     ) -> Vec<InboxRow> {
@@ -174,6 +172,8 @@ impl Dent {
             ("Needs you", needs, false),
             ("Done", done, false),
             ("Working", working, true),
+            // Its machine is away; each row says which and why.
+            ("Paused", paused, true),
         ] {
             if list.is_empty() {
                 continue;

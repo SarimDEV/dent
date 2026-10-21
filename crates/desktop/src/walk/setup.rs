@@ -411,8 +411,23 @@ pub(super) fn machines() -> Vec<(f32, Act)> {
             0.1,
             Until("Esc again closes Settings", |d, _| d.pane.is_none(), 2.),
         ),
+        (0.1, Call(leave_made_up_machines)),
     ]);
     v
+}
+
+/// Back to this machine alone, so a scene joined after one with made-up
+/// machines starts sessions here: their sessions, waiting messages and
+/// the chip's choice go.
+fn leave_made_up_machines(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
+    for m in std::mem::take(&mut d.machines) {
+        for id in d.core.forget(&m.id) {
+            d.rebuild(&id);
+        }
+    }
+    d.outbox.clear();
+    d.set_machine(String::new(), cx);
+    cx.notify();
 }
 
 fn made_up_machines() -> Vec<crate::machines::MachineView> {
@@ -557,6 +572,18 @@ pub(super) fn away() -> Vec<(f32, Act)> {
             ),
         ),
         (
+            0.,
+            Until(
+                "it waits in the sidebar's Paused, not Working",
+                |d, _| {
+                    let [_, _, working, paused] = d.shown_sections();
+                    paused.iter().any(|s| s.id == "c27b19e4a0d2/s1")
+                        && !working.iter().any(|s| s.id == "c27b19e4a0d2/s1")
+                },
+                1.,
+            ),
+        ),
+        (
             0.1,
             Call(|d, _, cx| {
                 d.send_draft(
@@ -613,5 +640,6 @@ pub(super) fn away() -> Vec<(f32, Act)> {
         ),
         (0.4, Shot("away-chip-light")),
         (0.1, Key("escape")),
+        (0.1, Call(leave_made_up_machines)),
     ]
 }

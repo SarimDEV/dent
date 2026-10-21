@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped when a change would break an older client. Adding fields or event
 /// kinds doesn't count.
-pub const PROTOCOL: u32 = 1;
+///
+/// 2: a message can carry its files (`Request::Send`'s `files`); a client
+/// sends files that way only to a daemon of 2 or later.
+pub const PROTOCOL: u32 = 2;
 /// The oldest protocol this build still speaks. Two sides talk when their
 /// ranges overlap ([decision 0060]).
 ///
@@ -562,6 +565,18 @@ impl Permission {
 fn default_agent() -> String {
     DEFAULT_AGENT.into()
 }
+
+/// A file a message brings with it ([`Request::Send`]'s `files`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Carried {
+    /// Its name where it came from; only the last part is kept.
+    pub name: String,
+    pub bytes_b64: String,
+}
+
+/// The most a message's files may come to, so the message stays well
+/// inside what a link takes once base64 has grown it by a third.
+pub const CARRIED_MAX: usize = 40 << 20;
 
 /// The agent a session runs when nothing says otherwise, and the one every
 /// session made before agents had names ran.
@@ -1117,6 +1132,9 @@ pub enum Request {
         text: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<String>,
+        /// As for [`Request::Send`].
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<Carried>,
     },
     /// While the agent works, the message waits for the turn to end,
     /// unless `steer` sends it into the running turn.
@@ -1130,6 +1148,11 @@ pub enum Request {
         /// images; every file is also named by its path.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<String>,
+        /// Files it carries itself, from a client on another machine whose
+        /// paths mean nothing here: written to this machine first, then
+        /// attached after `attachments`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<Carried>,
     },
     /// Go back to just before one of your messages. With `files`, the
     /// working tree goes back too.
@@ -1880,12 +1903,26 @@ pub mod b64 {
         out
     }
 
+    /// Each byte's value in [`ABC`], or 255 for one not in it.
+    const VALUE: [u8; 256] = {
+        let mut t = [255u8; 256];
+        let mut i = 0;
+        while i < 64 {
+            t[ABC[i] as usize] = i as u8;
+            i += 1;
+        }
+        t
+    };
+
     pub fn decode(s: &str) -> Option<Vec<u8>> {
         let mut out = Vec::with_capacity(s.len() / 4 * 3);
         let (mut acc, mut bits) = (0u32, 0);
         // Padding and line breaks (some encoders wrap at 76) carry nothing.
         for b in s.bytes().filter(|b| *b != b'=' && !b.is_ascii_whitespace()) {
-            let v = ABC.iter().position(|c| *c == b)? as u32;
+            let v = match VALUE[b as usize] {
+                255 => return None,
+                v => u32::from(v),
+            };
             acc = (acc << 6) | v;
             bits += 6;
             if bits >= 8 {
