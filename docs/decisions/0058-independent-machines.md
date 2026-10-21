@@ -20,6 +20,7 @@ No state is shared between machines. Each daemon is the only record for what it 
 - **Daemons list the setting keys they store,** so a client greys out a setting an older daemon would drop, with "update dent on <machine>".
 - **Anything a daemon acts on while no client is attached stays on that daemon:** archiving merged sessions, PR polling, keep-awake, and later automations. Pure display rules stay in the client.
 - **A project on several machines** is one group in the client, keyed by the repository resolver's group key. Its name, icon and default machine are written to each copy as a bulk edit.
+- **A daemon can pair with another daemon, like a device.** It has a key already, so the trust of [0061](0061-trust.md) applies unchanged. That leaves room for agents on one machine to start or follow work on another ("run this on the server"), and for daemons to carry moves themselves, without sharing any state. Not built now.
 - **Client-owned state is per device.** A pin on the laptop isn't a pin on the phone. Syncing it between devices could come later, through a channel the owner's devices share; it is out of scope now.
 
 ## Why

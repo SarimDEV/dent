@@ -16,6 +16,7 @@ Each daemon numbers its own events and machines share nothing ([0058](0058-indep
 - The transfer is in chunks, can be resumed from an offset, and is verified by hash.
 - The source keeps everything needed in a move folder under its state folder, so any client trusted by both machines can resume an interrupted move.
 - The phone can start a move. Running it needs a client that stays connected, or it pauses and resumes later.
+- **The carrier is replaceable.** The state machine, ids, manifest and target-side steps don't depend on who carries the bytes, so daemons that have paired with each other ([0058](0058-independent-machines.md)) can carry a move later, including one an agent starts on its own session.
 
 ### The state machine on the source
 

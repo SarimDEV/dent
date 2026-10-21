@@ -1,6 +1,6 @@
 # 0059. A machine is its key, bound to its install; everything is keyed by machine
 
-Status: proposed (2026-10-20) · R-B7's clone check run ([spike 14](../spikes/14-routes-identity-and-boot.md)); still to confirm: [R-B6, R-B7](../remote-tests.md#b-trust-and-identity) · Builds on [0033](0033-direct-websocket-hub-on-hold.md), [spike 05](../spikes/05-direct-links.md) · Plan: [remote-plan.md](../remote-plan.md)
+Status: accepted (2026-10-20, owner's call after stage 0) · Evidence: [spike 14](../spikes/14-routes-identity-and-boot.md) (clone check) · Before release: [R-B6, R-B7](../remote-tests.md#b-trust-and-identity) against the real daemon · Builds on [0033](0033-direct-websocket-hub-on-hold.md), [spike 05](../spikes/05-direct-links.md) · Plan: [remote-plan.md](../remote-plan.md)
 
 ## Decision
 

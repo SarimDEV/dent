@@ -1,6 +1,6 @@
 # 0065. A small launcher owns which daemon version runs: trial, snapshot, commit or roll back
 
-Status: proposed (2026-10-20) · R-E1–E6 passed on Linux ([spike 13](../spikes/13-service-and-updates.md)); still to confirm: [R-E7] on macOS(../remote-tests.md#e-install-service-and-updates) · Supersedes the self-update half of [0022](0022-install-service-manager-cargo-dist.md) (cargo-dist still builds the installers) · Plan: [remote-plan.md](../remote-plan.md)
+Status: accepted (2026-10-20, owner's call after stage 0) · Evidence: [spike 13](../spikes/13-service-and-updates.md) (R-E1–E6 on Linux) · Before release: [R-E7](../remote-tests.md#e-install-service-and-updates) on macOS · Supersedes the self-update half of [0022](0022-install-service-manager-cargo-dist.md) (cargo-dist still builds the installers) · Plan: [remote-plan.md](../remote-plan.md)
 
 ## Decision
 

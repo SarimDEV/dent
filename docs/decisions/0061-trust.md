@@ -1,6 +1,6 @@
 # 0061. Trust: a pinned key from pairing, or a strict live Tailscale check; only authenticated removal
 
-Status: proposed (2026-10-20) · R-B1, R-B2 ([spike 10](../spikes/10-tailscale-trust.md)) and R-B4 ([spike 15](../spikes/15-sleep-restart-and-serve.md)) passed; still to confirm: [R-B5–B9] (R-B3 optional)(../remote-tests.md#b-trust-and-identity) · Builds on [0033](0033-direct-websocket-hub-on-hold.md), [spike 05](../spikes/05-direct-links.md) · Plan: [remote-plan.md](../remote-plan.md)
+Status: accepted (2026-10-20, owner's call after stage 0) · Evidence: [spike 10](../spikes/10-tailscale-trust.md) (R-B1, R-B2), [spike 15](../spikes/15-sleep-restart-and-serve.md) (R-B4) · Before release: [R-B5–B9](../remote-tests.md#b-trust-and-identity), R-B3 optional · Builds on [0033](0033-direct-websocket-hub-on-hold.md), [spike 05](../spikes/05-direct-links.md) · Plan: [remote-plan.md](../remote-plan.md)
 
 ## Decision
 
@@ -29,6 +29,10 @@ Checked live, on every connection, and never saved as trust. All of these must h
 The answer is cached per peer address for the life of the connection, and re-checked when Tailscale's network map changes and every 5 minutes. A peer that leaves the account is dropped at the next check.
 
 Over any other route, a device trusted only this way gets `trusted_on { tailscale }`. The client demotes that route for that machine and offers "Pair with a code to use the LAN too". It never marks the machine untrusted.
+
+### What trust allows
+
+Every trust record (paired, or granted live by Tailscale) carries an **access level** in the protocol from v1. In v1 the only level is `full`, and it's what every device gets. The field exists so that later levels (a read-only phone, a link from another daemon limited to work it started) can arrive without a wire change. The daemon is the only side that enforces it, and clients ignore levels they don't know. Trust never expires on its own: silent expiry locks people out for weeks, so it ends only when it's removed. A daemon pairing with another daemon gets a trust record like any device ([0058](0058-independent-machines.md)).
 
 ### Removing trust
 

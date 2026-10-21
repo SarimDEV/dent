@@ -2,7 +2,7 @@
 
 How dent goes from one machine to many: the decisions that are hard to undo, the stages, what each stage must handle, and the real tests that settle each decision before it is built on.
 
-Status: proposed (2026-10-20). Owner calls are recorded in [0058](decisions/0058-independent-machines.md) and [0063](decisions/0063-queued-prompts.md). Each decision below is confirmed only once its test in [remote-tests.md](remote-tests.md) passes on real machines.
+Status: stage 0 done (2026-10-20). Doors 1–6 and 8 are accepted; door 7 (moving sessions) waits on its interrupted-move test. Each record lists the tests still to run against the real code before release ([remote-tests.md](remote-tests.md)).
 
 ## Why this comes next
 
@@ -34,7 +34,7 @@ Keep these. They answer problems other tools still have open.
 
 Each has its own decision record. Everything not listed here is a two-way door, tuned by feel: timings, wording, layout, load balancing.
 
-| # | Door | Proposed | Record | Settled by |
+| # | Door | Decision | Record | Settled by |
 | --- | --- | --- | --- | --- |
 | 1 | Shared state | None. Every machine is independent; the client merges the view | [0058](decisions/0058-independent-machines.md) | Owner call |
 | 2 | Machine identity | A key bound to the install, a locked data folder, everything keyed by (machine, id) | [0059](decisions/0059-machine-identity.md) | R-B7 |
