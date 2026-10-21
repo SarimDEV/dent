@@ -28,6 +28,12 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 
 ## Open
 
+### A fresh review worktree verifies from cold
+- Seen: 2026-10-20, review of PR #12. The first `just verify` in a new worktree took 3 min 38 s (its own empty `target/`, and a Cargo.lock change selects every crate); the next run took about 15 s.
+- Cost: ~3.5 min per review or batch started in a new worktree.
+- Fix: a shared `CARGO_TARGET_DIR` for worktrees of the same repo (cargo locks it, so two sessions building at once queue rather than collide), or seed a new worktree's `target/` from the main checkout's.
+- Check: first `just verify` in a new worktree under 1 min.
+
 ### A scroll fix patched one view before the cause was searched
 - Seen: 2026-10-20, trackpad drift in the diff. The first PR fixed only the diff and text views; the owner asked again to search the whole codebase for the cause. The same cause (GPUI giving each nested scroller its share of a swipe) was in chat code blocks, wide and tall tables, and every vertical-only scroller.
 - Cost: one extra review round and a second build-and-walk pass (~15 min).
