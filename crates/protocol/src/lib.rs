@@ -1251,8 +1251,8 @@ pub struct Device {
     /// Its key's fingerprint.
     pub id: String,
     pub name: String,
-    /// "paired" (with a code). Devices trusted through the Tailscale
-    /// account aren't stored, so never listed.
+    /// "paired" (with a code), or "tailscale" (let in through the
+    /// Tailscale account, and kept since so it can be removed).
     pub how: String,
     /// "full" in v1.
     pub access: String,

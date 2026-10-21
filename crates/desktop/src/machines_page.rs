@@ -1267,12 +1267,17 @@ impl Dent {
                     }))
                     .into_any_element()
             };
-            rows.push(self.simple_row(
-                "smartphone",
-                d.name.clone(),
-                format!("paired with a code {when}"),
-                Some(action),
-            ));
+            let (icon, how) = if d.how == "tailscale" {
+                let seen = match crate::cards::now_ms().saturating_sub(d.seen) / 86_400_000 {
+                    0 => "today".to_string(),
+                    1 => "yesterday".to_string(),
+                    n => format!("{n} days ago"),
+                };
+                ("laptop", format!("on your Tailscale, last here {seen}"))
+            } else {
+                ("smartphone", format!("paired with a code {when}"))
+            };
+            rows.push(self.simple_row(icon, d.name.clone(), how, Some(action)));
         }
         rows.push(self.simple_row(
             "shield-check",

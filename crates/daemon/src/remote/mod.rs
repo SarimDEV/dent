@@ -171,17 +171,23 @@ impl Net {
     }
 
     pub fn devices(&self) -> Vec<dent_protocol::Device> {
-        lock(&self.trust)
-            .list()
-            .into_iter()
-            .map(|(id, p)| dent_protocol::Device {
+        let trust = lock(&self.trust);
+        let device = |how: &str| {
+            let how = how.to_string();
+            move |(id, p): (String, trust::Peer)| dent_protocol::Device {
                 id,
                 name: p.name,
-                how: "paired".into(),
+                how: how.clone(),
                 access: p.access,
                 added: p.added,
                 seen: p.seen,
-            })
+            }
+        };
+        trust
+            .list()
+            .into_iter()
+            .map(device("paired"))
+            .chain(trust.list_account().into_iter().map(device("tailscale")))
             .collect()
     }
 
@@ -497,6 +503,9 @@ async fn conn(
             access: Access::Full,
         };
         lock(&d.net.via_tailscale).insert(t.remote.clone());
+        if !hello.probe {
+            lock(&d.net.trust).seen_by_account(&t.remote, &hello.name);
+        }
     }
     // Trusted through the Tailscale account but reached another way: say
     // so, unless a code is showing here, when it may pair to use this route

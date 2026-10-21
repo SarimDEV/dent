@@ -42,6 +42,9 @@ pub struct Trust {
     path: PathBuf,
     peers: BTreeMap<String, Peer>,
     removed: std::collections::BTreeSet<String>,
+    /// Devices let in through the Tailscale account, kept so they can be
+    /// listed and removed like paired ones (tailscale.json).
+    account: BTreeMap<String, Peer>,
 }
 
 impl Trust {
@@ -66,11 +69,63 @@ impl Trust {
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
+        let account = std::fs::read_to_string(path.with_file_name("tailscale.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
         Self {
             path,
             peers,
             removed,
+            account,
         }
+    }
+
+    /// A device let in through the Tailscale account: kept, with its name
+    /// and when it was last seen (saved at most once a minute).
+    pub fn seen_by_account(&mut self, public: &[u8], name: &str) {
+        let id = dent_link::fingerprint(public);
+        let now = now_ms();
+        let save = match self.account.get_mut(&id) {
+            Some(p) => {
+                let stale = now.saturating_sub(p.seen) > 60_000 || p.name != name;
+                p.seen = now;
+                p.name = name.to_string();
+                stale
+            }
+            None => {
+                self.account.insert(
+                    id,
+                    Peer {
+                        key: hex::encode(public),
+                        name: name.into(),
+                        added: now,
+                        seen: now,
+                        access: full(),
+                    },
+                );
+                true
+            }
+        };
+        if save {
+            let _ = self.save_account();
+        }
+    }
+
+    /// Devices let in through the Tailscale account and not paired.
+    pub fn list_account(&self) -> Vec<(String, Peer)> {
+        self.account
+            .iter()
+            .filter(|(k, _)| !self.peers.contains_key(*k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    fn save_account(&self) -> Result<()> {
+        write_private(
+            &self.path.with_file_name("tailscale.json"),
+            serde_json::to_string_pretty(&self.account)?.as_bytes(),
+        )
     }
 
     /// Whether the device with key `public` was removed here, and hasn't
@@ -132,8 +187,13 @@ impl Trust {
     /// even though it was never paired.
     pub fn remove(&mut self, id: &str, known: bool) -> Result<bool> {
         let paired = self.peers.contains_key(id);
-        if !paired && !known {
+        let by_account = self.account.contains_key(id);
+        if !paired && !known && !by_account {
             return Ok(false);
+        }
+        if by_account {
+            self.account.remove(id);
+            self.save_account()?;
         }
         let mut removed = self.removed.clone();
         removed.insert(id.to_string());
