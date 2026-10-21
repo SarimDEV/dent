@@ -109,6 +109,15 @@ The session holder owns terminal PTYs the same way it owns agents, so a terminal
 
 The daemon serves file reads, directory listings and a watch stream, scoped to project roots. `Files` lists a session's folder for `@` mentions (git's tracked and untracked files, or a walk that skips hidden folders, `node_modules` and `target`); `FilesIn` lists any folder, for a session that hasn't started.
 
+A session's files are read by what the session wrote ([0068](decisions/0068-files-across-machines.md)), for any device, through `dent-files`, the code clients use for their own machine's sessions too:
+- **Resolving:** a path, as written, resolves on this machine. `~` is this machine's home, a relative path starts from the session's folder (or the `base` folder of the document that wrote it), and `file://` addresses are decoded. A `#fragment` or `?query` is dropped only when the literal name isn't there.
+- **Requests:**
+  - `Stat` (up to 256 files) answers each with its real path, its stamp (device, inode, size, modification time in nanoseconds) and a picture's size from its header. It answers missing, a folder, refused or unreadable just as surely, each with the path it checked.
+  - `Read` returns at most 256 KiB from an offset. With `expect`, it only reads that version: a file rewritten since answers `FileGone` with `changed`, so a copy is never two versions mixed.
+  - `ReadFile` (the whole file, up to 32 MiB) follows the same rules.
+- **What may be read:** a trusted device may read any file the daemon's user can, except the daemon's own state (its key, trust list, secrets, database). Files under `attachments/`, which the daemon wrote for sessions, are the exception to that exception. A file is opened only as a regular file, non-blocking and never through a link at the last step, and its device and inode are checked against the path. A pipe or a device is unreadable, not a hang.
+- **Off the request loop:** file reads run beside the request loop, at most 4 per connection and 16 across the daemon, so a slow disk never holds up an approval or a send. Over a remote link their replies go on a lane of their own, after control frames, replies and live events. Each is small, so a live event waits for one at most: a 48 MiB transfer over the link kept live events within half a second.
+
 Projects are the folders sessions ran in, the projects in `~/.claude.json` (less any in temporary space, which were one-offs), and folders added from the picker (kept in the store's `kv` table, as are the ones taken off the list). `Folders` completes a typed path to its subfolders (hidden ones only after a typed dot); `AddProject` keeps a folder on the list, making it if asked; `NewProject` makes `~/dent/projects/<name>` (`-2`, `-3` when taken) with `git init`, a README and a first commit, and says so when the commit can't be made; `CloneProject` runs `git clone -- <url>` there for remote URLs only, with prompts turned off so a private repository fails rather than waits.
 
 A project can also be brought from another machine; the client both machines trust carries it across:

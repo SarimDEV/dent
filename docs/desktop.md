@@ -90,6 +90,20 @@ Settings (⌘, or dent › Settings…) is a page of its own, in place of the se
 - The session starts on the chosen machine at once and works in the clone once it's made.
 - If the clone can't be made, the message comes back to the reply box.
 
+**Another machine's files** ([0068](decisions/0068-files-across-machines.md)): every place that shows or opens a session's file goes through one layer, `files.rs`. That covers pictures in messages and tool results, images in replies, files linked in replies, media cards, the latest version of an edited file, the viewer and the web view.
+- **Never looked for on this Mac:** another machine's file is asked of that machine, even when the same path exists here. This Mac's sessions are read from disk with the same rules the daemon uses.
+- **Copies:** whole pictures and documents (up to 32 MiB) are copied in 256 KiB ranges, four at a time per machine, under `~/Library/Caches/dent/files/<machine>/` (readable by you only).
+  - Each copy is keyed by the file's real path and its stamp, so a rewritten file never shows its old bytes and nothing is fetched twice.
+  - An index draws the last copy in a launch's first frame while it's asked again.
+  - The cache is kept under 2 GiB, the least recently used going first, and forgetting a machine deletes its copies.
+- **When it's asked again:** when it's first shown, when something says it changed, every 3 s while it's open in the viewer, and when its machine comes back. A failure is asked again later, never kept for good.
+- **Video and pages:** a video plays from its machine a range at a time, through the web view's own `dent://` addresses, answered as the bytes arrive, so playback starts at once and seeking works. A page's own styles and pictures come from its machine the same way.
+- **While a machine is away:** what's kept shows, marked; what isn't says the machine is away. Every failure names the machine and the path it checked.
+- **Opening in another app:** Open copies the file here first and says "Copied from <machine>". Show in Finder is offered only for this Mac's files.
+- **History is kept too:** each machine's event log is kept in `history.db` in the client's state folder.
+  - It's tagged with the log's epoch and thrown away when that changes, written in transactions, and deleted and begun again when it's damaged or in a format this build doesn't know.
+  - A launch draws every machine's sessions from it before any link, an offline machine's too, and each link resumes after it.
+
   Also in Machines:
   - An asleep or unreachable machine that has said how to wake it offers **Wake**: magic packets from this Mac, which work from the same network, then a retry.
   - "Devices on this network" in Settings lets devices on the LAN reach this Mac to pair without Tailscale.
