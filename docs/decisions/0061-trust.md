@@ -37,6 +37,7 @@ Every trust record (paired, or granted live by Tailscale) carries an **access le
 ### Removing trust
 
 - **Removal is only real when authenticated.** "You were removed" counts only inside a Noise session that proved the machine's pinned key. The client then forgets the key and stops every route. A refusal or failure from anything unauthenticated is backed off, never acted on.
+- **Removal sticks** (owner, 2026-10-21). The machine remembers each device it removed. One that comes back, by any route, is told "this device was removed", not greeted as a stranger; and its Tailscale account doesn't let it back in on its own. Devices let in through the account are kept and listed, so they can be removed too. Pairing again with a code, on purpose, is the way back.
 - **Uncertainty never deletes trust.** Not an offline launch, not a timeout, not a refusal on one route.
 - **Revocation closes live sessions** within a second, and is written (atomic rename and fsync) before it's acknowledged.
 
