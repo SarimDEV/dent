@@ -3185,8 +3185,15 @@ impl Dent {
                 _ => String::new(),
             };
             // How it stood when its machine went away: said so.
-            let kept = matches!(media_stat, Some(crate::files::Look::Stale(_)))
-                && !crate::files::online(dent_client_core::fleet::split(&s.id).0);
+            let kept = matches!(
+                media_stat,
+                Some(crate::files::Look::Stale(
+                    dent_protocol::FileStat::File { .. }
+                ))
+            ) && !crate::files::online(dent_client_core::fleet::split(&s.id).0)
+                && media
+                    .as_ref()
+                    .is_some_and(|ask| crate::files::kept_copy(ask).is_some());
             format!(
                 "{} · {} · {size}{}",
                 crate::bridge::relative(std::path::Path::new(&s.cwd), a.path),
@@ -5913,31 +5920,28 @@ fn tool_pictures(session: &str, cwd: &str, ix: usize, paths: &[String], t: &them
     if set.len() == 1 {
         // As wide as it is, up to the cap, and narrower with the column.
         return div().mt(px(space::S2)).flex().child(
-            div()
-                .relative()
-                .flex()
-                .min_w_0()
-                .child(
-                    crate::lightbox::picture(
-                        &set,
-                        0,
-                        frame().max_w_full().max_h(px(TOOL_PICTURE_H)).child(
-                            img(set[0].path.clone())
-                                .max_w_full()
-                                .max_h(px(TOOL_PICTURE_H))
-                                .object_fit(ObjectFit::Contain),
-                        ),
-                    )
-                    .min_w_0()
-                    .max_w(px(TOOL_PICTURE_W)),
-                )
-                .when_some(kept, |d, m| {
-                    d.child(crate::ui::kept_mark(
-                        format!("tool-kept-{session}-{ix}"),
-                        &m,
-                        t,
-                    ))
-                }),
+            crate::lightbox::picture(
+                &set,
+                0,
+                frame()
+                    .max_w_full()
+                    .max_h(px(TOOL_PICTURE_H))
+                    .child(crate::markdown::sized(
+                        img(set[0].path.clone()).object_fit(ObjectFit::Contain),
+                        &set[0].path,
+                        TOOL_PICTURE_H,
+                    )),
+            )
+            .min_w_0()
+            .max_w(px(TOOL_PICTURE_W))
+            // On the picture's own corner.
+            .when_some(kept, |d, m| {
+                d.child(crate::ui::kept_mark(
+                    format!("tool-kept-{session}-{ix}"),
+                    &m,
+                    t,
+                ))
+            }),
         );
     }
     let shown = set.len().min(TOOL_TILES);

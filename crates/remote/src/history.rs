@@ -236,6 +236,9 @@ fn connect(path: &PathBuf) -> anyhow::Result<Connection> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
     match version {
         0 => {
+            // Space freed by a machine going is given back, a little at a
+            // time ([`trim`]).
+            db.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
             db.execute_batch(
                 "CREATE TABLE feeds (
                     machine TEXT PRIMARY KEY,
@@ -259,7 +262,7 @@ fn connect(path: &PathBuf) -> anyhow::Result<Connection> {
                 "BEGIN;
                 ALTER TABLE feeds ADD COLUMN bytes INTEGER NOT NULL DEFAULT 0;
                 ALTER TABLE feeds ADD COLUMN used INTEGER NOT NULL DEFAULT 0;
-                UPDATE feeds SET bytes = (SELECT COALESCE(SUM(length(body)), 0)
+                UPDATE feeds SET bytes = (SELECT COALESCE(SUM(length(CAST(body AS BLOB))), 0)
                     FROM events WHERE events.machine = feeds.machine);
                 PRAGMA user_version = 2;
                 COMMIT;",
@@ -398,6 +401,8 @@ fn trim(db: &mut Connection, last: &str, cap: u64) -> rusqlite::Result<Vec<Strin
         total -= bytes;
         gone.push(m);
     }
+    // Their pages back to the disk (where the file was made able to).
+    let _ = db.execute_batch("PRAGMA incremental_vacuum");
     Ok(gone)
 }
 

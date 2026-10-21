@@ -98,23 +98,25 @@ Settings (⌘, or dent › Settings…) is a page of its own, in place of the se
   - The cache is kept under 2 GiB, the least recently used going first, and forgetting a machine deletes its copies.
 - **When it's asked again:** when it's first shown, when something says it changed, every 3 s while it's open in the viewer, and when its machine comes back. A failure is asked again later, never kept for good.
 - **Video and pages:** a video plays from its machine a range at a time, through the web view's own `dent://` addresses, answered as the bytes arrive, so playback starts at once and seeking works. A page's own styles and pictures come from its machine the same way.
-- **While a machine is away:** what's kept shows, marked; what isn't says the machine is away. Every failure names the machine and the path it checked.
+- **While a machine is away:** what's kept shows, marked: a picture carries "Offline copy" in its corner, a video's card says "offline copy", and a kept video plays from its copy. What isn't kept says the machine is away. Every failure names the machine and the path it checked.
+- **Paths are the machine's:** `~/`, `~name/` and `file://` links are read on the session's machine. A `file://` address naming another computer is no file anywhere dent can reach, and says so. A page's link to a file opens in the page's own session, never this Mac's file of the same name.
 - **Opening in another app:** Open copies the file here first and says "Copied from <machine>". Show in Finder is offered only for this Mac's files.
 - **History is kept too:** each machine's event log is kept in `history.db` in the client's state folder.
   - It's tagged with the log's epoch and thrown away when that changes, written in transactions, and deleted and begun again when it's damaged or in a format this build doesn't know.
   - A launch draws every machine's sessions from it before any link, an offline machine's too, and each link resumes after it.
+  - It's kept under 1 GiB across machines. Past that, the machine used least lately goes whole and its history comes again from the start next time; a machine never has part of its log kept.
 
   Also in Machines:
   - An asleep or unreachable machine that has said how to wake it offers **Wake**: magic packets from this Mac, which work from the same network, then a retry.
   - "Devices on this network" in Settings lets devices on the LAN reach this Mac to pair without Tailscale.
-- **Other machines' sessions:** a machine chip on the new-session tray picks where it runs. A session on an away machine says so under its header, with Retry, and messages written meanwhile wait on this device until it's back ([0063](decisions/0063-queued-prompts.md), [0067](decisions/0067-settings-page-and-machines.md)).
+- **Other machines' sessions:** a machine chip on the new-session tray picks where it runs. A session on an away machine says so under its header, with Retry (steady while dent keeps trying, rather than coming and going with each try), and messages written meanwhile wait on this device until it's back ([0063](decisions/0063-queued-prompts.md), [0067](decisions/0067-settings-page-and-machines.md)).
 - **The welcome** opens on the very first launch, after the daemon answers: the agents, this Mac, and the shortcut and keep-awake choices, with **Get started**. It never opens again, and installs from before it existed count as seen. Per-project choices stay where they are, remembered by starting a session ([0054](decisions/0054-project-defaults-prs-and-scripts.md)).
 - **When the agent can't work:** while the default agent isn't installed or is signed out, the new-session page says so under its title ("Claude Code is signed out"), with Sign in or How to install, and Check again.
 - **More than one agent:** a chip before the model's on the new-session box picks the agent, shown only when more than one is installed and signed in. Picking one clears the model, so the one chosen is one it has.
 
 ## Viewer
 
-The viewer shows, as tabs, everything the open session made or changed ([0037](decisions/0037-viewer-system-web-view.md)). Every viewable file an agent writes becomes a card in the chat that opens it here. Writing the same file again adds a version; nothing is replaced. A card for an older version says what replaced it. Tabs share their strip: names give up letters from the middle first, and when that's not enough the files not showing are their icon alone (their path in the tooltip), so no tab is cut off at an edge; past that the strip scrolls, a fading edge saying there's more.
+The viewer shows, as tabs, everything the open session made or changed ([0037](decisions/0037-viewer-system-web-view.md)). Every viewable file an agent writes becomes a card in the chat that opens it here. Writing the same file again adds a version; nothing is replaced. A card for an older version says what replaced it. Tabs share their strip: names give up letters from the middle first, and when that's not enough the files not showing are their icon alone (their path in the tooltip), so no tab is cut off at an edge. Two files of the same name show as much of their folders as tells them apart (`take.mp4 · clips`, `take.mp4 · raw`); past that the strip scrolls, a fading edge saying there's more.
 
 - **Pages** (HTML files, and forwarded dev servers) run live in the system web view through a `dent://` scheme, with the network like any page.
   - **Versions:** a stepper (v3 of 4). An older version shows a "Back to v4" bar. A new version shows straight away when you're following the latest, with a brief "updated to v4" and the scroll position kept.

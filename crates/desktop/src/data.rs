@@ -374,6 +374,38 @@ pub fn is_file(path: &std::path::Path) -> bool {
     })
 }
 
+/// A picture's width and height in pixels, from its file's header: for
+/// sizing its box to it before it's decoded. Asked of the disk at most every
+/// few seconds, like [`is_file`]. The file is one to draw on this Mac: this
+/// Mac's own, or a copy here of another machine's.
+pub fn picture_dims(path: &std::path::Path) -> Option<(u32, u32)> {
+    use std::io::Read;
+    const FRESH: std::time::Duration = std::time::Duration::from_secs(3);
+    type Seen = (Option<(u32, u32)>, Instant);
+    thread_local! {
+        static SEEN: RefCell<crate::lru::Lru<PathBuf, Seen>> =
+            RefCell::new(crate::lru::Lru::new(1024));
+    }
+    SEEN.with(|seen| {
+        let now = Instant::now();
+        let path = path.to_path_buf();
+        if let Some((dims, at)) = seen.borrow_mut().get(&path)
+            && now.duration_since(at) < FRESH
+        {
+            return dims;
+        }
+        // Enough for any header, a JPEG's comes after its metadata.
+        let mut head = Vec::new();
+        let dims = std::fs::File::open(&path) // this Mac's: a local path, or a copy here
+            .and_then(|f| f.take(256 << 10).read_to_end(&mut head))
+            .ok()
+            .and_then(|_| dent_files::picture_size(&head))
+            .filter(|(w, h)| *w > 0 && *h > 0);
+        seen.borrow_mut().insert(path, (dims, now));
+        dims
+    })
+}
+
 /// One line of an opened tool group. Subagents' work sits under the call
 /// that started it, a level deeper each time.
 #[derive(Clone, Debug, PartialEq, Hash)]

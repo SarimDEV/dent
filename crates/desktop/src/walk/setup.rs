@@ -1355,6 +1355,178 @@ pub(super) fn many_live() -> Vec<(f32, Act)> {
     ]
 }
 
+thread_local! {
+    /// When `sleep-live` found the VM silent.
+    static SILENT: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// The VM sleeping for real (logind tells its daemon, which tells this
+/// Mac) and waking, then going silent with no goodbye (the whole VM frozen
+/// from this Mac) and coming back: each reads as what it is, a picture kept
+/// from before shows marked while the VM's away, and it comes back by
+/// itself, current again. Run after `files-live`'s fixtures. Not in
+/// `checks`.
+pub(super) fn sleep_live() -> Vec<(f32, Act)> {
+    use crate::files::{Ask, Look};
+    use dent_client_core::machine::State;
+    fn ask(d: &Dent) -> Option<Ask> {
+        d.sessions.iter().find_map(|s| {
+            let far = !dent_client_core::fleet::split(&s.id).0.is_empty();
+            let has = s
+                .items
+                .iter()
+                .any(|i| matches!(i, Item::Text(t) if t.contains("Files test")));
+            (far && has).then(|| Ask::new(&s.id, "pics/a.png", &s.cwd))
+        })
+    }
+    fn state(d: &Dent) -> Option<State> {
+        d.machines.first().map(|m| m.state.clone())
+    }
+    fn online(d: &Dent) -> bool {
+        matches!(state(d), Some(State::Online | State::Slow)) && d.machines[0].proto.is_some()
+    }
+    fn here(d: &Dent) -> bool {
+        ask(d).is_some_and(|a| matches!(crate::files::picture(&a), Look::Here(_)))
+    }
+    fn kept(d: &Dent) -> bool {
+        ask(d).is_some_and(|a| crate::files::kept(&a).is_some())
+    }
+    /// The VM's whole machine, stopped or let go on: from outside, as if
+    /// its lid shut with no warning.
+    fn freeze(stop: bool) {
+        let ok = std::process::Command::new("pkill")
+            .args([
+                if stop { "-STOP" } else { "-CONT" },
+                "-f",
+                "com.apple.Virtualization.VirtualMachine",
+            ])
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "couldn't reach the VM's process");
+    }
+    vec![
+        (0.1, Until("the VM is online", |d, _| online(d), 30.)),
+        (
+            0.1,
+            Until("its files session is here", |d, _| ask(d).is_some(), 10.),
+        ),
+        (
+            0.1,
+            Call(|d, w, cx| {
+                if let Some(a) = ask(d) {
+                    d.select(Some(a.session.clone()), w, cx);
+                }
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "its picture is here, current",
+                |d, _| here(d) && !kept(d),
+                10.,
+            ),
+        ),
+        (0.3, Shot("sleep-awake")),
+        (
+            0.1,
+            Call(|_, _, _| {
+                // Asked to sleep: logind tells the daemon first. (The VM's
+                // kernel can't really suspend, so it wakes at once.)
+                let user = std::env::var("USER").unwrap_or_default();
+                std::thread::spawn(move || {
+                    let _ = std::process::Command::new("/opt/homebrew/bin/limactl")
+                        .args(["shell", "dent-linux", "--", "sudo", "systemctl", "suspend"])
+                        .env("HOME", format!("/Users/{user}"))
+                        .status();
+                });
+            }),
+        ),
+        (
+            0.0,
+            Until(
+                "the VM says it's going to sleep",
+                |d, _| matches!(state(d), Some(State::Away(dent_link::Goodbye::Sleep))),
+                15.,
+            ),
+        ),
+        (0.0, Shot("sleep-asleep")),
+        (
+            0.1,
+            Until("awake, it's back by itself", |d, _| online(d), 20.),
+        ),
+        (
+            0.1,
+            Until(
+                "and its picture is current",
+                |d, _| here(d) && !kept(d),
+                10.,
+            ),
+        ),
+        // A document with a picture on a line of its own, open beside.
+        (0.1, Call(|d, _, cx| d.open_file_at("doc.md", None, cx))),
+        (2.0, Shot("sleep-doc")),
+        (0.1, Call(|_, _, _| freeze(true))),
+        (
+            0.1,
+            Until(
+                "silent, the VM reads as unreachable once it's tried",
+                |d, _| {
+                    matches!(
+                        crate::machines_page::Standing::of(&d.machines[0]),
+                        crate::machines_page::Standing::Unreachable
+                    )
+                },
+                30.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "its picture shows, marked as kept from before",
+                |d, _| kept(d),
+                5.,
+            ),
+        ),
+        // Tried again and again meanwhile: it reads as away throughout,
+        // not back and forth with each try.
+        (
+            0.1,
+            Call(|_, _, _| SILENT.set(Some(std::time::Instant::now()))),
+        ),
+        (
+            0.1,
+            Until(
+                "and keeps reading as away between tries",
+                |d, _| {
+                    let away = matches!(
+                        crate::machines_page::Standing::of(&d.machines[0]),
+                        crate::machines_page::Standing::Unreachable
+                    );
+                    assert!(away, "it read as {:?}", d.machines[0].state);
+                    SILENT.get().is_some_and(|t| t.elapsed().as_secs() >= 12)
+                },
+                15.,
+            ),
+        ),
+        (0.5, Shot("sleep-silent")),
+        (1.0, Shot("sleep-silent-picture")),
+        (0.1, Call(|_, _, _| freeze(false))),
+        (
+            0.1,
+            Until("let go on, it's back by itself", |d, _| online(d), 40.),
+        ),
+        (
+            0.1,
+            Until(
+                "and its picture is current again",
+                |d, _| here(d) && !kept(d),
+                10.,
+            ),
+        ),
+        (0.3, Shot("sleep-back")),
+    ]
+}
+
 /// Another machine asleep: its session says why under the header, a
 /// message written meanwhile waits on this Mac with Edit and Remove, and a
 /// new session can be started there from the machine chip. The machine

@@ -54,7 +54,7 @@ A lint stops direct disk reads of session files in the desktop crate.
 - **Writes are atomic.** History lives in one SQLite file in the client's state folder, written in transactions, with the format's version in it. File copies are written to a temporary name and renamed into place. A damaged cache, or one in a format this build doesn't know, is deleted and rebuilt, never read in part.
 - **Only what's been applied is saved,** in sequence order, so a resume never skips an event.
 - **Private:** the cache folders are readable by this user only (0700), since they can hold a project's files, `.env` included. Forgetting a machine deletes its history and files.
-- **Bounded:** file copies are capped, with least-recently-used eviction that never evicts what's open. History is kept per machine, and a forgotten machine's goes with it.
+- **Bounded:** file copies are capped, with least-recently-used eviction that never evicts what's open. History is kept per machine under 1 GiB in all, the machine used least lately going whole first, and a forgotten machine's goes with it.
 - **Each rule has a test:** a changed epoch, a truncated or corrupt cache file, a file rewritten with the same size and time to the second, a crash between the write and the apply, offline display, and a removed machine.
 
 Old daemons answer the new requests with an error. `PROTOCOL` goes to 4, so the client can say "update dent on <machine>" instead of failing silently.

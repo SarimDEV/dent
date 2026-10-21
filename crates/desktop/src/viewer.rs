@@ -2821,6 +2821,10 @@ fn tab_names(paths: &[&str]) -> Vec<String> {
                         .all(|&j| parts[j].get(1..=n) != Some(&folders[..n]))
                 })
                 .unwrap_or(folders.len());
+            if n == 0 {
+                // At the very top, with nothing above it.
+                return format!("{} · /", name(i));
+            }
             let dir: Vec<&str> = folders[..n].iter().rev().copied().collect();
             format!("{} · {}", name(i), dir.join("/"))
         })
@@ -2848,5 +2852,9 @@ mod tests {
             ["x.png · w", "x.png · sub"]
         );
         assert_eq!(tab_names(&["/only.txt"]), ["only.txt"]);
+        assert_eq!(
+            tab_names(&["/x.png", "/w/x.png"]),
+            ["x.png · /", "x.png · w"]
+        );
     }
 }

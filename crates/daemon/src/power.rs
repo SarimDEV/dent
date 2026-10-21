@@ -45,8 +45,20 @@ mod linux {
 
     pub fn watch(changed: Arc<dyn Fn(bool) + Send + Sync>) {
         tokio::spawn(async move {
-            if let Err(e) = run(changed).await {
-                eprintln!("dent-daemon: can't hear when the machine sleeps: {e}");
+            // The bus going away (dbus or logind restarting) ends a watch:
+            // heard again, after a while longer each time it fails at once.
+            let mut wait = std::time::Duration::from_secs(1);
+            loop {
+                let began = std::time::Instant::now();
+                match run(changed.clone()).await {
+                    Ok(()) => eprintln!("dent-daemon: lost logind; listening for sleep again"),
+                    Err(e) => eprintln!("dent-daemon: can't hear when the machine sleeps: {e}"),
+                }
+                if began.elapsed() > std::time::Duration::from_secs(60) {
+                    wait = std::time::Duration::from_secs(1);
+                }
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(std::time::Duration::from_secs(300));
             }
         });
     }
@@ -71,7 +83,10 @@ mod linux {
         let mut sleeps = m.receive_prepare_for_sleep().await?;
         let mut lock = hold(&m).await;
         while let Some(s) = sleeps.next().await {
-            let start = s.args()?.start;
+            // One that can't be read is let go, not the end of the watch.
+            let Ok(start) = s.args().map(|a| a.start) else {
+                continue;
+            };
             let f = changed.clone();
             let _ = tokio::task::spawn_blocking(move || f(start)).await;
             if start {

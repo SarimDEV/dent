@@ -1232,6 +1232,25 @@ pub fn resolve(href: &str, base: Option<&std::path::Path>) -> String {
     }
 }
 
+/// A picture's box, as wide as the column allows, no taller than `max_h`,
+/// and in the picture's own proportions, so no empty band sits above or
+/// below it. One whose size can't be read is fitted inside those bounds.
+/// (The box is a wrapper's: an image given a relative width takes its
+/// height from its pixels, whatever its proportions say.)
+pub fn sized(i: Img, path: &std::path::Path, max_h: f32) -> Div {
+    match crate::data::picture_dims(path) {
+        Some((w, h)) => {
+            let ratio = w as f32 / h as f32;
+            div()
+                .w_full()
+                .max_w(px((w as f32).min(max_h * ratio)))
+                .aspect_ratio(ratio)
+                .child(i.size_full())
+        }
+        None => div().child(i.max_w_full().max_h(px(max_h))),
+    }
+}
+
 /// A picture on its own line: a local file is shown, fitted to the column;
 /// a web picture is a link to it.
 fn image_block(src: &str, alt: &str, t: &Theme, key: &str, r: &mut R) -> AnyElement {
@@ -1263,21 +1282,21 @@ fn image_block(src: &str, alt: &str, t: &Theme, key: &str, r: &mut R) -> AnyElem
             .flex_col()
             .gap(px(space::S1))
             .child(
-                div()
-                    .relative()
-                    .flex()
-                    .child(crate::lightbox::picture(
-                        &crate::lightbox::single(format!("{key}/pic"), path.clone()),
-                        0,
+                crate::lightbox::picture(
+                    &crate::lightbox::single(format!("{key}/pic"), path.clone()),
+                    0,
+                    sized(
                         img(path.clone())
-                            .max_w_full()
-                            .max_h(px(520.))
                             .object_fit(ObjectFit::Contain)
                             .rounded(px(radius::MD)),
-                    ))
-                    .when_some(kept, |d, m| {
-                        d.child(crate::ui::kept_mark(format!("{key}/kept"), &m, t))
-                    }),
+                        &path,
+                        520.,
+                    ),
+                )
+                // On the picture's own corner.
+                .when_some(kept, |d, m| {
+                    d.child(crate::ui::kept_mark(format!("{key}/kept"), &m, t))
+                }),
             )
             .when(!alt.is_empty(), |d| {
                 d.child(div().ty(LABEL).text_color(t.quiet).child(alt.to_string()))

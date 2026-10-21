@@ -896,6 +896,14 @@ pub fn kept(a: &Ask) -> Option<String> {
     (!online(m) && matches!(picture(a), Look::Stale(_))).then(|| m.to_string())
 }
 
+/// The whole copy of another machine's file already kept here, if there
+/// is one, without asking for one: for showing while its machine is away.
+pub fn kept_copy(a: &Ask) -> Option<PathBuf> {
+    FILES
+        .with(|f| f.borrow().far.get(a).and_then(|f| f.copy.clone()))
+        .filter(|c| crate::data::is_file(c))
+}
+
 /// Whether `machine` can be asked now.
 pub fn online(machine: &str) -> bool {
     machine.is_empty() || FILES.with(|f| f.borrow().online.contains(machine))

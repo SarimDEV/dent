@@ -49,8 +49,10 @@ fn home_is_the_machines_own_and_relative_is_the_folder_given() {
         r(&format!("file://{short}.local/a")).unwrap(),
         Path::new("/a")
     );
-    // Another computer's file is no file here.
+    // Another computer's file is no file here, one of the same short name
+    // on another network too.
     assert_eq!(r("file://elsewhere-not-this-one/a/c.png"), None);
+    assert_eq!(r(&format!("file://{short}.other.lan/a")), None);
     // `~name` is that user's home, as a shell reads it; no such user, and
     // it's a name like any other.
     let root = if cfg!(target_os = "macos") {

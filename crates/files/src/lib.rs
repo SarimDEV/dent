@@ -94,8 +94,15 @@ fn is_this_host(host: &str) -> bool {
     }
     let end = buf.iter().position(|&b| b == 0).unwrap_or(0);
     let mine = String::from_utf8_lossy(&buf[..end]);
-    let first = |s: &str| s.split('.').next().unwrap_or(s).to_ascii_lowercase();
-    !mine.is_empty() && first(&mine) == first(host)
+    let (mine, host) = (mine.to_ascii_lowercase(), host.to_ascii_lowercase());
+    let short = |s: &str| s.split('.').next().unwrap_or(s).to_string();
+    // Its full name, or its short name with nothing more said
+    // (`name`, `name.local`); another network's `name.lan` is another
+    // computer.
+    !mine.is_empty()
+        && (host == mine
+            || ((!host.contains('.') || host == format!("{}.local", short(&host)))
+                && short(&host) == short(&mine)))
 }
 
 /// The home folder of the user `name` on this machine.
@@ -163,7 +170,9 @@ fn hex(c: Option<&u8>) -> Option<u8> {
 /// The candidates a written path could mean, best first: as written, then
 /// without a `#fragment` or `?query` a link may carry (a file named with
 /// a `#` in it wins when it's there).
-fn candidates(written: &str, base: &Path, home: &Path) -> Vec<PathBuf> {
+/// Every way `written` can be read, in order: as written, then without a
+/// `#…` or `?…` after it. Empty for another computer's `file://` address.
+pub fn candidates(written: &str, base: &Path, home: &Path) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = resolve(written, base, home).into_iter().collect();
     if let Some(cut) = written.find(['#', '?']).filter(|&i| i > 0)
         && let Some(short) = resolve(&written[..cut], base, home)

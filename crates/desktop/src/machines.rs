@@ -30,6 +30,10 @@ pub struct MachineView {
     pub pair_error: Option<String>,
     /// A known route answered with another machine.
     pub impostor: Option<String>,
+    /// How it stood when it last went away (asleep, unreachable), kept
+    /// while it's tried again: a retry doesn't make it any less away, so
+    /// what's shown for it doesn't come and go with each try.
+    pub last_away: Option<State>,
 }
 
 impl MachineView {
@@ -46,6 +50,16 @@ impl MachineView {
             agents_known: false,
             pair_error: None,
             impostor: None,
+            last_away: None,
+        }
+    }
+
+    /// How it stands for showing: while it's being tried again after going
+    /// away, still as it went away.
+    pub fn standing(&self) -> &State {
+        match (&self.state, &self.last_away) {
+            (State::Connecting | State::Reconnecting, Some(away)) => away,
+            (s, _) => s,
         }
     }
 
@@ -53,7 +67,7 @@ impl MachineView {
     /// it's online or still finding out.
     pub fn away(&self) -> Option<String> {
         let name = self.name();
-        match &self.state {
+        match self.standing() {
             State::Online | State::Slow | State::Connecting | State::Reconnecting => None,
             State::Away(dent_link::Goodbye::Sleep) => Some(format!("waiting for {name} to wake")),
             State::Away(dent_link::Goodbye::Awake) => None,
@@ -89,6 +103,12 @@ pub fn apply(list: &mut Vec<MachineView>, id: &str, event: Event) {
         Event::State(s) => {
             if !matches!(s, State::Online | State::Slow) {
                 m.rtt = None;
+            }
+            match &s {
+                State::Connecting | State::Reconnecting | State::Off => {}
+                State::Away(dent_link::Goodbye::Awake) => m.last_away = None,
+                State::Away(_) | State::Unreachable { .. } => m.last_away = Some(s.clone()),
+                _ => m.last_away = None,
             }
             m.state = s;
         }
@@ -172,15 +192,25 @@ mod tests {
         let m = &mut list[0];
         m.saved.name = "mini".into();
         assert_eq!(m.away().as_deref(), Some("waiting for mini to wake"));
-        m.state = State::Reconnecting;
+        apply(&mut list, "ab12", Event::State(State::Reconnecting));
         assert_eq!(
-            m.away(),
-            None,
-            "still finding out: sessions keep their state"
+            list[0].away().as_deref(),
+            Some("waiting for mini to wake"),
+            "tried again while asleep, it's still asleep"
         );
-        m.state = State::Unreachable {
+        let unreachable = State::Unreachable {
             why: "timeout".into(),
         };
-        assert_eq!(m.away().as_deref(), Some("mini can't be reached"));
+        apply(&mut list, "ab12", Event::State(unreachable.clone()));
+        assert_eq!(list[0].away().as_deref(), Some("mini can't be reached"));
+        apply(&mut list, "ab12", Event::State(State::Connecting));
+        assert_eq!(*list[0].standing(), unreachable, "no flicker between tries");
+        apply(&mut list, "ab12", Event::State(State::Online));
+        apply(&mut list, "ab12", Event::State(State::Reconnecting));
+        assert_eq!(
+            list[0].away(),
+            None,
+            "a link dropping from online is still finding out: sessions keep their state"
+        );
     }
 }

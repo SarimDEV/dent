@@ -75,7 +75,7 @@ pub enum Standing {
 
 impl Standing {
     pub fn of(m: &MachineView) -> Self {
-        match &m.state {
+        match m.standing() {
             State::Online | State::Slow => Standing::Online,
             State::Off | State::Connecting | State::Reconnecting => Standing::Connecting,
             State::Away(Goodbye::Sleep) => Standing::Asleep,
@@ -824,7 +824,7 @@ impl Dent {
             let st = Standing::of(m);
             let shape = shapes.get(&m.id).copied().unwrap_or(Shape::Circle);
             let faded = matches!(st, Standing::Unreachable | Standing::Blocked);
-            let meta = match (st, &m.state) {
+            let meta = match (st, m.standing()) {
                 (Standing::Online, _) => format!(
                     "Online · {}",
                     m.via
@@ -1702,7 +1702,7 @@ impl Dent {
                 ))
                 .into_any_element();
         }
-        match (&m.state, st) {
+        match (m.standing(), st) {
             (_, Standing::NeedsCode) => div()
                 .flex()
                 .flex_col()

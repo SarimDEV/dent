@@ -2111,11 +2111,18 @@ impl Dent {
         // This Mac's: `~` is this home, `file://` this Mac's address, the
         // way the daemon reads them.
         let base = self.current().map(|s| s.cwd.clone()).unwrap_or_default();
-        let Some(expanded) = dent_files::resolve(
+        let ways = dent_files::candidates(
             path,
             std::path::Path::new(&base),
             std::path::Path::new(&home()),
-        ) else {
+        );
+        // As written, else without a `#…` or `?…` after it.
+        let Some(expanded) = ways
+            .iter()
+            .find(|p| p.exists()) // this Mac's: a local path
+            .or(ways.first())
+            .cloned()
+        else {
             self.toast(ToastAction::Info, format!("{path} is on another computer"));
             cx.notify();
             return;
@@ -8172,6 +8179,15 @@ impl Dent {
             // Its machine away: said at once, not queued for when it's back.
             let machine = dent_client_core::fleet::split(&a.far.session).0.to_string();
             if !crate::files::online(&machine) {
+                // A whole copy kept from before plays on meanwhile (marked
+                // as an offline copy where it's named).
+                let ask = crate::files::Ask::new(&a.far.session, &a.rel, &a.far.cwd)
+                    .based(Some(a.far.dir.clone()));
+                if let Some(p) = crate::files::kept_copy(&ask) {
+                    self.far_served += 1;
+                    serve_copy(a, &p);
+                    continue;
+                }
                 a.responder.respond(
                     wry::http::Response::builder()
                         .status(503)
@@ -8441,9 +8457,13 @@ impl Dent {
                 // never this Mac's file of that name in the browser.
                 PageEvent::External(url) if url.starts_with("file:") => {
                     let sid = crate::viewer::art_session(art).to_string();
-                    if self.current().map(|s| s.id.as_str()) != Some(sid.as_str())
-                        && self.session(&sid).is_some()
-                    {
+                    if self.session(&sid).is_none() {
+                        // Its session is gone: no machine to ask, and
+                        // never the one that happens to be open.
+                        self.toast(ToastAction::Info, format!("Can't open {url}"));
+                        continue;
+                    }
+                    if self.current().map(|s| s.id.as_str()) != Some(sid.as_str()) {
                         self.select(Some(sid), window, cx);
                     }
                     self.open_file_at(&url, None, cx);
@@ -9536,5 +9556,57 @@ mod machine_folders {
         let here = crate::scratch_dir().display().to_string();
         assert!(is_scratch("", &here));
         assert!(!is_scratch("", "/elsewhere/dent/scratch"));
+    }
+}
+
+/// A page's file, or a player's range of it, answered from the whole copy
+/// kept here of another machine's file.
+fn serve_copy(a: crate::web::FarAsk, path: &std::path::Path) {
+    use std::io::{Read, Seek, SeekFrom};
+    let respond = |status: u16, headers: Vec<(&'static str, String)>, body: Vec<u8>| {
+        let mut b = wry::http::Response::builder()
+            .status(status)
+            .header("Content-Type", a.ty)
+            .header("Accept-Ranges", "bytes");
+        for (k, v) in headers {
+            b = b.header(k, v);
+        }
+        a.responder.respond(
+            b.body(std::borrow::Cow::Owned(body))
+                .unwrap_or_else(|_| wry::http::Response::new(std::borrow::Cow::Borrowed(&[][..]))),
+        );
+    };
+    // this Mac's: a copy here
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return respond(404, Vec::new(), Vec::new());
+    };
+    let total = f.metadata().map_or(0, |m| m.len());
+    let Some(range) = &a.range else {
+        let mut bytes = Vec::with_capacity(total as usize);
+        return match f.read_to_end(&mut bytes) {
+            Ok(_) => respond(200, Vec::new(), bytes),
+            Err(_) => respond(404, Vec::new(), Vec::new()),
+        };
+    };
+    let Some((start, end)) = crate::web::byte_range(range, total) else {
+        return respond(
+            416,
+            vec![("Content-Range", format!("bytes */{total}"))],
+            Vec::new(),
+        );
+    };
+    // A piece at a time, as a range from its machine would come.
+    let end = end.min(start + dent_protocol::READ_MAX as u64 * 4 - 1);
+    let mut bytes = vec![0; (end - start + 1) as usize];
+    match f
+        .seek(SeekFrom::Start(start))
+        .and_then(|_| f.read_exact(&mut bytes))
+    {
+        Ok(()) => respond(
+            206,
+            vec![("Content-Range", format!("bytes {start}-{end}/{total}"))],
+            bytes,
+        ),
+        Err(_) => respond(404, Vec::new(), Vec::new()),
     }
 }
