@@ -14,6 +14,11 @@ use serde::{Deserialize, Serialize};
 /// Bumped when a change would break an older client. Adding fields or event
 /// kinds doesn't count.
 pub const PROTOCOL: u32 = 1;
+/// The oldest protocol this build still speaks. Two sides talk when their
+/// ranges overlap ([decision 0060]).
+///
+/// [decision 0060]: ../../docs/decisions/0060-remote-wire.md
+pub const PROTOCOL_MIN: u32 = 1;
 
 /// Catch-up batches stop growing past this many bytes of events.
 pub const BATCH_BYTES: usize = 64 * 1024;
@@ -1049,6 +1054,24 @@ pub struct Envelope<T> {
     pub body: T,
 }
 
+/// A device this machine trusts.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Device {
+    /// Its key's fingerprint.
+    pub id: String,
+    pub name: String,
+    /// "paired" (with a code). Devices trusted through the Tailscale
+    /// account aren't stored, so never listed.
+    pub how: String,
+    /// "full" in v1.
+    pub access: String,
+    /// When it was added, in ms since the epoch.
+    pub added: u64,
+    /// When it last connected, in ms since the epoch; 0 for never.
+    #[serde(default)]
+    pub seen: u64,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
@@ -1056,9 +1079,23 @@ pub enum Request {
         proto: u32,
         client: String,
     },
-    /// Everything after `after`, then live.
+    /// Everything after `after`, then live. `epoch` is the log the client's
+    /// `after` counts in; a different one means the daemon's log was reset,
+    /// so it answers [`Out::Resync`] and starts from the beginning.
     Subscribe {
         after: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<String>,
+    },
+    /// Show a pairing code on this machine, for a device to pair with
+    /// ([decision 0061](../../docs/decisions/0061-trust.md)). Answered with
+    /// [`Reply::Pairing`].
+    OpenPairing,
+    /// The devices this machine trusts.
+    Devices,
+    /// Stop trusting a device, and cut it off if it's connected.
+    RemoveDevice {
+        id: String,
     },
     Create {
         cwd: String,
@@ -1359,6 +1396,11 @@ pub enum Out {
         #[serde(flatten)]
         reply: Reply,
     },
+    /// The log was reset (a new database or a restore): drop what was
+    /// cached from this machine; events from the start follow.
+    Resync {
+        epoch: String,
+    },
     Error {
         message: String,
     },
@@ -1436,8 +1478,29 @@ pub enum Reply {
         /// [`Request::Agents`].
         #[serde(default)]
         agents: Vec<AgentInfo>,
+        /// This machine's id: its key's fingerprint
+        /// ([decision 0059](../../docs/decisions/0059-machine-identity.md)).
+        /// Empty from a daemon older than remote access.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        id: String,
+        /// The event log's epoch, made with the database; `Subscribe`
+        /// carries it back.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        epoch: String,
+        /// Addresses other devices can reach this machine at, as
+        /// `host:port`, best first. Clients learn routes from them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        addresses: Vec<String>,
     },
     Ok,
+    Pairing {
+        code: String,
+        /// When the code stops working, in ms since the epoch.
+        expires: u64,
+    },
+    Devices {
+        devices: Vec<Device>,
+    },
     Created {
         session: SessionId,
     },
@@ -1650,7 +1713,13 @@ mod tests {
 
     #[test]
     fn requests_carry_their_id() {
-        let line = encode(3, &Request::Subscribe { after: 9 });
+        let line = encode(
+            3,
+            &Request::Subscribe {
+                after: 9,
+                epoch: None,
+            },
+        );
         // A body may not reuse the event's own field names.
         let e = Event {
             seq: 1,
@@ -1665,7 +1734,13 @@ mod tests {
         assert_eq!(back, e);
         let env: Envelope<Request> = serde_json::from_slice(&line).unwrap();
         assert_eq!(env.req, 3);
-        assert_eq!(env.body, Request::Subscribe { after: 9 });
+        assert_eq!(
+            env.body,
+            Request::Subscribe {
+                after: 9,
+                epoch: None
+            }
+        );
     }
 }
 

@@ -65,3 +65,4 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0063. A prompt for an away machine waits on the device and sends once when it's back](0063-queued-prompts.md)
 - [0064. Moving a session: a new id on the target, a guarded move, the real transcript, git in a bundle](0064-moving-sessions.md) (proposed)
 - [0065. A small launcher owns which daemon version runs: trial, snapshot, commit or roll back](0065-launcher-and-updates.md)
+- [0066. The link's dependencies: snow, spake2 and tokio-tungstenite](0066-link-crates.md)

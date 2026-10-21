@@ -2104,13 +2104,17 @@ name = "dent-daemon"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "dent-link",
  "dent-protocol",
  "dent-session-holder",
+ "futures-util",
+ "hex",
  "libc",
  "rusqlite",
  "serde",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]
@@ -2164,6 +2168,20 @@ name = "dent-hub"
 version = "0.0.0"
 dependencies = [
  "dent-protocol",
+]
+
+[[package]]
+name = "dent-link"
+version = "0.0.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "hex",
+ "hmac",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "snow",
+ "spake2",
 ]
 
 [[package]]

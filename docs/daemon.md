@@ -151,6 +151,23 @@ A goal is a session told to keep working until a stated outcome is met, using ea
 - An optional budget stops the run at a share of the 5-hour or weekly limit.
 - A run that hits a usage limit pauses with "waiting for reset at 3:40" and resumes on its own when the window resets.
 
+## Remote devices
+
+Devices on other machines reach the daemon over the network ([remote-plan.md](remote-plan.md), stage 1). The code is in `crates/daemon/src/remote` and [`crates/link`](../crates/link).
+
+- **Listening:** one WebSocket on port 7480 (`DENT_REMOTE_PORT`; 0 turns it off), on every address, filtered by the route each connection came in on. Binding an interface address at startup fails when Tailscale comes up later ([spike 14](spikes/14-routes-identity-and-boot.md)). Connections from devices that aren't paired are refused unless they come over Tailscale or loopback, or LAN access is on (`remote.lan` = `on` in the daemon's settings, or `DENT_REMOTE_LAN=1`).
+- **Identity:** `identity.key` in the state folder, bound to the machine in `identity.binding` ([0059](decisions/0059-machine-identity.md)). A copied folder leaves remote access off and says why. `dent-daemon reidentify` makes a new identity.
+- **Handshake:** Noise XX, with each side's protocol range in its encrypted payload. No overlap means a `Refuse(incompatible)` naming both ranges, then the connection closes.
+- **Trust** ([0061](decisions/0061-trust.md)):
+  - **Paired** with a code: kept in `trusted.json`. A damaged file is set aside, and nobody is trusted until paired again.
+  - **The same Tailscale account:** on a Tailscale route, through the LocalAPI, checked per connection, again every 5 minutes while connected, and never stored. Loopback (Tailscale Serve, SSH forwards) and this machine's own Tailscale address are never trusted this way.
+  - **Untrusted:** the device may only pair, and only while a code shows (`dent-daemon pair`, or `OpenPairing`). A code lasts 10 minutes and works once; three wrong codes show a new one and pause pairing; ten close it. One exchange runs at a time (others get `Refuse(busy)`), so parallel connections get no extra guesses, and an exchange begun on a code that has since changed doesn't pair.
+- **Limits:** 8 connections per address until trusted, 64 handshakes in progress in all, 5 s to finish a handshake, and 32 untrusted connections in all, each staying at most 10 minutes. A device that takes more than 30 s to accept a frame is dropped.
+- **Trusted connections** carry the same requests and events as the local socket, one JSON line per data message. Pings are answered on the control lane before any other work. A connection silent for 30 s is dropped: twice the client's 15 s, so the client decides when a link is dead ([0062](decisions/0062-liveness-and-retry.md)).
+- **Removing a device** (`dent-daemon devices remove ID`, or `RemoveDevice`) cuts it off at once with an authenticated `Refuse(removed)`.
+- **Going away:** on SIGTERM or Ctrl-C the daemon sends every remote device a goodbye: quit, or restart or update when `DENT_STOP_REASON` or the launcher's `stop-reason` file says so.
+- **The welcome** adds the machine's id, the log's epoch and the addresses devices can reach it at. A `Subscribe` with another epoch gets `Resync` and starts over.
+
 ## Moving sessions between machines
 
 > Being replaced by [0064](decisions/0064-moving-sessions.md) (proposed): a new id on the target, a guarded move, and git as a snapshot commit in a bundle rather than a patch.
