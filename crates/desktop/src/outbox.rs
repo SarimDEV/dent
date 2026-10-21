@@ -149,3 +149,7 @@ mod tests {
         assert_eq!(age(back[0].at, now), "14 h");
     }
 }
+
+#[cfg(test)]
+#[path = "outbox_break_b.rs"]
+mod break_b;

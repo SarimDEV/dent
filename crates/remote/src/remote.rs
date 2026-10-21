@@ -727,3 +727,7 @@ mod tests {
         assert_eq!(c.subscribe(), sub(1, "e2"));
     }
 }
+
+#[cfg(test)]
+#[path = "break_b_tests.rs"]
+mod break_b_tests;
