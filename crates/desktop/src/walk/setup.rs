@@ -588,6 +588,40 @@ pub(super) fn bring_live() -> Vec<(f32, Act)> {
     v
 }
 
+/// A saved machine's sessions come from the log kept on this Mac, before
+/// any link and while the machine is away: run after a scene that saw it
+/// (`machines-live`), with its daemon stopped. Not in `checks`.
+pub(super) fn kept_live() -> Vec<(f32, Act)> {
+    vec![
+        (
+            0.0,
+            Until(
+                "another machine's sessions are there from what's kept",
+                |d, _| {
+                    d.sessions
+                        .iter()
+                        .any(|s| !dent_client_core::fleet::split(&s.id).0.is_empty())
+                },
+                1.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "and it isn't online",
+                |d, _| {
+                    use dent_client_core::machine::State;
+                    d.machines
+                        .iter()
+                        .all(|m| !matches!(m.state, State::Online | State::Slow))
+                },
+                1.,
+            ),
+        ),
+        (2.0, Shot("kept-live-light")),
+    ]
+}
+
 /// Another machine asleep: its session says why under the header, a
 /// message written meanwhile waits on this Mac with Edit and Remove, and a
 /// new session can be started there from the machine chip. The machine

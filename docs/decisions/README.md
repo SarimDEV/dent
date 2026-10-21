@@ -67,3 +67,4 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0065. A small launcher owns which daemon version runs: trial, snapshot, commit or roll back](0065-launcher-and-updates.md)
 - [0066. The link's dependencies: snow, spake2 and tokio-tungstenite](0066-link-crates.md)
 - [0067. Settings is a page of its own; Machines shows every machine at a glance](0067-settings-page-and-machines.md)
+- [0068. Files across machines: one resolver on the daemon, ranged reads inside the link, one cache on the client](0068-files-across-machines.md)

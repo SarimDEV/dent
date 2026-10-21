@@ -15,6 +15,7 @@ use dent_link::{Keys, Trust};
 use dent_protocol::{AgentInfo, Envelope, Out, PROTOCOL, Reply, Request, encode};
 use tokio::sync::mpsc;
 
+use crate::history::History;
 use crate::host::{self, Ask};
 use crate::store::{self, Saved};
 
@@ -159,8 +160,32 @@ pub fn spawn(
     saved: Saved,
     events: impl FnMut(Event) + Send + 'static,
 ) -> Remote {
+    spawn_kept(rt, keys, client, saved, None, events)
+}
+
+/// The machine's log as this device keeps it ([`History`]): where a link
+/// resumes, and where what comes is kept.
+pub struct Keeping {
+    pub history: History,
+    /// The kept log's epoch and its newest event, already applied by the
+    /// client; `None` when nothing's kept.
+    pub resume: Option<(String, u64)>,
+}
+
+/// Like [`spawn`], keeping the machine's log on this device: a link
+/// subscribes after what's kept, and every event that comes is kept, in
+/// order, before the client hears it.
+pub fn spawn_kept(
+    rt: &tokio::runtime::Handle,
+    keys: Keys,
+    client: &str,
+    saved: Saved,
+    keeping: Option<Keeping>,
+    events: impl FnMut(Event) + Send + 'static,
+) -> Remote {
     let (tx, rx) = mpsc::unbounded_channel();
-    let seq = Arc::new(AtomicU64::new(0));
+    let resumed = keeping.as_ref().and_then(|k| k.resume.clone());
+    let seq = Arc::new(AtomicU64::new(resumed.as_ref().map_or(0, |r| r.1)));
     let pending = Arc::new(Mutex::new(Pending::default()));
     let theirs = Arc::new(Mutex::new(HashSet::new()));
     let m = Machine::new(
@@ -173,6 +198,7 @@ pub fn spawn(
         m,
         client.to_string(),
         saved,
+        keeping,
         seq.clone(),
         pending.clone(),
         theirs.clone(),
@@ -352,6 +378,7 @@ async fn run(
     m: Machine,
     client: String,
     mut saved: Saved,
+    keeping: Option<Keeping>,
     seq: Arc<AtomicU64>,
     pending: Arc<Mutex<Pending>>,
     theirs: Arc<Mutex<HashSet<String>>>,
@@ -382,10 +409,16 @@ async fn run(
             pairing_open: false,
         },
     );
+    // Resumed from the kept log: the client has applied it, so a link
+    // subscribes after it, in its epoch.
+    let (history, resume) = match keeping {
+        Some(k) => (Some(k.history), k.resume),
+        None => (None, None),
+    };
     let mut cursor = Cursor {
         applied: seq,
-        passed: 0,
-        epoch: None,
+        passed: resume.as_ref().map_or(0, |r| r.1),
+        epoch: resume.map(|r| r.0),
     };
     loop {
         tokio::select! {
@@ -466,6 +499,19 @@ async fn run(
                             continue;
                         }
                         cursor.out(&out);
+                        // Kept before the client hears it, in the order it
+                        // came, tagged with the log it's from.
+                        if let (Some(h), Some(epoch)) = (&history, &cursor.epoch)
+                            && !saved.id.is_empty()
+                        {
+                            match &out {
+                                Out::Resync { epoch } => h.reset(&saved.id, epoch),
+                                Out::Events { events } => {
+                                    h.save(&saved.id, epoch, events.clone())
+                                }
+                                _ => {}
+                            }
+                        }
                         if req != 0
                             && let Ok(mut p) = pending.lock()
                         {
