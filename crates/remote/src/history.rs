@@ -80,6 +80,13 @@ impl History {
                 connect(&path)?
             }
         };
+        // Opened with less room than before: kept to it before anything's
+        // read.
+        let mut db = db;
+        let gone = trim(&mut db, "", cap).unwrap_or_else(|e| {
+            eprintln!("dent: couldn't trim history: {e:#}");
+            Vec::new()
+        });
         let db = Arc::new(Mutex::new(db));
         let (tx, rx) = mpsc::channel();
         let writer = db.clone();
@@ -89,7 +96,7 @@ impl History {
                 // Machines whose history couldn't be kept this run: nothing
                 // more of theirs is kept until their log starts again, so
                 // no gap is ever kept as if whole.
-                let mut broken: std::collections::HashSet<String> = Default::default();
+                let mut broken: std::collections::HashSet<String> = gone.into_iter().collect();
                 for w in rx {
                     match &w {
                         Write::Save { machine, .. } if broken.contains(machine) => continue,
@@ -231,14 +238,15 @@ fn connect(path: &PathBuf) -> anyhow::Result<Connection> {
     use std::os::unix::fs::PermissionsExt;
     let db = Connection::open(path)?;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    // Space freed by a machine going is given back, a little at a time
+    // ([`trim`]). Only a new file takes it, and only before anything else
+    // (the journal mode too) is written to it.
+    db.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
     db.pragma_update(None, "journal_mode", "WAL")?;
     db.pragma_update(None, "synchronous", "NORMAL")?;
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
     match version {
         0 => {
-            // Space freed by a machine going is given back, a little at a
-            // time ([`trim`]).
-            db.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
             db.execute_batch(
                 "CREATE TABLE feeds (
                     machine TEXT PRIMARY KEY,

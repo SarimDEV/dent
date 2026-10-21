@@ -2803,11 +2803,24 @@ fn tab_names(paths: &[&str]) -> Vec<String> {
         .iter()
         .map(|p| p.split('/').filter(|c| !c.is_empty()).rev().collect())
         .collect();
+    // One path however it's written (`/w//f`, `/w/f/` are `/w/f`).
+    let key: Vec<String> = paths
+        .iter()
+        .zip(&parts)
+        .map(|(p, parts)| {
+            let joined: Vec<&str> = parts.iter().rev().copied().collect();
+            format!(
+                "{}{}",
+                if p.starts_with('/') { "/" } else { "" },
+                joined.join("/")
+            )
+        })
+        .collect();
     let name = |i: usize| parts[i].first().copied().unwrap_or(paths[i]);
-    (0..paths.len())
+    let names: Vec<String> = (0..paths.len())
         .map(|i| {
             let same: Vec<usize> = (0..paths.len())
-                .filter(|&j| j != i && name(j) == name(i) && paths[j] != paths[i])
+                .filter(|&j| j != i && name(j) == name(i) && key[j] != key[i])
                 .collect();
             if same.is_empty() {
                 return name(i).to_string();
@@ -2822,11 +2835,25 @@ fn tab_names(paths: &[&str]) -> Vec<String> {
                 })
                 .unwrap_or(folders.len());
             if n == 0 {
-                // At the very top, with nothing above it.
-                return format!("{} · /", name(i));
+                // At the very top, with nothing above it: the root, or
+                // the folder a relative path is taken from.
+                let top = if paths[i].starts_with('/') { "/" } else { "." };
+                return format!("{} · {top}", name(i));
             }
             let dir: Vec<&str> = folders[..n].iter().rev().copied().collect();
             format!("{} · {}", name(i), dir.join("/"))
+        })
+        .collect();
+    // Still the same as another path's (one relative and one not, or a
+    // file whose own name has ` · ` in it): the whole path, as written.
+    (0..paths.len())
+        .map(|i| {
+            let clash = (0..paths.len()).any(|j| key[j] != key[i] && names[j] == names[i]);
+            if clash {
+                paths[i].to_string()
+            } else {
+                names[i].clone()
+            }
         })
         .collect()
 }
@@ -2927,15 +2954,17 @@ mod tests {
         unique(&["/x.png", "/a/x.png", "/b/x.png"]);
     }
 
-    // Distinct paths that come out the same once empty parts are dropped.
+    // One file however it's written: one name, and not told apart from
+    // itself by a made-up folder.
     #[test]
     fn slashes_dont_make_two_tabs_of_one_name() {
-        unique(&["/w/f.md", "/w//f.md"]);
+        assert_eq!(tab_names(&["/w/f.md", "/w//f.md"]), ["f.md", "f.md"]);
+        unique(&["/w/f.md", "/v//f.md"]);
     }
 
     #[test]
     fn a_trailing_slash_doesnt_make_two_tabs_of_one_name() {
-        unique(&["/w/f.md", "/w/f.md/"]);
+        assert_eq!(tab_names(&["/w/f.md", "/w/f.md/"]), ["f.md", "f.md"]);
     }
 
     #[test]

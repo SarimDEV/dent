@@ -100,6 +100,7 @@ Settings (⌘, or dent › Settings…) is a page of its own, in place of the se
 - **Video and pages:** a video plays from its machine a range at a time, through the web view's own `dent://` addresses, answered as the bytes arrive, so playback starts at once and seeking works. A page's own styles and pictures come from its machine the same way.
 - **While a machine is away:** what's kept shows, marked: a picture carries "Offline copy" in its corner, a video's card says "offline copy", and a kept video plays from its copy. What isn't kept says the machine is away. Every failure names the machine and the path it checked.
 - **Paths are the machine's:** `~/`, `~name/` and `file://` links are read on the session's machine. A `file://` address naming another computer is no file anywhere dent can reach, and says so. A page's link to a file opens in the page's own session, never this Mac's file of the same name.
+- **Opening several at once:** each file asked for opens once it's here, in the order asked, however many are on their way.
 - **Opening in another app:** Open copies the file here first and says "Copied from <machine>". Show in Finder is offered only for this Mac's files.
 - **History is kept too:** each machine's event log is kept in `history.db` in the client's state folder.
   - It's tagged with the log's epoch and thrown away when that changes, written in transactions, and deleted and begun again when it's damaged or in a format this build doesn't know.

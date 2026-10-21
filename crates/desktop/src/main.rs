@@ -188,8 +188,9 @@ impl Render for Dent {
         if let Some((path, line)) = select::take_open() {
             self.open_file_at(&path, line, cx);
         }
-        // Another machine's file being opened, once it's here.
-        if let Some((ask, line)) = self.opening.clone() {
+        // Other machines' files being opened, each once it's here, in the
+        // order asked.
+        for (ask, line) in self.opening.clone() {
             self.open_far(ask, line, cx);
         }
         if let Some(ask) = self.outside.clone() {

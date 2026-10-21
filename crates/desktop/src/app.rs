@@ -899,7 +899,7 @@ pub struct Dent {
     /// Another machine's file being copied here to open in its app.
     pub outside: Option<crate::files::Ask>,
     /// Another machine's file being opened, tried again until it's here.
-    pub opening: Option<(crate::files::Ask, Option<u32>)>,
+    pub opening: Vec<(crate::files::Ask, Option<u32>)>,
     /// Other machines' files open in the viewer: what each is, the version
     /// showing, and when it was last asked about.
     pub opened_far: HashMap<&'static str, (crate::files::Ask, dent_protocol::Stamp, Instant)>,
@@ -1736,7 +1736,7 @@ impl Dent {
             bringing: None,
             given_back: Default::default(),
             files_timer: false,
-            opening: None,
+            opening: Vec::new(),
             outside: None,
             far_waiting: Vec::new(),
             far_served: 0,
@@ -2104,7 +2104,6 @@ impl Dent {
             && !dent_client_core::fleet::split(&s.id).0.is_empty()
         {
             let ask = crate::files::Ask::new(&s.id, path, &s.cwd);
-            self.opening = None;
             self.open_far(ask, line, cx);
             return;
         }
@@ -2203,9 +2202,11 @@ impl Dent {
         use dent_protocol::FileStat;
         let machine = dent_client_core::fleet::split(&ask.session).0.to_string();
         let name = self.machine_name(&machine);
-        let first = self.opening.as_ref().map(|(a, _)| a) != Some(&ask);
+        // Out of the waiting list while it's tried; back on it if it's
+        // still to come.
+        let first = !self.opening.iter().any(|(a, _)| *a == ask);
+        self.opening.retain(|(a, _)| *a != ask);
         if self.current().map(|s| s.id.as_str()) != Some(ask.session.as_str()) {
-            self.opening = None;
             return;
         }
         // Waiting: said once; the reply draws again, not every frame.
@@ -2215,12 +2216,11 @@ impl Dent {
                 this.toast(ToastAction::Info, format!("Opening {file} from {name}…"));
                 cx.notify();
             }
-            this.opening = Some((ask.clone(), line));
+            this.opening.push((ask.clone(), line));
         };
         let (real, stamp) = match crate::files::stat(&ask) {
             Look::Loading => return wait(self, cx),
             Look::Gone(g) => {
-                self.opening = None;
                 self.toast(ToastAction::Info, g.said(&name));
                 cx.notify();
                 return;
@@ -2228,13 +2228,11 @@ impl Dent {
             Look::Here(FileStat::File { path, stamp, .. })
             | Look::Stale(FileStat::File { path, stamp, .. }) => (path, stamp),
             Look::Here(FileStat::Dir { path }) | Look::Stale(FileStat::Dir { path }) => {
-                self.opening = None;
                 self.toast(ToastAction::Info, format!("A folder on {name} · {path}"));
                 cx.notify();
                 return;
             }
             Look::Here(other) | Look::Stale(other) => {
-                self.opening = None;
                 let said = match &other {
                     FileStat::Missing { checked } => format!("Not on {name} · {checked}"),
                     FileStat::Refused { checked } => {
@@ -2262,7 +2260,6 @@ impl Dent {
                 })
             });
             if let Some(a) = known {
-                self.opening = None;
                 self.clear_wait_toast();
                 self.mark_line(a, line);
                 self.open_art(a, None, cx);
@@ -2271,7 +2268,6 @@ impl Dent {
         }
         // A video, a sound or a PDF plays from there, a range at a time.
         if crate::data::Kind::of(&real) == Some(crate::data::Kind::Media) {
-            self.opening = None;
             let session = ask.session.clone();
             let id = crate::bridge::art_id(&session, &real);
             if !self.arts.iter().any(|a| a.id == id) {
@@ -2298,13 +2294,11 @@ impl Dent {
             Look::Here(p) | Look::Stale(p) => p,
             Look::Loading => return wait(self, cx),
             Look::Gone(g) => {
-                self.opening = None;
                 self.toast(ToastAction::Info, g.said(&name));
                 cx.notify();
                 return;
             }
         };
-        self.opening = None;
         // Moved on to another session meanwhile: it isn't opened there.
         if self.current().map(|s| s.id.as_str()) != Some(ask.session.as_str()) {
             return;

@@ -105,7 +105,9 @@ pub fn apply(list: &mut Vec<MachineView>, id: &str, event: Event) {
                 m.rtt = None;
             }
             match &s {
-                State::Connecting | State::Reconnecting | State::Off => {}
+                State::Connecting | State::Reconnecting => {}
+                // Turned off: whatever it was before is old news.
+                State::Off => m.last_away = None,
                 State::Away(dent_link::Goodbye::Awake) => m.last_away = None,
                 State::Away(_) | State::Unreachable { .. } => m.last_away = Some(s.clone()),
                 _ => m.last_away = None,

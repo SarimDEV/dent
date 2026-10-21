@@ -657,12 +657,15 @@ impl Dent {
             let words = div()
                 .flex()
                 .flex_col()
-                .when(below, |d| d.items_center())
                 .child(
                     div()
                         .ty(UI)
                         .font_weight(FontWeight::MEDIUM)
-                        .whitespace_nowrap()
+                        // A long name ends in "…" rather than run past the
+                        // map's edge; under a holder, it keeps to about
+                        // the holder's width.
+                        .max_w(px(if below { size * 2. + 24. } else { NAME_MAX }))
+                        .truncate()
                         .text_color(if faded { t.quiet } else { t.ink })
                         .child(n.name.clone()),
                 )
@@ -671,9 +674,9 @@ impl Dent {
                 .ml(px(-size / 2.))
                 .mt(px(-size / 2.))
                 .flex()
-                .when(below, |d| {
-                    d.flex_col().items_center().ml(px(-size)).w(px(size * 2.))
-                })
+                // Under the holder, from its left edge: near the map's edge
+                // a centred name would be cut off there.
+                .when(below, |d| d.flex_col().items_start())
                 .when(!below, |d| d.items_center())
                 .gap(px(if below { space::S1H } else { space::S3 }))
                 .child(holder(n.shape, n.standing.dot(&t), size, faded, &t))
@@ -993,8 +996,10 @@ impl Dent {
             .child(holder)
             .child(
                 div()
+                    // Gives way in a narrow window, its name ending in "…".
                     .w(px(240.))
-                    .flex_none()
+                    .min_w(px(120.))
+                    .flex_shrink(1.)
                     .flex()
                     .flex_col()
                     .child(
@@ -1020,12 +1025,19 @@ impl Dent {
                     .child(div().ty(UI).text_color(t.quiet).truncate().child(meta)),
             )
             .child(
+                // The counts that fit, whole; the rest wrap onto a line
+                // that's never shown, rather than shrink to nothing.
                 div()
                     .flex_1()
-                    .min_w_0()
+                    // Room for one count whole; the name gives way for it.
+                    .min_w(px(110.))
+                    .h(px(LINE_H))
+                    .overflow_hidden()
                     .flex()
+                    .flex_wrap()
                     .items_center()
-                    .gap(px(space::S3))
+                    .gap_x(px(space::S3))
+                    .gap_y(px(space::S4))
                     .ty(UI)
                     .text_color(t.quiet)
                     .children(sessions.into_iter().map(|(st, n)| {
@@ -1037,7 +1049,9 @@ impl Dent {
                             Status::Idle => "stopped",
                         };
                         div()
+                            .h(px(LINE_H))
                             .flex()
+                            .flex_none()
                             .items_center()
                             .gap(px(space::S1H))
                             .whitespace_nowrap()
@@ -1841,6 +1855,12 @@ fn peers_from(v: &serde_json::Value) -> Vec<Peer> {
     out.sort_by(|a, b| b.online.cmp(&a.online).then(a.name.cmp(&b.name)));
     out
 }
+
+/// The widest a machine's name runs on the map.
+const NAME_MAX: f32 = 180.;
+
+/// A machine row's line of session counts.
+const LINE_H: f32 = 24.;
 
 #[cfg(test)]
 mod tests {

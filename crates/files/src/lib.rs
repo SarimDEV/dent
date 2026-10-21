@@ -47,6 +47,11 @@ impl Policy {
 /// address naming another computer: no file here is it.
 pub fn resolve(written: &str, base: &Path, home: &Path) -> Option<PathBuf> {
     let w = written.trim();
+    // The scheme is case-insensitive.
+    let w = match w.get(..7).filter(|s| s.eq_ignore_ascii_case("file://")) {
+        Some(_) => format!("file://{}", &w[7..]),
+        None => w.to_string(),
+    };
     let w = match w.strip_prefix("file://") {
         // `file:///x`, `file://localhost/x` and `file://<this machine>/x`
         // all name `/x`.
@@ -63,7 +68,7 @@ pub fn resolve(written: &str, base: &Path, home: &Path) -> Option<PathBuf> {
         return Some(home.to_path_buf());
     }
     if let Some(rest) = w.strip_prefix("~/") {
-        return Some(home.join(rest));
+        return Some(home.join(rest.trim_start_matches('/')));
     }
     // `~name/…`, as a shell reads it: that user's home, when there's one.
     if let Some(rest) = w.strip_prefix('~') {
@@ -83,7 +88,13 @@ pub fn resolve(written: &str, base: &Path, home: &Path) -> Option<PathBuf> {
 /// Whether a `file://` address's host is this machine: none, `localhost`,
 /// or its own name (as `name`, `name.local` or fully).
 fn is_this_host(host: &str) -> bool {
-    if host.is_empty() || host.eq_ignore_ascii_case("localhost") {
+    if host.is_empty()
+        || host.eq_ignore_ascii_case("localhost")
+        || host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|a| a.is_loopback())
+    {
         return true;
     }
     let mut buf = [0u8; 256];
@@ -241,10 +252,8 @@ impl Opened {
 
     /// Its answer to a `Stat`, with a picture's size from its header.
     pub fn stat(&self) -> FileStat {
-        let mut head = vec![0u8; 64 * 1024];
-        let n = self.file.read_at(&mut head, 0).unwrap_or(0);
-        head.truncate(n);
-        let (width, height) = picture_size(&head).map_or((None, None), |(w, h)| (Some(w), Some(h)));
+        let (width, height) =
+            picture_size_in(&self.file).map_or((None, None), |(w, h)| (Some(w), Some(h)));
         FileStat::File {
             path: self.path.display().to_string(),
             stamp: self.stamp,
@@ -300,7 +309,13 @@ pub fn open(path: &Path, policy: &Policy) -> Result<Opened, FileStat> {
     let shown = path.display().to_string();
     let real = match path.canonicalize() {
         Ok(r) => r,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        // No file can be there: not found, a name no file can have (too
+        // long, with a NUL in it), or a file where a folder would be.
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                || e.kind() == std::io::ErrorKind::InvalidInput
+                || matches!(e.raw_os_error(), Some(libc::ENAMETOOLONG | libc::ENOTDIR)) =>
+        {
             return Err(FileStat::Missing { checked: shown });
         }
         Err(e) => {
@@ -396,6 +411,44 @@ pub fn read(
         false,
     ))
 }
+
+/// A picture's width and height, read from its open file: its start, and
+/// for a JPEG whose metadata runs past that (big previews, colour
+/// profiles), its markers walked to the frame, up to [`JPEG_WALK`] in.
+pub fn picture_size_in(file: &File) -> Option<(u32, u32)> {
+    let mut head = vec![0u8; 64 * 1024];
+    let n = file.read_at(&mut head, 0).ok()?;
+    head.truncate(n);
+    if let Some(size) = picture_size(&head) {
+        return Some(size);
+    }
+    if !head.starts_with(&[0xff, 0xd8]) || n < head.capacity() {
+        return None;
+    }
+    let mut at = 2u64;
+    let mut m = [0u8; 9];
+    while at < JPEG_WALK {
+        if file.read_at(&mut m, at).ok()? < 4 || m[0] != 0xff {
+            return None;
+        }
+        let be16 = |i: usize| u16::from_be_bytes([m[i], m[i + 1]]) as u32;
+        match m[1] {
+            0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf => {
+                file.read_at(&mut m, at).ok().filter(|&n| n == 9)?;
+                let be16 = |i: usize| u16::from_be_bytes([m[i], m[i + 1]]) as u32;
+                return Some((be16(7), be16(5))).filter(|(w, h)| *w > 0 && *h > 0);
+            }
+            0xd8 | 0x01 | 0xd0..=0xd7 => at += 2,
+            // Fill bytes before a marker.
+            0xff => at += 1,
+            _ => at += 2 + be16(2) as u64,
+        }
+    }
+    None
+}
+
+/// How far into a JPEG its frame is looked for.
+const JPEG_WALK: u64 = 16 << 20;
 
 /// A picture's width and height from the start of its file: PNG, GIF,
 /// JPEG, WebP.

@@ -1251,11 +1251,11 @@ impl Dent {
                 return None;
             }
             crate::machines_page::Standing::Asleep => (
-                format!("{} is asleep", m.name()),
+                "is asleep",
                 "The agent paused there and carries on when it wakes. Messages wait here till then.",
             ),
             _ => (
-                format!("{} can't be reached", m.name()),
+                "can't be reached",
                 "Its sessions keep their place there. Messages wait here till it's back.",
             ),
         };
@@ -1296,8 +1296,21 @@ impl Dent {
                     div()
                         .flex_1()
                         .min_w_0()
+                        .overflow_hidden()
                         .flex()
                         .gap(px(space::S1H))
+                        // A long machine name gives way, ending in "…",
+                        // before it would reach Retry; what it means goes
+                        // first. What's become of it always shows.
+                        .child(
+                            div()
+                                .flex_shrink(1.)
+                                .min_w(px(48.))
+                                .truncate()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(t.ink)
+                                .child(m.name().to_string()),
+                        )
                         .child(
                             div()
                                 .flex_none()
@@ -1305,15 +1318,24 @@ impl Dent {
                                 .text_color(t.ink)
                                 .child(strong),
                         )
-                        .child(div().min_w_0().truncate().text_color(t.quiet).child(rest)),
+                        .child(
+                            div()
+                                .flex_shrink(10.)
+                                .min_w_0()
+                                .truncate()
+                                .text_color(t.quiet)
+                                .child(rest),
+                        ),
                 )
-                .child(ghost("away-retry", "Retry", &t).on_press(cx.listener(
-                    move |this, _, _, cx| {
-                        this.live
-                            .signal(Some(&id), dent_client_core::machine::Signal::Retry);
-                        cx.notify();
-                    },
-                )))
+                .child(
+                    ghost("away-retry", "Retry", &t)
+                        .flex_none()
+                        .on_press(cx.listener(move |this, _, _, cx| {
+                            this.live
+                                .signal(Some(&id), dent_client_core::machine::Signal::Retry);
+                            cx.notify();
+                        })),
+                )
                 .child(probe(&self.probes, "away-banner"))
                 .arrive("away-banner", From::Above, motion::BASE)
                 .into_any_element(),

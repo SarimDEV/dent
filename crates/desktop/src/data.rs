@@ -379,7 +379,7 @@ pub fn is_file(path: &std::path::Path) -> bool {
 /// few seconds, like [`is_file`]. The file is one to draw on this Mac: this
 /// Mac's own, or a copy here of another machine's.
 pub fn picture_dims(path: &std::path::Path) -> Option<(u32, u32)> {
-    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
     const FRESH: std::time::Duration = std::time::Duration::from_secs(3);
     type Seen = (Option<(u32, u32)>, Instant);
     thread_local! {
@@ -394,12 +394,15 @@ pub fn picture_dims(path: &std::path::Path) -> Option<(u32, u32)> {
         {
             return dims;
         }
-        // Enough for any header, a JPEG's comes after its metadata.
-        let mut head = Vec::new();
-        let dims = std::fs::File::open(&path) // this Mac's: a local path, or a copy here
-            .and_then(|f| f.take(256 << 10).read_to_end(&mut head))
+        // Opened without waiting (a pipe named like a picture would hold
+        // the window up), and only a plain file is read.
+        let dims = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path) // this Mac's: a local path, or a copy here
             .ok()
-            .and_then(|_| dent_files::picture_size(&head))
+            .filter(|f| f.metadata().is_ok_and(|m| m.is_file()))
+            .and_then(|f| dent_files::picture_size_in(&f))
             .filter(|(w, h)| *w > 0 && *h > 0);
         seen.borrow_mut().insert(path, (dims, now));
         dims

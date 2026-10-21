@@ -248,6 +248,7 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("resync-live", &[resync_live]),
     ("many-live", &[many_live]),
     ("sleep-live", &[sleep_live]),
+    ("stress-live", &[stress_live]),
     ("away", &[away]),
     ("welcome", &[welcome]),
     // These three need the agent set up so (walk.sh does it by name).

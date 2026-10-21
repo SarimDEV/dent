@@ -1208,32 +1208,34 @@ const RANGE_CHUNK: u64 = 4 << 20;
 
 /// The bytes of `full` a `Range` header asks for (`bytes=a-b`, `bytes=a-`,
 /// `bytes=-n`): inclusive bounds, clamped to the file; `None` if it can't
-/// be met.
+/// be met. Of several ranges, the first that can be met is answered.
 pub fn byte_range(range: &str, total: u64) -> Option<(u64, u64)> {
+    let range = range.trim();
+    // The unit is case-insensitive.
     let spec = range
-        .trim()
-        .strip_prefix("bytes=")?
-        .split(',')
-        .next()?
-        .trim();
-    let (a, b) = spec.split_once('-')?;
+        .get(..6)
+        .filter(|u| u.eq_ignore_ascii_case("bytes="))
+        .map(|_| &range[6..])?;
     let last = total.checked_sub(1)?;
-    let (start, end) = match (a.trim(), b.trim()) {
-        ("", n) => {
-            let n: u64 = n.parse().ok()?;
-            (total.saturating_sub(n), last)
-        }
-        (a, "") => {
-            let a: u64 = a.parse().ok()?;
-            (a, last)
-        }
-        (a, b) => (a.parse().ok()?, b.parse::<u64>().ok()?.min(last)),
+    // Digits only: `+5` isn't a number here.
+    let num = |s: &str| -> Option<u64> {
+        (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| s.parse().ok())
+            .flatten()
     };
-    // At most a chunk at a time, whatever was asked: a player asking for
-    // all of a long recording at once gets its start and asks on, rather
-    // than dent reading gigabytes into memory.
-    let end = end.min(start.saturating_add(RANGE_CHUNK - 1));
-    (start <= end).then_some((start, end))
+    spec.split(',').find_map(|one| {
+        let (a, b) = one.trim().split_once('-')?;
+        let (start, end) = match (a.trim(), b.trim()) {
+            ("", n) => (total.saturating_sub(num(n)?), last),
+            (a, "") => (num(a)?, last),
+            (a, b) => (num(a)?, num(b)?.min(last)),
+        };
+        // At most a chunk at a time, whatever was asked: a player asking
+        // for all of a long recording at once gets its start and asks on,
+        // rather than dent reading gigabytes into memory.
+        let end = end.min(start.saturating_add(RANGE_CHUNK - 1));
+        (start <= end).then_some((start, end))
+    })
 }
 
 /// A media file's answer: the piece asked for, or all of it when nothing
@@ -1378,6 +1380,8 @@ mod root_tests {
         // Several ranges: the first.
         assert_eq!(byte_range("bytes=0-1,5-6", 100), Some((0, 1)));
         assert_eq!(byte_range("bytes=0-1, 5-6", 100), Some((0, 1)));
+        // An empty element of the list is let pass, as the standard says.
+        assert_eq!(byte_range("bytes=,0-1", 100), Some((0, 1)));
         // Garbage.
         for r in [
             "",
@@ -1387,7 +1391,6 @@ mod root_tests {
             "bytes=a-b",
             "bytes=1-b",
             "items=0-1",
-            "bytes=,0-1",
             "bytes=0--1",
             "bytes=-5-10",
             "bytes=1.5-2",

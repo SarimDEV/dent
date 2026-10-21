@@ -1524,6 +1524,196 @@ pub(super) fn sleep_live() -> Vec<(f32, Act)> {
             ),
         ),
         (0.3, Shot("sleep-back")),
+        // Its row in Settings › Machines, as it's named.
+        (
+            0.1,
+            Call(|d, _, cx| {
+                d.settings_tab = crate::settings::Tab::Machines;
+                d.open_pane(Pane::Settings, cx);
+            }),
+        ),
+        (1.0, Shot("sleep-machines")),
+    ]
+}
+
+thread_local! {
+    /// The stamp `stress-live` saw before the picture was rewritten.
+    static BEFORE: std::cell::RefCell<Option<dent_protocol::Stamp>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Trying to break what's shown of another machine: a dozen tabs of one
+/// name, its daemon gone while a picture there is rewritten, then back,
+/// then a message sent and answered as usual. Needs `files-live`'s
+/// fixtures and `~/fx/dup/d0..d11/index.html` on the VM. Not in `checks`.
+pub(super) fn stress_live() -> Vec<(f32, Act)> {
+    use crate::files::{Ask, Look};
+    use crate::machines_page::Standing;
+    use dent_protocol::FileStat;
+    fn sid(d: &Dent) -> Option<(String, String)> {
+        d.sessions.iter().find_map(|s| {
+            let far = !dent_client_core::fleet::split(&s.id).0.is_empty();
+            let has = s
+                .items
+                .iter()
+                .any(|i| matches!(i, Item::Text(t) if t.contains("Files test")));
+            (far && has).then(|| (s.id.clone(), s.cwd.clone()))
+        })
+    }
+    fn ask(d: &Dent) -> Option<Ask> {
+        sid(d).map(|(id, cwd)| Ask::new(&id, "pics/a.png", &cwd))
+    }
+    fn stamp(d: &Dent) -> Option<dent_protocol::Stamp> {
+        match crate::files::stat(&ask(d)?) {
+            Look::Here(FileStat::File { stamp, .. }) => Some(stamp),
+            _ => None,
+        }
+    }
+    fn current(d: &Dent) -> bool {
+        ask(d).is_some_and(|a| {
+            matches!(crate::files::picture(&a), Look::Here(_)) && crate::files::kept(&a).is_none()
+        })
+    }
+    fn standing(d: &Dent) -> Option<Standing> {
+        d.machines.first().map(Standing::of)
+    }
+    fn vm(cmd: &'static str) {
+        let user = std::env::var("USER").unwrap_or_default();
+        std::thread::spawn(move || {
+            let _ = std::process::Command::new("/opt/homebrew/bin/limactl")
+                .args(["shell", "dent-linux", "--", "bash", "-lc", cmd])
+                .env("HOME", format!("/Users/{user}"))
+                .status();
+        });
+    }
+    vec![
+        (
+            0.1,
+            Until(
+                "the VM is online",
+                |d, _| standing(d) == Some(Standing::Online),
+                30.,
+            ),
+        ),
+        (
+            0.1,
+            Until("its files session is here", |d, _| sid(d).is_some(), 10.),
+        ),
+        (
+            0.1,
+            Call(|d, w, cx| {
+                if let Some((id, _)) = sid(d) {
+                    d.select(Some(id), w, cx);
+                }
+            }),
+        ),
+        // A dozen files of one name, each opened.
+        (
+            0.3,
+            Call(|d, _, cx| {
+                for i in 0..12 {
+                    d.open_file_at(
+                        crate::data::intern(&format!("dup/d{i}/index.html")),
+                        None,
+                        cx,
+                    );
+                }
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "all twelve open, each told apart",
+                |d, _| {
+                    let Some(s) = d.current() else { return false };
+                    let pages = d
+                        .opened
+                        .get(&s.id)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|a| d.art(a))
+                        .filter(|a| a.path.ends_with("index.html"))
+                        .count();
+                    pages == 12
+                },
+                20.,
+            ),
+        ),
+        (0.5, Shot("stress-tabs")),
+        (0.1, Call(|d, _, cx| d.open_file_at("doc.md", None, cx))),
+        (
+            0.1,
+            Until("its picture is here, current", |d, _| current(d), 15.),
+        ),
+        (0.1, Call(|d, _, _| BEFORE.set(stamp(d)))),
+        // Its daemon gone, and the picture rewritten meanwhile.
+        (
+            0.1,
+            Call(|_, _, _| {
+                vm(
+                    "pkill -f '^target/release/dent-daemon'; sleep 1; cp ~/Pictures/h.png ~/fx/pics/a.png",
+                )
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "gone, the VM reads as unreachable",
+                |d, _| standing(d) == Some(Standing::Unreachable),
+                40.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "and its picture shows, marked as kept",
+                |d, _| ask(d).is_some_and(|a| crate::files::kept(&a).is_some()),
+                5.,
+            ),
+        ),
+        (0.5, Shot("stress-gone")),
+        (
+            0.1,
+            Call(|_, _, _| {
+                vm(
+                    "cd ~/dent && (DENT_REMOTE_LAN=1 DENT_CLAUDE=$HOME/dent/target/release/dent-fake-claude setsid nohup target/release/dent-daemon --state $HOME/rt/dd2 >> $HOME/rt/dd2.log 2>&1 < /dev/null &)",
+                )
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "back, it's online by itself",
+                |d, _| standing(d) == Some(Standing::Online),
+                40.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "and the picture is the new one, unmarked",
+                |d, _| current(d) && stamp(d).is_some() && stamp(d) != BEFORE.with(|b| *b.borrow()),
+                15.,
+            ),
+        ),
+        (0.5, Shot("stress-back")),
+        // As usual afterwards: a message there, answered.
+        (0.2, Type(Field::Composer, "say: still here after all that")),
+        (0.2, Key("enter")),
+        (
+            0.1,
+            Until(
+                "a message afterwards is answered as usual",
+                |d, _| {
+                    d.current().is_some_and(|s| {
+                        s.items
+                            .iter()
+                            .any(|i| matches!(i, Item::Text(t) if t.contains("still here after all that")))
+                    })
+                },
+                30.,
+            ),
+        ),
+        (0.5, Shot("stress-after")),
     ]
 }
 
