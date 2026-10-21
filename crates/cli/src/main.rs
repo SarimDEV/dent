@@ -16,6 +16,9 @@
 //! - `dent call NAME JSON` sends one request (as JSON, `{"op": …}`) to a
 //!   saved machine and prints its reply, for scripts and for looking into
 //!   what a machine says.
+//! - `dent get NAME SESSION PATH [OUT]` copies a file a session names from
+//!   its machine (by what the session wrote: `~`, relative, absolute), in
+//!   ranges a few at a time, and says how fast it came.
 //! - `dent wake NAME` sends a sleeping machine a Wake-on-LAN packet, from
 //!   the same network, to the cards its last welcome named.
 //!
@@ -70,6 +73,7 @@ async fn main() -> Result<()> {
         Some("watch") => watch(&args[1..]).await,
         Some("ask") => ask(&args[1..]).await,
         Some("call") => call(&args[1..]).await,
+        Some("get") => get(&args[1..]).await,
         Some("wake") => {
             let name = args.get(1).context("dent wake NAME")?;
             let m = load()
@@ -85,7 +89,7 @@ async fn main() -> Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: dent machine add HOST:PORT [--code CODE] | dent machines | dent machine remove NAME | dent watch [NAME...] [--secs N] | dent ask NAME TEXT [--file PATH]... [--cwd DIR | --bring DIR] | dent wake NAME"
+                "usage: dent machine add HOST:PORT [--code CODE] | dent machines | dent machine remove NAME | dent watch [NAME...] [--secs N] | dent ask NAME TEXT [--file PATH]... [--cwd DIR | --bring DIR] | dent wake NAME | dent call NAME JSON | dent get NAME SESSION PATH [OUT]"
             );
             Ok(())
         }
@@ -339,6 +343,120 @@ fn local(r: Request) -> Result<Reply> {
         };
     }
     bail!("this machine's daemon hung up")
+}
+
+/// The next answer to a request, past the feed's events.
+async fn next_reply(
+    rx: &mut mpsc::UnboundedReceiver<dent_remote::remote::Event>,
+) -> Result<(u64, Out)> {
+    loop {
+        match tokio::time::timeout(Duration::from_secs(60), rx.recv()).await {
+            Ok(Some(dent_remote::remote::Event::Out { req, out })) if req != 0 => {
+                return Ok((req, out));
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => bail!("the connection ended"),
+            Err(_) => bail!("no answer within a minute"),
+        }
+    }
+}
+
+async fn get(args: &[String]) -> Result<()> {
+    let (name, session, path, dest) = match args {
+        [n, s, p] => (n, s, p, p.rsplit('/').next().unwrap_or(p).to_string()),
+        [n, s, p, o] => (n, s, p, o.clone()),
+        _ => bail!("dent get NAME SESSION PATH [OUT]"),
+    };
+    let saved = load()
+        .into_iter()
+        .find(|s| s.name == *name || s.id == *name)
+        .with_context(|| format!("no saved machine called {name}"))?;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let remote = dent_remote::remote::spawn(
+        &tokio::runtime::Handle::current(),
+        device_keys()?,
+        "dent cli",
+        saved,
+        move |e| {
+            let _ = tx.send(e);
+        },
+    );
+    let file = dent_protocol::FileRef {
+        session: session.clone(),
+        path: path.clone(),
+        base: None,
+    };
+    remote.send(
+        9,
+        Request::Stat {
+            files: vec![file.clone()],
+        },
+    );
+    let (_, out) = next_reply(&mut rx).await?;
+    let (real, stamp) = match out {
+        Out::Reply {
+            reply: Reply::Stats { stats },
+        } => match stats.into_iter().next() {
+            Some(dent_protocol::FileStat::File { path, stamp, .. }) => (path, stamp),
+            other => bail!("{other:?}"),
+        },
+        Out::Error { message } => bail!(message),
+        o => bail!("unexpected answer: {o:?}"),
+    };
+    let total = stamp.size;
+    let mut bytes = vec![0u8; total as usize];
+    let step = dent_protocol::READ_MAX as u64;
+    let mut next = 0u64;
+    let mut got = 0u64;
+    let mut inflight = std::collections::HashMap::new();
+    let mut n = 10u64;
+    let started = Instant::now();
+    while got < total {
+        while inflight.len() < 4 && next < total {
+            remote.send(
+                n,
+                Request::Read {
+                    file: file.clone(),
+                    offset: next,
+                    len: dent_protocol::READ_MAX,
+                    expect: Some(stamp),
+                },
+            );
+            inflight.insert(n, next);
+            n += 1;
+            next += step;
+        }
+        let (req, out) = next_reply(&mut rx).await?;
+        let Some(at) = inflight.remove(&req) else {
+            continue;
+        };
+        match out {
+            Out::Reply {
+                reply: Reply::Bytes { bytes_b64, .. },
+            } => {
+                let b = dent_protocol::b64::decode(&bytes_b64).context("bad bytes")?;
+                bytes[at as usize..at as usize + b.len()].copy_from_slice(&b);
+                got += b.len() as u64;
+            }
+            Out::Reply {
+                reply: Reply::FileGone { changed, .. },
+            } => bail!(if changed {
+                "it changed while it came"
+            } else {
+                "it's gone"
+            }),
+            o => bail!("unexpected answer: {o:?}"),
+        }
+    }
+    remote.stop();
+    std::fs::write(&dest, &bytes)?;
+    let secs = started.elapsed().as_secs_f64();
+    eprintln!(
+        "{real}: {} bytes in {secs:.2} s ({:.1} MB/s) to {dest}",
+        total,
+        total as f64 / secs / 1e6
+    );
+    Ok(())
 }
 
 async fn call(args: &[String]) -> Result<()> {

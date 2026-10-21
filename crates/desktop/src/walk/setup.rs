@@ -1299,6 +1299,38 @@ pub(super) fn remote_happy_live() -> Vec<(f32, Act)> {
     v
 }
 
+/// The VM's log starts again (its database wiped, as a reinstall would):
+/// what this Mac kept of the old one goes once the link says so (on a fast
+/// link that's before the first look), and the new log's sessions come. Run after `machines-live` kept
+/// history, with the VM's database moved aside. Not in `checks`.
+pub(super) fn resync_live() -> Vec<(f32, Act)> {
+    fn far_sessions(d: &Dent) -> usize {
+        d.sessions
+            .iter()
+            .filter(|s| !dent_client_core::fleet::split(&s.id).0.is_empty())
+            .count()
+    }
+    vec![
+        (
+            0.1,
+            Until(
+                "the VM is online, on its new log",
+                |d, _| d.machines.iter().any(|m| m.rtt.is_some()),
+                30.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "and the old log's sessions are gone",
+                |d, _| far_sessions(d) == 0,
+                10.,
+            ),
+        ),
+        (0.5, Shot("resync-light")),
+    ]
+}
+
 /// Another machine asleep: its session says why under the header, a
 /// message written meanwhile waits on this Mac with Edit and Remove, and a
 /// new session can be started there from the machine chip. The machine

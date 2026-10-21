@@ -21,6 +21,8 @@ use crate::store::{self, Saved};
 
 const HELLO: u64 = 1;
 const SUBSCRIBE: u64 = 2;
+/// The first number a caller's request may take.
+pub const FIRST: u64 = 3;
 
 enum Cmd {
     /// Request `n`, already in [`Pending`], to go if the link is up.
@@ -116,7 +118,14 @@ impl Remote {
     /// the same number. While the machine is away it waits.
     /// Files on this device go inside it, read in on the way out (see
     /// [`carry`]).
+    ///
+    /// Numbers up to [`FIRST`] are the link's own (its hello and
+    /// subscribe); a reply to one of those would never reach the caller.
     pub fn send(&self, n: u64, r: Request) {
+        assert!(
+            n >= FIRST,
+            "request numbers below {FIRST} are the link's own"
+        );
         if let Ok(mut p) = self.pending.lock() {
             p.0.insert(n, (r, false));
         }
