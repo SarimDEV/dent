@@ -227,9 +227,14 @@ struct Open {
     generation: u64,
     opened: u64,
     last_rx: u64,
-    /// When this side last pinged. Pings follow what's heard, not what's
-    /// sent: the daemon only answers, so a busy sender must still ping.
+    /// When this side last pinged. A ping goes when nothing has been heard
+    /// for a while (the daemon only answers, so a busy sender must still
+    /// ping), and when nothing has been sent for a while (the daemon judges
+    /// this side's liveness by what it hears, so a busy listener must still
+    /// ping).
     last_ping: u64,
+    /// When this side last sent any frame.
+    last_tx: u64,
     slow: bool,
     /// A replacement racing beside the silent link.
     replace: Option<Race>,
@@ -424,6 +429,7 @@ impl Machine {
                         data: f,
                     });
                     o.last_ping = now;
+                    o.last_tx = now;
                 }
                 o.home_due = true;
             }
@@ -434,7 +440,7 @@ impl Machine {
 
     /// Sends one data message (a JSON line) on the live link. Returns
     /// false when there's none; the caller keeps it for later.
-    pub fn send(&mut self, line: &[u8], _now: u64) -> bool {
+    pub fn send(&mut self, line: &[u8], now: u64) -> bool {
         let Phase::Open(o) = &mut self.phase else {
             return false;
         };
@@ -443,6 +449,7 @@ impl Machine {
                 for data in frames {
                     self.io.push_back(Io::Send { conn: o.conn, data });
                 }
+                o.last_tx = now;
                 true
             }
             Err(_) => false,
@@ -467,7 +474,9 @@ impl Machine {
             Phase::Open(o) => {
                 // Only deadlines still ahead: one already acted on (slow
                 // shown, replacement running) would wake the host in a loop.
-                let mut d = (o.last_rx.max(o.last_ping) + PING_MS).min(o.last_rx + SILENCE_MS);
+                let mut d = (o.last_rx.max(o.last_ping) + PING_MS)
+                    .min(o.last_tx + PING_MS)
+                    .min(o.last_rx + SILENCE_MS);
                 if !o.slow {
                     d = d.min(o.last_rx + SLOW_MS);
                 }
@@ -964,6 +973,7 @@ impl Machine {
             opened: now,
             last_rx: now,
             last_ping: now,
+            last_tx: now,
             slow: false,
             replace: None,
             redial_at: now,
@@ -1008,7 +1018,9 @@ impl Machine {
             let Phase::Open(o) = &mut self.phase else {
                 return;
             };
-            if now >= o.last_rx.max(o.last_ping) + PING_MS
+            let unheard = now >= o.last_rx.max(o.last_ping) + PING_MS;
+            let unsent = now >= o.last_tx + PING_MS;
+            if (unheard || unsent)
                 && let Ok(f) = o.t.seal_control(&Control::Ping { t: now })
             {
                 self.io.push_back(Io::Send {
@@ -1016,6 +1028,7 @@ impl Machine {
                     data: f,
                 });
                 o.last_ping = now;
+                o.last_tx = now;
             }
             if quiet >= REPLACE_MS && o.replace.is_none() {
                 to_replace = true;

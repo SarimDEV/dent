@@ -31,6 +31,8 @@ enum Peer {
 struct Sim {
     m: Machine,
     now: u64,
+    /// When the daemon heard each frame from the client on a live link.
+    client_frames: Vec<u64>,
     daemon: Keys,
     imposter: Keys,
     addrs: HashMap<String, Addr>,
@@ -64,6 +66,7 @@ impl Sim {
         Self {
             m,
             now: 0,
+            client_frames: Vec::new(),
             daemon,
             imposter: Keys::generate().unwrap(),
             addrs: routes.iter().map(|(a, s)| (a.to_string(), *s)).collect(),
@@ -167,6 +170,7 @@ impl Sim {
                 self.m.received(conn, &f, self.now);
             }
             Peer::Live(mut t) => {
+                self.client_frames.push(self.now);
                 if !self.responsive {
                     self.conns.insert(conn, (addr, Peer::Live(t)));
                     return;
@@ -862,4 +866,34 @@ fn awake_on_a_live_link_keeps_it() {
     s.daemon_says(Control::Goodbye(Goodbye::Awake));
     assert_eq!(s.m.state(), &State::Online);
     assert_eq!(s.ups().len(), 1);
+}
+
+#[test]
+fn a_busy_listener_still_pings_so_the_daemon_hears_it() {
+    // The daemon judges a client by what it hears from it, and drops one
+    // silent for 30 s. Events streaming in mustn't stop the client's pings.
+    let mut s = Sim::new(&[("lan:7480", Addr::Up)]);
+    s.trust_device();
+    s.m.connect(0);
+    s.pump();
+    s.run_for(500);
+    let start = s.now;
+    s.client_frames.clear();
+    while s.now < start + 40_000 {
+        // An event from the daemon every half second (a pong it never
+        // asked for stands in for one).
+        s.daemon_says(Control::Pong { t: 0 });
+        s.run_for(500);
+    }
+    let mut last = start;
+    for t in s.client_frames.iter().copied() {
+        assert!(
+            t - last <= 2_500,
+            "the client went quiet for {} ms",
+            t - last
+        );
+        last = t;
+    }
+    assert!(s.now - last <= 2_500);
+    assert_eq!(s.m.state(), &State::Online);
 }
