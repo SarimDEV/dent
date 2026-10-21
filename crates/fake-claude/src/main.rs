@@ -1062,6 +1062,13 @@ impl Agent {
         if lower.contains("replay a real turn") {
             return self.replay(ask);
         }
+        // Says exactly what follows, for a test to put any reply in the
+        // chat (pictures, links, odd paths).
+        if let Some(rest) = text.trim_start().strip_prefix("say:") {
+            self.say(rest.trim(), None)?;
+            self.end("done", false);
+            return Ok(());
+        }
         // Edges, checked before anything else so the odd words in them
         // can't set off another script.
         if lower.contains("odd content") {
