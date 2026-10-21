@@ -753,6 +753,8 @@ pub(super) fn files_live() -> Vec<(f32, Act)> {
         (
             0.1,
             Call(|d, _, cx| {
+                d.far_served = 0;
+                d.far_missed = 0;
                 if let Some((_, cwd)) = session(d, "Files test") {
                     d.open_file(&format!("{cwd}/page.html"), cx);
                 }
@@ -761,13 +763,24 @@ pub(super) fn files_live() -> Vec<(f32, Act)> {
         (
             0.1,
             Until(
-                "its page opens, its styles and pictures from the VM",
-                |d, _| d.arts.iter().any(|a| a.title == "page.html") && d.far_waiting.is_empty(),
+                "its page opens, its styles and both pictures from the VM",
+                |d, _| {
+                    d.arts.iter().any(|a| a.title == "page.html")
+                        && d.far_served >= 3
+                        && d.far_missed == 0
+                        && d.far_waiting.is_empty()
+                },
                 10.,
             ),
         ),
         (2.0, Shot("files-live-page-light")),
-        (0.1, Call(|d, _, cx| d.open_file("~/Movies/take.mp4", cx))),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                d.far_served = 0;
+                d.open_file("~/Movies/take.mp4", cx)
+            }),
+        ),
         (
             0.1,
             Until(

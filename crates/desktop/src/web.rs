@@ -373,9 +373,15 @@ impl Preview {
                         responder.respond(resp);
                         return;
                     }
-                    let rel = path
-                        .split_once('/')
-                        .map_or(path.clone(), |(_, r)| r.to_string());
+                    // `{version}/{path}` from the page; a link from the site's
+                    // root (`/styles.css`) comes without the version, and is
+                    // found from the page's folder.
+                    let rel = match path.split_once('/') {
+                        Some((v, r)) if !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()) => {
+                            r.to_string()
+                        }
+                        _ => path.clone(),
+                    };
                     let range = req
                         .headers()
                         .get(RANGE)

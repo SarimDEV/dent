@@ -328,6 +328,26 @@ impl Dent {
     /// A file's Open, and beside it Open with: the apps that can open it,
     /// your pick for its kind ticked; picking one opens it there from now
     /// on.
+    /// Open, for another machine's file: copied here first, then opened in
+    /// its app.
+    pub fn open_far_button(
+        &self,
+        id: &'static str,
+        ask: crate::files::Ask,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.t;
+        crate::ui::ghost(id, "Open", &t)
+            .relative()
+            .child(crate::ui::probe(&self.probes, id))
+            .on_press(cx.listener(move |this, _, _, cx| this.open_outside_far(ask.clone(), cx)))
+            .with_tip(crate::ui::tip_owned(
+                "Copy it here and open it in its app".to_string(),
+                t,
+            ))
+            .into_any_element()
+    }
+
     pub fn open_button(
         &self,
         id: &'static str,

@@ -192,6 +192,9 @@ impl Render for Dent {
         if let Some((ask, line)) = self.opening.clone() {
             self.open_far(ask, line, cx);
         }
+        if let Some(ask) = self.outside.clone() {
+            self.open_outside_far(ask, cx);
+        }
         // A file you opened in the viewer follows its changes on disk.
         if let Some(Tab::Art(a)) = self.current().map(|s| self.tab(s))
             && self.panel_open

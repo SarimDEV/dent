@@ -79,22 +79,18 @@ pub fn far_root(a: &crate::data::Artifact) -> Option<crate::web::FarRoot> {
     })
 }
 
-/// An artifact's file on this Mac: the file itself, the copy opened here,
-/// or (another machine's) its copy once it's come, up to `cap`.
-pub fn art_here(a: &crate::data::Artifact, cap: u64) -> Option<std::path::PathBuf> {
+/// What another machine's artifact is, to ask of the file layer; `None`
+/// for this Mac's.
+pub fn far_ask(a: &crate::data::Artifact) -> Option<crate::files::Ask> {
     if !art_far(a) {
-        return art_file(a);
+        return None;
     }
     let cwd = a
         .dir
         .as_ref()
         .map(|d| d.display().to_string())
         .unwrap_or_default();
-    crate::files::copy(
-        &crate::files::Ask::new(art_session(a.id), a.path, &cwd),
-        cap,
-    )
-    .shown()
+    Some(crate::files::Ask::new(art_session(a.id), a.path, &cwd))
 }
 
 /// A long name cut in the middle, so its start and its extension both show.
@@ -909,13 +905,19 @@ impl Dent {
                 let server_url = a.path.to_string();
                 // The latest version is the file itself, beside its styles
                 // and pictures; an older one is written out on its own.
-                let on_disk = (v == latest)
-                    .then(|| art_here(&a, crate::files::COPY_MAX))
+                // Another machine's file opens from a copy here, made when
+                // it's asked for, never just because this is drawn.
+                let far = far_ask(&a);
+                let on_disk = (v == latest && far.is_none())
+                    .then(|| art_file(&a))
                     .flatten()
-                    .filter(|f| f.is_file()); // this Mac's: the file or its copy
+                    .filter(|f| f.is_file()); // this Mac's
                 let file = (!server && on_disk.is_none()).then(|| {
                     (
-                        a.versions[v - 1].clone(),
+                        a.versions
+                            .get(v - 1)
+                            .cloned()
+                            .unwrap_or_else(|| Rc::from(&b""[..])),
                         a.path.rsplit('/').next().unwrap_or(a.path).to_string(),
                     )
                 });
@@ -929,7 +931,12 @@ impl Dent {
                         },
                         cx,
                     ))
-                    .on_press(move |_, _, cx| match (&on_disk, &file) {
+                    .on_press(cx.listener(move |this, _, _, cx| match (&on_disk, &file) {
+                        _ if far.is_some() && (media || v == latest) => {
+                            if let Some(ask) = far.clone() {
+                                this.open_outside_far(ask, cx);
+                            }
+                        }
                         (Some(path), _) if in_app.is_some() => {
                             crate::open::open(&path.display().to_string(), cx)
                         }
@@ -942,7 +949,7 @@ impl Dent {
                             }
                         }
                         (None, None) => cx.open_url(&server_url),
-                    })
+                    }))
             });
 
         // The web view is a native layer over this area. GPUI draws the frame
@@ -1401,8 +1408,11 @@ impl Dent {
                                 cx.notify();
                             }))
                     })
-                    .when_some(art_here(&a, crate::files::COPY_MAX), |d, full| {
+                    .when_some(art_file(&a).filter(|_| !art_far(&a)), |d, full| {
                         d.child(self.open_button("open-doc", full, cx))
+                    })
+                    .when_some(far_ask(&a), |d, ask| {
+                        d.child(self.open_far_button("open-doc", ask, cx))
                     }),
             )
             .child(
@@ -2096,8 +2106,11 @@ impl Dent {
                                 cx.notify();
                             })),
                     )
-                    .when_some(art_here(&a, crate::files::COPY_MAX), |d, full| {
+                    .when_some(art_file(&a).filter(|_| !art_far(&a)), |d, full| {
                         d.child(self.open_button("open-text", full, cx))
+                    })
+                    .when_some(far_ask(&a), |d, ask| {
+                        d.child(self.open_far_button("open-text", ask, cx))
                     }),
             )
             .child(
