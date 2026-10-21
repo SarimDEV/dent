@@ -762,7 +762,12 @@ async fn trusted(
                     return Ok(());
                 }
                 r = removed.recv() => {
-                    if matches!(r, Ok(ref gone) if *gone == id) {
+                    // After missed removals, ask the list itself. Trust by
+                    // account isn't on it, so only paired trust is asked.
+                    let lagged = matches!(r, Err(broadcast::error::RecvError::Lagged(_)))
+                        && recheck.is_none()
+                        && !lock(&d.net.trust).has(&id);
+                    if lagged || matches!(r, Ok(ref gone) if *gone == id) {
                         let _ = ctl_tx.try_send(Control::Refuse(Refusal::Removed));
                         return Ok(());
                     }

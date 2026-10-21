@@ -64,6 +64,10 @@ impl Trust {
         self.peers.get(&dent_link::fingerprint(public))
     }
 
+    pub fn has(&self, id: &str) -> bool {
+        self.peers.contains_key(id)
+    }
+
     pub fn list(&self) -> Vec<(String, Peer)> {
         self.peers
             .iter()
@@ -71,10 +75,12 @@ impl Trust {
             .collect()
     }
 
-    /// Written before it's acknowledged.
+    /// Written before it's acknowledged. Memory changes only once the
+    /// file has, so a failed write trusts nobody new.
     pub fn add(&mut self, public: &[u8], name: &str) -> Result<()> {
         let now = now_ms();
-        self.peers.insert(
+        let mut peers = self.peers.clone();
+        peers.insert(
             dent_link::fingerprint(public),
             Peer {
                 key: hex::encode(public),
@@ -84,15 +90,24 @@ impl Trust {
                 access: full(),
             },
         );
-        self.save()
+        self.commit(peers)
     }
 
+    /// Written before it's acknowledged, as [`Trust::add`].
     pub fn remove(&mut self, id: &str) -> Result<bool> {
-        let had = self.peers.remove(id).is_some();
-        if had {
-            self.save()?;
+        if !self.peers.contains_key(id) {
+            return Ok(false);
         }
-        Ok(had)
+        let mut peers = self.peers.clone();
+        peers.remove(id);
+        self.commit(peers)?;
+        Ok(true)
+    }
+
+    fn commit(&mut self, peers: BTreeMap<String, Peer>) -> Result<()> {
+        write_private(&self.path, serde_json::to_string_pretty(&peers)?.as_bytes())?;
+        self.peers = peers;
+        Ok(())
     }
 
     /// Notes a connection. Saved at most once a minute per device.
