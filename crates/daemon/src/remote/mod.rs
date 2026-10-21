@@ -484,7 +484,8 @@ async fn conn(
     let pairing_open = lock(&d.net.window).is_open();
     // Removed here and not paired since: told so, by any route, unless a
     // code is showing, when it may pair again on purpose.
-    if paired.is_none() && !pairing_open && lock(&d.net.trust).was_removed(&t.remote) {
+    let removed = paired.is_none() && lock(&d.net.trust).was_removed(&t.remote);
+    if removed && !pairing_open {
         let _ = send_control(&mut ws, &mut t, &Control::Refuse(Refusal::Removed)).await;
         return Ok(());
     }
@@ -494,7 +495,10 @@ async fn conn(
         },
         None => Verdict::Untrusted { pairing_open },
     };
+    // A removed device comes back only by pairing, never through its
+    // account alone.
     if matches!(verdict, Verdict::Untrusted { .. })
+        && !removed
         && route == Route::Tailscale
         && let (Some(me_ts), Some(p)) = (me_ts.as_ref(), ts_peer.as_ref())
         && tailnet::same_account(me_ts, p)
