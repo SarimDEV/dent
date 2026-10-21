@@ -157,6 +157,9 @@ const WINDOW: usize = 4;
 /// How long a stat of this Mac's file is trusted.
 const LOCAL_FRESH: Duration = Duration::from_secs(3);
 
+/// Files drawn within this long count as on screen for asking again.
+const RECENT: Duration = Duration::from_secs(30);
+
 /// A question to a machine with no answer in this long is asked again: the
 /// link it went on may be gone for good (a machine removed, replaced).
 const PATIENCE: Duration = Duration::from_secs(20);
@@ -169,6 +172,9 @@ struct Far {
     stale: bool,
     /// Asked, and when.
     asked_at: Option<Instant>,
+    /// Something said it changed while it was being asked: the answer on
+    /// its way may be from before, so it's asked again once that comes.
+    again: bool,
     /// The copy here of the version the machine last gave (or, before it
     /// answers, the one kept from before).
     copy: Option<PathBuf>,
@@ -186,6 +192,7 @@ impl Far {
             stat: None,
             stale: true,
             asked_at: None,
+            again: false,
             copy,
             want: 0,
             retry_at: None,
@@ -216,6 +223,8 @@ struct Fetch {
     sent_at: Option<Instant>,
     /// Asked again no sooner than this, after a failed read.
     wait_until: Option<Instant>,
+    /// Reads that failed in a row.
+    fails: u32,
     seen_at: Instant,
 }
 
@@ -254,6 +263,10 @@ struct Files {
     came: u64,
     /// Numbers the copies' temporary names.
     made: u64,
+    /// When each session's files were last asked about again, and those
+    /// waiting out the second since.
+    asked_session: HashMap<String, Instant>,
+    pending_sessions: HashSet<String>,
 }
 
 /// An index key: what a session wrote, where.
@@ -457,6 +470,11 @@ impl Files {
                         why: Why::TooBig(stamp.size),
                     });
                 }
+                // A copy deleted since (trimmed, or by hand) is copied again.
+                if f.copy.as_ref().is_some_and(|c| !crate::data::is_file(c)) {
+                    f.copy = None;
+                    self.dirty = true;
+                }
                 match &f.copy {
                     Some(c) if online && !f.stale => Look::Here(c.clone()),
                     Some(c) => Look::Stale(c.clone()),
@@ -502,6 +520,31 @@ impl Files {
             if x.wait_until.is_some_and(|t| now >= t) {
                 x.wait_until = None;
                 self.dirty = true;
+            }
+        }
+        // Sessions that changed again within their second: asked about now.
+        let due: Vec<String> = self
+            .pending_sessions
+            .iter()
+            .filter(|id| {
+                self.asked_session
+                    .get(*id)
+                    .is_none_or(|t| now.duration_since(*t) >= Duration::from_secs(1))
+            })
+            .cloned()
+            .collect();
+        for id in due {
+            self.pending_sessions.remove(&id);
+            self.asked_session.insert(id.clone(), now);
+            for (a, e) in self.far.iter_mut() {
+                if a.session == id && now.duration_since(e.seen_at) <= RECENT {
+                    if e.asked_at.is_some() {
+                        e.again = true;
+                    } else {
+                        e.stale = true;
+                        self.dirty = true;
+                    }
+                }
             }
         }
         if !self.dirty {
@@ -581,6 +624,7 @@ impl Files {
                             total: stamp.size,
                             sent_at: None,
                             wait_until: None,
+                            fails: 0,
                             seen_at: seen,
                         },
                     );
@@ -636,6 +680,11 @@ impl Files {
                 continue;
             };
             f.asked_at = None;
+            if std::mem::take(&mut f.again) {
+                // Changed since it was asked: this answer may be old news.
+                f.stale = true;
+                continue;
+            }
             if passing(&s) {
                 // Caught mid-rewrite there: asked again in a moment.
                 f.retry_at = Some(Instant::now() + Duration::from_secs(1));
@@ -756,6 +805,9 @@ impl Files {
             let m = a.machine().to_string();
             if let Some(f) = self.far.get_mut(&a) {
                 f.copy = Some(key.clone());
+                // Wanted again only when it's drawn or asked for again: a
+                // later version isn't copied for something no one looks at.
+                f.want = 0;
             }
             let index = self.index.entry(m.clone()).or_default();
             index.insert(index_key(&a), key.clone());
@@ -787,9 +839,34 @@ impl Files {
 
     fn read_failed(&mut self, key: PathBuf) {
         self.dirty = true;
-        if let Some(x) = self.fetches.get_mut(&key) {
-            x.sent_at = None;
-            x.wait_until = Some(Instant::now() + Duration::from_secs(2));
+        let others: Vec<Ask> = self.wanting(&key);
+        let Some(x) = self.fetches.get_mut(&key) else {
+            return;
+        };
+        x.sent_at = None;
+        x.fails += 1;
+        x.wait_until = Some(Instant::now() + Duration::from_secs(2));
+        if x.fails < 3 {
+            return;
+        }
+        // Read through another session that names it, if one does (the
+        // first may be gone there); else it stops, and what wants it asks
+        // what it is now.
+        match others.into_iter().find(|a| a.session != x.ask.session) {
+            Some(a) => {
+                x.ask = a;
+                x.fails = 0;
+            }
+            None => {
+                if let Some(x) = self.fetches.remove(&key) {
+                    let _ = std::fs::remove_file(&x.tmp);
+                }
+                for a in self.wanting(&key) {
+                    if let Some(f) = self.far.get_mut(&a) {
+                        f.retry_at = Some(Instant::now() + Duration::from_secs(10));
+                    }
+                }
+            }
         }
     }
 }
@@ -832,10 +909,14 @@ pub fn changed(machine: &str, paths: Option<&[String]>) {
                         || matches!(&e.stat, Some(FileStat::File { path, .. }) if path == p)
                 })
             });
-            if named && e.asked_at.is_none() {
-                e.stale = true;
-                e.retry_at = None;
-                any = true;
+            if named {
+                if e.asked_at.is_some() {
+                    e.again = true;
+                } else {
+                    e.stale = true;
+                    e.retry_at = None;
+                    any = true;
+                }
             }
         }
         if machine.is_empty() {
@@ -848,14 +929,32 @@ pub fn changed(machine: &str, paths: Option<&[String]>) {
     });
 }
 
-/// Something happened in session `id`: its files are asked about again
-/// (another machine's), or read again (this Mac's).
+/// Something happened in session `id`: the files of it shown lately are
+/// asked about again (another machine's), or read again (this Mac's). At
+/// most once a second per session, so a busy one isn't a stream of
+/// questions.
 pub fn session_changed(id: &str) {
     FILES.with(|f| {
         let mut f = f.borrow_mut();
+        let now = Instant::now();
+        if f.asked_session
+            .get(id)
+            .is_some_and(|t| now.duration_since(*t) < Duration::from_secs(1))
+        {
+            f.pending_sessions.insert(id.to_string());
+            f.dirty = true;
+            return;
+        }
+        f.asked_session.insert(id.to_string(), now);
+        f.pending_sessions.remove(id);
         let mut any = false;
         for (a, e) in f.far.iter_mut() {
-            if a.session == id && e.asked_at.is_none() {
+            if a.session != id || now.duration_since(e.seen_at) > RECENT {
+                continue;
+            }
+            if e.asked_at.is_some() {
+                e.again = true;
+            } else {
                 e.stale = true;
                 e.retry_at = None;
                 any = true;
@@ -887,7 +986,12 @@ pub fn set_online(machine: &str, online: bool, proto: Option<u32>) {
         }
         if online && !was {
             for (a, e) in f.far.iter_mut() {
-                if a.machine() == machine && e.asked_at.is_none() {
+                if a.machine() != machine {
+                    continue;
+                }
+                if e.asked_at.is_some() {
+                    e.again = true;
+                } else {
                     e.stale = true;
                     e.retry_at = None;
                 }
@@ -1005,6 +1109,7 @@ pub fn waiting() -> bool {
             || f.fetches
                 .values()
                 .any(|x| x.sent_at.is_some() || x.wait_until.is_some())
+            || !f.pending_sessions.is_empty()
     })
 }
 

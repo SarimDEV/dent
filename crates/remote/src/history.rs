@@ -74,7 +74,18 @@ impl History {
         std::thread::Builder::new()
             .name("history".into())
             .spawn(move || {
+                // Machines whose history couldn't be kept this run: nothing
+                // more of theirs is kept until their log starts again, so
+                // no gap is ever kept as if whole.
+                let mut broken: std::collections::HashSet<String> = Default::default();
                 for w in rx {
+                    match &w {
+                        Write::Save { machine, .. } if broken.contains(machine) => continue,
+                        Write::Reset { machine, .. } | Write::Forget(machine) => {
+                            broken.remove(machine);
+                        }
+                        _ => {}
+                    }
                     let machine = match &w {
                         Write::Save { machine, .. } | Write::Reset { machine, .. } => {
                             Some(machine.clone())
@@ -89,7 +100,8 @@ impl History {
                         // its history comes again from the start.
                         eprintln!("dent: couldn't keep history: {e:#}");
                         if let Some(m) = machine {
-                            let _ = write(&mut db, Write::Forget(m));
+                            let _ = write(&mut db, Write::Forget(m.clone()));
+                            broken.insert(m);
                         }
                     }
                 }

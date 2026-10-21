@@ -145,10 +145,18 @@ pub async fn session(
             continue;
         }
         if reads_files(&env.body) {
-            // A client can't queue reads without end: past a point its next
-            // request waits for one to finish.
-            while reads.len() >= READS_QUEUED {
-                let _ = reads.join_next().await;
+            // A client can't queue reads without end: past a point it's told
+            // to ask again, and the loop never waits on its reads (an
+            // approval behind them would).
+            while reads.try_join_next().is_some() {}
+            if reads.len() >= READS_QUEUED {
+                let _ = bulk.try_send(encode(
+                    req,
+                    &Out::Error {
+                        message: "busy reading files: ask again shortly".into(),
+                    },
+                ));
+                continue;
             }
             let (d, bulk, mine) = (d.clone(), bulk.clone(), mine.clone());
             let body = env.body;

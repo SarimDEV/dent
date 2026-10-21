@@ -2460,6 +2460,18 @@ impl Dent {
         let name = self.machine_name(&machine);
         let first = self.outside.as_ref() != Some(&ask);
         match crate::files::copy(&ask, crate::files::COPY_MAX) {
+            // A copy kept from before is opened only while the machine is
+            // away; online, the current version is waited for.
+            Look::Stale(p) if crate::files::online(&machine) => {
+                let _ = p;
+                if first {
+                    let file = ask.path.rsplit('/').next().unwrap_or(&ask.path).to_string();
+                    self.toast(ToastAction::Info, format!("Copying {file} from {name}…"));
+                    cx.notify();
+                }
+                self.outside = Some(ask);
+                return;
+            }
             Look::Here(p) | Look::Stale(p) => {
                 self.outside = None;
                 self.toast(ToastAction::Info, format!("Copied from {name}"));
@@ -5601,9 +5613,14 @@ impl Dent {
                 }
             }
         }
-        // Waiting on a clock (a retry, an unanswered question): looked at
-        // again in a second, never by drawing every frame meanwhile.
-        if !came && crate::files::waiting() && !self.files_timer {
+        // Waiting on a clock (a retry, an unanswered question, a page's
+        // file or a video's range on its way): looked at again in a second,
+        // so a lost answer is asked again even in an idle window, never by
+        // drawing every frame meanwhile.
+        let _ = came;
+        let waiting =
+            crate::files::waiting() || !self.web_ranges.is_empty() || !self.far_waiting.is_empty();
+        if waiting && !self.files_timer {
             self.files_timer = true;
             cx.spawn(async move |this, cx| {
                 cx.background_executor()

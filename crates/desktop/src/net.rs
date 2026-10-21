@@ -75,7 +75,10 @@ impl Net {
         let n = net.clone();
         std::thread::spawn(move || {
             for s in dent_remote::store::load() {
-                n.follow(s);
+                // One forgotten meanwhile isn't followed again.
+                if dent_remote::store::load().iter().any(|x| x.id == s.id) {
+                    n.follow(s);
+                }
             }
         });
         net
@@ -182,6 +185,10 @@ impl Net {
         // just come, so its sessions are there before any link (and while
         // it's away); the link then resumes after it. A machine being
         // added has nothing kept yet.
+        // Held while its kept history goes to the window and its link is
+        // made: a request for one of its sessions waits for the link
+        // instead of being dropped.
+        let Ok(mut far) = self.far.lock() else { return };
         let keeping = self.history.clone().map(|history| {
             let kept = (!s.id.is_empty()).then(|| history.load(&s.id)).flatten();
             let resume = kept.map(|k| {
@@ -196,7 +203,6 @@ impl Net {
             });
             dent_remote::remote::Keeping { history, resume }
         });
-        let Ok(mut far) = self.far.lock() else { return };
         if let Some(old) = far.remove(&tag) {
             old.remote.stop();
         }

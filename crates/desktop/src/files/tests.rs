@@ -441,3 +441,119 @@ fn a_failure_waits_on_a_clock_not_on_every_frame() {
     assert!(!busy());
     assert!(waiting());
 }
+
+#[test]
+fn a_change_while_being_asked_asks_again() {
+    setup();
+    set_online("vm-again", true, Some(4));
+    let a = Ask::new("vm-again/s1", "out.png", "/w");
+    picture(&a);
+    let asks = drain()
+        .into_iter()
+        .find_map(|(_, s)| match s {
+            Send::Stat { asks, .. } => Some(asks),
+            _ => None,
+        })
+        .unwrap();
+    // The agent writes it while the question's out; the answer is from
+    // before.
+    changed("vm-again", Some(&["out.png".into()]));
+    stats_came(
+        asks,
+        vec![FileStat::Missing {
+            checked: "/w/out.png".into(),
+        }],
+    );
+    assert!(
+        drain().iter().any(|(_, s)| matches!(s, Send::Stat { .. })),
+        "asked again, not left missing"
+    );
+}
+
+#[test]
+fn a_copy_no_one_looks_at_isnt_made_again_when_its_file_changes() {
+    setup();
+    set_online("vm-want", true, Some(4));
+    let a = Ask::new("vm-want/s1", "w.png", "/w");
+    picture(&a);
+    serve("/w/w.png", stamp(1, 2), b"v1");
+    // Rewritten there, and asked about again, but not drawn since.
+    changed("vm-want", Some(&["w.png".into()]));
+    for (_, s) in drain() {
+        if let Send::Stat { asks, .. } = s {
+            stats_came(asks, vec![file("/w/w.png", stamp(2, 2))]);
+        }
+    }
+    assert!(
+        drain().iter().all(|(_, s)| !matches!(s, Send::Read { .. })),
+        "no copy for something not looked at"
+    );
+    // Drawn again: copied.
+    picture(&a);
+    serve("/w/w.png", stamp(2, 2), b"v2");
+    assert_eq!(std::fs::read(picture(&a).shown().unwrap()).unwrap(), b"v2");
+}
+
+#[test]
+fn a_busy_session_is_asked_about_at_most_once_a_second() {
+    setup();
+    set_online("vm-busy", true, Some(4));
+    let a = Ask::new("vm-busy/s1", "b.png", "/w");
+    picture(&a);
+    serve("/w/b.png", stamp(1, 2), b"ok");
+    session_changed("vm-busy/s1");
+    let first = drain()
+        .iter()
+        .filter(|(_, s)| matches!(s, Send::Stat { .. }))
+        .count();
+    for (_, s) in drain() {
+        let _ = s;
+    }
+    // Answered, then the session changes again and again within the
+    // second: no new question yet.
+    FILES.with(|f| {
+        for e in f.borrow_mut().far.values_mut() {
+            e.asked_at = None;
+            e.stale = false;
+        }
+    });
+    for _ in 0..20 {
+        session_changed("vm-busy/s1");
+    }
+    let burst = drain()
+        .iter()
+        .filter(|(_, s)| matches!(s, Send::Stat { .. }))
+        .count();
+    assert_eq!(first, 1);
+    assert_eq!(burst, 0, "held to the second");
+    assert!(waiting(), "and asked when it's up");
+}
+
+#[test]
+fn a_copy_whose_session_is_gone_reads_through_another_or_stops() {
+    setup();
+    set_online("vm-gone", true, Some(4));
+    let a = Ask::new("vm-gone/s1", "/w/g.png", "/w");
+    let b = Ask::new("vm-gone/s2", "/w/g.png", "/w");
+    picture(&a);
+    picture(&b);
+    for (_, s) in drain() {
+        if let Send::Stat { asks, .. } = s {
+            let n = asks.len();
+            stats_came(asks, vec![file("/w/g.png", stamp(1, 2)); n]);
+        }
+    }
+    let key = drain()
+        .into_iter()
+        .find_map(|(_, s)| match s {
+            Send::Read { key, .. } => Some(key),
+            _ => None,
+        })
+        .unwrap();
+    let first = FILES.with(|f| f.borrow().fetches[&key].ask.session.clone());
+    for _ in 0..3 {
+        read_failed(key.clone());
+    }
+    let now = FILES.with(|f| f.borrow().fetches.get(&key).map(|x| x.ask.session.clone()));
+    assert!(now.is_some_and(|s| s != first), "another session reads it");
+}
