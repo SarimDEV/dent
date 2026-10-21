@@ -251,6 +251,10 @@ impl Dent {
             // Open while its files are read; it closes once they're here.
             .keeps_open(),
         );
+        // Work here a clone won't have: said before it's brought.
+        if let Some(missing) = p.missing() {
+            v.push(Entry::note(&missing));
+        }
         if p.ignored.is_empty() {
             return;
         }

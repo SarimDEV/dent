@@ -80,6 +80,19 @@ pub fn pack(dir: &Path) -> Option<Pack> {
         .collect();
     ignored.sort_by(|a, b| b.carry.cmp(&a.carry).then_with(|| a.path.cmp(&b.path)));
     ignored.truncate(MAX_IGNORED);
+    // What a clone of the remote wouldn't have: commits on no remote, and
+    // tracked files changed and not committed.
+    let count = |args: &[&str]| -> u32 {
+        run(&root, args).map_or(0, |out| {
+            if args[0] == "rev-list" {
+                out.trim().parse().unwrap_or(0)
+            } else {
+                out.lines().filter(|l| !l.trim().is_empty()).count() as u32
+            }
+        })
+    };
+    let unpushed = count(&["rev-list", "--count", "HEAD", "--not", "--remotes"]);
+    let changed = count(&["status", "--porcelain", "--untracked-files=no"]);
     Some(Pack {
         name: root
             .file_name()
@@ -88,6 +101,8 @@ pub fn pack(dir: &Path) -> Option<Pack> {
         remotes,
         branch: crate::workspace::branch(&root),
         ignored,
+        unpushed,
+        changed,
     })
 }
 

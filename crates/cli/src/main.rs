@@ -324,6 +324,9 @@ fn pack(dir: &str) -> Result<dent_protocol::Bring> {
     if pack.remotes.is_empty() {
         bail!("{dir} has no remote another machine can clone from");
     }
+    if let Some(missing) = pack.missing() {
+        eprintln!("note: {missing}");
+    }
     let paths: Vec<String> = pack
         .ignored
         .iter()

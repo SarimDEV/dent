@@ -822,6 +822,37 @@ fn a_project_is_brought_from_another_machine_with_its_ignored_files() {
             ("blob.bin", false)
         ]
     );
+    // All pushed, nothing changed: a clone has everything.
+    assert_eq!((pack.unpushed, pack.changed, pack.missing()), (0, 0, None));
+    // A commit on no remote and a change not committed: said, since a
+    // clone won't have them.
+    std::fs::write(
+        there.join(".env.example"),
+        "KEY=1
+",
+    )
+    .unwrap();
+    git(&there, &["commit", "-q", "-am", "here only"]);
+    std::fs::write(there.join(".gitignore"), "changed\n").unwrap();
+    let again = match c
+        .call(Request::Pack {
+            dir: there.display().to_string(),
+        })
+        .unwrap()
+    {
+        Out::Reply {
+            reply: dent_protocol::Reply::Pack { pack: Some(p) },
+        } => p,
+        o => panic!("{o:?}"),
+    };
+    assert_eq!((again.unpushed, again.changed), (1, 1));
+    assert_eq!(
+        again.missing().as_deref(),
+        Some(
+            "1 commit here isn't pushed, and 1 file has changes not committed: the copy there won't have them"
+        )
+    );
+    git(&there, &["reset", "-q", "--hard", "origin/feature"]);
     // Only files inside the checkout are read.
     assert!(
         c.call(Request::ReadFiles {

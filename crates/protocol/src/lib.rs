@@ -686,6 +686,35 @@ pub struct Pack {
     /// listed.
     #[serde(default)]
     pub ignored: Vec<Ignored>,
+    /// Commits here on no remote, which a clone won't have.
+    #[serde(default)]
+    pub unpushed: u32,
+    /// Tracked files changed here and not committed, which a clone won't
+    /// have either.
+    #[serde(default)]
+    pub changed: u32,
+}
+
+impl Pack {
+    /// What a clone of it would be missing, in words; `None` when nothing.
+    pub fn missing(&self) -> Option<String> {
+        let commits = match self.unpushed {
+            0 => None,
+            1 => Some("1 commit here isn't pushed".to_string()),
+            n => Some(format!("{n} commits here aren't pushed")),
+        };
+        let files = match self.changed {
+            0 => None,
+            1 => Some("1 file has changes not committed".to_string()),
+            n => Some(format!("{n} files have changes not committed")),
+        };
+        let said = match (commits, files) {
+            (Some(c), Some(f)) => format!("{c}, and {f}"),
+            (Some(one), None) | (None, Some(one)) => one,
+            (None, None) => return None,
+        };
+        Some(format!("{said}: the copy there won't have them"))
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
