@@ -26,7 +26,8 @@
 //! - Addresses race a quarter second apart; the first to answer with the
 //!   right key wins. While on a slower route, the better ones are tried
 //!   every 60 s and on every signal, and a route that answered but then
-//!   failed is left alone for 5 minutes.
+//!   failed is left alone for 5 minutes, as is one this device is trusted
+//!   only elsewhere on, or where a different machine answered.
 //!
 //! Every connection has a number, so anything an old socket reports late is
 //! ignored.
@@ -239,6 +240,8 @@ struct Open {
     /// Better routes being tried while on a slower one.
     home: Option<Race>,
     last_home: u64,
+    /// A signal asked for a home check at the next tick.
+    home_due: bool,
 }
 
 pub struct Machine {
@@ -422,7 +425,7 @@ impl Machine {
                     });
                     o.last_ping = now;
                 }
-                o.last_home = 0;
+                o.home_due = true;
             }
             _ => {}
         }
@@ -816,10 +819,12 @@ impl Machine {
         };
         let mut done: Option<(String, Box<Transport>, Trust)> = None;
         let mut diff_machine: Option<String> = None;
+        let mut stale: Option<String> = None;
         {
             let Some(a) = self.attempt_mut(conn) else {
                 return;
             };
+            let addr = a.addr.clone();
             let att = std::mem::replace(&mut a.att, Att::Failed);
             match att {
                 Att::Handshake(ini) => match ini.read(data, known.as_deref()) {
@@ -833,6 +838,7 @@ impl Machine {
                     Err(e) => {
                         if matches!(e, dent_link::Error::WrongKey(_)) {
                             diff_machine = Some(a.addr.clone());
+                            stale = Some(a.addr.clone());
                         }
                         self.io.push_back(Io::Close { conn });
                     }
@@ -843,6 +849,11 @@ impl Machine {
                     }
                     Ok(Some(Opened::Control(Control::Refuse(r)))) => {
                         self.io.push_back(Io::Close { conn });
+                        if matches!(r, Refusal::TrustedOn { .. }) {
+                            // Not usable for this device: demote it rather
+                            // than ask again at every home check.
+                            stale = Some(addr.clone());
+                        }
                         if let Some(race) = self.race_ref(slot) {
                             race.why = Some(refusal_words(&r));
                             if !r.transient() {
@@ -864,6 +875,9 @@ impl Machine {
                     }
                 }
             }
+        }
+        if let Some(addr) = stale {
+            self.cooldown.insert(addr, now + COOLDOWN_MS);
         }
         if let Some(addr) = diff_machine {
             self.notes
@@ -956,6 +970,7 @@ impl Machine {
             redials: 0,
             home: None,
             last_home: now,
+            home_due: false,
         }));
         self.notes.push(Note::Up {
             generation: self.generation,
@@ -1009,7 +1024,9 @@ impl Machine {
                 redial = Some(o.redials);
                 o.redials += 1;
             }
-            if o.home.is_none() && !better.is_empty() && now >= o.last_home + HOME_EVERY_MS {
+            let due = o.home_due || now >= o.last_home + HOME_EVERY_MS;
+            o.home_due = false;
+            if o.home.is_none() && !better.is_empty() && due {
                 o.last_home = now;
                 to_home = true;
             }
@@ -1071,6 +1088,9 @@ impl Machine {
                 }
             }
             Control::Pong { t } if t > 0 && t <= now => self.notes.push(Note::Rtt { ms: now - t }),
+            // Awake only matters to a client waiting on backoff; this link
+            // is live.
+            Control::Goodbye(Goodbye::Awake) => {}
             Control::Goodbye(g) => {
                 let back_soon = matches!(
                     g,

@@ -39,6 +39,8 @@ struct Sim {
     code: Option<String>,
     /// Refuse every connection with this instead of a verdict.
     refuse: Option<Refusal>,
+    /// Refuse connections to this one address with this.
+    refuse_on: Option<(String, Refusal)>,
     conns: HashMap<u64, (String, Peer)>,
     /// Whether the daemon answers frames on live links (false: frozen).
     responsive: bool,
@@ -68,6 +70,7 @@ impl Sim {
             trusted: Vec::new(),
             code: None,
             refuse: None,
+            refuse_on: None,
             conns: HashMap::new(),
             responsive: true,
             notes: Vec::new(),
@@ -147,7 +150,8 @@ impl Sim {
             }
             Peer::Handshaking(res) => {
                 let (mut t, _hello) = res.finish(&data).unwrap();
-                let verdict = if let Some(r) = self.refuse.clone() {
+                let here = self.refuse_on.clone().filter(|(a, _)| *a == addr);
+                let verdict = if let Some(r) = self.refuse.clone().or(here.map(|(_, r)| r)) {
                     Control::Refuse(r)
                 } else if self.trusted.contains(&t.remote) {
                     Control::Trust(Trust::Paired {
@@ -818,4 +822,44 @@ fn frames_on_an_untrusted_answer_mid_race_keep_it_usable() {
     s.m.pair("424242", s.now);
     s.pump();
     assert_eq!(s.m.state(), &State::Online);
+}
+
+#[test]
+fn a_signal_checks_better_routes_at_once() {
+    let mut s = Sim::new(&[("lan:7480", Addr::Refused), ("ts:7480", Addr::Up)]);
+    s.trust_device();
+    online(&mut s);
+    s.addrs.insert("lan:7480".into(), Addr::Up);
+    // Early in the host's clock, well inside the first minute.
+    s.m.signal(Signal::NetworkChanged, s.now);
+    s.pump();
+    s.run_for(500);
+    assert_eq!(s.ups().last().map(|u| u.1.clone()), Some("lan:7480".into()));
+}
+
+#[test]
+fn a_route_trusted_elsewhere_is_left_alone_by_home_checks() {
+    let mut s = Sim::new(&[("lan:7480", Addr::Up), ("ts:7480", Addr::Up)]);
+    s.trust_device();
+    s.refuse_on = Some((
+        "lan:7480".into(),
+        Refusal::TrustedOn {
+            routes: vec!["tailscale".into()],
+        },
+    ));
+    online(&mut s);
+    assert_eq!(s.ups().last().map(|u| u.1.clone()), Some("ts:7480".into()));
+    s.run_for(290_000);
+    let lan = s.dials.iter().filter(|d| *d == "lan:7480").count();
+    assert_eq!(lan, 1, "asked again every minute");
+}
+
+#[test]
+fn awake_on_a_live_link_keeps_it() {
+    let mut s = Sim::new(&[("lan:7480", Addr::Up)]);
+    s.trust_device();
+    online(&mut s);
+    s.daemon_says(Control::Goodbye(Goodbye::Awake));
+    assert_eq!(s.m.state(), &State::Online);
+    assert_eq!(s.ups().len(), 1);
 }
