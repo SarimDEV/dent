@@ -336,6 +336,8 @@ fn an_untrusted_device_pairs_with_the_code() {
     s.pump();
     assert!(s.notes.contains(&Note::PairFailed(Refusal::PairWrong)));
     s.code = Some("424242".into());
+    // Asked twice (a view repeating itself): one exchange.
+    s.m.pair("424242", s.now);
     s.m.pair("424242", s.now);
     s.pump();
     assert_eq!(s.m.state(), &State::Online);
@@ -693,4 +695,127 @@ fn a_restart_that_never_comes_back_says_so() {
         "{:?}",
         s.m.state()
     );
+}
+
+/// A machine not yet paired, answering untrusted on `routes`.
+fn unpaired(routes: &[(&str, Addr)]) -> Sim {
+    let mut s = Sim::new(routes);
+    s.m.known = None;
+    s
+}
+
+#[test]
+fn an_untrusted_link_that_goes_silent_is_redialled() {
+    let mut s = unpaired(&[("lan:7480", Addr::Up)]);
+    s.m.connect(0);
+    s.pump();
+    s.run_for(500);
+    assert!(matches!(s.m.state(), State::NeedsCode { .. }));
+    // Kept alive by pings while the daemon answers.
+    let dials = s.dials.len();
+    s.run_for(20_000);
+    assert_eq!(s.dials.len(), dials);
+    // Then the machine vanishes.
+    s.addrs.insert("lan:7480".into(), Addr::Silent);
+    s.run_for(16_000);
+    assert!(s.dials.len() > dials, "never noticed the silence");
+}
+
+#[test]
+fn a_dropped_connection_resumes_the_same_pairing() {
+    let mut s = unpaired(&[("lan:7480", Addr::Up)]);
+    s.code = Some("424242".into());
+    s.m.connect(0);
+    s.pump();
+    s.run_for(500);
+    let Phase::Untrusted { conn, .. } = &s.m.phase else {
+        panic!("not untrusted")
+    };
+    let c = *conn;
+    // The code goes out, and the connection drops before any answer.
+    s.m.pair("424242", s.now);
+    s.m.closed(c, "reset", s.now);
+    s.pump();
+    s.run_for(2_000);
+    assert_eq!(s.m.state(), &State::Online);
+    assert_eq!(s.m.known_key(), Some(s.daemon.public.as_slice()));
+}
+
+#[test]
+fn paired_counts_only_after_the_machine_proves_the_code() {
+    let mut s = unpaired(&[("lan:7480", Addr::Up)]);
+    s.m.connect(0);
+    s.pump();
+    s.run_for(500);
+    s.daemon_says(Control::Paired {
+        access: Access::Full,
+    });
+    assert!(matches!(s.m.state(), State::NeedsCode { .. }));
+    assert_eq!(s.m.known_key(), None);
+    // Nor after a second pairing message mid-exchange.
+    s.m.pair("424242", s.now);
+    s.m.take_io();
+    s.daemon_says(Control::Pair {
+        spake: hex::encode(dent_link::pair::Pairing::start("000000").outbound),
+    });
+    s.daemon_says(Control::Pair {
+        spake: hex::encode(dent_link::pair::Pairing::start("000000").outbound),
+    });
+    s.daemon_says(Control::Paired {
+        access: Access::Full,
+    });
+    assert_eq!(s.m.known_key(), None);
+    assert!(s.ups().is_empty());
+}
+
+#[test]
+fn pairing_on_a_live_link_leaves_it_alone() {
+    let mut s = Sim::new(&[("lan:7480", Addr::Up)]);
+    s.trust_device();
+    online(&mut s);
+    s.m.pair("424242", s.now);
+    s.pump();
+    assert_eq!(s.ups().len(), 1);
+    assert_eq!(s.m.state(), &State::Online);
+}
+
+#[test]
+fn an_untrusted_answer_lost_mid_race_is_not_kept() {
+    let mut s = unpaired(&[("lan:7480", Addr::Up), ("ts:7480", Addr::Silent)]);
+    s.m.connect(0);
+    s.pump();
+    s.run_for(300);
+    // The LAN answered untrusted; Tailscale is still dialling. Then the
+    // LAN socket drops.
+    let lan = *s
+        .conns
+        .iter()
+        .find(|(_, (a, _))| a == "lan:7480")
+        .map(|(c, _)| c)
+        .unwrap();
+    s.conns.remove(&lan);
+    s.m.closed(lan, "reset", s.now);
+    s.pump();
+    // Tailscale times out, the race fails, and the next one settles.
+    s.run_for(7_000);
+    match &s.m.phase {
+        Phase::Untrusted { conn, .. } => assert!(s.conns.contains_key(conn), "kept a dead link"),
+        _ => panic!("expected to be waiting for a code"),
+    }
+}
+
+#[test]
+fn frames_on_an_untrusted_answer_mid_race_keep_it_usable() {
+    let mut s = unpaired(&[("lan:7480", Addr::Up), ("ts:7480", Addr::Silent)]);
+    s.code = Some("424242".into());
+    s.m.connect(0);
+    s.pump();
+    s.run_for(300);
+    // The machine pings the untrusted link while Tailscale still dials.
+    s.daemon_says(Control::Ping { t: 1 });
+    s.run_for(3_500);
+    assert!(matches!(s.m.state(), State::NeedsCode { .. }));
+    s.m.pair("424242", s.now);
+    s.pump();
+    assert_eq!(s.m.state(), &State::Online);
 }

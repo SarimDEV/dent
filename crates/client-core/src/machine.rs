@@ -204,12 +204,15 @@ enum Phase {
         until: u64,
     },
     Racing(Race),
-    /// Answered but untrusted: the connection stays open for pairing.
+    /// Answered but untrusted: the connection stays open for pairing,
+    /// kept alive by pings like a trusted one.
     Untrusted {
         conn: u64,
         addr: String,
         t: Box<Transport>,
         pairing: Option<(PairStep, u64)>,
+        last_rx: u64,
+        last_ping: u64,
     },
     Open(Box<Open>),
     /// Waiting for a signal: blocked by a refusal, or removed.
@@ -259,6 +262,8 @@ pub struct Machine {
     missed_restart: bool,
     /// Routes that answered then failed, until when they're left alone.
     cooldown: HashMap<String, u64>,
+    /// The code to pair with, kept until an outcome: a dropped connection
+    /// resumes the same pairing on the next one.
     code: Option<String>,
     rng: u64,
 }
@@ -331,37 +336,57 @@ impl Machine {
 
     /// Stop and stay stopped.
     pub fn disconnect(&mut self) {
+        self.code = None;
         self.close_all();
         self.phase = Phase::Off;
         self.set_state(State::Off);
     }
 
     /// Pair with the code shown on the machine. Uses the open untrusted
-    /// connection if there is one, else connects first.
+    /// connection if there is one, else connects first. The code is kept
+    /// until pairing succeeds or is refused, so a dropped connection
+    /// resumes it.
     pub fn pair(&mut self, code: &str, now: u64) {
         self.code = Some(code.to_string());
-        if let Phase::Untrusted {
+        match self.phase {
+            // An exchange in flight finishes first: a second one would
+            // break it on the machine's side.
+            Phase::Untrusted {
+                pairing: Some(_), ..
+            } => {}
+            Phase::Untrusted { .. } => self.start_pair(now),
+            // Its outcome decides; an untrusted answer pairs then.
+            Phase::Racing(_) => {}
+            // Already trusted: nothing to pair.
+            Phase::Open(_) => self.code = None,
+            Phase::Off | Phase::Waiting { .. } | Phase::Blocked => {
+                self.attempt = 0;
+                self.race(now);
+            }
+        }
+    }
+
+    fn start_pair(&mut self, now: u64) {
+        let Some(code) = self.code.clone() else {
+            return;
+        };
+        let Phase::Untrusted {
             conn, t, pairing, ..
         } = &mut self.phase
-        {
-            let p = dent_link::pair::Pairing::start(code);
-            let msg = Control::Pair {
-                spake: hex::encode(&p.outbound),
-            };
-            if let Ok(f) = t.seal_control(&msg) {
-                self.io.push_back(Io::Send {
-                    conn: *conn,
-                    data: f,
-                });
-            }
-            *pairing = Some((PairStep::Spake(Box::new(p)), now + STEP_MS));
-            self.code = None;
+        else {
             return;
+        };
+        let p = dent_link::pair::Pairing::start(&code);
+        let msg = Control::Pair {
+            spake: hex::encode(&p.outbound),
+        };
+        if let Ok(f) = t.seal_control(&msg) {
+            self.io.push_back(Io::Send {
+                conn: *conn,
+                data: f,
+            });
         }
-        if !matches!(self.phase, Phase::Racing(_)) {
-            self.attempt = 0;
-            self.race(now);
-        }
+        *pairing = Some((PairStep::Spake(Box::new(p)), now + STEP_MS));
     }
 
     /// Something changed that's worth acting on at once.
@@ -427,7 +452,15 @@ impl Machine {
             Phase::Off | Phase::Blocked => None,
             Phase::Waiting { until } => Some(*until),
             Phase::Racing(r) => race_deadline(r),
-            Phase::Untrusted { pairing, .. } => pairing.as_ref().map(|(_, d)| *d),
+            Phase::Untrusted {
+                pairing,
+                last_rx,
+                last_ping,
+                ..
+            } => {
+                let d = ((*last_rx).max(*last_ping) + PING_MS).min(last_rx + SILENCE_MS);
+                Some(pairing.as_ref().map_or(d, |(_, p)| d.min(*p)))
+            }
             Phase::Open(o) => {
                 // Only deadlines still ahead: one already acted on (slow
                 // shown, replacement running) would wake the host in a loop.
@@ -457,14 +490,28 @@ impl Machine {
         match &mut self.phase {
             Phase::Waiting { until } if now >= *until => self.race(now),
             Phase::Racing(_) => self.step_race(now, Slot::Main),
-            Phase::Untrusted { conn, pairing, .. } => {
-                if let Some((_, deadline)) = pairing
-                    && now >= *deadline
-                {
-                    let c = *conn;
-                    self.notes.push(Note::PairFailed(Refusal::PairClosed));
-                    self.io.push_back(Io::Close { conn: c });
+            Phase::Untrusted {
+                conn,
+                t,
+                pairing,
+                last_rx,
+                last_ping,
+                ..
+            } => {
+                // A stalled or silent link is dropped; the code is kept, so
+                // the next connection resumes the pairing.
+                if pairing.as_ref().is_some_and(|(_, d)| now >= *d) {
                     self.after_loss(now, "pairing stalled".into());
+                } else if now >= *last_rx + SILENCE_MS {
+                    self.after_loss(now, format!("silent for {} s", SILENCE_MS / 1000));
+                } else if now >= (*last_rx).max(*last_ping) + PING_MS
+                    && let Ok(f) = t.seal_control(&Control::Ping { t: now })
+                {
+                    self.io.push_back(Io::Send {
+                        conn: *conn,
+                        data: f,
+                    });
+                    *last_ping = now;
                 }
             }
             Phase::Open(_) => self.tick_open(now),
@@ -495,11 +542,22 @@ impl Machine {
     }
 
     pub fn closed(&mut self, conn: u64, why: &str, now: u64) {
-        if let Some(a) = self.attempt_mut(conn) {
-            if !matches!(a.att, Att::Failed) {
+        // An untrusted answer kept in a race: it's gone.
+        if let Some(slot) = self.untrusted_slot(conn) {
+            if let Some(r) = self.race_ref(slot) {
+                r.untrusted = None;
+                r.why = Some(why.to_string());
+            }
+            self.settle_race(now, slot);
+            return;
+        }
+        if let Some(slot) = self.slot_of(conn) {
+            if let Some(a) = self.attempt_mut(conn) {
                 a.att = Att::Failed;
             }
-            self.note_failure(why);
+            if let Some(r) = self.race_ref(slot) {
+                r.why = Some(why.to_string());
+            }
             self.tick(now);
             return;
         }
@@ -511,6 +569,12 @@ impl Machine {
     }
 
     pub fn received(&mut self, conn: u64, data: &[u8], now: u64) {
+        // An untrusted answer kept in a race? Its frames are opened in
+        // order, or the pairing that may follow would fail.
+        if let Some(slot) = self.untrusted_slot(conn) {
+            self.race_untrusted_received(slot, conn, data, now);
+            return;
+        }
         // An attempt in progress?
         if self.attempt_mut(conn).is_some() {
             self.attempt_received(conn, data, now);
@@ -545,7 +609,12 @@ impl Machine {
                     Ok(Some(Opened::Control(c))) => self.open_control(c, now),
                 }
             }
-            Phase::Untrusted { conn: c, .. } if *c == conn => self.untrusted_received(data, now),
+            Phase::Untrusted {
+                conn: c, last_rx, ..
+            } if *c == conn => {
+                *last_rx = now;
+                self.untrusted_received(data, now);
+            }
             _ => {}
         }
     }
@@ -686,11 +755,11 @@ impl Machine {
                         addr,
                         t,
                         pairing: None,
+                        last_rx: now,
+                        last_ping: now,
                     };
                     self.set_state(State::NeedsCode { pairing_open });
-                    if let Some(code) = self.code.take() {
-                        self.pair(&code, now);
-                    }
+                    self.start_pair(now);
                     return;
                 }
                 match refused {
@@ -701,11 +770,36 @@ impl Machine {
         }
     }
 
-    fn note_failure(&mut self, why: &str) {
-        for slot in [Slot::Main, Slot::Replace, Slot::Home] {
-            if let Some(r) = self.race_ref(slot) {
-                r.why = Some(why.to_string());
+    fn untrusted_slot(&self, conn: u64) -> Option<Slot> {
+        let has = |r: &Race| r.untrusted.as_ref().is_some_and(|u| u.0 == conn);
+        match &self.phase {
+            Phase::Racing(r) if has(r) => Some(Slot::Main),
+            Phase::Open(o) if o.replace.as_ref().is_some_and(has) => Some(Slot::Replace),
+            Phase::Open(o) if o.home.as_ref().is_some_and(has) => Some(Slot::Home),
+            _ => None,
+        }
+    }
+
+    fn race_untrusted_received(&mut self, slot: Slot, conn: u64, data: &[u8], now: u64) {
+        let Some(r) = self.race_ref(slot) else {
+            return;
+        };
+        let Some((_, _, t, _)) = r.untrusted.as_mut() else {
+            return;
+        };
+        let (keep, reply) = match t.open(data) {
+            Ok(Some(Opened::Control(Control::Ping { t: n }))) => {
+                (true, t.seal_control(&Control::Pong { t: n }).ok())
             }
+            Ok(Some(Opened::Control(Control::Refuse(_)))) | Err(_) => (false, None),
+            _ => (true, None),
+        };
+        if !keep {
+            r.untrusted = None;
+            self.io.push_back(Io::Close { conn });
+            self.settle_race(now, slot);
+        } else if let Some(data) = reply {
+            self.io.push_back(Io::Send { conn, data });
         }
     }
 
@@ -846,6 +940,7 @@ impl Machine {
         }
         self.restart_until = None;
         self.missed_restart = false;
+        self.code = None;
         self.last_online = Some(now);
         self.phase = Phase::Open(Box::new(Open {
             conn,
@@ -1076,7 +1171,11 @@ impl Machine {
                     self.io.push_back(Io::Send { conn, data: f });
                 }
             }
-            (Control::Pair { spake }, Some((step, deadline))) => {
+            // Only in answer to ours: a second one must not move pairing on
+            // past the machine's proof of the code.
+            (Control::Pair { spake }, Some((step, deadline)))
+                if matches!(step, PairStep::Spake(_)) =>
+            {
                 let PairStep::Spake(p) = std::mem::replace(step, PairStep::Done) else {
                     return;
                 };
@@ -1099,19 +1198,22 @@ impl Machine {
                     dent_link::pair::verify(key, &t.hash, dent_link::pair::Role::Daemon, &m)
                 });
                 if !ok {
-                    // The machine couldn't prove it knows the code.
-                    self.io.push_back(Io::Close { conn });
-                    return self.pair_failed(Refusal::PairWrong);
+                    // The machine couldn't prove it knows the code: not the
+                    // machine the code came from.
+                    self.pair_failed(Refusal::PairWrong);
+                    return self.after_loss(now, "the machine couldn't prove the code".into());
                 }
                 *pairing = Some((PairStep::Done, now + STEP_MS));
             }
-            (Control::Paired { access }, _) => {
+            // Only once the machine has proved it knows the code.
+            (Control::Paired { access }, Some((PairStep::Done, _))) => {
                 let Phase::Untrusted { conn, addr, t, .. } =
                     std::mem::replace(&mut self.phase, Phase::Off)
                 else {
                     return;
                 };
                 self.known = Some(t.remote.clone());
+                self.code = None;
                 self.notes.push(Note::Paired {
                     key: t.remote.clone(),
                 });
@@ -1136,6 +1238,7 @@ impl Machine {
 
     /// Pairing didn't work; the connection stays open for another try.
     fn pair_failed(&mut self, r: Refusal) {
+        self.code = None;
         self.notes.push(Note::PairFailed(r));
         if let Phase::Untrusted { pairing, .. } = &mut self.phase {
             *pairing = None;
