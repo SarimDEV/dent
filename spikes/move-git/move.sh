@@ -20,13 +20,21 @@
 set -euo pipefail
 
 die() { echo "refused: $*" >&2; exit 3; }
+# An absolute path, so a relative argument still works after a cd.
+abs() { case $1 in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$PWD" "$1" ;; esac; }
+# shasum ships with macOS; sha256sum with coreutils.
+sha256() {
+  if command -v sha256sum > /dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1
+}
 quiet_git() { GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never SSH_ASKPASS_REQUIRE=never git "$@"; }
 # Never inherit a caller's git environment.
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
       GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_CEILING_DIRECTORIES
 
 pack() {
-  local wt=$1 out=$2 id=$3 have=${4:-}
+  local wt out id=$3 have=${4:-}
+  wt=$(abs "$1"); out=$(abs "$2")
+  [ -n "$have" ] && have=$(abs "$have")
   mkdir -p "$out"
   cd "$wt"
   local tip branch
@@ -43,11 +51,17 @@ pack() {
   fi
 
   local tmp; tmp=$(mktemp -d)
+  # Any exit from here on, a refusal included, leaves no temporary refs or
+  # files behind in the person's repository.
+  trap "rm -rf $(printf %q "$tmp"); git update-ref -d refs/dent/move/$id/snapshot 2>/dev/null; git update-ref -d refs/dent/move/$id/index 2>/dev/null" EXIT
   local idx="$tmp/index"
   local real; real=$(git rev-parse --git-path index)
-  if [ -f "$real" ]; then cp "$real" "$idx"; fi
-  # Same-size edits made in the same second must be re-read, not trusted.
-  touch -t 197001010000.01 "$idx" 2>/dev/null || true
+  if [ -f "$real" ]; then
+    cp "$real" "$idx"
+    # An old mtime marks every entry racily clean, so same-size edits made in
+    # the same second as the last index write are re-read, not trusted.
+    touch -t 197001010000.01 "$idx"
+  fi
   local cfg=(-c core.splitIndex=false -c splitIndex.sharedIndexExpire=never -c core.fsmonitor=false)
   local snap_tree idx_tree
   GIT_INDEX_FILE=$idx git "${cfg[@]}" add --all -- ':/'
@@ -61,39 +75,44 @@ pack() {
   git update-ref "refs/dent/move/$id/index" "$ixc"
   rm -rf "$tmp"
 
+  # Commits to leave out. It can end up empty, and macOS's bash 3.2 treats
+  # "${a[@]}" of an empty array as unbound under set -u, hence ${a[@]+…} below.
   local not=()
   if [ -n "$have" ] && [ -s "$have" ]; then
     while read -r h; do
-      git cat-file -e "$h^{commit}" 2>/dev/null && not+=("^$h")
+      if git cat-file -e "$h^{commit}" 2>/dev/null; then not+=("^$h"); fi
     done < "$have"
   else
     not+=(--not --remotes=origin)
   fi
   local refs=("refs/dent/move/$id/snapshot" "refs/dent/move/$id/index")
-  [ -n "$branch" ] && refs+=("refs/heads/$branch")
-  git bundle create -q "$out/$id.bundle" "${refs[@]}" "${not[@]}"
+  if [ -n "$branch" ]; then refs+=("refs/heads/$branch"); fi
+  git bundle create -q "$out/$id.bundle" "${refs[@]}" ${not[@]+"${not[@]}"}
   local size; size=$(wc -c < "$out/$id.bundle" | tr -d ' ')
   if [ "$size" -gt $((200 * 1024 * 1024)) ]; then
     rm -f "$out/$id.bundle"
     die "the work is over 200 MiB; push the branch, then move"
   fi
-  local sum; sum=$(shasum -a 256 "$out/$id.bundle" | cut -d' ' -f1)
+  local sum; sum=$(sha256 "$out/$id.bundle")
   printf '{"id":"%s","tip":"%s","snapshot":"%s","index":"%s","branch":"%s","bytes":%s,"sha256":"%s"}\n' \
     "$id" "$tip" "$snap" "$ixc" "$branch" "$size" "$sum" > "$out/$id.json"
   git update-ref -d "refs/dent/move/$id/snapshot" "$snap"
   git update-ref -d "refs/dent/move/$id/index" "$ixc"
+  rm -rf "$tmp"
+  trap - EXIT
   cat "$out/$id.json"
 }
 
 field() { sed -E "s/.*\"$2\":\"?([^\",}]*)\"?.*/\1/" "$1"; }
 
 apply() {
-  local repo=$1 out=$2 id=$3 new=$4
+  local repo out id=$3 new
+  repo=$(abs "$1"); out=$(abs "$2"); new=$(abs "$4")
   local man="$out/$id.json" bundle="$out/$id.bundle"
   local tip snap ixc branch sum
   tip=$(field "$man" tip); snap=$(field "$man" snapshot); ixc=$(field "$man" index)
   branch=$(field "$man" branch); sum=$(field "$man" sha256)
-  [ "$(shasum -a 256 "$bundle" | cut -d' ' -f1)" = "$sum" ] || die "the bundle doesn't match its hash"
+  [ "$(sha256 "$bundle")" = "$sum" ] || die "the bundle doesn't match its hash"
   cd "$repo"
   local heads; heads=$(git bundle list-heads "$bundle" 2>/dev/null) || die "the bundle is damaged"
   grep -q " refs/dent/move/$id/snapshot$" <<< "$heads" && grep -q " refs/dent/move/$id/index$" <<< "$heads" \
@@ -102,31 +121,38 @@ apply() {
     quiet_git fetch -q origin || true
     git bundle verify -q "$bundle" > /dev/null 2>&1 || die "commits it builds on are missing here; push the branch where it came from"
   fi
-  [ -n "$branch" ] && git check-ref-format "refs/heads/$branch" || [ -z "$branch" ] || die "bad branch name"
-  git fetch -q "$bundle" "refs/dent/move/$id/snapshot:refs/dent/move/$id/snapshot" \
-                         "refs/dent/move/$id/index:refs/dent/move/$id/index"
-  [ "$(git rev-parse "refs/dent/move/$id/snapshot")" = "$snap" ] || die "snapshot mismatch"
-  [ "$(git rev-parse "$snap^")" = "$tip" ] || die "snapshot parent mismatch"
+  if [ -n "$branch" ]; then
+    git check-ref-format "refs/heads/$branch" || die "bad branch name"
+  fi
 
-  local undo=()
+  # Undo steps, run newest first. Starts with a harmless entry because
+  # macOS's bash 3.2 treats "${a[@]}" of an empty array as unbound.
+  local undo=(:)
   cleanup() {
     git update-ref -d "refs/dent/move/$id/snapshot" 2>/dev/null || true
     git update-ref -d "refs/dent/move/$id/index" 2>/dev/null || true
   }
-  local done=0
   rollback() {
-    [ "$done" = 1 ] && return
-    for u in "${undo[@]}"; do eval "$u" || true; done
+    # The new worktree may be the current folder, and may be removed below.
+    cd "$repo" || true
+    local i
+    for ((i = ${#undo[@]} - 1; i >= 0; i--)); do eval "${undo[i]}" || true; done
     cleanup
   }
   # Any exit before the end, a refusal included, undoes what this run made.
   trap 'rollback' EXIT
 
+  git fetch -q "$bundle" "+refs/dent/move/$id/snapshot:refs/dent/move/$id/snapshot" \
+                         "+refs/dent/move/$id/index:refs/dent/move/$id/index"
+  [ "$(git rev-parse "refs/dent/move/$id/snapshot")" = "$snap" ] || die "snapshot mismatch"
+  [ "$(git rev-parse "refs/dent/move/$id/index")" = "$ixc" ] || die "index mismatch"
+  [ "$(git rev-parse "$snap^")" = "$tip" ] || die "snapshot parent mismatch"
+
   local checkout="$branch"
   if [ -n "$branch" ]; then
     local cur=""
     cur=$(git rev-parse -q --verify "refs/heads/$branch" || true)
-    if git worktree list --porcelain | grep -qx "branch refs/heads/$branch"; then
+    if git worktree list --porcelain | grep -qxF "branch refs/heads/$branch"; then
       if [ "$cur" = "$tip" ]; then checkout=""; else die "$branch is checked out in another worktree here"; fi
     fi
     if [ -n "$cur" ] && [ "$cur" != "$tip" ]; then
@@ -139,7 +165,8 @@ apply() {
     fi
   fi
   mkdir "$new" || die "$new already exists"
-  undo+=("git worktree remove --force '$new' 2>/dev/null; rm -rf '$new'; git worktree prune")
+  local q; q=$(printf %q "$new")
+  undo+=("git worktree remove --force $q 2>/dev/null; rm -rf $q; git worktree prune")
   rmdir "$new"
   if [ -n "$checkout" ]; then
     git worktree add -q "$new" "$branch"
@@ -149,7 +176,6 @@ apply() {
   cd "$new"
   git checkout -q --no-overlay "$snap" -- .
   git read-tree -m "$ixc^{tree}"
-  done=1
   trap - EXIT
   cleanup
   echo "applied $id into $new"
