@@ -1,6 +1,6 @@
 # 0061. Trust: a pinned key from pairing, or a strict live Tailscale check; only authenticated removal
 
-Status: proposed (2026-10-20) · R-B1 and R-B2 passed ([spike 10](../spikes/10-tailscale-trust.md)); still to confirm: [R-B3–B9](../remote-tests.md#b-trust-and-identity) · Builds on [0033](0033-direct-websocket-hub-on-hold.md), [spike 05](../spikes/05-direct-links.md) · Plan: [remote-plan.md](../remote-plan.md)
+Status: proposed (2026-10-20) · R-B1, R-B2 ([spike 10](../spikes/10-tailscale-trust.md)) and R-B4 ([spike 15](../spikes/15-sleep-restart-and-serve.md)) passed; still to confirm: [R-B5–B9] (R-B3 optional)(../remote-tests.md#b-trust-and-identity) · Builds on [0033](0033-direct-websocket-hub-on-hold.md), [spike 05](../spikes/05-direct-links.md) · Plan: [remote-plan.md](../remote-plan.md)
 
 ## Decision
 

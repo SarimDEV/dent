@@ -18,7 +18,7 @@ Status: proposed (2026-10-20) · R-E1–E6 passed on Linux ([spike 13](../spikes
 
    A failed check stops here, and nothing is stopped.
 4. It records `pending`, then acknowledges.
-5. It stops the old daemon. The holder keeps every agent running.
+5. It tells the old daemon why it's being stopped (update, with the expected downtime), so clients show "restarting" rather than "quit" (a bare SIGTERM can't say which; [spike 15](../spikes/15-sleep-restart-and-serve.md)). Then it stops the old daemon. The holder keeps every agent running.
 6. It snapshots the database (main file, `-wal`, `-shm`) once per update. It clones on APFS and reflink filesystems and copies elsewhere, and never overwrites the snapshot on a retry.
 7. It starts the new daemon as a **trial**. The trial migrates, binds its socket and listeners, then **parks**: it doesn't attach to the holder's agents or accept commands. Then it reports `prepared`.
 8. The launcher writes `committed` durably and tells the daemon, which unparks.

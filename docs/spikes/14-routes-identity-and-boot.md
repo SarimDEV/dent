@@ -4,7 +4,7 @@ Date: 2026-10-20 · studio (macOS 26.5) and dent-linux (Ubuntu 24.04 VM, Lima 2.
 
 ## Coming home (R-A6)
 
-The client followed a session with two routes, the LAN first and Tailscale second, using 0062's rules and a 20 s home check for the test. 60 s into the run, the LAN was blocked for 60 s.
+The client followed a session with two routes, the LAN first and Tailscale second, using 0062's rules and a 20 s home check for the test. About 28 s into the run, the LAN was blocked for 60 s.
 
 | Moment | What happened |
 | --- | --- |

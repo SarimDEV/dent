@@ -60,7 +60,7 @@ The test rig is the owner's Mac plus `dent-linux`, a Lima VM on it. The VM is on
    - Check a tagged machine.
    - Check a connection arriving through `tailscale serve` from loopback.
 
-   This decides door 4. (R-B1–B4: B1 and B2 **done**, [spike 10](spikes/10-tailscale-trust.md))
+   This decides door 4. (R-B1–B4: B1 and B2 **done**, [spike 10](spikes/10-tailscale-trust.md); B4 **done**, [spike 15](spikes/15-sleep-restart-and-serve.md); B3 optional)
 3. **The link under a bad network.** Extend `spikes/link` with the new liveness, backoff and route rules, then run it between the Mac and the VM:
    - packet loss and reordering;
    - added latency;
@@ -71,7 +71,7 @@ The test rig is the owner's Mac plus `dent-linux`, a Lima VM on it. The VM is on
    - hours unreachable;
    - an hour-long soak.
 
-   This decides doors 3 and 5. (R-A1–A10: A1 and A3 **done**, [spike 12](spikes/12-link-under-real-networks.md); A6 **done**, [spike 14](spikes/14-routes-identity-and-boot.md))
+   This decides doors 3 and 5. (R-A1–A10: A1 and A3 **done**, [spike 12](spikes/12-link-under-real-networks.md); A6 **done**, [spike 14](spikes/14-routes-identity-and-boot.md); A4 and A5 **done**, [spike 15](spikes/15-sleep-restart-and-serve.md))
 4. **Git across machines.** A script that packs a worktree as a snapshot commit in a bundle and applies it on the VM. It must reproduce `git status` exactly:
    - binaries, deletions, renames and file modes;
    - staged, untracked and force-added ignored files.

@@ -1,6 +1,6 @@
 # 0062. Liveness and retry: any frame is life, probe before replacing, capped backoff from v1
 
-Status: proposed (2026-10-20) · R-A1, R-A3 ([spike 12](../spikes/12-link-under-real-networks.md)) and R-A6 ([spike 14](../spikes/14-routes-identity-and-boot.md)) passed; still to confirm: [R-A4, R-A5, R-A7, R-A8](../remote-tests.md#a-links-liveness-and-routes) · Changes spike 05's timings · Plan: [remote-plan.md](../remote-plan.md)
+Status: proposed (2026-10-20) · R-A1, R-A3 ([spike 12](../spikes/12-link-under-real-networks.md)), R-A6 ([spike 14](../spikes/14-routes-identity-and-boot.md)), R-A4 and R-A5 ([spike 15](../spikes/15-sleep-restart-and-serve.md)) passed; still to confirm: [R-A7, R-A8](../remote-tests.md#a-links-liveness-and-routes) · Changes spike 05's timings · Plan: [remote-plan.md](../remote-plan.md)
 
 ## Decision
 

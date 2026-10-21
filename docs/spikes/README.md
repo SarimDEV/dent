@@ -18,3 +18,4 @@ Each spike is a small crate under `spikes/` plus a findings note here.
 | 12 | [The link under real network trouble (remote stage 0, R-A1/A3)](12-link-under-real-networks.md) | Done |
 | 13 | [Running as a service, and updating without breaking (remote stage 0, R-E1–E6)](13-service-and-updates.md) | Done |
 | 14 | [Coming home, cloned machines, and starting at boot (remote stage 0, R-A6/B7)](14-routes-identity-and-boot.md) | Done |
+| 15 | [A frozen machine, an announced restart, and Tailscale Serve (remote stage 0, R-A4/A5/B4)](15-sleep-restart-and-serve.md) | Done |
