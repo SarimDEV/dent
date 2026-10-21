@@ -89,6 +89,11 @@ Settings (⌘, or dent › Settings…) is a page of its own, in place of the se
 - Bring reads the ticked files, and the chip names the project.
 - The session starts on the chosen machine at once and works in the clone once it's made.
 - If the clone can't be made, the message comes back to the reply box.
+
+  Also in Machines:
+  - An asleep or unreachable machine that has said how to wake it offers **Wake**: magic packets from this Mac, which work from the same network, then a retry.
+  - Pictures in another machine's sessions are copied here once and shown.
+  - "Devices on this network" in Settings lets devices on the LAN reach this Mac to pair without Tailscale.
 - **Other machines' sessions:** a machine chip on the new-session tray picks where it runs. A session on an away machine says so under its header, with Retry, and messages written meanwhile wait on this device until it's back ([0063](decisions/0063-queued-prompts.md), [0067](decisions/0067-settings-page-and-machines.md)).
 - **The welcome** opens on the very first launch, after the daemon answers: the agents, this Mac, and the shortcut and keep-awake choices, with **Get started**. It never opens again, and installs from before it existed count as seen. Per-project choices stay where they are, remembered by starting a session ([0054](decisions/0054-project-defaults-prs-and-scripts.md)).
 - **When the agent can't work:** while the default agent isn't installed or is signed out, the new-session page says so under its title ("Claude Code is signed out"), with Sign in or How to install, and Check again.

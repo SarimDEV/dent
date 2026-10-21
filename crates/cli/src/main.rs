@@ -261,6 +261,10 @@ async fn ask(args: &[String]) -> Result<()> {
                     }
                 }
                 Some(dent_remote::remote::Event::State(s)) => eprintln!("{name}: {s:?}"),
+                // What its welcome said (routes, how to wake it), kept.
+                Some(dent_remote::remote::Event::Saved(s)) => {
+                    let _ = dent_remote::store::upsert(&s);
+                }
                 Some(_) => {}
                 None => bail!("the connection ended"),
             },

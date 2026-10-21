@@ -23,7 +23,9 @@ Status: accepted (2026-10-20, owner's picks from the machines mockups) · Amends
 
 **Fixed words.** Online, Asleep, Can't reach, Connecting…, Tailscale, LAN, This Mac. With more than one machine, each inbox row names its machine after the project, and the status bar names only the machines that need a look, then how many there are.
 
-**Nothing that doesn't work yet is shown.** Wake (it needs Wake-on-LAN), a per-device LAN switch and hiding a machine from the inbox are left out until they exist.
+**Nothing that doesn't work yet is shown.** Hiding a machine from the inbox is left out until it exists. Wake and the LAN switch exist now (2026-10-20):
+- An asleep or unreachable machine that has named its network cards offers **Wake** in place of Retry.
+- This Mac's Settings has a **Devices on this network** switch.
 
 ## Why
 
