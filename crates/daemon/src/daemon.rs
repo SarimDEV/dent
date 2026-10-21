@@ -831,7 +831,14 @@ impl Daemon {
         let secs = now_ms().saturating_sub(started).div_ceil(1000);
         let ok = got.is_ok();
         let text = match got {
-            Ok(line) => format!("{line} in {secs}s"),
+            Ok((line, notes)) => {
+                let mut text = format!("{line} in {secs}s");
+                for n in notes {
+                    text.push_str("; ");
+                    text.push_str(&n);
+                }
+                text
+            }
             Err(e) => {
                 // The agent still needs its folder to start in.
                 let _ = std::fs::create_dir_all(&dest);

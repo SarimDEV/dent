@@ -199,24 +199,40 @@ pub fn stage(staging: &Path, files: &[Carried]) -> Result<(), String> {
 }
 
 /// Clone `b` into `dest` (an empty folder this machine made for it, or one
-/// a clone cut short left: emptied first), recreate its other remotes,
-/// check out its branch and write in the files waiting in `staging`. What
-/// happened, in a line for the chat, or what went wrong.
-pub fn clone_into(dest: &Path, b: &Bring, staging: &Path) -> Result<String, String> {
+/// a clone cut short left), recreate its other remotes, check out its
+/// branch and write in the files waiting in `staging`. What happened, as a
+/// line for the chat and notes to follow it, or what went wrong.
+pub fn clone_into(dest: &Path, b: &Bring, staging: &Path) -> Result<(String, Vec<String>), String> {
     let first = b
         .remotes
         .first()
         .ok_or_else(|| format!("{} has no remote this machine can clone from", b.name))?;
-    if dest.exists() {
-        std::fs::remove_dir_all(dest).map_err(|e| e.to_string())?;
-    }
     let parent = dest.parent().ok_or("no folder to clone into")?;
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let to = dest.display().to_string();
+    // Each try clones into a folder of its own beside `dest`, moved into
+    // place once whole: a clone a killed daemon left running writes to its
+    // own folder, never this one's. Those left by earlier tries go.
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tag = format!(".{name}.cloning-");
+    if let Ok(rd) = std::fs::read_dir(parent) {
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().starts_with(&tag) {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let temp = parent.join(format!("{tag}{nanos}"));
+    let to = temp.display().to_string();
     let mut notes = Vec::new();
     let clone = |url: &str| {
         run(parent, &["clone", "-q", "-o", &first.name, "--", url, &to]).map_err(|e| {
-            let _ = std::fs::remove_dir_all(dest);
+            let _ = std::fs::remove_dir_all(&temp);
             first_line(&e)
         })
     };
@@ -226,14 +242,17 @@ pub fn clone_into(dest: &Path, b: &Bring, staging: &Path) -> Result<String, Stri
         // the same, and stays that way here.
         let https =
             https_of(&first.url).ok_or_else(|| format!("couldn't clone {}: {e}", first.url))?;
-        clone(&https).map_err(|e2| {
-            format!("couldn't clone {}: {e}; nor over HTTPS: {e2}", first.url)
-        })?;
+        clone(&https)
+            .map_err(|e2| format!("couldn't clone {}: {e}; nor over HTTPS: {e2}", first.url))?;
         notes.push(format!(
             "{} over HTTPS, as SSH to it didn't work here",
             first.name
         ));
     }
+    if dest.exists() {
+        std::fs::remove_dir_all(dest).map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&temp, dest).map_err(|e| e.to_string())?;
     for r in &b.remotes[1..] {
         if let Err(e) = run(dest, &["remote", "add", "--", &r.name, &r.url]) {
             notes.push(format!("couldn't add the remote {}: {e}", r.name));
@@ -287,11 +306,7 @@ pub fn clone_into(dest: &Path, b: &Bring, staging: &Path) -> Result<String, Stri
         1 => line.push_str(" and brought 1 ignored file"),
         n => line.push_str(&format!(" and brought {n} ignored files")),
     }
-    for n in notes {
-        line.push_str("; ");
-        line.push_str(&n);
-    }
-    Ok(line)
+    Ok((line, notes))
 }
 
 /// Add `paths` to the checkout's own ignore list, `.git/info/exclude`,
