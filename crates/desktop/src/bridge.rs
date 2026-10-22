@@ -926,7 +926,9 @@ fn detail(v: &SessionView) -> String {
             // server"), so they follow a label rather than finish one.
             v.background
                 .first()
-                .map(|t| format!("In the background · {}", t.description))
+                .map(|t| t.description.trim())
+                .filter(|d| !d.is_empty())
+                .map(|d| format!("In the background · {d}"))
                 .unwrap_or_else(|| "Work in the background".into())
         }),
         Wire::Interrupted => "Stopped".into(),

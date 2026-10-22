@@ -63,10 +63,20 @@ impl Dent {
             actions = actions.child(self.message_arrows(s, cx));
         }
         // A failure's note offers Continue itself; one name, in one place.
-        let note_offers = matches!(
-            s.items.iter().rev().find(|i| !matches!(i, Item::TurnEnd { .. })),
-            Some(Item::Note { icon, .. }) if *icon == "circle-alert"
-        );
+        let note_offers = s
+            .items
+            .iter()
+            .rev()
+            .take_while(|i| !matches!(i, Item::User { .. }))
+            .any(|i| {
+                matches!(
+                    i,
+                    Item::Note {
+                        kind: crate::data::NoteKind::Error,
+                        ..
+                    }
+                )
+            });
         if s.stopped && !s.closed && said && !note_offers {
             let sid = id.clone();
             actions = actions.child(
@@ -1631,8 +1641,18 @@ impl Dent {
                             }),
                     )
                     .map(|d| {
+                        // Earlier versions of this message, by where it sits.
+                        let versions = s
+                            .versions
+                            .iter()
+                            .find(|(m, ..)| m == msg)
+                            .map(|&(_, at, cur, total)| (at, cur, total));
                         if asking {
-                            // Going back asks once, in place.
+                            // Going back asks once, in place; the versions
+                            // stay where they were.
+                            let d = d.children(versions.map(|(at, cur, total)| {
+                                self.version_stepper(&s.id, at, cur, total, cx)
+                            }));
                             d.pb(px(size::CONTROL_SM)).child(div().ty(UI).text_color(t.ink).child(if busy {
                                 "Stop it first, then go back"
                             } else {
@@ -1699,26 +1719,34 @@ impl Dent {
                             let (fsid, fmsg) = (s.id.clone(), msg.clone());
                             // Earlier versions of this message: step through
                             // them, always shown.
-                            let stepper = s
-                                .versions
-                                .iter()
-                                .find(|(m, ..)| m == msg)
-                                .map(|&(_, at, cur, total)| {
-                                    self.version_stepper(&s.id, at, cur, total, cx)
-                                });
+                            let stepper = versions.map(|(at, cur, total)| {
+                                self.version_stepper(&s.id, at, cur, total, cx)
+                            });
                             d.child(
                                 div()
                                     .flex()
+                                    // The versions keep the bubble's edge;
+                                    // narrow, the actions (shown on hover)
+                                    // wrap under them rather than run past
+                                    // the edge or leave them stranded.
+                                    .flex_row_reverse()
+                                    .flex_wrap()
+                                    .w_full()
                                     .items_center()
                                     .gap(px(space::S1))
+                                    .children(stepper)
                                     .child(
                                 div()
                                     .flex()
                                     .items_center()
                                     .gap(px(space::S1))
+                                    // Narrow, they wrap within the column.
+                                    .min_w_0()
+                                    .flex_wrap()
+                                    .justify_end()
                                     // In the gap below the message, part of
                                     // it: reaching for them keeps them shown.
-                                    .h(px(size::CONTROL_SM))
+                                    .min_h(px(size::CONTROL_SM))
                                     .reveal_on_hover(group.clone())
                                     // When you sent it, beside what you can do with it.
                                     .when(*at > 0, |d| {
@@ -1796,10 +1824,7 @@ impl Dent {
                                         }))
                                         .child(probe(&self.probes, format!("edit-from-{ix}"))),
                                     )),
-                                    )
-                                    // At the bubble's edge, where the eye
-                                    // leaves the message.
-                                    .children(stepper),
+                                    ),
                             )
                         }
                     })
@@ -2712,7 +2737,10 @@ impl Dent {
                     && !s.items[ix + 1..]
                         .iter()
                         .any(|i| matches!(i, Item::User { .. }));
-                let limit = latest_failure
+                // Only a note about a limit becomes one: a crash while some
+                // other limit is used up keeps its own words and actions.
+                let about_limit = text.to_lowercase().contains("limit");
+                let limit = (latest_failure && about_limit)
                     .then(|| self.limit_hit(&s.agent_id))
                     .flatten()
                     .map(|(which, at)| {
@@ -2794,11 +2822,7 @@ impl Dent {
                                 .any(|i| matches!(i, Item::User { .. })),
                         |d| {
                             let sid = s.id.clone();
-                            let retry =
-                                ghost(SharedString::from(format!("retry-{ix}")), "Try again", &t)
-                                    .relative()
-                                    .child(probe(&self.probes, format!("retry-{ix}")));
-                            match self.limit_hit(&s.agent_id) {
+                            match self.limit_hit(&s.agent_id).filter(|_| about_limit) {
                                 Some((which, at)) => {
                                     let at = at.max(0) as u64;
                                     let when = crate::data::clock(at * 1000);
@@ -2877,9 +2901,18 @@ impl Dent {
                                             }),
                                         ),
                                     )
-                                    .child(retry.on_press(
-                                        cx.listener(move |this, _, _, cx| this.retry(&sid, cx)),
-                                    ))
+                                    .child(
+                                        ghost(
+                                            SharedString::from(format!("retry-{ix}")),
+                                            "Try again",
+                                            &t,
+                                        )
+                                        .relative()
+                                        .child(probe(&self.probes, format!("retry-{ix}")))
+                                        .on_press(cx.listener(move |this, _, _, cx| {
+                                            this.retry(&sid, cx)
+                                        })),
+                                    )
                                 }
                             }
                         },
@@ -3464,29 +3497,43 @@ impl Dent {
                     .border_1()
                     .border_color(t.hairline)
                     .flex()
+                    // Narrow, the choices go under the words rather than
+                    // squeezing them into a column.
+                    .flex_wrap()
                     .items_center()
                     .gap(px(space::S2))
                     .child(icon("rotate-ccw-clock", 14., t.quiet))
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(220.))
                             .ty(UI)
                             .text_color(t.quiet)
                             .child("Viewing an earlier version. Replies go to the latest."),
                     )
                     .child(
-                        ghost("fork-version", "Continue from here", &t)
-                            .relative()
-                            .child(probe(&self.probes, "fork-version"))
-                            .on_press(cx.listener(move |this, _, _, cx| this.fork_version(&a, cx))),
-                    )
-                    .child(
-                        crate::ui::button("latest-version", "Back to latest", true, &t)
-                            .relative()
-                            .child(probe(&self.probes, "latest-version"))
-                            .on_press(
-                                cx.listener(move |this, _, _, cx| this.latest_version(&b, cx)),
+                        div()
+                            .ml_auto()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S2))
+                            .child(
+                                ghost("fork-version", "Continue from here", &t)
+                                    .relative()
+                                    .child(probe(&self.probes, "fork-version"))
+                                    .on_press(
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.fork_version(&a, cx)
+                                        }),
+                                    ),
+                            )
+                            .child(
+                                crate::ui::button("latest-version", "Back to latest", true, &t)
+                                    .relative()
+                                    .child(probe(&self.probes, "latest-version"))
+                                    .on_press(cx.listener(move |this, _, _, cx| {
+                                        this.latest_version(&b, cx)
+                                    })),
                             ),
                     ),
             )
@@ -6025,7 +6072,14 @@ fn tool_pictures(
             .overflow_hidden()
     };
     if set.len() == 1 {
-        // As wide as it is, up to the cap, and narrower with the column.
+        // As wide as it is, up to the cap, and narrower with the column. The
+        // row sizes to its content, so the picture needs a width of its own
+        // (a share of nothing is nothing).
+        let wide = crate::data::picture_dims(&set[0].path).map_or(TOOL_PICTURE_W, |(w, h)| {
+            (w as f32)
+                .min(TOOL_PICTURE_H * w as f32 / h.max(1) as f32)
+                .min(TOOL_PICTURE_W)
+        });
         return div().mt(px(space::S2)).flex().child(
             crate::lightbox::picture(
                 &set,
@@ -6042,7 +6096,8 @@ fn tool_pictures(
                     )),
             )
             .min_w_0()
-            .max_w(px(TOOL_PICTURE_W))
+            .w(px(wide))
+            .max_w_full()
             // On the picture's own corner.
             .when_some(kept, |d, m| {
                 d.child(crate::ui::kept_mark(
@@ -6524,7 +6579,8 @@ pub fn fit_footer(room: f32, chips: [(String, String); 3], context: bool, hint: 
     let text = |t: &str| t.chars().count() as f32 * 7.2;
     let chip = |t: &str| if t.is_empty() { 44. } else { 52. + text(t) };
     let gap = space::S1;
-    let ctx_w = text("context 99%") + space::S2;
+    // The widest it reads ("context full"), with the needs square beside it.
+    let ctx_w = text("context full") + space::S2 + 7. + space::S1;
     let hint_w = text(hint) + space::S2;
     // The steps, least loss first.
     let mut steps: Vec<([bool; 3], [bool; 3], bool, bool)> = Vec::new();
@@ -6583,7 +6639,14 @@ pub fn fit_footer(room: f32, chips: [(String, String); 3], context: bool, hint: 
 /// A note about an MCP server in trouble, worded as now ("The tickets MCP
 /// server …") or as older logs have it ("The MCP server tickets …").
 fn mcp_note(text: &str) -> bool {
-    text.starts_with("The ") && text.contains("MCP server ")
+    text.starts_with("The MCP server ")
+        || (text.starts_with("The ")
+            && [
+                " MCP server couldn't connect.",
+                " MCP server needs you to sign in.",
+            ]
+            .iter()
+            .any(|end| text.ends_with(end)))
 }
 
 /// The number key that answers with a button, faint inside it.
@@ -6806,6 +6869,17 @@ mod answer_tests {
         // A turn stopped before it said anything keeps a plain note.
         let bare = vec![note, Item::TurnEnd { at: 1, took: 0 }];
         assert!(turn_end_after(&bare, 0).is_none());
+    }
+
+    #[test]
+    fn only_an_mcp_servers_own_notes_offer_its_servers() {
+        use super::mcp_note;
+        assert!(mcp_note("The tickets MCP server needs you to sign in."));
+        assert!(mcp_note("The figma MCP server couldn't connect."));
+        // As older logs have it.
+        assert!(mcp_note("The MCP server tickets needs you to sign in."));
+        assert!(!mcp_note("The request to the MCP server timed out"));
+        assert!(!mcp_note("An MCP server couldn't connect."));
     }
 
     #[test]

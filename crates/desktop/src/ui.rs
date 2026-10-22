@@ -147,7 +147,6 @@ pub fn icon_button(id: impl Into<SharedString>, name: &str, t: &Theme) -> Statef
         .child(icon(name, 15., t.quiet))
 }
 
-/// A text button. Primary is ink on paper; the rest are quiet outlines.
 /// A label that changes ("Copy" to "Copied") without moving what's beside
 /// it: it holds the width of the widest of its words, the one shown centred.
 pub fn steady_label(shown: impl Into<SharedString>, all: &[&'static str]) -> Div {
@@ -163,6 +162,7 @@ pub fn steady_label(shown: impl Into<SharedString>, all: &[&'static str]) -> Div
         .child(div().flex().justify_center().child(shown))
 }
 
+/// A text button. Primary is ink on paper; the rest are quiet outlines.
 pub fn button(
     id: impl Into<SharedString>,
     label: impl Into<SharedString>,

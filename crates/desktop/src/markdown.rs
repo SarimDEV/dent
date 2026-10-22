@@ -1241,11 +1241,9 @@ pub fn sized(i: Img, path: &std::path::Path, max_h: f32) -> Div {
     match crate::data::picture_dims(path) {
         Some((w, h)) => {
             let ratio = w as f32 / h as f32;
-            // A width of its own, not a share of the parent's: inside a
-            // row that sizes to its content, a share of nothing is nothing.
             div()
-                .w(px((w as f32).min(max_h * ratio)))
-                .max_w_full()
+                .w_full()
+                .max_w(px((w as f32).min(max_h * ratio)))
                 .aspect_ratio(ratio)
                 .child(i.size_full())
         }
@@ -2571,6 +2569,8 @@ fn table_block(table: &std::sync::Arc<Table>, t: &Theme, key: &str, r: &mut R) -
             .text_color(t.quiet)
             .cursor_pointer()
             .hover(|d| d.bg(t.hover()).text_color(t.ink))
+            .active(|d| d.bg(t.press()).text_color(t.ink))
+            .on_mouse_down(MouseButton::Left, |_, _, _| crate::select::claim())
             .child("Open")
             .child(crate::ui::probe(&probes, "md-open-table"))
             .on_click(move |_, window, _| {

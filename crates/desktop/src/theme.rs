@@ -298,13 +298,13 @@ pub fn serif() -> &'static str {
     fonts().serif
 }
 
-/// A 12px status square, drawn as a 4×4 pixel pattern so status never relies
-/// on colour alone (the same patterns as the phone): needs you = solid,
-/// done = a corner step, working = a checker, waiting = dots, idle = an
-/// outline. Working is the one that moves: with motion on, a small rounded
-/// square that breathes smoothly between its paler partner and the signal
-/// (`motion::BREATH_FPS`); with Reduce Motion, it holds still as its
-/// checker, so it never reads as needs-you's solid square.
+/// A 12px status square, a flat shape of its own for each status so status
+/// never relies on colour alone ([0070](docs/decisions/0070-flat-status-marks.md)):
+/// needs you = filled, done = filled with a check, waiting = an outline with
+/// a small square inside, idle = an outline. Working is the one that moves:
+/// with motion on, a small rounded square that breathes smoothly between its
+/// paler partner and the signal (`motion::BREATH_FPS`); with Reduce Motion,
+/// it holds still in its paler fill, so it never reads as needs-you's.
 pub fn status_square(status: Status, t: &Theme) -> Div {
     status_square_at(status, t, 1.)
 }

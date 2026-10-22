@@ -9025,7 +9025,7 @@ impl Dent {
         self.open_palette(window, cx);
         self.palette_mine = true;
         self.search.update(cx, |s, cx| {
-            s.set_placeholder("Search what you've sent", window, cx)
+            s.set_placeholder("Find your messages in this session", window, cx)
         });
     }
 

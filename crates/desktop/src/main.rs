@@ -178,7 +178,9 @@ impl Render for Dent {
         // back-to-back frames were (a gap over 250 ms is rest, not a frame),
         // to find hitches while something moves.
         if std::env::var_os("DENT_FRAME_TIMES").is_some() {
-            thread_local!(static G: std::cell::RefCell<(Option<Instant>, Instant, Vec<f32>, Vec<f32>)> =
+            // The last frame, when this report began, the gaps and the work.
+            type Times = (Option<Instant>, Instant, Vec<f32>, Vec<f32>);
+            thread_local!(static G: std::cell::RefCell<Times> =
                 std::cell::RefCell::new((None, Instant::now(), Vec::new(), Vec::new())));
             // How long this frame's own drawing took: until the effects after
             // the draw run.
