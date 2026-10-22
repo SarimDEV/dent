@@ -3524,6 +3524,40 @@ impl Dent {
             return div().into_any_element();
         };
         let key = (art, version);
+        // No web view can sit in the chat here (Wayland): the page is a card
+        // that opens it where one can.
+        if self.inline.borrow().broken {
+            return div()
+                .id(SharedString::from(format!("inline-card-{art}-{version}")))
+                .relative()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(space::S2))
+                .px(px(space::S3))
+                .py(px(space::S2))
+                .rounded(px(radius::LG))
+                .border_1()
+                .border_color(t.hairline)
+                .bg(t.raised)
+                .cursor_pointer()
+                .hover(|d| d.border_color(t.ink.opacity(0.3)))
+                .on_press(cx.listener(move |this, _, _, cx| this.open_art(art, Some(version), cx)))
+                .child(icon("app-window", 16., t.quiet))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .ty(UI)
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(t.ink)
+                        .child(a.title),
+                )
+                .child(div().flex_none().ty(UI).text_color(t.quiet).child("Open"))
+                .child(probe(&self.probes, "inline-card"))
+                .into_any_element();
+        }
         let (h, still) = {
             let i = self.inline.borrow();
             (

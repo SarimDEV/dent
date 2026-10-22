@@ -247,3 +247,35 @@ pub(super) fn look_hidden() -> Vec<(f32, Act)> {
     ]);
     v
 }
+
+/// Where no web view can sit in the chat (Wayland; DENT_NO_INLINE_WEB here),
+/// a page is a card that opens it beside the chat.
+pub(super) fn pages_fallback() -> Vec<(f32, Act)> {
+    let mut v = new_session("show a visual of sign-ups");
+    v.extend([
+        (
+            0.1,
+            Until(
+                "the page is a card to open",
+                |d, _| drawn(d, "inline-card").is_some() && drawn(d, "inline-page").is_none(),
+                15.,
+            ),
+        ),
+        (0.3, Call(to_end)),
+        (0.4, Shot("pages-fallback")),
+        (0.2, Click("inline-card")),
+        (
+            0.1,
+            Until(
+                "a click opens it beside the chat",
+                |d, _| {
+                    d.panel_open
+                        && current(d)
+                            .is_some_and(|s| matches!(d.tab(s), Tab::Art(a) if d.in_chat(a)))
+                },
+                5.,
+            ),
+        ),
+    ]);
+    v
+}

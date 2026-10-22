@@ -426,6 +426,10 @@ impl Preview {
     /// view draws none), fitted to its height, its scrolls handed to the
     /// chat, and dent's colours as CSS variables (`INLINE_SCRIPT`).
     pub fn new_inline(window: &Window) -> Option<Self> {
+        // DENT_NO_INLINE_WEB stands in for a platform without one, for checks.
+        if std::env::var_os("DENT_NO_INLINE_WEB").is_some() {
+            return None;
+        }
         Self::build(window, true)
     }
 
