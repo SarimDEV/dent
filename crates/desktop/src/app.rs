@@ -8884,6 +8884,10 @@ impl Dent {
                 .position(|(a, b)| a != b)
                 .unwrap_or(old.len().min(sigs.len()));
             self.transcript.splice(first..old.len(), sigs.len() - first);
+            // Rows from here on may be others now.
+            if self.hover_row.is_some_and(|r| r >= first) {
+                self.hover_row = None;
+            }
             // A few items added at the end arrive, each with all its rows;
             // the working line's row trails the items and isn't one of
             // them. A batch (history loading) just appears.

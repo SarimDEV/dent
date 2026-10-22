@@ -951,13 +951,23 @@ impl Dent {
                 let area = crate::select::area(&format!("chat/{}", s.id));
                 let _place = match r.part {
                     Some(p) => {
-                        // Find numbers this block's matches on from those
-                        // before it, drawn or not.
-                        crate::select::set_found(ix as u32, this.found_before(ix, p.block));
-                        crate::select::part(area, ix, p.block, p.of)
+                        let sigs = this
+                            .row_parts
+                            .1
+                            .get(ix)
+                            .map(|(_, sigs, _)| sigs.clone())
+                            .unwrap_or_else(|| std::rc::Rc::from([]));
+                        crate::select::part(area, ix, p.block, sigs)
                     }
                     None => crate::select::item(area, ix),
                 };
+                // Find numbers a block's matches on from those before it,
+                // drawn or not: set as it paints, since every row on screen
+                // is laid out before any is painted.
+                let found_from = r.part.map(|p| {
+                    let before = this.found_before(ix, p.block);
+                    crate::select::at_paint(move |_| crate::select::set_found(ix as u32, before))
+                });
                 // The working line sits under the reply being written, above
                 // any messages queued after it, so they never read as the
                 // thing being written.
@@ -1076,9 +1086,7 @@ impl Dent {
                             .pb(px(if !r.last() {
                                 // Between a reply's blocks, as within one.
                                 space::S3
-                            } else if ix + 1 == count && host.is_some() {
-                                0.
-                            } else if ix + 1 == count || (host.is_some() && ix + 2 == count) {
+                            } else if ix + 1 == count {
                                 space::S8
                             } else if marker || folded_change(&s.items, ix) {
                                 0.
@@ -1118,6 +1126,7 @@ impl Dent {
                                     (true, false) | (false, false) => space::S4,
                                 }
                             }))
+                            .children(found_from)
                             .child(body),
                     )
                     .into_any_element()
@@ -1140,6 +1149,17 @@ impl Dent {
             s.items.len(),
             move |ix| said.get(ix).and_then(Item::plain),
         );
+        // A reply's blocks never drawn as they are copy from their words.
+        let blocks: Vec<_> = self.row_parts.1.iter().map(|(.., b)| b.clone()).collect();
+        crate::select::part_source(
+            crate::select::area(&format!("chat/{}", s.id)),
+            move |ix, b| {
+                let blocks = blocks.get(ix)?.as_ref()?;
+                let mut words = Vec::new();
+                markdown::drawn(std::slice::from_ref(blocks.get(b)?), &mut words);
+                Some(words.join("\n"))
+            },
+        );
         // ⌘F keeps up with a reply still arriving, and the match it went
         // to is brought into view within its message.
         self.refresh_find(false, cx);
@@ -1161,6 +1181,13 @@ impl Dent {
                     this.chat_context(e.position, window, cx)
                 }),
             )
+            // A row scrolled out from under the pointer says nothing as it
+            // goes: an older turn's actions it showed go with the scroll.
+            .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| {
+                if this.hover_row.take().is_some() {
+                    cx.notify();
+                }
+            }))
             // Find floats at the top; while it's open the chat starts under
             // it, so nothing reads through the bar.
             .when(find.is_some(), |d| {
