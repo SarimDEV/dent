@@ -290,7 +290,7 @@ pub fn limits(bars: &[Bar], t: &Theme) -> Div {
                         .child(
                             div()
                                 .flex_none()
-                                .text_color(if used >= 0.9 { t.needs.0 } else { t.quiet })
+                                .text_color(t.quiet)
                                 .child(format!("{:.0}% used", used * 100.)),
                         ),
                 )
@@ -309,6 +309,17 @@ pub fn limits(bars: &[Bar], t: &Theme) -> Div {
                 )
                 .children(resets.map(|r| div().ty(LABEL).text_color(t.faint).child(r)))
         }))
+}
+
+/// The gauge's words for how full the context is, in whole percent.
+pub fn context_words(pct: f32) -> String {
+    if pct.is_nan() || pct < 1. {
+        "context <1%".into()
+    } else if pct >= 100. {
+        "context full".into()
+    } else {
+        format!("context {}%", pct.floor() as u32)
+    }
 }
 
 impl Dent {
@@ -343,7 +354,7 @@ impl Dent {
             .whitespace_nowrap()
             .flex_shrink(2.)
             .ty(LABEL)
-            .text_color(if near { t.needs.0 } else { t.faint })
+            .text_color(if near { t.quiet } else { t.faint })
             .cursor_pointer()
             .hover(|d| d.text_color(t.ink))
             .on_press(cx.listener(|this, _, _, cx| {
@@ -351,11 +362,9 @@ impl Dent {
                 this.menu = None;
                 cx.notify();
             }))
-            .child(if pct < 10. {
-                format!("context {pct:.1}%")
-            } else {
-                format!("context {pct:.0}%")
-            })
+            // Whole percent: a tenth jitters the row's width as it grows and
+            // claims more precision than the count has.
+            .child(context_words(pct))
             .child(probe(&self.probes, "context-gauge"));
         let popover = open.then(|| {
             let who = &s.agent_short;
@@ -432,7 +441,7 @@ impl Dent {
             let sid = s.id.clone();
             crate::ui::ghost("compact-first", "Compact", &t)
                 .relative()
-                .text_color(t.needs.0)
+                .text_color(t.ink)
                 .with_tip(tip_owned(
                     "The context is nearly full: summarize the conversation before the next message",
                     t,
@@ -451,6 +460,11 @@ impl Dent {
             .items_center()
             .gap(px(space::S1))
             .children(first)
+            // Signals are fills, never text: nearly full puts the needs
+            // square beside the words.
+            .when(near, |d| {
+                d.child(div().flex_none().size(px(7.)).bg(t.needs.0))
+            })
             .child(gauge)
             .children(popover)
             .into_any_element()
@@ -1117,6 +1131,19 @@ pub fn panel(t: &Theme) -> Div {
 #[cfg(test)]
 mod tests {
     use super::{Activity, activity_line, tokens};
+
+    #[test]
+    fn the_context_reads_in_whole_percent() {
+        use super::context_words as w;
+        assert_eq!(w(0.), "context <1%");
+        assert_eq!(w(0.99), "context <1%");
+        assert_eq!(w(9.04), "context 9%");
+        assert_eq!(w(99.9), "context 99%");
+        assert_eq!(w(100.), "context full");
+        assert_eq!(w(104.2), "context full");
+        assert_eq!(w(f32::NAN), "context <1%");
+        assert_eq!(w(f32::INFINITY), "context full");
+    }
 
     #[test]
     fn token_counts_read_naturally() {

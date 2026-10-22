@@ -22,7 +22,7 @@ pub(super) fn failures() -> Vec<(f32, Act)> {
         (
             0.1,
             Until(
-                "a used-up limit says which and when it resets, and Try again waits for it",
+                "a used-up limit says which and when it resets, offering Continue at the reset",
                 |d, _| {
                     !current(d).is_some_and(|s| s.running())
                         && d.limit_hit("").is_some_and(|(w, _)| w == "5-hour limit")

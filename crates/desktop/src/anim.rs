@@ -1,5 +1,5 @@
 //! The motion vocabulary's building blocks (docs/design-system.md, Motion):
-//! curves, the dither dissolve and the digit ticker.
+//! curves and the digit ticker.
 
 #![allow(dead_code)] // shared with the gpui-chat spike
 
@@ -9,19 +9,6 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use crate::ds::{Type, Typed, motion};
-
-/// Ordered-dither thresholds: cells reveal in a stable, even pattern instead of
-/// a fade, which is cheap and reads as "printed".
-const BAYER: [[u8; 8]; 8] = [
-    [0, 32, 8, 40, 2, 34, 10, 42],
-    [48, 16, 56, 24, 50, 18, 58, 26],
-    [12, 44, 4, 36, 14, 46, 6, 38],
-    [60, 28, 52, 20, 62, 30, 54, 22],
-    [3, 35, 11, 43, 1, 33, 9, 41],
-    [51, 19, 59, 27, 49, 17, 57, 25],
-    [15, 47, 7, 39, 13, 45, 5, 37],
-    [63, 31, 55, 23, 61, 29, 53, 21],
-];
 
 /// Linear progress in 0..=1 since `start`, after an optional delay.
 pub fn progress(start: Instant, ms: f32) -> f32 {
@@ -129,51 +116,6 @@ pub fn pop(t_secs: f32) -> f32 {
         left -= dt;
     }
     s.value()
-}
-
-/// An overlay that covers every cell not yet revealed (the Resolve motion). At
-/// `progress` 0 the element is hidden behind `cover`; at 1 nothing is painted.
-pub fn dissolve(progress: f32, cover: Hsla, cell: f32) -> impl IntoElement {
-    canvas(
-        |_, _, _| (),
-        move |bounds, _, window, _| {
-            if progress >= 1. {
-                return;
-            }
-            let cols = (bounds.size.width.as_f32() / cell).ceil() as usize;
-            let rows = (bounds.size.height.as_f32() / cell).ceil() as usize;
-            // Adjacent covered cells in a row are merged into one quad, so the
-            // nearly-covered and nearly-clear ends of the dissolve cost almost nothing.
-            for y in 0..rows {
-                let mut x = 0;
-                while x < cols {
-                    let covered = |x: usize| (BAYER[y % 8][x % 8] as f32 + 0.5) / 64. > progress;
-                    if !covered(x) {
-                        x += 1;
-                        continue;
-                    }
-                    let start = x;
-                    while x < cols && covered(x) {
-                        x += 1;
-                    }
-                    window.paint_quad(fill(
-                        Bounds {
-                            origin: point(
-                                bounds.origin.x + px(start as f32 * cell),
-                                bounds.origin.y + px(y as f32 * cell),
-                            ),
-                            size: size(px((x - start) as f32 * cell), px(cell)),
-                        },
-                        cover,
-                    ));
-                }
-            }
-        },
-    )
-    .absolute()
-    .top_0()
-    .left_0()
-    .size_full()
 }
 
 /// A number that changed: `from` rolls to `to` (the Tick motion).

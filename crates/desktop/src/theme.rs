@@ -42,7 +42,7 @@ fn c(hex: u32) -> Hsla {
 
 impl Theme {
     /// Signal colours pair with a paler partner on Paper and a deeper one on
-    /// Carbon, for the dither.
+    /// Carbon, which the working square breathes from.
     pub fn paper() -> Self {
         Self {
             dark: false,
@@ -298,13 +298,13 @@ pub fn serif() -> &'static str {
     fonts().serif
 }
 
-/// A 12px status square, drawn as a 4×4 pixel pattern so status never relies
-/// on colour alone (the same patterns as the phone): needs you = solid,
-/// done = a corner step, working = a checker, waiting = dots, idle = an
-/// outline. Working is the one that moves: with motion on, a small rounded
-/// square that breathes smoothly between its paler partner and the signal
-/// (`motion::BREATH_FPS`); with Reduce Motion, it holds still as its
-/// checker, so it never reads as needs-you's solid square.
+/// A 12px status square, a flat shape of its own for each status so status
+/// never relies on colour alone ([0070](docs/decisions/0070-flat-status-marks.md)):
+/// needs you = filled, done = filled with a check, waiting = an outline with
+/// a small square inside, idle = an outline. Working is the one that moves:
+/// with motion on, a small rounded square that breathes smoothly between its
+/// paler partner and the signal (`motion::BREATH_FPS`); with Reduce Motion,
+/// it holds still in its paler fill, so it never reads as needs-you's.
 pub fn status_square(status: Status, t: &Theme) -> Div {
     status_square_at(status, t, 1.)
 }
@@ -341,23 +341,42 @@ pub fn status_square_at(status: Status, t: &Theme, scale: f32) -> Div {
                     ),
             );
     }
-    let mark = div()
-        .size(px(s))
-        .flex()
-        .flex_col()
-        .children((0..4).map(move |y: usize| {
-            div().flex().children((0..4).map(move |x: usize| {
-                let on = match status {
-                    Status::Needs => true,
-                    Status::Done => x <= y,
-                    Status::Working => (x + y).is_multiple_of(2),
-                    Status::Waiting => x.is_multiple_of(2) && y.is_multiple_of(2),
-                    Status::Idle => x == 0 || y == 0 || x == 3 || y == 3,
-                };
-                let cell = div().size(px(s / 4.));
-                if on { cell.bg(signal) } else { cell }
-            }))
-        }));
+    // Flat shapes, never pixel patterns, each its own form so a status
+    // reads without its colour: needs is filled, done carries a check,
+    // waiting a square within a square, idle an outline, and working (when
+    // it can't breathe) its breathing square held still: inset, rounded.
+    let line = (s / 8.).max(1.);
+    let mark = match status {
+        Status::Needs => div().size(px(s)).bg(signal),
+        Status::Done => div()
+            .size(px(s))
+            .bg(signal)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(crate::ui::icon("check", s * 0.82, t.surface)),
+        // The breathing square held still: inset and rounded, so it never
+        // reads as Needs' full square however the colours fall.
+        Status::Working => div()
+            .size(px(s * 0.84))
+            .rounded(px(s * 0.84 * 0.28))
+            .bg(partner)
+            .child(
+                div()
+                    .size_full()
+                    .rounded(px(s * 0.84 * 0.28))
+                    .bg(signal.opacity(0.65)),
+            ),
+        Status::Waiting => div()
+            .size(px(s))
+            .border(px(line))
+            .border_color(signal)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(div().size(px(s * 0.34)).bg(signal)),
+        Status::Idle => div().size(px(s)).border(px(line)).border_color(signal),
+    };
     div()
         .size(px(crate::ds::size::SQUARE))
         .flex_none()

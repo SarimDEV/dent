@@ -70,7 +70,7 @@ Five sizes, two weights, three inks. Line heights sit on the 4 px grid.
 
 | Token | px | Use |
 | --- | --- | --- |
-| `radius.0` | 0 | Status squares, dither, diff rows (pixels are square); the one exception is the breathing working square, rounded at 28% of its side while it moves |
+| `radius.0` | 0 | Status squares, diff rows; the one exception is the breathing working square, rounded at 28% of its side, moving or held still |
 | `radius.sm` | 4 | Buttons inside cards, pills, tags, keys |
 | `radius.md` | 6 | Buttons, inputs, selected rows |
 | `radius.lg` | 8 | Cards, approval cards, an opened tool group (user messages take 10) |
@@ -86,7 +86,7 @@ Five sizes, two weights, three inks. Line heights sit on the 4 px grid.
 Three layers. Components never use a hex value.
 
 1. **Primitives:** the Field Notes hex values in [design.md](design.md) (Palette).
-2. **Semantic tokens:** `surface`, `raised`, `panel`, `ink`, `quiet`, `faint`, `hairline`, `hairline.strong`, the five signals (`working`, `needs`, `done`, `waiting`, `idle`) each with a dither partner, `diff.added`, `diff.removed`.
+2. **Semantic tokens:** `surface`, `raised`, `panel`, `ink`, `quiet`, `faint`, `hairline`, `hairline.strong`, the five signals (`working`, `needs`, `done`, `waiting`, `idle`) each with a paler partner, `diff.added`, `diff.removed`.
 3. **State tokens** are ink at an alpha, so one value works on every surface:
 
 | Token | Paper | Carbon | Use |
@@ -160,7 +160,6 @@ Each motion has one name and one job.
 | **Pop in** | Chrome arriving (`ui::Arrive`): opacity 0→1 and the last 4 px towards where it rests, away from what opened it, on `ease.out`. `dur.fast` for what you open often (menus, the slash menu, the palette and its dim, the right-click menu); `dur.base` for what comes to you (a tooltip, a toast, the Latest pill). Exits are instant | Menus, palette, tooltips, toasts, pills |
 | **Turn** | A fold's chevron (`ui::disclosure`) turns from right to down on `spring.snappy` instead of swapping icons | Tool groups, thoughts, menu folds, the Closed section |
 | **Stream** | Each new word fades in over `dur.base`; a block cursor in `working` breathes while text arrives | Agent replies |
-| **Resolve** | The ordered-dither dissolve, the Field Notes signature, on small surfaces only | Approval cards arriving (`dur.slow`), images and diagrams loading |
 | **Shift** | Every colour token tweens from the old theme to the new, `dur.theme`, `ease.out`; the grain crossfades. Nothing moves and text stays readable | Theme switch |
 | **Fold** | A card's content fades out (`dur.fast`) and it collapses to one line (`dur.slow`, `ease.in_out`); the line arrives in its place | Approval resolved, tool output collapsed |
 | **Confirm** | The done square pops from 60% on `spring.pop` | A tool, approval or turn finishing |
@@ -169,7 +168,7 @@ Each motion has one name and one job.
 | **Lift** | A picture zooms from where it sits to the middle of the window (`dur.slow` + 40 ms, `ease.out`) as the backdrop fades dark a little ahead of it; it zooms back in `dur.base`, the backdrop clearing first | Opening a picture large |
 | **Zoom** | A large picture's zoom moves on a log scale about the pointer. Fingers (pinch, trackpad ⌘-scroll, drag) are followed with no easing, giving past limits by UIKit's rubber band (0.55) and settling back; steps (keys, wheel notches, double-click) ride a critically damped spring, ω = 28, stepped exactly so it's the same at any frame rate; a drag let go glides at 0.998 a ms | Zooming a picture large |
 | **Compact** | The serif title eases from 28 to 20 on `spring.snappy`; the live pill arrives with a 4 px slide | Reading history |
-| **Drift** | The working square, a small rounded square, breathes from its paler partner to the full signal and back over `dur.working` (and grows a touch), at 12 fps, which a slow fade of a small square reads as smooth (GPUI redraws the whole window for it, so not at the display's rate; measured in [0047](decisions/0047-calmer-work.md)); every working square shares one clock. With Reduce Motion it holds still as Working's checker | Working status |
+| **Drift** | The working square, a small rounded square, breathes from its paler partner to the full signal and back over `dur.working` (and grows a touch), at 12 fps, which a slow fade of a small square reads as smooth (GPUI redraws the whole window for it, so not at the display's rate; measured in [0047](decisions/0047-calmer-work.md)); every working square shares one clock. With Reduce Motion it holds still at its resting size, still rounded, its partner under the signal at 65% | Working status |
 | **Hand-over** | The working line's words stay up at least 650 ms (a plan step 2 s, unless the plan's next step replaces it) and change only once the new words have held 250 ms; the old rise 3 px out, the new rise 3 px in, `dur.base` in all | Working line |
 | **Breathe** | After 3 s of work the working line's words ease between full and 60% opacity over 2 s | Working line |
 | **Glide** | A machine on the strip moves to its new round trip on a spring (0.5 s, no bounce), from where it is; round trips are smoothed first, so one slow ping doesn't throw it | Settings › Machines |
@@ -184,12 +183,11 @@ Each motion has one name and one job.
 
 ### Reduced motion
 
-With the system's reduce-motion setting on (read at launch and whenever the window comes forward; `--reduce-motion` forces it), every motion resolves instantly, the working square holds still as its checker (Working's own pattern, never Needs' solid square), and streamed text still appears word by word.
+With the system's reduce-motion setting on (read at launch and whenever the window comes forward; `--reduce-motion` forces it), every motion resolves instantly, the working square holds still in its paler fill (never Needs' solid square), and streamed text still appears word by word.
 
 ### Cost rules
 
 - Allowed per frame: opacity, offsets, colours, flat quads, and remeasuring at most the one row that is changing.
-- The dither is a grid of flat quads, so it is for small surfaces only. Across a whole window it measured far over budget, which is why the theme switch is a colour tween.
 - Only the working line repaints a quiet window (its square's drift, its words' breath and hand-over; the working squares in the sidebar and plan card too), and only while a session is working and visible. The exceptions: an ambient background you chose for the new-session page, which redraws every frame while that page is visible ([0049](decisions/0049-ambient-backgrounds.md)), and Settings › Machines' Pulse, while the page is in front with a machine connected ([0067](decisions/0067-settings-page-and-machines.md)).
 - Every new motion is measured with the frame-timing bench before it lands (Reliability requirements).
 

@@ -174,6 +174,52 @@ impl Render for Dent {
                 }
             });
         }
+        // DENT_FRAME_TIMES prints, each 5 s of drawing, how far apart
+        // back-to-back frames were (a gap over 250 ms is rest, not a frame),
+        // to find hitches while something moves.
+        if std::env::var_os("DENT_FRAME_TIMES").is_some() {
+            // The last frame, when this report began, the gaps and the work.
+            type Times = (Option<Instant>, Instant, Vec<f32>, Vec<f32>);
+            thread_local!(static G: std::cell::RefCell<Times> =
+                std::cell::RefCell::new((None, Instant::now(), Vec::new(), Vec::new())));
+            // How long this frame's own drawing took: until the effects after
+            // the draw run.
+            let start = Instant::now();
+            cx.defer(move |_| {
+                G.with(|g| g.borrow_mut().3.push(start.elapsed().as_secs_f32() * 1000.))
+            });
+            G.with(|g| {
+                let (prev, since, gaps, work) = &mut *g.borrow_mut();
+                let now = Instant::now();
+                if let Some(p) = prev {
+                    let ms = now.duration_since(*p).as_secs_f32() * 1000.;
+                    if ms < 250. {
+                        gaps.push(ms);
+                    }
+                }
+                *prev = Some(now);
+                if since.elapsed().as_secs() >= 5 && !gaps.is_empty() && !work.is_empty() {
+                    gaps.sort_by(f32::total_cmp);
+                    let at = |q: f32| gaps[((gaps.len() - 1) as f32 * q) as usize];
+                    let long = gaps.iter().filter(|g| **g > 25.).count();
+                    work.sort_by(f32::total_cmp);
+                    let w = |q: f32| work[((work.len().max(1) - 1) as f32 * q) as usize];
+                    eprintln!(
+                        "frame gaps: {} frames, p50 {:.1} ms, p99 {:.1} ms, max {:.1} ms, {long} over 25 ms; work p50 {:.1} ms, p99 {:.1} ms, max {:.1} ms",
+                        gaps.len(),
+                        at(0.5),
+                        at(0.99),
+                        at(1.),
+                        w(0.5),
+                        w(0.99),
+                        w(1.)
+                    );
+                    gaps.clear();
+                    work.clear();
+                    *since = now;
+                }
+            });
+        }
         if self.walk.as_ref().is_some_and(|w| w.resting.is_some()) {
             eprintln!(
                 "      idle frame: active={} inbox={}",
@@ -407,7 +453,7 @@ impl Render for Dent {
                     ToastAction::Undo(_)
                     | ToastAction::UnhideProject(_)
                     | ToastAction::Unremove { .. } => "Undo",
-                    ToastAction::Resume(_) => "Resume",
+                    ToastAction::Resume(_) => "Continue",
                     ToastAction::Open(_) => "Open",
                     ToastAction::Info => "OK",
                 };

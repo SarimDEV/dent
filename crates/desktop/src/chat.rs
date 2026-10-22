@@ -62,10 +62,26 @@ impl Dent {
         if !cramped && said {
             actions = actions.child(self.message_arrows(s, cx));
         }
-        if s.stopped && !s.closed && said {
+        // A failure's note offers Continue itself; one name, in one place.
+        // A limit's note offers only to continue later, so here it stays.
+        let limited = self.limit_hit(&s.agent_id).is_some();
+        let note_offers = s
+            .items
+            .iter()
+            .rev()
+            .take_while(|i| !matches!(i, Item::User { .. }))
+            .any(|i| match i {
+                Item::Note {
+                    kind: crate::data::NoteKind::Error,
+                    text,
+                    ..
+                } => !(limited && text.to_lowercase().contains("limit")),
+                _ => false,
+            });
+        if s.stopped && !s.closed && said && !note_offers {
             let sid = id.clone();
             actions = actions.child(
-                button("resume", "Resume", false, &t)
+                button("resume", "Continue", false, &t)
                     .on_press(cx.listener(move |this, _, _, cx| this.resume(&sid, cx))),
             );
         }
@@ -669,9 +685,9 @@ impl Dent {
             .copied_key
             .as_ref()
             .is_some_and(|(k, at)| *k == key && at.elapsed() < Duration::from_millis(1300));
-        ghost(
+        crate::ui::ghost_with(
             SharedString::from(key.clone()),
-            if copied { "Copied" } else { "Copy" },
+            crate::ui::steady_label(if copied { "Copied" } else { "Copy" }, &["Copy", "Copied"]),
             &self.t,
         )
         .relative()
@@ -743,7 +759,7 @@ impl Dent {
                         .child(format!("+{added} −{removed}")),
                 )
             })
-            .child(div().text_color(t.ink).child("Review"))
+            .child(div().text_color(t.secondary()).child("Review"))
             .child(probe(&self.probes, format!("changed-{ix}")))
             .into_any_element()
     }
@@ -849,7 +865,6 @@ impl Dent {
                 Item::Changed { paths } => Some(self.changed_line(s, c, paths, cx)),
                 _ => None,
             });
-            let has_changes = changed.is_some();
             div()
                 .flex()
                 // A narrow column wraps the time and actions under the
@@ -866,9 +881,6 @@ impl Dent {
                         .items_center()
                         .gap(px(space::S1))
                         .when(!latest, |d| d.reveal_on_hover(group.clone()))
-                        .when(has_changes, |d| {
-                            d.child(div().ty(UI).text_color(t.faint).child("·"))
-                        })
                         // In line with the reply's text.
                         .child(
                             div()
@@ -1066,6 +1078,11 @@ impl Dent {
                     this.chat_context(e.position, window, cx)
                 }),
             )
+            // Find floats at the top; while it's open the chat starts under
+            // it, so nothing reads through the bar.
+            .when(find.is_some(), |d| {
+                d.pt(px(space::S2 + size::CONTROL + space::S2 - space::S1))
+            })
             .child(transcript)
             .child(probe(&self.probes, "transcript"))
             .children(find)
@@ -1625,8 +1642,18 @@ impl Dent {
                             }),
                     )
                     .map(|d| {
+                        // Earlier versions of this message, by where it sits.
+                        let versions = s
+                            .versions
+                            .iter()
+                            .find(|(m, ..)| m == msg)
+                            .map(|&(_, at, cur, total)| (at, cur, total));
                         if asking {
-                            // Going back asks once, in place.
+                            // Going back asks once, in place; the versions
+                            // stay where they were.
+                            let d = d.children(versions.map(|(at, cur, total)| {
+                                self.version_stepper(&s.id, at, cur, total, cx)
+                            }));
                             d.pb(px(size::CONTROL_SM)).child(div().ty(UI).text_color(t.ink).child(if busy {
                                 "Stop it first, then go back"
                             } else {
@@ -1691,14 +1718,36 @@ impl Dent {
                             )
                         } else {
                             let (fsid, fmsg) = (s.id.clone(), msg.clone());
+                            // Earlier versions of this message: step through
+                            // them, always shown.
+                            let stepper = versions.map(|(at, cur, total)| {
+                                self.version_stepper(&s.id, at, cur, total, cx)
+                            });
                             d.child(
+                                div()
+                                    .flex()
+                                    // The versions keep the bubble's edge;
+                                    // narrow, the actions (shown on hover)
+                                    // wrap under them rather than run past
+                                    // the edge or leave them stranded.
+                                    .flex_row_reverse()
+                                    .flex_wrap()
+                                    .w_full()
+                                    .items_center()
+                                    .gap(px(space::S1))
+                                    .children(stepper)
+                                    .child(
                                 div()
                                     .flex()
                                     .items_center()
                                     .gap(px(space::S1))
+                                    // Narrow, they wrap within the column.
+                                    .min_w_0()
+                                    .flex_wrap()
+                                    .justify_end()
                                     // In the gap below the message, part of
                                     // it: reaching for them keeps them shown.
-                                    .h(px(size::CONTROL_SM))
+                                    .min_h(px(size::CONTROL_SM))
                                     .reveal_on_hover(group.clone())
                                     // When you sent it, beside what you can do with it.
                                     .when(*at > 0, |d| {
@@ -1776,16 +1825,10 @@ impl Dent {
                                         }))
                                         .child(probe(&self.probes, format!("edit-from-{ix}"))),
                                     )),
+                                    ),
                             )
                         }
                     })
-                    // Earlier versions of this message: step through them.
-                    .children(
-                        s.versions
-                            .iter()
-                            .find(|(m, ..)| m == msg)
-                            .map(|&(_, at, cur, total)| self.version_stepper(&s.id, at, cur, total, cx)),
-                    )
                     .into_any_element()
             }
             Item::Text(src) => {
@@ -2139,7 +2182,7 @@ impl Dent {
                     // What the calls brought back as pictures shows whether
                     // the line is open or not: a screenshot is the point.
                     .when(!pictures.is_empty(), |d| {
-                        d.child(tool_pictures(&s.id, &s.cwd, ix, pictures, &t))
+                        d.child(tool_pictures(&s.id, &s.cwd, ix, pictures, &self.probes, &t))
                     })
                     .into_any_element()
             }
@@ -2259,6 +2302,7 @@ impl Dent {
                             .gap(px(space::S2))
                             .child(
                                 button("allow", "Allow once", true, &t)
+                                    .child(key_num("1", true, &t))
                                     .relative()
                                     .on_press(cx.listener(move |this, _, _, cx| {
                                         this.allow(&a, Some(&k1), Scope::Once, cx)
@@ -2267,6 +2311,7 @@ impl Dent {
                             )
                             .child(
                                 button("allow-session", "Allow for this session", false, &t)
+                                    .child(key_num("2", false, &t))
                                     .relative()
                                     .on_press(cx.listener(move |this, _, _, cx| {
                                         this.allow(&a2, Some(&k2), Scope::Session, cx)
@@ -2280,6 +2325,9 @@ impl Dent {
                                     false,
                                     &t,
                                 )
+                                .when(*keeps && s.caps.project_rules, |b| {
+                                    b.child(key_num("3", false, &t))
+                                })
                                 .relative()
                                 .child(probe(&self.probes, "allow-project"));
                                 if *keeps && s.caps.project_rules {
@@ -2304,6 +2352,7 @@ impl Dent {
                             })
                             .child(
                                 button("deny", "Deny", false, &t)
+                                    .child(key_num("4", false, &t))
                                     .relative()
                                     .on_press(cx.listener(move |this, _, window, cx| {
                                         this.deny(&d, Some(&k3), window, cx)
@@ -2313,12 +2362,8 @@ impl Dent {
                     )
                     .child(ask_keys(
                         keyed,
-                        if *keeps {
-                            "↩ or 1 allows once · 2 for this session · 3 in this project · 4 denies"
-                        } else {
-                            "↩ or 1 allows once · 2 for this session · 4 denies"
-                        },
-                        "Esc, then a number, to answer by key",
+                        "Press a number, or ↩ to allow once",
+                        "Esc to answer by number",
                         &t,
                     ))
                     .into_any_element()
@@ -2387,6 +2432,7 @@ impl Dent {
                             .gap(px(space::S2))
                             .child(
                                 button("plan-go", "Start building", true, &t)
+                                    .child(key_num("1", true, &t))
                                     .relative()
                                     .on_press(cx.listener(move |this, _, _, cx| {
                                         this.allow(&a, Some(&k1), Scope::Once, cx)
@@ -2395,6 +2441,7 @@ impl Dent {
                             )
                             .child(
                                 button("plan-keep", "Keep planning", false, &t)
+                                    .child(key_num("2", false, &t))
                                     .relative()
                                     .on_press(cx.listener(move |this, _, window, cx| {
                                         this.deny(&d, Some(&k3), window, cx)
@@ -2404,8 +2451,8 @@ impl Dent {
                     )
                     .child(ask_keys(
                         keyed,
-                        "↩ or 1 starts building · 2 keeps planning, with what you typed",
-                        "Typed text is sent as what to change · Esc, then 1 or 2, to answer by key",
+                        "Press a number, or ↩ to start building · what you've typed goes with Keep planning",
+                        "What you type is sent as what to change · Esc to answer by number",
                         &t,
                     ))
                     .into_any_element()
@@ -2426,7 +2473,7 @@ impl Dent {
                 let hint = match (keyed, multi, fixed, many) {
                     (true, true, ..) => format!("Press 1–{n} to tick, ↩ to continue{back}"),
                     (true, false, ..) => format!("Press 1–{n} to pick{back}"),
-                    (false, _, true, _) => "Esc, then a number key, to pick".to_string(),
+                    (false, _, true, _) => "Esc to pick by number".to_string(),
                     (false, _, false, true) => {
                         "Answer each one, or type an answer in the box".to_string()
                     }
@@ -2693,23 +2740,32 @@ impl Dent {
                     && !s.items[ix + 1..]
                         .iter()
                         .any(|i| matches!(i, Item::User { .. }));
-                let limit = latest_failure
+                // Only a note about a limit becomes one: a crash while some
+                // other limit is used up keeps its own words and actions.
+                let about_limit = text.to_lowercase().contains("limit");
+                let limit = (latest_failure && about_limit)
                     .then(|| self.limit_hit(&s.agent_id))
                     .flatten()
                     .map(|(which, at)| {
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .map_or(0, |d| d.as_secs() as i64);
-                        format!(
-                            "Your {which} is used up. It resets at {}, in {}.",
-                            crate::data::clock(at as u64 * 1000),
-                            crate::data::span((at - now).max(0) as u64)
+                        (
+                            format!("Your {which} is used up"),
+                            format!(
+                                "It resets at {}, in {}.",
+                                crate::data::clock(at as u64 * 1000),
+                                crate::data::span((at - now).max(0) as u64)
+                            ),
                         )
                     });
                 div()
                     .flex()
                     .items_start()
                     .gap(px(space::S2))
+                    // Its actions' words end on the column's edge, as
+                    // the composer's and the cards' do.
+                    .mr(px(-space::S2))
                     .ty(UI)
                     .text_color(t.quiet)
                     .child(
@@ -2723,18 +2779,24 @@ impl Dent {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(crate::select::text(
-                                SharedString::from(format!("note-{ix}")),
-                                text.clone(),
-                                &t,
-                            ))
-                            .when_some(limit, |d, l| d.child(div().text_color(t.ink).child(l))),
+                            // A used-up limit says so in plain words, which
+                            // and when, in place of the agent's own line.
+                            .map(|d| match limit {
+                                Some((head, when)) => d
+                                    .child(div().text_color(t.ink).child(head))
+                                    .child(div().child(when)),
+                                None => d.child(crate::select::text(
+                                    SharedString::from(format!("note-{ix}")),
+                                    text.clone(),
+                                    &t,
+                                )),
+                            }),
                     )
                     // An MCP server in trouble: its sheet reconnects it or
                     // signs in.
                     .when(
-                        text.starts_with("The MCP server ")
-                            && !matches!(s.items.get(ix + 1), Some(Item::Note { text: next, .. }) if next.starts_with("The MCP server ")),
+                        mcp_note(text)
+                            && !matches!(s.items.get(ix + 1), Some(Item::Note { text: next, .. }) if mcp_note(next)),
                         |d| {
                         let sid = s.id.clone();
                         d.child(
@@ -2763,11 +2825,7 @@ impl Dent {
                                 .any(|i| matches!(i, Item::User { .. })),
                         |d| {
                             let sid = s.id.clone();
-                            let retry =
-                                ghost(SharedString::from(format!("retry-{ix}")), "Try again", &t)
-                                    .relative()
-                                    .child(probe(&self.probes, format!("retry-{ix}")));
-                            match self.limit_hit(&s.agent_id) {
+                            match self.limit_hit(&s.agent_id).filter(|_| about_limit) {
                                 Some((which, at)) => {
                                     let at = at.max(0) as u64;
                                     let when = crate::data::clock(at * 1000);
@@ -2783,7 +2841,7 @@ impl Dent {
                                                 div()
                                                     .px(px(space::S2))
                                                     .text_color(t.ink)
-                                                    .child(format!("Carries on at {when}")),
+                                                    .child(format!("Continues at {when}")),
                                             )
                                             .child(
                                                 ghost(
@@ -2798,7 +2856,7 @@ impl Dent {
                                             .into_any_element(),
                                         None => ghost(
                                             SharedString::from(format!("resume-{ix}")),
-                                            format!("Carry on at {when}"),
+                                            format!("Continue at {when}"),
                                             &t,
                                         )
                                         .relative()
@@ -2825,11 +2883,6 @@ impl Dent {
                                                 })),
                                             )
                                         })
-                                        .child(crate::ui::off_owned(
-                                            retry,
-                                            format!("Once it resets, at {when}"),
-                                            &t,
-                                        ))
                                 }
                                 None => {
                                     let again = s.id.clone();
@@ -2842,7 +2895,7 @@ impl Dent {
                                         .relative()
                                         .child(probe(&self.probes, format!("carry-on-{ix}")))
                                         .with_tip(crate::ui::tip_owned(
-                                            "Carry on from where it was cut off".to_string(),
+                                            "Pick up from where it was cut off".to_string(),
                                             t,
                                         ))
                                         .on_press(
@@ -2851,9 +2904,18 @@ impl Dent {
                                             }),
                                         ),
                                     )
-                                    .child(retry.on_press(
-                                        cx.listener(move |this, _, _, cx| this.retry(&sid, cx)),
-                                    ))
+                                    .child(
+                                        ghost(
+                                            SharedString::from(format!("retry-{ix}")),
+                                            "Try again",
+                                            &t,
+                                        )
+                                        .relative()
+                                        .child(probe(&self.probes, format!("retry-{ix}")))
+                                        .on_press(cx.listener(move |this, _, _, cx| {
+                                            this.retry(&sid, cx)
+                                        })),
+                                    )
                                 }
                             }
                         },
@@ -2938,6 +3000,25 @@ impl Dent {
                             .flex()
                             .flex_col()
                             .gap(px(space::S1H))
+                            // Its folded pastes and the files it carries, as
+                            // they showed in the box, and first, as a sent
+                            // message has them.
+                            .when(!attachments.is_empty() || !pasted.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .gap(px(space::S1H))
+                                        .children(pasted.into_iter().map(|label| {
+                                            small_chip(ChipFace::Icon("file-text"), label, &t)
+                                        }))
+                                        .children(attachments.iter().map(|p| {
+                                            let a =
+                                                crate::app::Attachment::File { path: p.clone() };
+                                            small_chip(file_face(p), a.label(), &t)
+                                        })),
+                                )
+                            })
                             .when(!shown.is_empty(), |d| {
                                 d.child(crate::select::text(
                                     SharedString::from(format!("queued-text-{ix}")),
@@ -2962,24 +3043,6 @@ impl Dent {
                                         } else {
                                             "Show full message"
                                         }),
-                                )
-                            })
-                            // Its folded pastes and the files it carries, as
-                            // they showed in the box.
-                            .when(!attachments.is_empty() || !pasted.is_empty(), |d| {
-                                d.child(
-                                    div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .gap(px(space::S1H))
-                                        .children(pasted.into_iter().map(|label| {
-                                            small_chip(ChipFace::Icon("file-text"), label, &t)
-                                        }))
-                                        .children(attachments.iter().map(|p| {
-                                            let a =
-                                                crate::app::Attachment::File { path: p.clone() };
-                                            small_chip(file_face(p), a.label(), &t)
-                                        })),
                                 )
                             }),
                     )
@@ -3010,7 +3073,7 @@ impl Dent {
                                             )
                                         }
                                     } else if ahead.is_some() {
-                                        "Queued · sends after the one above".into()
+                                        "Queued".into()
                                     } else if matches!(
                                         s.activity,
                                         Some(dent_protocol::Activity::SettingUp { .. })
@@ -3437,29 +3500,43 @@ impl Dent {
                     .border_1()
                     .border_color(t.hairline)
                     .flex()
+                    // Narrow, the choices go under the words rather than
+                    // squeezing them into a column.
+                    .flex_wrap()
                     .items_center()
                     .gap(px(space::S2))
                     .child(icon("rotate-ccw-clock", 14., t.quiet))
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(px(220.))
                             .ty(UI)
                             .text_color(t.quiet)
-                            .child("An earlier version, as it was. Replies go to the latest."),
+                            .child("Viewing an earlier version. Replies go to the latest."),
                     )
                     .child(
-                        ghost("fork-version", "Carry this one on", &t)
-                            .relative()
-                            .child(probe(&self.probes, "fork-version"))
-                            .on_press(cx.listener(move |this, _, _, cx| this.fork_version(&a, cx))),
-                    )
-                    .child(
-                        crate::ui::button("latest-version", "Back to latest", true, &t)
-                            .relative()
-                            .child(probe(&self.probes, "latest-version"))
-                            .on_press(
-                                cx.listener(move |this, _, _, cx| this.latest_version(&b, cx)),
+                        div()
+                            .ml_auto()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S2))
+                            .child(
+                                ghost("fork-version", "Continue from here", &t)
+                                    .relative()
+                                    .child(probe(&self.probes, "fork-version"))
+                                    .on_press(
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.fork_version(&a, cx)
+                                        }),
+                                    ),
+                            )
+                            .child(
+                                crate::ui::button("latest-version", "Back to latest", true, &t)
+                                    .relative()
+                                    .child(probe(&self.probes, "latest-version"))
+                                    .on_press(cx.listener(move |this, _, _, cx| {
+                                        this.latest_version(&b, cx)
+                                    })),
                             ),
                     ),
             )
@@ -3832,7 +3909,16 @@ impl Dent {
                         };
                         let mark = match st.as_str() {
                             "completed" => icon("check", 13., t.quiet).into_any_element(),
-                            "in_progress" => status_square(Status::Working, &t).into_any_element(),
+                            // Held up on you, the step waits as the session does.
+                            "in_progress" => status_square(
+                                if s.status == Status::Needs {
+                                    Status::Needs
+                                } else {
+                                    Status::Working
+                                },
+                                &t,
+                            )
+                            .into_any_element(),
                             _ => div()
                                 .size(px(9.))
                                 .rounded_full()
@@ -3905,16 +3991,26 @@ impl Dent {
                         .justify_center()
                         .child(status_square(Status::Working, &t)),
                 )
-                .child(div().flex_1().min_w_0().truncate().text_color(t.ink).child(
-                    if task.description.trim().is_empty() {
-                        "Background work".to_string()
-                    } else {
-                        task.description.clone()
-                    },
-                ))
-                .when(!kind.is_empty(), |d| {
-                    d.child(div().flex_none().text_color(t.faint).child(kind))
-                })
+                // What kind it is stays with its name, small, apart from
+                // the actions at the end.
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_baseline()
+                        .gap(px(space::S1H))
+                        .child(div().min_w_0().truncate().text_color(t.ink).child(
+                            if task.description.trim().is_empty() {
+                                "Background work".to_string()
+                            } else {
+                                task.description.clone()
+                            },
+                        ))
+                        .when(!kind.is_empty(), |d| {
+                            d.child(div().flex_none().ty(LABEL).text_color(t.faint).child(kind))
+                        }),
+                )
                 .when_some(output, |d, path| {
                     d.child(
                         ghost(
@@ -5940,7 +6036,14 @@ fn picture_path(session: &str, shown: &str, cwd: &str) -> Option<std::path::Path
 /// step together in the large view. One shows at a readable size; more
 /// sit in one row of small tiles, and past [`TOOL_TILES`] the last tile
 /// counts the rest.
-fn tool_pictures(session: &str, cwd: &str, ix: usize, paths: &[String], t: &theme::Theme) -> Div {
+fn tool_pictures(
+    session: &str,
+    cwd: &str,
+    ix: usize,
+    paths: &[String],
+    probes: &std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Bounds<Pixels>>>>,
+    t: &theme::Theme,
+) -> Div {
     // Each as it's here: this Mac's own, or the copy of another machine's
     // once it's come.
     // Drawn from copies kept from before, their machine away: marked.
@@ -5972,14 +6075,23 @@ fn tool_pictures(session: &str, cwd: &str, ix: usize, paths: &[String], t: &them
             .overflow_hidden()
     };
     if set.len() == 1 {
-        // As wide as it is, up to the cap, and narrower with the column.
+        // As wide as it is, up to the cap, and narrower with the column. The
+        // row sizes to its content, so the picture needs a width of its own
+        // (a share of nothing is nothing).
+        let wide = crate::data::picture_dims(&set[0].path).map_or(TOOL_PICTURE_W, |(w, h)| {
+            (w as f32)
+                .min(TOOL_PICTURE_H * w as f32 / h.max(1) as f32)
+                .min(TOOL_PICTURE_W)
+        });
         return div().mt(px(space::S2)).flex().child(
             crate::lightbox::picture(
                 &set,
                 0,
                 frame()
+                    .relative()
                     .max_w_full()
                     .max_h(px(TOOL_PICTURE_H))
+                    .child(probe(probes, "tool-picture"))
                     .child(crate::markdown::sized(
                         img(set[0].path.clone()).object_fit(ObjectFit::Contain),
                         &set[0].path,
@@ -5987,7 +6099,8 @@ fn tool_pictures(session: &str, cwd: &str, ix: usize, paths: &[String], t: &them
                     )),
             )
             .min_w_0()
-            .max_w(px(TOOL_PICTURE_W))
+            .w(px(wide))
+            .max_w_full()
             // On the picture's own corner.
             .when_some(kept, |d, m| {
                 d.child(crate::ui::kept_mark(
@@ -6469,7 +6582,8 @@ pub fn fit_footer(room: f32, chips: [(String, String); 3], context: bool, hint: 
     let text = |t: &str| t.chars().count() as f32 * 7.2;
     let chip = |t: &str| if t.is_empty() { 44. } else { 52. + text(t) };
     let gap = space::S1;
-    let ctx_w = text("context 9.9%") + space::S2;
+    // The widest it reads ("context full"), with the needs square beside it.
+    let ctx_w = text("context full") + space::S2 + 7. + space::S1;
     let hint_w = text(hint) + space::S2;
     // The steps, least loss first.
     let mut steps: Vec<([bool; 3], [bool; 3], bool, bool)> = Vec::new();
@@ -6523,6 +6637,32 @@ pub fn fit_footer(room: f32, chips: [(String, String); 3], context: bool, hint: 
         hint: false,
         fits: false,
     }
+}
+
+/// A note about an MCP server in trouble, worded as now ("The tickets MCP
+/// server …") or as older logs have it ("The MCP server tickets …").
+fn mcp_note(text: &str) -> bool {
+    text.starts_with("The MCP server ")
+        || (text.starts_with("The ")
+            && [
+                " MCP server couldn't connect.",
+                " MCP server needs you to sign in.",
+            ]
+            .iter()
+            .any(|end| text.ends_with(end)))
+}
+
+/// The number key that answers with a button, faint inside it.
+fn key_num(n: &'static str, primary: bool, t: &theme::Theme) -> Div {
+    div()
+        .ty(NUMERAL)
+        .font_weight(FontWeight::NORMAL)
+        .text_color(if primary {
+            t.surface.opacity(0.55)
+        } else {
+            t.faint
+        })
+        .child(n)
 }
 
 /// The line under an approval or a plan saying how to answer by key: the
@@ -6592,10 +6732,10 @@ pub fn is_answer(items: &[Item], ix: usize, running: bool) -> bool {
 pub fn turn_end_after(items: &[Item], ix: usize) -> Option<(u64, u64, bool)> {
     match items.get(ix) {
         Some(Item::Text(_)) => {}
-        // A turn you stopped says so straight under its words, and its time
-        // and actions follow the note.
+        // A turn you stopped, or one that failed, says so straight under its
+        // words, and its time and actions follow the note.
         Some(Item::Note {
-            kind: crate::data::NoteKind::Stopped,
+            kind: crate::data::NoteKind::Stopped | crate::data::NoteKind::Error,
             ..
         }) if items[..ix]
             .iter()
@@ -6610,7 +6750,7 @@ pub fn turn_end_after(items: &[Item], ix: usize) -> Option<(u64, u64, bool)> {
             | Item::User { .. }
             | Item::Queued { .. }
             | Item::Note {
-                kind: crate::data::NoteKind::Stopped,
+                kind: crate::data::NoteKind::Stopped | crate::data::NoteKind::Error,
                 ..
             } => return None,
             Item::TurnEnd { at, took } => {
@@ -6732,6 +6872,46 @@ mod answer_tests {
         // A turn stopped before it said anything keeps a plain note.
         let bare = vec![note, Item::TurnEnd { at: 1, took: 0 }];
         assert!(turn_end_after(&bare, 0).is_none());
+    }
+
+    #[test]
+    fn only_an_mcp_servers_own_notes_offer_its_servers() {
+        use super::mcp_note;
+        assert!(mcp_note("The tickets MCP server needs you to sign in."));
+        assert!(mcp_note("The figma MCP server couldn't connect."));
+        // As older logs have it.
+        assert!(mcp_note("The MCP server tickets needs you to sign in."));
+        assert!(!mcp_note("The request to the MCP server timed out"));
+        assert!(!mcp_note("An MCP server couldn't connect."));
+    }
+
+    #[test]
+    fn a_failed_turns_time_and_copy_follow_its_error() {
+        let error = Item::Note {
+            icon: "circle-alert",
+            text: "Claude Code stopped unexpectedly".into(),
+            kind: crate::data::NoteKind::Error,
+        };
+        let items = vec![
+            Item::Text("starting".into()),
+            error.clone(),
+            Item::TurnEnd { at: 1, took: 0 },
+        ];
+        assert!(turn_end_after(&items, 0).is_none());
+        assert!(turn_end_after(&items, 1).is_some());
+        // A failure before any words: no footer at all, as before.
+        let bare = vec![error.clone(), Item::TurnEnd { at: 1, took: 0 }];
+        assert!(turn_end_after(&bare, 0).is_none());
+        // It went on after the error and finished: the footer is the
+        // last words', not the error's.
+        let after = vec![
+            Item::Text("starting".into()),
+            error,
+            Item::Text("done after all".into()),
+            Item::TurnEnd { at: 1, took: 0 },
+        ];
+        assert!(turn_end_after(&after, 1).is_none());
+        assert!(turn_end_after(&after, 2).is_some());
     }
 
     #[test]

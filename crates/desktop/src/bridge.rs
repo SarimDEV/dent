@@ -856,7 +856,7 @@ fn detail(v: &SessionView) -> String {
     }
     // Waiting for a used-up limit to reset, to carry on by itself.
     if let Some(at) = v.resume_at {
-        return format!("Carries on at {}", crate::data::clock(at * 1000));
+        return format!("Continues at {}", crate::data::clock(at * 1000));
     }
     match v.status {
         Wire::NeedsYou => match v.open_ask() {
@@ -922,13 +922,14 @@ fn detail(v: &SessionView) -> String {
         }
         // A subagent at work says how far it got.
         Wire::Background => agent_step(v).unwrap_or_else(|| {
-            format!(
-                "Waiting on {}",
-                v.background
-                    .first()
-                    .map(|t| t.description.clone())
-                    .unwrap_or_else(|| "background work".into())
-            )
+            // The task's own words are a sentence ("Start the dev
+            // server"), so they follow a label rather than finish one.
+            v.background
+                .first()
+                .map(|t| t.description.trim())
+                .filter(|d| !d.is_empty())
+                .map(|d| format!("In the background · {d}"))
+                .unwrap_or_else(|| "Work in the background".into())
         }),
         Wire::Interrupted => "Stopped".into(),
         Wire::Error => v
@@ -964,7 +965,12 @@ fn first_line(s: &str) -> String {
         .unwrap_or_default()
         .replace("**", "")
         .replace('`', "");
-    let l = l.as_str();
+    // A line that leads into a list ("Here's what I changed:") ends on its
+    // words, not the colon pointing at what the preview leaves out.
+    let l = match l.strip_suffix(':').map(str::trim_end) {
+        Some(cut) if !cut.is_empty() => cut,
+        _ => l.as_str(),
+    };
     let mut out: String = l.chars().take(90).collect();
     if l.chars().count() > 90 {
         out.push('…');
@@ -1535,6 +1541,22 @@ fn answered(tool: &str, input: &Value, a: &Answer, cwd: &Path) -> Item {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_preview_ends_on_words_not_a_colon() {
+        assert_eq!(super::first_line("What I changed:\n- a"), "What I changed");
+        assert_eq!(
+            super::first_line("**Why it failed:** the cache"),
+            "Why it failed: the cache"
+        );
+        // Only a colon is left as it is, rather than as nothing.
+        assert_eq!(super::first_line(":"), ":");
+        assert_eq!(super::first_line("Times 10:30:"), "Times 10:30");
+        assert_eq!(
+            super::first_line("Ends with emoji 🎉🚀:"),
+            "Ends with emoji 🎉🚀"
+        );
+    }
+
     #[test]
     fn an_edit_counts_only_the_lines_it_changes() {
         // One line changed amid its context.

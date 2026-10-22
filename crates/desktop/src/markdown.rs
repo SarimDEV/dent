@@ -1587,7 +1587,10 @@ fn copy_button(
         .text_color(if copied { t.ink } else { t.quiet })
         .cursor_pointer()
         .hover(|d| d.bg(t.hover()).text_color(t.ink))
-        .child(if copied { "Copied" } else { label })
+        .child(crate::ui::steady_label(
+            if copied { "Copied" } else { label },
+            &[label, "Copied"],
+        ))
         .child(crate::ui::probe(&probes, key.clone()))
         .on_press(move |_, _, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(text()));
@@ -1927,7 +1930,12 @@ fn display_math(tex: &str, closed: bool, t: &Theme, key: &str, r: &mut R) -> Any
         t,
         r,
     );
-    hover_actions(body, copy, key, t).into_any_element()
+    // Centred under the prose it belongs to: on the reading measure when it
+    // fits there, else across the column, scrolling past that.
+    let measure = crate::ds::measure();
+    hover_actions(body, copy, key, t)
+        .when(w <= measure, |d| d.max_w(px(measure)))
+        .into_any_element()
 }
 
 /// A Mermaid diagram: rendered off the UI thread once its fence closes, its
@@ -2552,7 +2560,18 @@ fn table_block(table: &std::sync::Arc<Table>, t: &Theme, key: &str, r: &mut R) -
     // In the chat, Open shows it in the viewer, with room for every row.
     let open = counted.then(|| {
         let whole = table.clone();
-        crate::ui::ghost(SharedString::from(format!("md-open-{key}")), "Open", t)
+        div()
+            .id(SharedString::from(format!("md-open-{key}")))
+            .relative()
+            .px(px(space::S1H))
+            .rounded(px(radius::SM))
+            .ty(UI)
+            .text_color(t.quiet)
+            .cursor_pointer()
+            .hover(|d| d.bg(t.hover()).text_color(t.ink))
+            .active(|d| d.bg(t.press()).text_color(t.ink))
+            .on_mouse_down(MouseButton::Left, |_, _, _| crate::select::claim())
+            .child("Open")
             .child(crate::ui::probe(&probes, "md-open-table"))
             .on_click(move |_, window, _| {
                 OPEN_TABLE.with(|o| *o.borrow_mut() = Some(whole.markdown()));

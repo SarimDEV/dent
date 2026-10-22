@@ -147,6 +147,21 @@ pub fn icon_button(id: impl Into<SharedString>, name: &str, t: &Theme) -> Statef
         .child(icon(name, 15., t.quiet))
 }
 
+/// A label that changes ("Copy" to "Copied") without moving what's beside
+/// it: it holds the width of the widest of its words, the one shown centred.
+pub fn steady_label(shown: impl Into<SharedString>, all: &[&'static str]) -> Div {
+    let shown = shown.into();
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .children(
+            all.iter()
+                .map(|w| div().h_0().overflow_hidden().opacity(0.).child(*w)),
+        )
+        .child(div().flex().justify_center().child(shown))
+}
+
 /// A text button. Primary is ink on paper; the rest are quiet outlines.
 pub fn button(
     id: impl Into<SharedString>,
@@ -307,6 +322,15 @@ pub fn ghost(
     label: impl Into<SharedString>,
     t: &Theme,
 ) -> Stateful<Div> {
+    ghost_with(id, label.into(), t)
+}
+
+/// A ghost button around any label, such as a `steady_label`.
+pub fn ghost_with(
+    id: impl Into<SharedString>,
+    label: impl IntoElement,
+    t: &Theme,
+) -> Stateful<Div> {
     div()
         .id(ElementId::Name(id.into()))
         .flex_none()
@@ -322,7 +346,7 @@ pub fn ghost(
         .control()
         .hover(|s| s.bg(t.hover()).text_color(t.ink))
         .active(|s| s.bg(t.press()).text_color(t.ink))
-        .child(label.into())
+        .child(label)
 }
 
 /// A key, boxed like a keycap: ⌘Z, 1.
