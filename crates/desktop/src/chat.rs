@@ -3586,7 +3586,8 @@ impl Dent {
             .w_full()
             .flex()
             .flex_col()
-            .gap(px(space::S1))
+            // Its name and actions sit apart from the page's own last line.
+            .gap(px(space::S2))
             .child(
                 div()
                     .id(SharedString::from(format!("inline-{art}-{version}")))

@@ -51,6 +51,13 @@ pub(super) fn real() -> Vec<(f32, Act)> {
             }
         })),
         (0.1, Until("the chat goes back", |d, _| !has(d, |i| matches!(i, Item::User { text, .. } if text.contains("red.png"))), 10.)),
+        // Going back puts the message in the box with its picture (0069):
+        // this one goes without it.
+        (0.1, Until("the message comes back to the box with its picture", |d, _| !d.attachments.is_empty(), 5.)),
+        (0.1, Call(|d, _, cx| {
+            d.attachments.clear();
+            cx.notify();
+        })),
         (0.2, Type(Field::Composer, "Did I send you an image in this conversation? Reply yes or no.")),
         (0.2, Key("enter")),
         (0.1, Until("after rewinding, it has no memory of the picture", |d, _| done(d) && current(d).is_some_and(|s| matches!(s.items.iter().rev().find(|i| matches!(i, Item::Text(_))), Some(Item::Text(t)) if t.to_lowercase().contains("no"))), 90.)),
@@ -161,5 +168,86 @@ pub(super) fn compare() -> Vec<(f32, Act)> {
         both_themes(&mut v, &format!("{i:03}"));
         v.push((0.9, Call(pace)));
     }
+    v
+}
+
+/// The real agent, on its smallest model, using dent's page tools: it looks
+/// at a small chart, shows it in the chat, then a second turn folds the
+/// first. Strict about the flow, lenient about wording.
+pub(super) fn real_pages() -> Vec<(f32, Act)> {
+    fn haiku(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
+        d.defaults.model = Some("haiku".into());
+        d.defaults.permission = dent_protocol::Permission::Ask;
+        d.fold_turns = true;
+        cx.notify();
+    }
+    fn done(d: &Dent) -> bool {
+        status_is(d, Status::Done)
+    }
+    fn looked(d: &Dent) -> bool {
+        current(d).is_some_and(|s| {
+            s.items.iter().any(|i| matches!(i, Item::Tools { lines, .. } if lines.iter().any(|l| l.text.starts_with("Looked at the page"))))
+        })
+    }
+    fn shown(d: &Dent) -> bool {
+        current(d).is_some_and(|s| {
+            s.items
+                .iter()
+                .any(|i| matches!(i, Item::Made { art, .. } if d.in_chat(art)))
+        })
+    }
+    let mut v: Vec<(f32, Act)> = vec![(
+        0.,
+        Until("connects to the daemon", |d, _| d.connection.is_ok(), 15.),
+    )];
+    v.push((0.2, Call(haiku)));
+    v.extend(new_session(
+        "Make a tiny HTML bar chart of three bars labelled A, B and C (heights 40px, 80px, 60px) using the CSS variables var(--chart-1) and var(--foreground), no page background. First check it with dent's preview_visual tool, then show it with show_visual titled Three bars. Then reply with one short sentence.",
+    ));
+    v.extend([
+        (
+            0.1,
+            Until(
+                "Haiku looks at its page before showing it",
+                |d, _| looked(d) || shown(d),
+                120.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "the page shows in the chat, fitted, and the turn ends",
+                |d, _| {
+                    done(d)
+                        && shown(d)
+                        && drawn(d, "inline-page").is_some()
+                        && d.inline.borrow().live() >= 1
+                },
+                120.,
+            ),
+        ),
+        (0.3, Call(to_end)),
+    ]);
+    both_themes(&mut v, "real-pages-shown");
+    v.extend([
+        (0.2, Type(Field::Composer, "Reply with just the word ok.")),
+        (0.2, Key("enter")),
+        (
+            0.1,
+            Until(
+                "the next turn ends, and the first one's work folds",
+                |d, _| {
+                    done(d)
+                        && says(d, "ok")
+                        && d.turn_folds
+                            .iter()
+                            .any(|f| matches!(f, crate::chat::TurnFold::Head { .. }))
+                },
+                90.,
+            ),
+        ),
+        (0.3, Call(to_end)),
+        (0.6, Shot("real-pages-folded")),
+    ]);
     v
 }

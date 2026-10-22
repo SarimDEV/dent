@@ -269,6 +269,7 @@ const OWN_START: &[(&str, Scene)] = &[
     ("checks", checks),
     ("stills", stills),
     ("real", real),
+    ("real-pages", real_pages),
     ("compare", compare),
     ("sweep", sweep),
     ("markdown", markdown),
