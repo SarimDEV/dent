@@ -852,6 +852,11 @@ impl Preview {
             Cow::Borrowed(bytes)
         };
         if let Ok(mut m) = self.files.lock() {
+            // A view in the chat shows one page at a time: what it showed
+            // before (a look's whole page, its pictures inline) goes.
+            if self.inline {
+                m.clear();
+            }
             m.insert(key, bytes.as_ref().into());
         }
         self.load(src);
@@ -1016,7 +1021,11 @@ impl Preview {
     /// into dent or the page hides, so typing would land in the page.
     pub fn release_focus(&self) {
         self.pressed.store(false, Ordering::Release);
-        let _ = self.web.focus_parent();
+        // Only its own: a hidden page mustn't take the keyboard from
+        // another that has it.
+        if self.has_focus() {
+            let _ = self.web.focus_parent();
+        }
     }
 
     /// The editing keys, done in the page while it has the keyboard: dent

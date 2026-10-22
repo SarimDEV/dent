@@ -60,7 +60,7 @@ The default pairing is called Book: agent replies read like a page, and the inte
 
 ## Fixes before building
 
-- Make status squares larger and give each status its own pattern (solid, checker, dots, outline).
+- Make status squares larger and give each status its own flat shape ([0070](decisions/0070-flat-status-marks.md)).
 - Quiet the hard offset shadow on approval cards; it reads loud, especially in light mode.
 - Shrink the serif session title as the chat scrolls so it stops costing vertical space.
 

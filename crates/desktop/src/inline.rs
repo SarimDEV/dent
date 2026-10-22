@@ -5,7 +5,9 @@
 //! The web view is a native layer over the window, so it can't be clipped,
 //! covered or moved in step with GPUI's drawing. A page is live only while
 //! its whole row is in view, nothing floats over the chat and the chat isn't
-//! scrolling; otherwise its last still is drawn in its place. Pages beyond
+//! scrolling; otherwise its last still is drawn in its place. A page taller
+//! than the chat can never be all in view, so its view is drawn off screen,
+//! at its full height, and only its still is shown. Pages beyond
 //! the few live views wait their turn with a still, or an empty space of
 //! their height until they've been seen.
 
@@ -48,6 +50,8 @@ struct Slot {
     drawn: u64,
     bounds: Option<Bounds<Pixels>>,
     whole: bool,
+    /// Its page is taller than the chat: drawn off screen for its still.
+    tall: bool,
     /// Its page has said its height since it was loaded here: it has drawn.
     ready: bool,
 }
@@ -79,21 +83,23 @@ fn frame() -> u64 {
 
 impl Inline {
     /// A row with its page on screen at `bounds`; `whole` when all of it is
-    /// in view. Lends it a live view when one is free or showing it already.
+    /// in view, `tall` when it's taller than the view. Lends it a live view
+    /// when one is free or showing it already.
     pub fn want(
         &mut self,
         key: Key,
         page: &Page,
         bounds: Bounds<Pixels>,
         whole: bool,
+        tall: bool,
         window: &Window,
     ) {
         let now = frame();
         let at = match self.slots.iter().position(|s| s.key == Some(key)) {
             Some(i) => i,
             // Only a page wholly in view takes a view; one half out of
-            // sight keeps its still.
-            None if !whole => return,
+            // sight keeps its still. One too tall to be is drawn off screen.
+            None if !whole && !tall => return,
             None => {
                 // A view no row placed this frame or the last.
                 let free = self
@@ -117,6 +123,7 @@ impl Inline {
                             drawn: 0,
                             bounds: None,
                             whole: false,
+                            tall: false,
                             ready: false,
                         });
                         self.slots.len() - 1
@@ -144,16 +151,30 @@ impl Inline {
         let slot = &mut self.slots[at];
         // Live and now moved, or no longer all in view: out of the way at
         // once, before this frame shows; it comes back once settled.
+        // Too tall: off screen at its full size, never over the window.
+        let at = if tall && !whole {
+            off_screen(
+                window,
+                bounds.size.width.as_f32(),
+                bounds.size.height.as_f32(),
+            )
+        } else {
+            bounds
+        };
         {
             let mut p = slot.page.borrow_mut();
-            if p.is_visible() && (!whole || slot.bounds != Some(bounds)) {
+            if p.is_visible() && slot.tall != tall {
                 p.set_visible(false);
             }
-            p.place(bounds);
+            if p.is_visible() && !tall && (!whole || slot.bounds != Some(at)) {
+                p.set_visible(false);
+            }
+            p.place(at);
         }
         slot.drawn = now;
-        slot.bounds = Some(bounds);
+        slot.bounds = Some(at);
         slot.whole = whole;
+        slot.tall = tall && !whole;
         // Wanted now: the last to go when stills are many.
         if let Some(i) = self.seen.iter().position(|k| *k == key) {
             self.seen.remove(i);
@@ -181,9 +202,12 @@ impl Inline {
             // Its own page drawn first: shown before, it would flash the last
             // page, a blank or the guessed height.
             let live = clear && settled && placed && slot.whole && slot.ready;
+            // Too tall to show: drawn off screen while its row is on screen,
+            // for the still that stands in for it.
+            let off = placed && slot.tall;
             // Hiding hands the keyboard back to dent too.
             let mut p = slot.page.borrow_mut();
-            p.set_visible(live);
+            p.set_visible(live || off);
             // The view's picture of what it shows now (`snapshot` checks
             // it's of this page), kept as this page's still.
             if slot.ready
@@ -230,7 +254,15 @@ impl Inline {
     pub fn live(&self) -> usize {
         self.slots
             .iter()
-            .filter(|s| s.page.borrow().is_visible())
+            .filter(|s| !s.tall && s.page.borrow().is_visible())
+            .count()
+    }
+
+    /// How many pages too tall to show are drawn off screen now, for checks.
+    pub fn off_screen(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|s| s.tall && s.page.borrow().is_visible())
             .count()
     }
 
@@ -424,6 +456,8 @@ struct Look {
     html: String,
     width: u32,
     dark: bool,
+    /// When it was asked for: the call waits only so long.
+    asked: Instant,
     began: Option<Instant>,
     height: Option<f32>,
     /// When it was last resized: it settles before its picture.
@@ -436,6 +470,10 @@ struct Look {
 
 /// How long a page has to draw before it's given up on.
 const LOOK_GIVE_UP: Duration = Duration::from_secs(15);
+/// How long after it was asked a look must be answered: the call waits 40 s
+/// (`plan_tool::LOOK_WAIT`), and a look queued behind others mustn't run
+/// past it and be told no window answered.
+const LOOK_ANSWER_BY: Duration = Duration::from_secs(36);
 /// The tallest picture sent back: taller, scaled to fit the model's
 /// limit, its words would be too small to read.
 const LOOK_MAX_H: f32 = 2000.;
@@ -459,6 +497,7 @@ impl Looker {
             html: html.to_string(),
             width,
             dark,
+            asked: Instant::now(),
             began: None,
             height: None,
             sized_at: None,
@@ -472,6 +511,19 @@ impl Looker {
     /// the same page asked again later is drawn again.
     pub fn keep_only(&mut self, waiting: &std::collections::HashSet<String>) {
         self.seen.retain(|m| waiting.contains(m));
+        // Nor are those queued or being drawn worth finishing.
+        let mark = |l: &Look| format!("{}/{}", l.session, l.key);
+        self.queue.retain(|l| waiting.contains(&mark(l)));
+        if self
+            .now
+            .as_ref()
+            .is_some_and(|l| !waiting.contains(&mark(l)))
+        {
+            self.now = None;
+            if let Some(page) = &self.page {
+                blank(page);
+            }
+        }
     }
 
     pub fn busy(&self) -> bool {
@@ -482,6 +534,10 @@ impl Looker {
     pub fn step(&mut self, window: &Window) -> Option<(String, String, dent_protocol::Look)> {
         if self.now.is_none() {
             let mut next = self.queue.pop_front()?;
+            // Waited behind others too long to draw in time: said at once.
+            if next.asked.elapsed() + LOOK_QUIET * 3 >= LOOK_ANSWER_BY {
+                return Some(failed(next, "dent was still drawing other pages"));
+            }
             if self.page.is_none() {
                 match Preview::new_inline(window) {
                     Some(p) => self.page = Some(Rc::new(RefCell::new(p))),
@@ -542,6 +598,9 @@ impl Looker {
             }
         }
         let p = page.borrow();
+        // Drawn off screen, never pressed: a page that takes the keyboard
+        // on load gives it straight back.
+        p.keep_keys_unless_pressed(point(px(-1.), px(-1.)));
         // Settled: loaded, sized, and both a while ago.
         let settled = matches!(
             (look.loaded_at, look.sized_at),
@@ -579,7 +638,9 @@ impl Looker {
                 None => failed(look, "its picture couldn't be read"),
             });
         }
-        if look.began.is_some_and(|b| b.elapsed() >= LOOK_GIVE_UP) {
+        if look.began.is_some_and(|b| b.elapsed() >= LOOK_GIVE_UP)
+            || look.asked.elapsed() >= LOOK_ANSWER_BY
+        {
             drop(p);
             let look = self.now.take()?;
             blank(&page);
