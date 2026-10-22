@@ -143,3 +143,140 @@ fn to_long_reply(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
         d.scroll_to_item(ix, cx);
     }
 }
+
+/// A reply drawn a row per block, pushed at its edges: folded into its
+/// finished turn (folding on, as it is by default), the session left and
+/// come back to while it streams, zoomed mid-stream, read back mid-stream.
+pub(super) fn rows() -> Vec<(f32, Act)> {
+    let mut v = vec![(
+        0.1,
+        Call(|d, _, cx| {
+            d.fold_turns = true;
+            cx.notify();
+        }),
+    )];
+    v.extend(new_session("show me colour output please"));
+    v.extend([(
+        0.1,
+        Until(
+            "the first session's turn ends",
+            |d, _| done_saying(d, "Tests ran"),
+            15.,
+        ),
+    )]);
+    v.extend(new_session("stream bench 30"));
+    v.extend([
+        (0.1, Until("it streams", |d, _| streaming(d), 10.)),
+        (0.8, Until("a few blocks in", |d, _| d.rows.len() > 8, 10.)),
+        // Away and back while it streams.
+        (0.1, Key("ctrl-tab")),
+        (0.05, Call(let_go)),
+        (0.3, Until("on the other session", |d, _| !streaming(d), 2.)),
+        (0.1, Key("ctrl-tab")),
+        (0.05, Call(let_go)),
+        (
+            0.3,
+            Until(
+                "back, it's still a row per block and still at its end",
+                |d, _| streaming(d) && d.rows.len() > 8 && d.transcript.is_following_tail(),
+                3.,
+            ),
+        ),
+        // Larger text mid-stream: everything measured again.
+        (0.1, Key("cmd-=")),
+        (0.5, Key("cmd--")),
+        (
+            0.3,
+            Until(
+                "zoomed and back, it keeps following",
+                |d, _| streaming(d) && d.transcript.is_following_tail(),
+                3.,
+            ),
+        ),
+        // Reading back while it streams: what you read stays put as
+        // blocks land below.
+        (0.1, Wheel("transcript", 400.)),
+        (0.3, Call(save_scroll)),
+        (
+            1.0,
+            Until(
+                "reading back mid-stream, the chat stays still",
+                |d, _| streaming(d) && !d.transcript.is_following_tail() && chat_still(d),
+                0.5,
+            ),
+        ),
+        (0.1, Call(to_end)),
+        (
+            0.1,
+            Until(
+                "the long reply finishes",
+                |d, _| done_saying(d, "start with the first"),
+                300.,
+            ),
+        ),
+        // Narration of several blocks folds away with the turn's work.
+        (0.2, Type(Field::Composer, "folded bench")),
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until(
+                "the narrated turn ends folded",
+                |d, _| {
+                    done_saying(d, "start with the first")
+                        && d.turn_folds
+                            .iter()
+                            .any(|f| matches!(f, crate::chat::TurnFold::Head { open: false, .. }))
+                },
+                30.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "its narration, three blocks, folds with the work",
+                |d, _| narration_rows(d).is_some_and(|(n, hidden)| n == 3 && hidden),
+                2.,
+            ),
+        ),
+        // Find opens the fold to reach the narration's last block.
+        (0.2, Key("cmd-f")),
+        (0.1, Keys("narwhal marker")),
+        (
+            0.3,
+            Until(
+                "Find finds it in the folded narration",
+                |d, _| find_at(d).is_some_and(|(_, n)| n == 1),
+                2.,
+            ),
+        ),
+        (
+            0.3,
+            Until(
+                "and opens the turn to show it",
+                |d, _| narration_rows(d).is_some_and(|(_, hidden)| !hidden),
+                2.,
+            ),
+        ),
+        (0.5, Call(look_shown)),
+        (0.1, Until("the match is on screen", shown, 0.5)),
+        (0.1, Key("escape")),
+    ]);
+    v
+}
+
+/// The narration's rows, and whether its turn's fold hides them.
+fn narration_rows(d: &Dent) -> Option<(usize, bool)> {
+    let s = current(d)?;
+    let ix = s
+        .items
+        .iter()
+        .position(|i| matches!(i, Item::Text(t) if t.contains("narwhal")))?;
+    let fold = d.turn_folds.get(ix).copied()?;
+    Some((
+        d.rows.of(ix).len(),
+        matches!(
+            fold,
+            crate::chat::TurnFold::Hidden | crate::chat::TurnFold::Head { open: false, .. }
+        ),
+    ))
+}

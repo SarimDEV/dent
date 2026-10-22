@@ -231,6 +231,7 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("recall", &[recall]),
     ("visuals", &[visuals]),
     ("bench", &[bench]),
+    ("rows", &[rows]),
     ("fold", &[fold]),
     ("pages", &[pages]),
     ("look-hidden", &[look_hidden]),

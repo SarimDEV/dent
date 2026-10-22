@@ -1807,6 +1807,20 @@ impl Agent {
         }
         // A long, mixed reply at the real agent's pace, to time drawing
         // while a reply streams (the `bench` walk).
+        // Narration of several blocks, a call, then a long answer: the
+        // narration folds into the finished turn's line (`rows` walk).
+        if lower.contains("folded bench") {
+            let id = self.say_and_call(
+                "First I'll read the sync layer.\n\n- the log\n- the cursor\n\nThe narwhal marker is here.",
+                "Read",
+                json!({"file_path": "src/sync.rs"}),
+            )?;
+            self.result(&id, "fn sync() {}", false, None);
+            let reply = bench_reply(6);
+            self.say(&reply, None)?;
+            self.end(&reply, false);
+            return Ok(());
+        }
         if lower.contains("stream bench") {
             self.chunk_ms = 25;
             // "stream bench 30" streams thirty parts.
