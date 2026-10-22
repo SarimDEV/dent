@@ -91,7 +91,7 @@ pub(super) fn to_reply(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
     let at = current(d).and_then(|s| s.items.iter().rposition(|i| matches!(i, Item::Text(_))));
     if let Some(ix) = at {
         d.transcript.scroll_to(ListOffset {
-            item_ix: ix,
+            item_ix: d.item_row(ix),
             offset_in_item: px(0.),
         });
         cx.notify();

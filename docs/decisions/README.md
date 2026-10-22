@@ -72,3 +72,4 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0070. Status marks are flat shapes, not pixel patterns](0070-flat-status-marks.md)
 - [0071. Pages the agent shows live in the chat, and it can look first](0071-pages-in-the-chat.md)
 - [0072. A finished turn's work folds into one line](0072-finished-turns-fold.md)
+- [0073. The chat's list draws a reply a row per block](0073-a-reply-is-a-row-per-block.md)

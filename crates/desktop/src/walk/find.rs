@@ -240,7 +240,18 @@ pub(super) fn match_shown(d: &Dent, w: &Window, cx: &App) -> bool {
         return false;
     };
     let needle = d.find_input.read(cx).value().to_string();
-    crate::select::in_view(d.scope_area(s, f.scope), ix as u32, k, &needle, w)
+    let (part, k) = match f.scope {
+        crate::find::Scope::Chat => d.hit_in(ix, k),
+        _ => (None, k),
+    };
+    crate::select::in_view(
+        d.scope_area(s, f.scope),
+        ix as u32,
+        part.map(|b| b as u32),
+        k,
+        &needle,
+        w,
+    )
 }
 
 pub(super) fn doc_top(d: &Dent) -> f32 {

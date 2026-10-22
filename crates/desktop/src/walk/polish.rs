@@ -160,7 +160,7 @@ pub(super) fn to_tools(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
     let at = current(d).and_then(|s| s.items.iter().position(|i| matches!(i, Item::Tools { .. })));
     if let Some(ix) = at {
         d.transcript.scroll_to(ListOffset {
-            item_ix: ix.saturating_sub(1),
+            item_ix: d.item_row(ix.saturating_sub(1)),
             offset_in_item: px(0.),
         });
         cx.notify();

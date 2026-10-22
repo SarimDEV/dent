@@ -73,7 +73,10 @@ pub struct Find {
     /// In the chat: how many matches each item draws, and each item's count
     /// by its words, so only what changed is counted again.
     chat: std::rc::Rc<Vec<usize>>,
-    memo: crate::lru::Lru<u64, usize>,
+    /// A reply's matches block by block (it's drawn a row per block);
+    /// anything else's as one.
+    chat_blocks: std::rc::Rc<Vec<std::rc::Rc<[usize]>>>,
+    memo: crate::lru::Lru<u64, std::rc::Rc<[usize]>>,
 }
 
 /// The words a chat item draws as text, a piece at a time: your message
@@ -196,6 +199,7 @@ impl Dent {
                 cells: Vec::new(),
                 page_count: 0,
                 chat: Default::default(),
+                chat_blocks: Default::default(),
                 memo: crate::lru::Lru::new(256),
             });
         }
@@ -370,13 +374,14 @@ impl Dent {
             let top = match scope {
                 Scope::Chat => {
                     let view = self.transcript.viewport_bounds();
-                    (0..s.items.len())
-                        .find(|ix| {
+                    let row = (0..self.rows.len())
+                        .find(|row| {
                             self.transcript
-                                .bounds_for_item(*ix)
+                                .bounds_for_item(*row)
                                 .is_some_and(|b| b.bottom() > view.top() + px(space::S6))
                         })
-                        .unwrap_or_else(|| self.transcript.logical_scroll_top().item_ix)
+                        .unwrap_or_else(|| self.transcript.logical_scroll_top().item_ix);
+                    self.rows.item_of(row)
                 }
                 Scope::Changes => self.diff_list.logical_scroll_top().item_ix,
                 // The first match at or below the top of the screen.
@@ -406,6 +411,39 @@ impl Dent {
         self.paint_find(cx);
     }
 
+    /// Where the `k`th match in chat item `ix` is: for a reply drawn a row
+    /// per block, its block and which match it is there.
+    pub fn hit_in(&self, ix: usize, k: usize) -> (Option<usize>, usize) {
+        let split = self
+            .rows
+            .of_item(ix)
+            .and_then(|r| self.rows.get(r))
+            .is_some_and(|r| r.part.is_some());
+        let blocks = self.find.as_ref().and_then(|f| f.chat_blocks.get(ix));
+        let Some(blocks) = blocks.filter(|_| split) else {
+            return (None, k);
+        };
+        let mut seen = 0;
+        for (b, n) in blocks.iter().enumerate() {
+            if k < seen + n {
+                return (Some(b), k - seen);
+            }
+            seen += n;
+        }
+        (None, k)
+    }
+
+    /// How many of Find's matches in chat item `ix` come before its block
+    /// `block`: a block drawn in a row of its own numbers its matches on
+    /// from there, whether or not those before it are drawn.
+    pub fn found_before(&self, ix: usize, block: usize) -> usize {
+        self.find
+            .as_ref()
+            .filter(|f| f.scope == Scope::Chat)
+            .and_then(|f| f.chat_blocks.get(ix))
+            .map_or(0, |b| b.iter().take(block).sum())
+    }
+
     /// Count the matches of `query` in each chat item's drawn words, again
     /// only for items whose words changed.
     fn chat_counts(&mut self, s: &Session, query: &str) {
@@ -419,7 +457,7 @@ impl Dent {
         let live = self.births.get(&s.id).map(|(ix, _)| *ix);
         // Room for every item's count, and those of the words before.
         f.memo.at_least(2 * s.items.len() + 64);
-        let counts = s
+        let counts: Vec<std::rc::Rc<[usize]>> = s
             .items
             .iter()
             .enumerate()
@@ -446,25 +484,43 @@ impl Dent {
                         3u8.hash(&mut h);
                         fp(text, &mut h);
                     }
-                    _ => return 0,
+                    _ => return std::rc::Rc::from([]),
                 }
+                (live == Some(ix)).hash(&mut h);
                 let key = h.finish();
                 let md = &mut self.md;
                 f.memo.get_or_insert_with(key, || {
-                    item_words(item, open, |src| {
-                        if live == Some(ix) {
-                            md.live(&s.id, src)
-                        } else {
-                            md.get(src)
+                    let count = |words: &[String]| -> usize {
+                        words
+                            .iter()
+                            .map(|w| crate::select::matches(w, query).len())
+                            .sum()
+                    };
+                    match item {
+                        // Block by block, as it's drawn.
+                        Item::Text(src) => {
+                            let blocks = if live == Some(ix) {
+                                md.live(&s.id, src)
+                            } else {
+                                md.get(src)
+                            };
+                            blocks
+                                .iter()
+                                .map(|b| {
+                                    let mut words = Vec::new();
+                                    crate::markdown::drawn(std::slice::from_ref(b), &mut words);
+                                    count(&words)
+                                })
+                                .collect()
                         }
-                    })
-                    .iter()
-                    .map(|w| crate::select::matches(w, query).len())
-                    .sum()
+                        _ => std::rc::Rc::from([count(&item_words(item, open, |src| md.get(src)))]),
+                    }
                 })
             })
             .collect();
-        f.chat = std::rc::Rc::new(counts);
+        let totals: Vec<usize> = counts.iter().map(|c| c.iter().sum()).collect();
+        f.chat = std::rc::Rc::new(totals);
+        f.chat_blocks = std::rc::Rc::new(counts);
         self.find = Some(f);
     }
 
@@ -515,6 +571,16 @@ impl Dent {
         {
             self.expanded.insert(crate::data::Fold::Turn(id).key());
         }
+        // A match in a reply drawn a row per block is in its block's row.
+        let chat_row = self
+            .find
+            .as_ref()
+            .filter(|f| f.scope == Scope::Chat)
+            .and_then(|f| f.hits.get(f.at).copied())
+            .and_then(|(ix, k)| match self.hit_in(ix, k).0 {
+                Some(b) => self.rows.of_block(ix, b),
+                None => self.rows.of_item(ix),
+            });
         let Some(f) = self.find.as_mut() else { return };
         // A page counts as it looks: it's asked even for nothing found yet.
         if let Scope::Page(_) = f.scope
@@ -531,7 +597,13 @@ impl Dent {
             // Its message first, then the match within it once that's
             // laid out: a long reply's later matches are in view too.
             Scope::Chat => {
-                self.transcript.scroll_to_reveal_item(ix);
+                // Reading back to it: the chat stops following its end, or
+                // the next frame would take it straight back there.
+                let row = chat_row.unwrap_or(ix);
+                if self.transcript.bounds_for_item(row).is_none() {
+                    self.transcript.pause_following_tail();
+                }
+                self.transcript.scroll_to_reveal_item(row);
                 f.reveal = REVEAL_FRAMES;
                 // In a long table's rows out of view, the table scrolls too.
                 crate::select::reveal_row();
@@ -563,7 +635,12 @@ impl Dent {
         };
         let area = self.scope_area(s, f.scope);
         let needle = self.find_input.read(cx).value().to_string();
-        let found = crate::select::reveal(area, ix as u32, k, &needle, window);
+        let (part, k) = match f.scope {
+            Scope::Chat => self.hit_in(ix, k),
+            _ => (None, k),
+        };
+        let found =
+            crate::select::reveal(area, ix as u32, part.map(|b| b as u32), k, &needle, window);
         if let Some(f) = self.find.as_mut() {
             f.reveal = if found { 0 } else { f.reveal - 1 };
         }
