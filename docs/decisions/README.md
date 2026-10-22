@@ -70,3 +70,5 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0068. Files across machines: one resolver on the daemon, ranged reads inside the link, one cache on the client](0068-files-across-machines.md)
 - [0069. Stopped before any reply, a message goes back to the box and out of the conversation](0069-stop-before-a-reply.md)
 - [0070. Status marks are flat shapes, not pixel patterns](0070-flat-status-marks.md)
+- [0071. Pages the agent shows live in the chat, and it can look first](0071-pages-in-the-chat.md)
+- [0072. A finished turn's work folds into one line](0072-finished-turns-fold.md)
