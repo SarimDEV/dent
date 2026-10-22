@@ -4,7 +4,7 @@ Status: accepted (2026-10-22) · Spec: [design-system.md](../design-system.md), 
 
 ## Decision
 
-- Each status keeps a shape of its own, so it reads without its colour, but drawn flat: **needs** a filled square, **done** a filled square with a check cut out of it, **waiting** an outline with a small square inside, **idle** an outline. **Working** still breathes as a small rounded square; with Reduce Motion it holds still in its paler fill under the signal.
+- Each status keeps a shape of its own, so it reads without its colour, but drawn flat: **needs** a filled square, **done** a filled square with a check cut out of it, **waiting** an outline with a small square inside, **idle** an outline. **Working** still breathes as a small rounded square; with Reduce Motion it holds still as that same small rounded square, its paler fill under the signal, so it never reads as needs' full square.
 - No ordered dither anywhere in the app. The unused dissolve (`anim::dissolve`) is gone, and the Resolve motion with it.
 
 ## Why

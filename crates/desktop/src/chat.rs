@@ -63,19 +63,20 @@ impl Dent {
             actions = actions.child(self.message_arrows(s, cx));
         }
         // A failure's note offers Continue itself; one name, in one place.
+        // A limit's note offers only to continue later, so here it stays.
+        let limited = self.limit_hit(&s.agent_id).is_some();
         let note_offers = s
             .items
             .iter()
             .rev()
             .take_while(|i| !matches!(i, Item::User { .. }))
-            .any(|i| {
-                matches!(
-                    i,
-                    Item::Note {
-                        kind: crate::data::NoteKind::Error,
-                        ..
-                    }
-                )
+            .any(|i| match i {
+                Item::Note {
+                    kind: crate::data::NoteKind::Error,
+                    text,
+                    ..
+                } => !(limited && text.to_lowercase().contains("limit")),
+                _ => false,
             });
         if s.stopped && !s.closed && said && !note_offers {
             let sid = id.clone();
@@ -2352,7 +2353,9 @@ impl Dent {
                                     false,
                                     &t,
                                 )
-                                .child(key_num("3", false, &t))
+                                .when(*keeps && s.caps.project_rules, |b| {
+                                    b.child(key_num("3", false, &t))
+                                })
                                 .relative()
                                 .child(probe(&self.probes, "allow-project"));
                                 if *keeps && s.caps.project_rules {
