@@ -108,10 +108,10 @@ fn look(dir: Option<&Path>, args: &Value, wait: Duration) -> Value {
         return text(&why);
     }
     let width = args["width"].as_u64().unwrap_or(700).clamp(240, 1600) as u32;
-    let appearance = match args["appearance"].as_str() {
-        Some(a @ ("light" | "dark")) => a,
-        _ => "auto",
-    };
+    let appearance = args["appearance"]
+        .as_str()
+        .filter(|a| matches!(*a, "light" | "dark"))
+        .unwrap_or("auto");
     let key = dent_protocol::look_key(html, width, appearance);
     let file = dir.join(format!("look-{key}.json"));
     let until = std::time::Instant::now() + wait;
