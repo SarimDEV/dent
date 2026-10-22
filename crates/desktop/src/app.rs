@@ -8282,6 +8282,11 @@ impl Dent {
         cx.notify();
     }
 
+    /// A page an agent asked to see is waiting, or one is being drawn.
+    pub fn looks_waiting(&self) -> bool {
+        self.looker.busy() || self.sessions.iter().any(|s| !s.looks.is_empty())
+    }
+
     /// Draw the pages agents asked to see, in any session, and send each
     /// picture back to its daemon.
     pub fn look_at_pages(&mut self, window: &Window) {

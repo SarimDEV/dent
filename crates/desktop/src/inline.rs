@@ -414,6 +414,8 @@ pub struct Looker {
     /// Keys answered or under way, so each is drawn once.
     seen: std::collections::HashSet<String>,
     n: usize,
+    /// When the last look was drawn and sent, for checks.
+    pub answered_at: Option<Instant>,
 }
 
 struct Look {
@@ -556,6 +558,7 @@ impl Looker {
             drop(p);
             let look = self.now.take()?;
             blank(&page);
+            self.answered_at = Some(Instant::now());
             return Some(match png(&bytes, format) {
                 Some((png, w, h)) => (
                     look.session,

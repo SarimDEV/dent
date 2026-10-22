@@ -1169,6 +1169,7 @@ fn main() {
         // screen changes: a timer's second, a page's message. (A working
         // square asks for every frame itself, through `animating`.)
         let weak = view.downgrade();
+        let main_handle = main_window.into();
         cx.spawn(async move |cx| {
             loop {
                 cx.background_executor()
@@ -1177,6 +1178,17 @@ fn main() {
                 let Ok(due) = weak.update(cx, |this, _| this.tick_due()) else {
                     break;
                 };
+                // A page an agent asked to see is drawn even while the window
+                // draws nothing (minimized, on another Space): its look moves
+                // on here, not only in a frame.
+                let looking = weak
+                    .update(cx, |this, _| this.looks_waiting())
+                    .unwrap_or(false);
+                if looking {
+                    let _ = cx.update_window(main_handle, |_, window, cx| {
+                        let _ = weak.update(cx, |this, _| this.look_at_pages(window));
+                    });
+                }
                 if due && weak.update(cx, |_, cx| cx.notify()).is_err() {
                     break;
                 }

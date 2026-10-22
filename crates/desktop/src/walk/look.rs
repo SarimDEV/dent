@@ -205,3 +205,45 @@ pub(super) fn pages() -> Vec<(f32, Act)> {
     )]);
     v
 }
+
+/// When the window came back from the Dock, for the check that the look
+/// was answered before then.
+static RESTORED: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+/// A look asked for while dent is minimized: drawn and answered all the
+/// same, before the window comes back.
+pub(super) fn look_hidden() -> Vec<(f32, Act)> {
+    let mut v = new_session("look before you show the sign-ups");
+    v.extend([
+        (
+            0.,
+            Call(|_, w, cx| {
+                w.minimize_window();
+                // Back in a while, by itself: a minimized window draws no
+                // frames, so the walk can't bring it back.
+                let handle = w.window_handle();
+                cx.spawn(async move |_, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(8))
+                        .await;
+                    *RESTORED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+                    let _ = cx.update_window(handle, |_, w, _| w.activate_window());
+                })
+                .detach();
+            }),
+        ),
+        (
+            0.5,
+            Until(
+                "minimized, the agent still gets its picture of the page",
+                |d, _| {
+                    let restored = *RESTORED.lock().unwrap_or_else(|e| e.into_inner());
+                    says(d, "Checked it first")
+                        && matches!((d.looker.answered_at, restored), (Some(a), Some(r)) if a < r)
+                },
+                30.,
+            ),
+        ),
+    ]);
+    v
+}
