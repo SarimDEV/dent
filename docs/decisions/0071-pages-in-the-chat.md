@@ -24,6 +24,10 @@ Status: accepted (2026-10-22, owner's call: "live in the chat", and "all that T3
 
 ## Consequences
 
+- A web view lent to a page loads it afresh (another session's page may share its name) and goes live only once that load has said its height; each load is numbered so an earlier page's messages are dropped. Making a web view never brings dent to the front when it wasn't.
+- A look waits for the page to load and sit still 0.9 s, so charts that animate in are drawn; it pictures at most 2,000 pt (taller, the model's image limit shrinks the words past reading) and reports the page's real height.
+- Known limit: looks are drawn on the window's own frames, so with dent minimized the agent is told no window answered.
+
 - `PageEvent::Height` and `Wheel` from inline pages; `Preview::new_inline` (transparent, `INLINE_SCRIPT`).
 - The protocol gains `Request::Looked`, `Look` and `look_key` (pinned by a test, with a copy in the fake agent).
 - A page's still is kept per page and version while the app runs; a theme change drops them (they'd show the old colours).

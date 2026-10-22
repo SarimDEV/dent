@@ -2,7 +2,7 @@
 
 A fast, chat-first app for driving coding agents on any machine you own, from a native desktop app or your iPhone. Agents run under a daemon on each machine, so sessions survive closed lids, dropped connections and restarts.
 
-Early days. The macOS desktop app runs Claude Code sessions: replies stream in, approvals and questions are answered in place, messages queue or steer, Stop stops, sessions survive the app quitting and the daemon restarting, and what the agent makes opens beside the chat.
+Early days. The macOS desktop app runs Claude Code sessions: replies stream in, approvals and questions are answered in place, messages queue or steer, Stop stops, sessions survive the app quitting and the daemon restarting, and what the agent makes opens beside the chat. Charts, tables and mock-ups the agent shows appear live in the conversation itself, in dent's colours, and the agent can look at a page before showing it. A finished turn's work folds into one line above its answer.
 
 It drives other machines too: pair a Mac or Linux box once with a code, then its sessions sit beside this Mac's. The app shows plainly when a machine is asleep, unreachable or has removed you, wakes it over the network where it can, keeps messages until it's back, opens the files its agents make, and can bring a project from this Mac to it. See [docs/spec.md](docs/spec.md) for the spec and [AGENTS.md](AGENTS.md) for working in the repo.
 
