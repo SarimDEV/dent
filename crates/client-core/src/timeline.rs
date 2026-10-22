@@ -291,7 +291,7 @@ impl Call {
         };
         // dent's own look at a page before showing it, at the width asked.
         if self.name == LOOK_TOOL {
-            let width = v["width"].as_u64().unwrap_or(700);
+            let width = v["width"].as_u64().unwrap_or(720);
             return match &self.result {
                 None => format!("Looking at the page at {width} px"),
                 Some((true, _)) => "Couldn't look at the page".into(),

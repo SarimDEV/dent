@@ -109,7 +109,7 @@ const INLINE_SCRIPT: &str = r#"
     const tall = d.scrollHeight > d.clientHeight + 1;
     const bottom = b.getBoundingClientRect().bottom + (parseFloat(getComputedStyle(b).marginBottom) || 0) + scrollY;
     const h = Math.ceil(tall ? d.scrollHeight : Math.max(d.getBoundingClientRect().height, bottom));
-    if (h > 0 && Math.abs(h - last) >= 1) { last = h; send({ t: 'height', h }); }
+    if (h > 0 && Math.abs(h - last) >= 1) { last = h; send({ t: 'height', h, n: window.__dentLoad || 0 }); }
   };
   // A timer, not an animation frame: a page waiting out of sight (hidden
   // until its height is known) gets no frames, but layout still answers.
@@ -352,6 +352,8 @@ pub struct Preview {
     /// An inline page's theme as JSON, written into each page it loads so
     /// the first frame already has dent's colours.
     theme: Shared<String>,
+    /// Inline pages loaded so far: each carries its number in what it says.
+    loads: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// GPUI speaks XCB on X11; the web view wants an Xlib handle. Both name the
@@ -428,6 +430,24 @@ impl Preview {
     }
 
     fn build(window: &Window, inline: bool) -> Option<Self> {
+        // wry activates the whole app whenever it makes a web view; one made
+        // without your asking (a page scrolling into view, an agent's look)
+        // must not pull dent in front of what you're doing.
+        #[cfg(target_os = "macos")]
+        let was_active = objc2::MainThreadMarker::new()
+            .is_some_and(|mtm| objc2_app_kit::NSApplication::sharedApplication(mtm).isActive());
+        // On Wayland a web view gets a window of its own: right for the
+        // viewer, wrong for a page inside the chat.
+        #[cfg(target_os = "linux")]
+        if inline {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if matches!(
+                HasWindowHandle::window_handle(window).map(|h| h.as_raw()),
+                Ok(RawWindowHandle::Wayland(_))
+            ) {
+                return None;
+            }
+        }
         let files: Shared<HashMap<String, Arc<[u8]>>> = Arc::default();
         let events: Shared<Vec<PageEvent>> = Arc::default();
         let pending = Arc::new(AtomicBool::new(false));
@@ -454,6 +474,10 @@ impl Preview {
         let ipc_settled = settled.clone();
         let pressed = Arc::new(AtomicBool::new(false));
         let ipc_pressed = pressed.clone();
+        // Which load an inline page's height belongs to: one from a page
+        // shown before is dropped.
+        let loads = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let ipc_loads = loads.clone();
         let (nav_origin, nav_push, win_push, ipc_push, drop_push) = (
             origin.clone(),
             push.clone(),
@@ -464,6 +488,20 @@ impl Preview {
         let builder = WebViewBuilder::new()
             .with_asynchronous_custom_protocol("dent".into(), move |_, req, responder| {
                 let mut path = req.uri().path().trim_start_matches('/').to_string();
+                // dent's own type, for pages in the chat to set themselves in:
+                // from here, never another machine.
+                if let Some(name) = path.strip_prefix(".dent/fonts/")
+                    && let Some((_, bytes)) = crate::assets::FONTS.iter().find(|(n, _)| *n == name)
+                {
+                    responder.respond(
+                        Response::builder()
+                            .status(200)
+                            .header(CONTENT_TYPE, "font/ttf")
+                            .body(Cow::Borrowed(*bytes))
+                            .unwrap_or_else(|_| Response::new(Cow::Borrowed(&[][..]))),
+                    );
+                    return;
+                }
                 // Another machine's page: what isn't the page itself is the
                 // window's to fetch from there.
                 if let Some(far) = fr.lock().ok().and_then(|f| f.clone()) {
@@ -508,18 +546,6 @@ impl Preview {
                     return;
                 }
                 let respond = |r: Response<Cow<'static, [u8]>>| responder.respond(r);
-                // dent's own type, for pages in the chat to set themselves in.
-                if let Some(name) = path.strip_prefix(".dent/fonts/")
-                    && let Some((_, bytes)) = crate::assets::FONTS.iter().find(|(n, _)| *n == name)
-                {
-                    return respond(
-                        Response::builder()
-                            .status(200)
-                            .header(CONTENT_TYPE, "font/ttf")
-                            .body(Cow::Borrowed(*bytes))
-                            .unwrap_or_else(|_| Response::new(Cow::Borrowed(&[][..]))),
-                    );
-                }
                 let root = r.lock().ok().and_then(|r| r.clone());
                 // Video and sound play from disk a piece at a time, as the
                 // player asks for them, so a long film never loads whole.
@@ -611,8 +637,15 @@ impl Preview {
                     "found" => {
                         PageEvent::Found(v.get("n").and_then(|n| n.as_u64()).unwrap_or(0) as usize)
                     }
-                    "height" => match v.get("h").and_then(|h| h.as_f64()) {
-                        Some(h) if h.is_finite() => PageEvent::Height(h as f32),
+                    "height" => match (
+                        v.get("h").and_then(|h| h.as_f64()),
+                        v.get("n").and_then(|n| n.as_u64()),
+                    ) {
+                        (Some(h), Some(n))
+                            if h.is_finite() && n == ipc_loads.load(Ordering::Acquire) =>
+                        {
+                            PageEvent::Height(h as f32)
+                        }
                         _ => return,
                     },
                     "wheel" => match v.get("dy").and_then(|x| x.as_f64()) {
@@ -696,10 +729,10 @@ impl Preview {
             .map_err(|e| eprintln!("preview: no web view ({e})"))
             .ok()?;
 
-        // wry activates the whole app whenever it makes a web view. A
-        // background run hands activation straight back.
+        // A background run, or dent not in front when it was made, hands
+        // activation straight back.
         #[cfg(target_os = "macos")]
-        if crate::BACKGROUND.load(Ordering::Relaxed)
+        if (crate::BACKGROUND.load(Ordering::Relaxed) || !was_active)
             && let Some(mtm) = objc2::MainThreadMarker::new()
         {
             objc2_app_kit::NSApplication::sharedApplication(mtm).deactivate();
@@ -729,6 +762,7 @@ impl Preview {
             own_window,
             inline,
             theme: Arc::default(),
+            loads,
         })
     }
 
@@ -808,7 +842,8 @@ impl Preview {
         // Inside the chat, the page starts with dent's colours.
         let bytes: Cow<[u8]> = if self.inline {
             let theme = self.theme.lock().map(|t| t.clone()).unwrap_or_default();
-            Cow::Owned(with_theme(bytes, &theme))
+            let n = self.loads.fetch_add(1, Ordering::AcqRel) + 1;
+            Cow::Owned(with_theme(bytes, &theme, n))
         } else {
             Cow::Borrowed(bytes)
         };
@@ -917,6 +952,30 @@ impl Preview {
                 .web
                 .evaluate_script("dispatchEvent(new Event('resize'))");
         }
+    }
+
+    /// Load afresh next time anything is shown, and drop the last picture:
+    /// it was of something else (another session's page can share a name).
+    pub fn forget(&mut self) {
+        self.showing = None;
+        self.drop_snapshot();
+    }
+
+    /// The last picture no longer shows the page as it is (its colours
+    /// changed): gone, so nothing takes it for a still.
+    pub fn drop_snapshot(&mut self) {
+        if let Ok(mut s) = self.snapshot.lock()
+            && let Some(old) = s.take()
+            && let Ok(mut r) = self.retired.lock()
+        {
+            r.push(old.image);
+        }
+        self.want_snapshot.set(true);
+    }
+
+    /// You pressed in the page since dent last had the keyboard.
+    pub fn was_pressed(&self) -> bool {
+        self.pressed.load(Ordering::Acquire)
     }
 
     pub fn is_visible(&self) -> bool {
@@ -1180,17 +1239,19 @@ impl Preview {
 /// A page with its theme set before anything of its own runs: a script
 /// calling `__dentTheme` (from `INLINE_SCRIPT`) at the very start, so its
 /// styles never draw a frame without dent's colours.
-pub fn with_theme(page: &[u8], theme: &str) -> Vec<u8> {
-    if theme.is_empty() {
-        return page.to_vec();
-    }
+pub fn with_theme(page: &[u8], theme: &str, load: u64) -> Vec<u8> {
     // `</` can't appear inside the script, or the parser would end it early.
+    let theme = if theme.is_empty() { "null" } else { theme };
     let tag = format!(
-        "<script data-dent>window.__dentTheme&&window.__dentTheme({})</script>",
+        "<script data-dent>window.__dentLoad={load};window.__dentTheme&&window.__dentTheme({})</script>",
         theme.replace("</", "<\\/")
     );
-    // After the doctype: anything before it would put the page in quirks
-    // mode and change how it lays out.
+    inject(page, &tag)
+}
+
+/// `tag` at the very start of a page, after its doctype: anything before
+/// that would put the page in quirks mode and change how it lays out.
+pub fn inject(page: &[u8], tag: &str) -> Vec<u8> {
     let head = &page[..page.len().min(2048)];
     let at = head
         .windows(9)

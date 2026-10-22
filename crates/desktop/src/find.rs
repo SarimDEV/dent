@@ -497,9 +497,15 @@ impl Dent {
             .filter(|f| f.scope == Scope::Chat)
             .and_then(|f| f.hits.get(f.at))
             .map(|h| h.0);
+        // (A closed turn's line stands in for its first item too.)
         if let Some(ix) = at
-            && self.turn_folds.get(ix) == Some(&crate::chat::TurnFold::Hidden)
-            && let Some(crate::chat::TurnFold::Head { user, .. }) = self.turn_folds[..ix]
+            && matches!(
+                self.turn_folds.get(ix),
+                Some(
+                    crate::chat::TurnFold::Hidden | crate::chat::TurnFold::Head { open: false, .. }
+                )
+            )
+            && let Some(crate::chat::TurnFold::Head { user, .. }) = self.turn_folds[..=ix]
                 .iter()
                 .rev()
                 .find(|f| matches!(f, crate::chat::TurnFold::Head { .. }))

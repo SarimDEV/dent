@@ -3550,7 +3550,6 @@ impl Dent {
         let open_name = a.path.rsplit('/').next().unwrap_or(a.path).to_string();
         div()
             .w_full()
-            .max_w(px(crate::ds::measure()))
             .flex()
             .flex_col()
             .gap(px(space::S1))
@@ -3638,10 +3637,12 @@ impl Dent {
                             "Open in browser",
                             &t,
                         )
-                        .on_press(cx.listener(move |_, _, _, cx| {
+                        .on_press(cx.listener(move |this, _, _, cx| {
                             let path = std::env::temp_dir()
                                 .join(format!("dent-visual-v{version}-{open_name}"));
-                            if std::fs::write(&path, &bytes[..]).is_ok() {
+                            // With dent's colours and type, as the chat draws it.
+                            let page = crate::inline::browser_copy(&bytes, &this.t);
+                            if std::fs::write(&path, page).is_ok() {
                                 cx.open_url(&format!("file://{}", path.display()));
                             }
                         })),

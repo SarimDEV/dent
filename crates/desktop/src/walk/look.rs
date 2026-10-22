@@ -166,7 +166,7 @@ pub(super) fn pages() -> Vec<(f32, Act)> {
             Until(
                 "scrolling, they step aside for their pictures",
                 |d, _| live(d) == 0,
-                1.,
+                0.3,
             ),
         ),
         (
@@ -198,9 +198,9 @@ pub(super) fn pages() -> Vec<(f32, Act)> {
     v.extend([(
         0.1,
         Until(
-            "another session shows none of them",
+            "another session shows none of them, at once",
             |d, _| live(d) == 0,
-            3.,
+            0.5,
         ),
     )]);
     v

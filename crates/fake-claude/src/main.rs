@@ -1435,7 +1435,7 @@ impl Agent {
         if lower.contains("look before") {
             // Checks the page first, as dent's tool lets it: a desktop draws
             // it and the picture comes back through the asks folder.
-            let width = 700u32;
+            let width = 720u32;
             let input = json!({"html": VISUAL_PAGE, "width": width});
             let id = self.tool("mcp__dent__preview_visual", input, None);
             let Some(asks) = asks_dir() else {

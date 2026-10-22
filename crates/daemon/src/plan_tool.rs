@@ -86,10 +86,10 @@ pub fn run() -> anyhow::Result<()> {
 
 /// What `show_visual` tells the agent: what the page is for, where it shows
 /// and how to make it sit well in the chat.
-const VISUAL_DESCRIPTION: &str = "Show the person a finished visual inside the chat, above your reply: a chart, a table, a diagram, a mock-up, a comparison. Call it before you write that reply. They see the page, so your reply shouldn't announce it, say where it is or restate it: add only what the page doesn't say. Give one whole, self-contained HTML document (inline <style> and <script>; libraries may load from a CDN). Nothing is written to the project. Call it again with the same title to show a new version.\n\nHow it sits in the chat: on the chat's own background, about 700px wide, left-aligned with your reply, and exactly as tall as the page (the frame grows to fit, so the page never scrolls inside itself). So: no background on html or body, no outer card or banner; panels inside get at least 16px padding and var(--radius). Give charts a fixed pixel height. Never use viewport-height units (vh, svh, lvh, dvh) or height:100% on html or body: the frame follows the page's height, so a page that follows the frame grows without end, and it is refused.\n\nColours and type follow dent's light or dark theme through CSS variables, live: --background, --foreground, --muted, --muted-foreground, --card, --border, --primary, --primary-foreground, --accent, --destructive, --warning, --success, --info, --chart-1 to --chart-6, --radius, --font-sans, --font-serif, --font-mono. Use them rather than fixed colours. Links open in the person's browser.";
+const VISUAL_DESCRIPTION: &str = "Show the person a finished visual inside the chat, above your reply: a chart, a table, a diagram, a mock-up, a comparison. Call it before you write that reply. They see the page, so your reply shouldn't announce it, say where it is or restate it: add only what the page doesn't say. Give one whole, self-contained HTML document (inline <style> and <script>; libraries may load from a CDN). Nothing is written to the project. Call it again with the same title to show a new version.\n\nHow it sits in the chat: on the chat's own background, 720px wide, left-aligned with your reply, and exactly as tall as the page (the frame grows to fit, so the page never scrolls inside itself). So: no background on html or body, no outer card or banner; panels inside get at least 16px padding and var(--radius). Give charts a fixed pixel height. Never use viewport-height units (vh, svh, lvh, dvh) or height:100% on html or body: the frame follows the page's height, so a page that follows the frame grows without end, and it is refused.\n\nColours and type follow dent's light or dark theme through CSS variables, live: --background, --foreground, --muted, --muted-foreground, --card, --border, --primary, --primary-foreground, --accent, --destructive, --warning, --success, --info, --chart-1 to --chart-6, --radius, --font-sans, --font-serif, --font-mono. Use them rather than fixed colours. Links open in the person's browser.";
 
 /// What `preview_visual` tells the agent.
-const LOOK_DESCRIPTION: &str = "See a page as it will show in the chat before you show it with show_visual: dent draws it at the width you give (700 by default, the chat's column) in the person's theme and returns a picture, its height (contentHeight) and anything it reported going wrong in its console. Use it to check layout, overflow, wrapping and contrast, then fix and look again, or show it. It needs dent open on the person's computer; if it isn't, you'll be told.";
+const LOOK_DESCRIPTION: &str = "See a page as it will show in the chat before you show it with show_visual: dent draws it at the width you give (720 by default, the chat's column) in the person's theme and returns a picture, its height (contentHeight) and anything it reported going wrong in its console. Use it to check layout, overflow, wrapping and contrast, then fix and look again, or show it. It needs dent open on the person's computer; if it isn't, you'll be told.";
 
 /// How long a look may take before the agent hears none came.
 const LOOK_WAIT: Duration = Duration::from_secs(40);
@@ -107,7 +107,7 @@ fn look(dir: Option<&Path>, args: &Value, wait: Duration) -> Value {
     if let Some(why) = page_refused(Some(html)) {
         return text(&why);
     }
-    let width = args["width"].as_u64().unwrap_or(700).clamp(240, 1600) as u32;
+    let width = args["width"].as_u64().unwrap_or(720).clamp(240, 1600) as u32;
     let appearance = args["appearance"]
         .as_str()
         .filter(|a| matches!(*a, "light" | "dark"))
@@ -301,7 +301,7 @@ fn answer(msg: &Value) -> Option<Value> {
                     "type": "object",
                     "properties": {
                         "html": {"type": "string", "description": "The whole HTML document, as you'd give show_visual."},
-                        "width": {"type": "integer", "minimum": 240, "maximum": 1600, "description": "The width to lay it out at, in CSS pixels. Defaults to 700, the chat's column; about 390 checks a phone."},
+                        "width": {"type": "integer", "minimum": 240, "maximum": 1600, "description": "The width to lay it out at, in CSS pixels. Defaults to 720, the chat's column; about 390 checks a phone."},
                         "appearance": {"type": "string", "enum": ["auto", "light", "dark"], "description": "dent's theme to draw it in. Defaults to auto, the person's own."},
                     },
                     "required": ["html"],

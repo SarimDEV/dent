@@ -8286,6 +8286,13 @@ impl Dent {
     /// picture back to its daemon.
     pub fn look_at_pages(&mut self, window: &Window) {
         let dark = self.t.dark;
+        let mut waiting = std::collections::HashSet::new();
+        for s in &self.sessions {
+            for (key, ..) in &s.looks {
+                waiting.insert(format!("{}/{key}", s.id));
+            }
+        }
+        self.looker.keep_only(&waiting);
         for s in &self.sessions {
             for (key, html, width, appearance) in &s.looks {
                 let dark = match appearance.as_str() {
@@ -8303,7 +8310,12 @@ impl Dent {
 
     /// Nothing floats over the chat: an inline page may show live.
     pub fn inline_clear(&self) -> bool {
-        self.menu.is_none()
+        self.pane.is_none()
+            && !self.meter_open
+            && !self.keys_open
+            && self.adding.is_none()
+            && !self.dragging_sidebar
+            && self.menu.is_none()
             && self.palette.is_none()
             && self.context.is_none()
             && self.lightbox.is_none()
@@ -8319,7 +8331,7 @@ impl Dent {
         for image in retired {
             let _ = window.drop_image(image);
         }
-        let events = self.inline.borrow().drain();
+        let events = self.inline.borrow_mut().drain();
         if events.is_empty() {
             return;
         }
@@ -8332,7 +8344,8 @@ impl Dent {
                         cx.notify();
                     }
                 }
-                PageEvent::Wheel(dy) => {
+                // A sideways swipe has nothing for the chat; it isn't a move.
+                PageEvent::Wheel(dy) if dy != 0. => {
                     self.transcript.scroll_by(px(dy));
                     self.inline.borrow_mut().moved();
                     cx.notify();

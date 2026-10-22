@@ -768,7 +768,7 @@ fn looks(v: &SessionView) -> Vec<(String, std::rc::Rc<str>, u32, String)> {
         .filter_map(|c| {
             let i = c.input();
             let html = i["html"].as_str()?.to_string();
-            let width = i["width"].as_u64().unwrap_or(700).clamp(240, 1600) as u32;
+            let width = i["width"].as_u64().unwrap_or(720).clamp(240, 1600) as u32;
             let appearance = i["appearance"]
                 .as_str()
                 .filter(|a| matches!(*a, "light" | "dark"))

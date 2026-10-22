@@ -43,11 +43,17 @@ pub struct Page {
 struct Slot {
     page: Rc<RefCell<Preview>>,
     key: Option<Key>,
-    /// The frame a row last placed it in.
+    /// The frame a row last placed it in, where, and whether all of that
+    /// row was in view.
     drawn: u64,
-    /// That row was wholly in view.
+    bounds: Option<Bounds<Pixels>>,
     whole: bool,
+    /// Its page has said its height since it was loaded here: it has drawn.
+    ready: bool,
 }
+
+/// How many pages keep a still; the longest unseen go first.
+const STILLS: usize = 24;
 
 #[derive(Default)]
 pub struct Inline {
@@ -55,14 +61,16 @@ pub struct Inline {
     /// Each page's height, in points, as it last laid out.
     pub heights: HashMap<Key, f32>,
     stills: HashMap<Key, Arc<RenderImage>>,
+    /// Pages by when their still was last wanted, oldest first.
+    seen: std::collections::VecDeque<Key>,
     /// Stills replaced, for the window to free.
     retired: Vec<Arc<RenderImage>>,
     /// The chat's scroll position last frame, and when it last changed.
     top: Option<(usize, f32)>,
     moved_at: Option<Instant>,
     theme: String,
-    /// No web view could be made (a test without a window, say).
-    broken: bool,
+    /// No web view could be made (Wayland, or a test without a window).
+    pub broken: bool,
 }
 
 fn frame() -> u64 {
@@ -107,7 +115,9 @@ impl Inline {
                             page: Rc::new(RefCell::new(p)),
                             key: None,
                             drawn: 0,
+                            bounds: None,
                             whole: false,
+                            ready: false,
                         });
                         self.slots.len() - 1
                     }
@@ -117,19 +127,38 @@ impl Inline {
                 {
                     let mut p = slot.page.borrow_mut();
                     p.set_visible(false);
+                    // Always afresh: another session's page may share its
+                    // name, and the last picture was of something else.
+                    p.forget();
+                    let _ = p.drain();
                     match &page.far {
                         Some(far) => p.show_far(page.path, page.version, &page.bytes, far.clone()),
                         None => p.show(page.path, page.version, &page.bytes, page.dir.as_deref()),
                     }
                 }
                 slot.key = Some(key);
+                slot.ready = false;
                 i
             }
         };
         let slot = &mut self.slots[at];
+        // Live and now moved, or no longer all in view: out of the way at
+        // once, before this frame shows; it comes back once settled.
+        {
+            let mut p = slot.page.borrow_mut();
+            if p.is_visible() && (!whole || slot.bounds != Some(bounds)) {
+                p.set_visible(false);
+            }
+            p.place(bounds);
+        }
         slot.drawn = now;
+        slot.bounds = Some(bounds);
         slot.whole = whole;
-        slot.page.borrow_mut().place(bounds);
+        // Wanted now: the last to go when stills are many.
+        if let Some(i) = self.seen.iter().position(|k| *k == key) {
+            self.seen.remove(i);
+        }
+        self.seen.push_back(key);
     }
 
     /// Once a frame, before drawing: which views show, and the stills
@@ -149,16 +178,16 @@ impl Inline {
                 slot.page.borrow_mut().set_visible(false);
                 continue;
             };
-            // Fitted first: shown before its height is known, it would
-            // flash at the guess.
-            let fitted = self.heights.contains_key(&key);
-            let live = clear && settled && placed && slot.whole && fitted;
+            // Its own page drawn first: shown before, it would flash the last
+            // page, a blank or the guessed height.
+            let live = clear && settled && placed && slot.whole && slot.ready;
             // Hiding hands the keyboard back to dent too.
             let mut p = slot.page.borrow_mut();
             p.set_visible(live);
             // The view's picture of what it shows now (`snapshot` checks
             // it's of this page), kept as this page's still.
-            if let Some(snap) = p.snapshot(size(px(0.), px(0.)), true)
+            if slot.ready
+                && let Some(snap) = p.snapshot(size(px(0.), px(0.)), true)
                 && self
                     .stills
                     .get(&key)
@@ -167,6 +196,18 @@ impl Inline {
             {
                 self.retired.push(old);
             }
+        }
+        // A still per page seen lately, not every page ever.
+        while self.stills.len() > STILLS {
+            let Some(old) = self.seen.pop_front() else {
+                break;
+            };
+            if let Some(img) = self.stills.remove(&old) {
+                self.retired.push(img);
+            }
+        }
+        while self.seen.len() > STILLS * 4 {
+            self.seen.pop_front();
         }
     }
 
@@ -197,22 +238,36 @@ impl Inline {
         self.stills.get(&key).cloned()
     }
 
-    /// What the pages said since last asked, by page.
-    pub fn drain(&self) -> Vec<(Key, PageEvent)> {
+    /// What the pages said since last asked, by page; a page saying its
+    /// height has drawn. A link opens only after a press in its page: a
+    /// script can't send you to the browser on its own.
+    pub fn drain(&mut self) -> Vec<(Key, PageEvent)> {
         let mut out = Vec::new();
-        for slot in &self.slots {
+        for slot in &mut self.slots {
             let Some(key) = slot.key else { continue };
-            out.extend(slot.page.borrow().drain().into_iter().map(|e| (key, e)));
+            let p = slot.page.borrow();
+            let pressed = p.was_pressed();
+            for e in p.drain() {
+                match e {
+                    PageEvent::Height(_) => slot.ready = true,
+                    PageEvent::External(_) if !pressed => continue,
+                    _ => {}
+                }
+                out.push((key, e));
+            }
         }
         out
     }
 
-    /// Snapshots owed or events waiting: the window checks back.
+    /// Snapshots owed, events waiting, or a live view whose row wasn't
+    /// drawn last frame (another session, a page over the chat): the
+    /// window draws again, and the next frame hides it.
     pub fn tick(&self) -> bool {
+        let now = frame();
         self.slots.iter().any(|s| {
             let p = s.page.borrow();
             let owed = p.tick();
-            p.pending() || owed
+            p.pending() || owed || (p.is_visible() && s.drawn < now)
         })
     }
 
@@ -233,13 +288,16 @@ impl Inline {
             .collect()
     }
 
-    /// dent's colours changed: every page takes them, and old stills go.
+    /// dent's colours changed: every page takes them, and every picture
+    /// of the old ones goes, the views' own included.
     pub fn set_theme(&mut self, json: String) {
         if self.theme == json {
             return;
         }
         for s in &self.slots {
-            s.page.borrow().set_theme(&json);
+            let mut p = s.page.borrow_mut();
+            p.set_theme(&json);
+            p.drop_snapshot();
         }
         self.retired.extend(self.stills.drain().map(|(_, v)| v));
         self.theme = json;
@@ -312,6 +370,27 @@ pub fn theme_json(t: &crate::theme::Theme) -> String {
     serde_json::json!({"dark": t.dark, "vars": vars}).to_string()
 }
 
+/// A page as a file for the browser: dent's colours and type as fixed CSS
+/// variables, since there's no dent there to set them.
+pub fn browser_copy(page: &[u8], t: &crate::theme::Theme) -> Vec<u8> {
+    let json: serde_json::Value = serde_json::from_str(&theme_json(t)).unwrap_or_default();
+    let vars: String = json["vars"]
+        .as_object()
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| format!("--{k}:{};", v.as_str().unwrap_or_default()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let scheme = if t.dark { "dark" } else { "light" };
+    // The values are dent's own colours and font names: nothing in them
+    // can end the style early.
+    let style = format!(
+        "<style>:root{{{vars}color-scheme:{scheme}}}:where(html){{font:14px/1.5 var(--font-sans);color:var(--foreground);background:var(--background)}}:where(body){{margin:24px}}</style>"
+    );
+    crate::web::inject(page, &style)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -347,24 +426,31 @@ struct Look {
     height: Option<f32>,
     /// When it was last resized: it settles before its picture.
     sized_at: Option<Instant>,
+    /// When it said it had loaded.
+    loaded_at: Option<Instant>,
     asked_still: bool,
     console: Vec<String>,
 }
 
 /// How long a page has to draw before it's given up on.
 const LOOK_GIVE_UP: Duration = Duration::from_secs(15);
-/// The tallest picture sent back.
-const LOOK_MAX_H: f32 = 4000.;
+/// The tallest picture sent back: taller, scaled to fit the model's
+/// limit, its words would be too small to read.
+const LOOK_MAX_H: f32 = 2000.;
+/// How long a loaded page must sit still before its picture: charts that
+/// animate in, fonts and late scripts.
+const LOOK_QUIET: Duration = Duration::from_millis(900);
 
 impl Looker {
     /// A page asked to be seen, in this session: queued unless it already
     /// was. `dark` is the theme it's drawn in.
     pub fn ask(&mut self, session: &str, key: &str, html: &str, width: u32, dark: bool) {
-        if self.seen.contains(key) {
+        let mark = format!("{session}/{key}");
+        if self.seen.contains(&mark) {
             return;
         }
+        self.seen.insert(mark);
         let key = key.to_string();
-        self.seen.insert(key.clone());
         self.queue.push_back(Look {
             session: session.to_string(),
             key,
@@ -374,9 +460,16 @@ impl Looker {
             began: None,
             height: None,
             sized_at: None,
+            loaded_at: None,
             asked_still: false,
             console: Vec::new(),
         });
+    }
+
+    /// Forget looks no call waits on any more (`waiting`: session/key), so
+    /// the same page asked again later is drawn again.
+    pub fn keep_only(&mut self, waiting: &std::collections::HashSet<String>) {
+        self.seen.retain(|m| waiting.contains(m));
     }
 
     pub fn busy(&self) -> bool {
@@ -397,6 +490,9 @@ impl Looker {
             }
             let page = self.page.clone()?;
             let mut p = page.borrow_mut();
+            // Nothing the last look's page still says counts for this one.
+            let _ = p.drain();
+            p.forget();
             let t = if next.dark {
                 crate::theme::Theme::carbon()
             } else {
@@ -422,14 +518,20 @@ impl Looker {
         for e in events {
             match e {
                 PageEvent::Height(h) => {
-                    let h = h.clamp(1., LOOK_MAX_H);
                     if look.height.is_none_or(|o| (o - h).abs() >= 1.) {
                         look.height = Some(h);
                         look.sized_at = Some(Instant::now());
                         look.asked_still = false;
-                        page.borrow_mut()
-                            .place(off_screen(window, look.width as f32, h));
+                        page.borrow_mut().place(off_screen(
+                            window,
+                            look.width as f32,
+                            h.clamp(1., LOOK_MAX_H),
+                        ));
                     }
+                }
+                PageEvent::Loaded => {
+                    look.loaded_at = Some(Instant::now());
+                    look.asked_still = false;
                 }
                 PageEvent::Error(m) | PageEvent::Logged(m) if look.console.len() < 20 => {
                     look.console.push(m.chars().take(500).collect());
@@ -438,10 +540,11 @@ impl Looker {
             }
         }
         let p = page.borrow();
-        // Settled: its last size held a moment, fonts and scripts done.
-        let settled = look
-            .sized_at
-            .is_some_and(|at| at.elapsed() >= Duration::from_millis(400));
+        // Settled: loaded, sized, and both a while ago.
+        let settled = matches!(
+            (look.loaded_at, look.sized_at),
+            (Some(l), Some(z)) if l.elapsed() >= LOOK_QUIET && z.elapsed() >= LOOK_QUIET
+        );
         if settled && !look.asked_still {
             look.asked_still = true;
             let _ = p.take_still();
@@ -452,7 +555,7 @@ impl Looker {
         {
             drop(p);
             let look = self.now.take()?;
-            page.borrow_mut().set_visible(false);
+            blank(&page);
             return Some(match png(&bytes, format) {
                 Some((png, w, h)) => (
                     look.session,
@@ -476,7 +579,7 @@ impl Looker {
         if look.began.is_some_and(|b| b.elapsed() >= LOOK_GIVE_UP) {
             drop(p);
             let look = self.now.take()?;
-            page.borrow_mut().set_visible(false);
+            blank(&page);
             let why = if look.height.is_none() {
                 "it never finished loading"
             } else {
@@ -486,6 +589,14 @@ impl Looker {
         }
         None
     }
+}
+
+/// Done with a look: out of sight and its page's scripts stopped.
+fn blank(page: &Rc<RefCell<Preview>>) {
+    let mut p = page.borrow_mut();
+    p.set_visible(false);
+    p.forget();
+    p.script("document.open();document.close()");
 }
 
 fn failed(look: Look, why: &str) -> (String, String, dent_protocol::Look) {

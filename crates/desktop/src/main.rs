@@ -395,7 +395,13 @@ impl Render for Dent {
         let top = self.transcript.logical_scroll_top();
         {
             let mut inline = self.inline.borrow_mut();
-            inline.set_theme(crate::inline::theme_json(&self.t));
+            // The theme it's going to, not each step of a change: pages
+            // take it once.
+            inline.set_theme(crate::inline::theme_json(&if self.t.dark {
+                crate::theme::Theme::carbon()
+            } else {
+                crate::theme::Theme::paper()
+            }));
             inline.show(clear, (top.item_ix, top.offset_in_item.as_f32()));
             inline.keep_keys(window.mouse_position());
         }
