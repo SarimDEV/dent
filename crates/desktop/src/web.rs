@@ -50,6 +50,11 @@ pub enum PageEvent {
     Found(usize),
     /// Files dropped on the page, to attach.
     Dropped(Vec<std::path::PathBuf>),
+    /// An inline page's height, in CSS pixels, as it lays out.
+    Height(f32),
+    /// A wheel or trackpad scroll over an inline page that the page can't
+    /// use itself, down the page: it belongs to the chat around it.
+    Wheel(f32),
 }
 
 /// What the web view shows.
@@ -60,6 +65,93 @@ pub enum Source {
     /// A dev server on a forwarded port.
     Server(String),
 }
+
+/// For a page inside the chat (`Preview::new_inline`), after `SCRIPT`:
+/// dent's colours and type as CSS variables under the page's own styles,
+/// its height reported as it lays out (so the chat fits it and it never
+/// scrolls inside itself), and wheel scrolls it can't use handed to the
+/// chat, so the chat scrolls on over it.
+const INLINE_SCRIPT: &str = r#"
+(() => {
+  if (window.__dentInline) return;
+  window.__dentInline = true;
+  const send = (o) => window.ipc.postMessage(JSON.stringify(o));
+  const style = document.createElement('style');
+  style.setAttribute('data-dent', '');
+  const face = (family, file, weight, italic) =>
+    `@font-face{font-family:'${family}';src:url('/.dent/fonts/${file}') format('truetype');font-weight:${weight};font-style:${italic ? 'italic' : 'normal'};font-display:block}`;
+  const faces =
+    face('IBM Plex Sans', 'IBMPlexSans-Regular.ttf', 400) +
+    face('IBM Plex Sans', 'IBMPlexSans-Medium.ttf', 500) +
+    face('IBM Plex Sans', 'IBMPlexSans-SemiBold.ttf', 600) +
+    face('Literata', 'Literata-Regular.ttf', 400) +
+    face('Literata', 'Literata-Medium.ttf', 500) +
+    face('Literata', 'Literata-Italic.ttf', 400, true) +
+    face('Commit Mono', 'CommitMono-400-Regular.ttf', 400) +
+    face('Commit Mono', 'CommitMono-700-Regular.ttf', 700) +
+    face('Commit Mono', 'CommitMono-400-Italic.ttf', 400, true);
+  // The page's own styles win: the base rules weigh nothing (`:where`).
+  window.__dentTheme = (t) => {
+    const vars = Object.entries((t && t.vars) || {}).map(([k, v]) => `--${k}:${v};`).join('');
+    style.textContent = faces +
+      `:root{${vars}color-scheme:${t && t.dark ? 'dark' : 'light'}}` +
+      ':where(html){font:14px/1.5 var(--font-sans);color:var(--foreground);background:transparent}' +
+      ':where(body){margin:0}' +
+      'html{scrollbar-width:none}::-webkit-scrollbar{display:none}';
+    if (!style.isConnected) (document.head || document.documentElement).prepend(style);
+  };
+  // Its height, each time it changes, once a frame at most.
+  let last = -1, frame = 0;
+  const measure = () => {
+    frame = 0;
+    const d = document.documentElement, b = document.body;
+    if (!d || !b) return;
+    const tall = d.scrollHeight > d.clientHeight + 1;
+    const bottom = b.getBoundingClientRect().bottom + (parseFloat(getComputedStyle(b).marginBottom) || 0) + scrollY;
+    const h = Math.ceil(tall ? d.scrollHeight : Math.max(d.getBoundingClientRect().height, bottom));
+    if (h > 0 && Math.abs(h - last) >= 1) { last = h; send({ t: 'height', h }); }
+  };
+  // A timer, not an animation frame: a page waiting out of sight (hidden
+  // until its height is known) gets no frames, but layout still answers.
+  const ask = () => { if (!frame) frame = setTimeout(measure, 16); };
+  const watch = () => {
+    const ro = new ResizeObserver(ask);
+    ro.observe(document.documentElement);
+    if (document.body) ro.observe(document.body);
+    ask();
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', watch);
+  else watch();
+  addEventListener('load', () => { measure(); ask(); });
+  if (document.fonts) document.fonts.ready.then(ask);
+  // Late layout (images, scripts drawing charts) in its first seconds.
+  for (const ms of [250, 750, 1500, 3000]) setTimeout(ask, ms);
+  // A scroll the page can't use goes to the chat. Something inside it that
+  // scrolls (a wide table, a code block) keeps its own.
+  const takes = (el, dx, dy) => {
+    const root = document.scrollingElement || document.documentElement;
+    for (; el; el = el.parentElement) {
+      const s = el === root ? null : getComputedStyle(el);
+      const y = el === root || /(auto|scroll)/.test(s.overflowY);
+      const x = el === root || /(auto|scroll)/.test(s.overflowX);
+      if (dy && y && el.scrollHeight > el.clientHeight + 1 &&
+          (dy < 0 ? el.scrollTop > 0 : el.scrollTop + el.clientHeight < el.scrollHeight - 1)) return true;
+      if (dx && x && el.scrollWidth > el.clientWidth + 1 &&
+          (dx < 0 ? el.scrollLeft > 0 : el.scrollLeft + el.clientWidth < el.scrollWidth - 1)) return true;
+      if (el === root) break;
+    }
+    return false;
+  };
+  addEventListener('wheel', (e) => {
+    if (e.ctrlKey) return;
+    const at = e.target instanceof Element ? e.target : document.documentElement;
+    if (takes(at, e.deltaX, e.deltaY)) return;
+    const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? innerHeight : 1;
+    e.preventDefault();
+    send({ t: 'wheel', dx: e.deltaX * k, dy: e.deltaY * k });
+  }, { passive: false, capture: true });
+})();
+"#;
 
 const SCRIPT: &str = r#"
 (() => {
@@ -255,6 +347,11 @@ pub struct Preview {
     /// The page lives in its own window (Wayland), not inside dent's.
     #[cfg(target_os = "linux")]
     own_window: Option<gtk::Window>,
+    /// Shown inside the chat (`new_inline`).
+    inline: bool,
+    /// An inline page's theme as JSON, written into each page it loads so
+    /// the first frame already has dent's colours.
+    theme: Shared<String>,
 }
 
 /// GPUI speaks XCB on X11; the web view wants an Xlib handle. Both name the
@@ -320,6 +417,17 @@ fn kind(path: &str) -> &'static str {
 
 impl Preview {
     pub fn new(window: &Window) -> Option<Self> {
+        Self::build(window, false)
+    }
+
+    /// A page shown inside the chat: on the chat's own background (the web
+    /// view draws none), fitted to its height, its scrolls handed to the
+    /// chat, and dent's colours as CSS variables (`INLINE_SCRIPT`).
+    pub fn new_inline(window: &Window) -> Option<Self> {
+        Self::build(window, true)
+    }
+
+    fn build(window: &Window, inline: bool) -> Option<Self> {
         let files: Shared<HashMap<String, Arc<[u8]>>> = Arc::default();
         let events: Shared<Vec<PageEvent>> = Arc::default();
         let pending = Arc::new(AtomicBool::new(false));
@@ -400,6 +508,18 @@ impl Preview {
                     return;
                 }
                 let respond = |r: Response<Cow<'static, [u8]>>| responder.respond(r);
+                // dent's own type, for pages in the chat to set themselves in.
+                if let Some(name) = path.strip_prefix(".dent/fonts/")
+                    && let Some((_, bytes)) = crate::assets::FONTS.iter().find(|(n, _)| *n == name)
+                {
+                    return respond(
+                        Response::builder()
+                            .status(200)
+                            .header(CONTENT_TYPE, "font/ttf")
+                            .body(Cow::Borrowed(*bytes))
+                            .unwrap_or_else(|_| Response::new(Cow::Borrowed(&[][..]))),
+                    );
+                }
                 let root = r.lock().ok().and_then(|r| r.clone());
                 // Video and sound play from disk a piece at a time, as the
                 // player asks for them, so a long film never loads whole.
@@ -491,6 +611,14 @@ impl Preview {
                     "found" => {
                         PageEvent::Found(v.get("n").and_then(|n| n.as_u64()).unwrap_or(0) as usize)
                     }
+                    "height" => match v.get("h").and_then(|h| h.as_f64()) {
+                        Some(h) if h.is_finite() => PageEvent::Height(h as f32),
+                        _ => return,
+                    },
+                    "wheel" => match v.get("dy").and_then(|x| x.as_f64()) {
+                        Some(dy) if dy.is_finite() => PageEvent::Wheel(dy as f32),
+                        _ => return,
+                    },
                     // Settling only makes the snapshot stale; it wakes nothing.
                     "settled" => {
                         ipc_settled.store(true, Ordering::Release);
@@ -514,6 +642,13 @@ impl Preview {
             .with_visible(false)
             // The composer keeps focus when a page is made.
             .with_focused(false);
+        let builder = if inline {
+            builder
+                .with_transparent(true)
+                .with_initialization_script(INLINE_SCRIPT)
+        } else {
+            builder
+        };
 
         #[cfg(target_os = "linux")]
         let (web, own_window) = {
@@ -592,6 +727,8 @@ impl Preview {
             visible: false,
             #[cfg(target_os = "linux")]
             own_window,
+            inline,
+            theme: Arc::default(),
         })
     }
 
@@ -668,8 +805,15 @@ impl Preview {
             return;
         }
         let key = format!("{v}/{name}");
+        // Inside the chat, the page starts with dent's colours.
+        let bytes: Cow<[u8]> = if self.inline {
+            let theme = self.theme.lock().map(|t| t.clone()).unwrap_or_default();
+            Cow::Owned(with_theme(bytes, &theme))
+        } else {
+            Cow::Borrowed(bytes)
+        };
         if let Ok(mut m) = self.files.lock() {
-            m.insert(key, bytes.into());
+            m.insert(key, bytes.as_ref().into());
         }
         self.load(src);
     }
@@ -773,6 +917,10 @@ impl Preview {
                 .web
                 .evaluate_script("dispatchEvent(new Event('resize'))");
         }
+    }
+
+    pub fn is_visible(&self) -> bool {
+        self.visible
     }
 
     pub fn set_visible(&mut self, on: bool) {
@@ -906,6 +1054,18 @@ impl Preview {
     }
 
     /// Scripted input for the walkthrough: point at an element and click it.
+    /// An inline page's colours and type: CSS variables, as JSON
+    /// (`{"dark": bool, "vars": {"background": "#…", …}}`). The page keeps
+    /// them across loads, and takes new ones without reloading.
+    pub fn set_theme(&self, json: &str) {
+        let _ = self
+            .web
+            .evaluate_script(&format!("window.__dentTheme && window.__dentTheme({json})"));
+        if let Ok(mut t) = self.theme.lock() {
+            *t = json.to_string();
+        }
+    }
+
     pub fn script(&self, js: &str) {
         let _ = self.web.evaluate_script(js);
     }
@@ -1015,6 +1175,33 @@ impl Preview {
         };
         snapshot::take(&self.web, store);
     }
+}
+
+/// A page with its theme set before anything of its own runs: a script
+/// calling `__dentTheme` (from `INLINE_SCRIPT`) at the very start, so its
+/// styles never draw a frame without dent's colours.
+pub fn with_theme(page: &[u8], theme: &str) -> Vec<u8> {
+    if theme.is_empty() {
+        return page.to_vec();
+    }
+    // `</` can't appear inside the script, or the parser would end it early.
+    let tag = format!(
+        "<script data-dent>window.__dentTheme&&window.__dentTheme({})</script>",
+        theme.replace("</", "<\\/")
+    );
+    // After the doctype: anything before it would put the page in quirks
+    // mode and change how it lays out.
+    let head = &page[..page.len().min(2048)];
+    let at = head
+        .windows(9)
+        .position(|w| w.eq_ignore_ascii_case(b"<!doctype"))
+        .and_then(|i| head[i..].iter().position(|b| *b == b'>').map(|j| i + j + 1))
+        .unwrap_or(0);
+    let mut out = Vec::with_capacity(page.len() + tag.len());
+    out.extend_from_slice(&page[..at]);
+    out.extend_from_slice(tag.as_bytes());
+    out.extend_from_slice(&page[at..]);
+    out
 }
 
 const SNAP_EVERY: std::time::Duration = std::time::Duration::from_millis(700);

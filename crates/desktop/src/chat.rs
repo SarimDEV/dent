@@ -922,6 +922,10 @@ impl Dent {
     fn chat(&mut self, s: &Session, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.t;
         self.sync_transcript(s);
+        self.chat_view = (
+            self.transcript.viewport_bounds(),
+            self.transcript.is_following_tail(),
+        );
         let count = self.transcript.item_count();
         // Only the items on screen are drawn, however long the session.
         let transcript = list(
@@ -3184,6 +3188,10 @@ impl Dent {
         let Some(a) = self.art(art).cloned() else {
             return div().into_any_element();
         };
+        // A page the agent showed with dent's tool lives in the chat itself.
+        if a.kind == Kind::Html && a.path.starts_with(dent_client_core::timeline::VISUAL_DIR) {
+            return self.inline_page(&a, version, cx);
+        }
         let latest = a.versions.len();
         let showing =
             self.panel_open && self.tab(s) == Tab::Art(art) && self.version(&a) == version;
@@ -3418,6 +3426,148 @@ impl Dent {
                     .child(probe(&self.probes, format!("made-still-{art}"))),
             )
             .child(card)
+            .into_any_element()
+    }
+
+    /// A page the agent showed (`show_visual`), in the chat at its own
+    /// height on the chat's own background: live while wholly in view and
+    /// nothing floats over it, its still otherwise (`inline.rs`). Under it,
+    /// its name and ways to see it bigger.
+    fn inline_page(
+        &mut self,
+        a: &crate::data::Artifact,
+        version: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.t;
+        let art = a.id;
+        let Some(bytes) = a.versions.get(version.wrapping_sub(1)).cloned() else {
+            return div().into_any_element();
+        };
+        let key = (art, version);
+        let (h, still) = {
+            let i = self.inline.borrow();
+            (
+                crate::inline::height(i.heights.get(&key).copied()),
+                i.still(key),
+            )
+        };
+        let page = Rc::new(crate::inline::Page {
+            path: a.path,
+            version,
+            bytes: bytes.clone(),
+            dir: a.dir.clone(),
+            far: crate::viewer::far_root(a),
+        });
+        // Where it may show live: the chat's view, less the Latest pill's
+        // room over its foot while you read back.
+        // (Read before the list draws: its state is busy while rows do.)
+        let mut view = self.chat_view.0;
+        if !self.chat_view.1 {
+            view.size.height -= px(size::CONTROL + space::S2 * 2.);
+        }
+        let inline = self.inline.clone();
+        let name = a.title;
+        let open_name = a.path.rsplit('/').next().unwrap_or(a.path).to_string();
+        div()
+            .w_full()
+            .max_w(px(crate::ds::measure()))
+            .flex()
+            .flex_col()
+            .gap(px(space::S1))
+            .child(
+                div()
+                    .id(SharedString::from(format!("inline-{art}-{version}")))
+                    .relative()
+                    .w_full()
+                    .h(px(h))
+                    .child(
+                        canvas(
+                            move |bounds, window, _| {
+                                let whole = view.size.height > px(0.)
+                                    && bounds.top() >= view.top() - px(0.5)
+                                    && bounds.bottom() <= view.bottom() + px(0.5);
+                                inline.borrow_mut().want(key, &page, bounds, whole, window);
+                                bounds
+                            },
+                            move |_, bounds, window, _| {
+                                // Its last picture underneath, at its own size from
+                                // the top: what shows while the live page can't.
+                                if let Some(image) = still {
+                                    let s = image.size(0);
+                                    let scale = window.scale_factor();
+                                    let at = Bounds::new(
+                                        bounds.origin,
+                                        size(
+                                            px(s.width.0 as f32 / scale),
+                                            px(s.height.0 as f32 / scale),
+                                        ),
+                                    );
+                                    window.with_content_mask(
+                                        Some(ContentMask { bounds }),
+                                        |window| {
+                                            let _ = window.paint_image(
+                                                at,
+                                                at,
+                                                Corners::default(),
+                                                image,
+                                                0,
+                                                false,
+                                            );
+                                        },
+                                    );
+                                }
+                            },
+                        )
+                        .size_full(),
+                    )
+                    .child(probe(&self.probes, "inline-page")),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S1))
+                    .ml(px(-space::S2))
+                    .child(
+                        div()
+                            .px(px(space::S2))
+                            .min_w_0()
+                            .truncate()
+                            .ty(LABEL)
+                            .text_color(t.faint)
+                            .child(name),
+                    )
+                    .child(
+                        ghost(
+                            SharedString::from(format!("inline-open-{art}-{version}")),
+                            "Open beside",
+                            &t,
+                        )
+                        .relative()
+                        .with_tip(tip("Show it beside the chat, larger", None, t))
+                        .on_press(
+                            cx.listener(move |this, _, _, cx| {
+                                this.open_art(art, Some(version), cx)
+                            }),
+                        )
+                        .child(probe(&self.probes, "inline-open")),
+                    )
+                    .child(
+                        ghost(
+                            SharedString::from(format!("inline-browser-{art}-{version}")),
+                            "Open in browser",
+                            &t,
+                        )
+                        .on_press(cx.listener(move |_, _, _, cx| {
+                            let path = std::env::temp_dir()
+                                .join(format!("dent-visual-v{version}-{open_name}"));
+                            if std::fs::write(&path, &bytes[..]).is_ok() {
+                                cx.open_url(&format!("file://{}", path.display()));
+                            }
+                        })),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -4240,6 +4390,7 @@ impl Dent {
     fn slash_menu(&mut self, below: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = self.t;
         let c = self.completion(cx)?;
+        self.over_chat.set(true);
         let mention = c.token.kind == complete::Kind::Mention;
         let arg = c.token.kind == complete::Kind::Arg;
         let n = c.items.len();

@@ -71,6 +71,100 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// What `show_visual` tells the agent: what the page is for, where it shows
+/// and how to make it sit well in the chat.
+const VISUAL_DESCRIPTION: &str = "Show the person a finished visual inside the chat, above your reply: a chart, a table, a diagram, a mock-up, a comparison. Call it before you write that reply. They see the page, so your reply shouldn't announce it, say where it is or restate it: add only what the page doesn't say. Give one whole, self-contained HTML document (inline <style> and <script>; libraries may load from a CDN). Nothing is written to the project. Call it again with the same title to show a new version.\n\nHow it sits in the chat: on the chat's own background, about 700px wide, left-aligned with your reply, and exactly as tall as the page (the frame grows to fit, so the page never scrolls inside itself). So: no background on html or body, no outer card or banner; panels inside get at least 16px padding and var(--radius). Give charts a fixed pixel height. Never use viewport-height units (vh, svh, lvh, dvh) or height:100% on html or body: the frame follows the page's height, so a page that follows the frame grows without end, and it is refused.\n\nColours and type follow dent's light or dark theme through CSS variables, live: --background, --foreground, --muted, --muted-foreground, --card, --border, --primary, --primary-foreground, --accent, --destructive, --warning, --success, --info, --chart-1 to --chart-6, --radius, --font-sans, --font-serif, --font-mono. Use them rather than fixed colours. Links open in the person's browser.";
+
+/// What the agent hears once a page is shown.
+const SHOWN: &str = "Shown to the person above your reply. Don't mention or describe the page; reply with only what it doesn't already say.";
+
+/// Why a page can't be shown, if it can't: viewport-height units in its
+/// styles make the fitted frame grow for ever.
+fn page_refused(html: Option<&str>) -> Option<String> {
+    let html = html?;
+    let unit = viewport_height_unit(html)?;
+    Some(format!(
+        "The page uses a viewport height unit ({unit}). The frame grows to fit the page, so a size that follows the viewport makes it grow again and again. Let the content set the height, or use fixed pixel heights, and show it again."
+    ))
+}
+
+/// The first viewport-height length (`100vh`, `50dvh`) in the page's styles:
+/// `<style>` blocks and `style=` attributes, comments left out. Words and
+/// data elsewhere (a base64 picture that happens to hold "1vh") don't count.
+fn viewport_height_unit(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let mut css = String::new();
+    // <style>…</style>
+    let mut at = 0;
+    while let Some(i) = lower[at..].find("<style") {
+        let open = at + i;
+        let Some(gt) = lower[open..].find('>') else {
+            break;
+        };
+        let start = open + gt + 1;
+        let end = lower[start..]
+            .find("</style")
+            .map_or(lower.len(), |e| start + e);
+        css.push_str(&lower[start..end]);
+        css.push('\n');
+        at = end;
+    }
+    // style="…" and style='…'
+    for quote in ['"', '\''] {
+        let pat = format!("style={quote}");
+        let mut at = 0;
+        while let Some(i) = lower[at..].find(&pat) {
+            let start = at + i + pat.len();
+            let end = lower[start..]
+                .find(quote)
+                .map_or(lower.len(), |e| start + e);
+            css.push_str(&lower[start..end]);
+            css.push(';');
+            at = end;
+        }
+    }
+    // Without comments.
+    let mut clean = String::with_capacity(css.len());
+    let mut rest = css.as_str();
+    while let Some(i) = rest.find("/*") {
+        clean.push_str(&rest[..i]);
+        rest = rest[i + 2..]
+            .find("*/")
+            .map_or("", |j| &rest[i + 2 + j + 2..]);
+    }
+    clean.push_str(rest);
+    let b = clean.as_bytes();
+    for unit in ["dvh", "svh", "lvh", "vh"] {
+        let mut from = 0;
+        while let Some(i) = clean[from..].find(unit) {
+            let at = from + i;
+            from = at + unit.len();
+            // A number right before it, and no letter right after.
+            let after = b.get(at + unit.len()).copied().unwrap_or(b' ');
+            if after.is_ascii_alphanumeric() || after == b'-' || after == b'_' {
+                continue;
+            }
+            let mut j = at;
+            while j > 0 && (b[j - 1].is_ascii_digit() || b[j - 1] == b'.') {
+                j -= 1;
+            }
+            let number = j < at;
+            // What's before the number: a sign is fine (`-10vh`) unless
+            // it's inside a name (`mt-2vh`).
+            let before = if j > 0 { b[j - 1] } else { b' ' };
+            let named = before.is_ascii_alphabetic()
+                || before == b'_'
+                || (before == b'-'
+                    && j > 1
+                    && (b[j - 2].is_ascii_alphanumeric() || b[j - 2] == b'_'));
+            if number && !named {
+                return Some(clean[j..at + unit.len()].to_string());
+            }
+        }
+    }
+    None
+}
+
 fn called(id: Value, text: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "result": {"content": [{"type": "text", "text": text}]}})
 }
@@ -103,7 +197,7 @@ fn answer(msg: &Value) -> Option<Value> {
             },
             {
                 "name": "show_visual",
-                "description": "Show the person a visual you made, as a web page beside the chat: a chart, a diagram, a mock-up, a comparison table. Give one whole HTML document (inline CSS and scripts; it may load libraries from a CDN). Nothing is written to the project. Use it when a picture explains better than words; call it again with the same title to show a new version.",
+                "description": VISUAL_DESCRIPTION,
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -127,8 +221,16 @@ fn answer(msg: &Value) -> Option<Value> {
             },
         ]}),
         "tools/call" => {
+            if msg["params"]["name"] == "show_visual"
+                && let Some(why) = page_refused(msg["params"]["arguments"]["html"].as_str())
+            {
+                return Some(json!({"jsonrpc": "2.0", "id": id, "result": {
+                    "content": [{"type": "text", "text": why}],
+                    "isError": true,
+                }}));
+            }
             let text = match msg["params"]["name"].as_str() {
-                Some("show_visual") => "Shown beside the chat.",
+                Some("show_visual") => SHOWN,
                 // A secret is answered by `run`, on its own thread.
                 Some("ask_secret") => "dent can't ask for secrets here.",
                 _ => "Plan updated.",
@@ -197,6 +299,39 @@ pub fn said(name: &str, answer: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_page_sized_by_the_viewport_is_refused() {
+        use super::viewport_height_unit as vh;
+        assert_eq!(
+            vh("<style>body{min-height:100vh}</style>").as_deref(),
+            Some("100vh")
+        );
+        assert_eq!(
+            vh("<div style='height: 50dvh'>x</div>").as_deref(),
+            Some("50dvh")
+        );
+        assert_eq!(
+            vh("<style>.a{margin:-10vh 0}</style>").as_deref(),
+            Some("10vh")
+        );
+        assert_eq!(
+            vh("<STYLE>main{height:calc(100svh - 2rem)}</STYLE>").as_deref(),
+            Some("100svh")
+        );
+        // Not in its styles, in a comment, or part of a name: fine.
+        assert_eq!(vh("<p>Use 100vh with care</p>"), None);
+        assert_eq!(vh("<style>/* not 100vh */ body{margin:0}</style>"), None);
+        assert_eq!(vh("<style>.mt-2vh{margin:2px}</style>"), None);
+        assert_eq!(vh("<img src='data:image/png;base64,AAA1vhZZ'>"), None);
+        assert_eq!(
+            vh("<style>.x{height:240px}</style><div style=\"width:50vw\"></div>"),
+            None
+        );
+        assert_eq!(vh(""), None);
+        // An unclosed style still counts to its end.
+        assert_eq!(vh("<style>body{height:100vh").as_deref(), Some("100vh"));
+    }
+
     use super::*;
 
     #[test]

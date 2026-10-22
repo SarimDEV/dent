@@ -29,6 +29,7 @@ mod github;
 mod glyph;
 mod highlight;
 mod hotkey;
+mod inline;
 mod keys;
 mod lightbox;
 mod live;
@@ -386,6 +387,17 @@ impl Render for Dent {
         if let Some(p) = &self.preview {
             p.borrow_mut().set_visible(visible);
             p.borrow().keep_keys_unless_pressed(window.mouse_position());
+        }
+        // Pages in the chat: live only with nothing over them and the chat
+        // still; dent's colours, as they are this frame.
+        self.over_chat_was = self.over_chat.replace(false);
+        let clear = self.inline_clear();
+        let top = self.transcript.logical_scroll_top();
+        {
+            let mut inline = self.inline.borrow_mut();
+            inline.set_theme(crate::inline::theme_json(&self.t));
+            inline.show(clear, (top.item_ix, top.offset_in_item.as_f32()));
+            inline.keep_keys(window.mouse_position());
         }
         let t = self.t;
         // Lay out from the window: the chat keeps its minimum, the viewer
@@ -987,23 +999,10 @@ impl Render for Dent {
 
 /// The Book pairing, compiled in so the app needs nothing beside it (0032).
 fn load_fonts(cx: &mut App) {
-    let fonts: Vec<std::borrow::Cow<'static, [u8]>> = [
-        &include_bytes!("../../../assets/fonts/CommitMono-400-Italic.ttf")[..],
-        &include_bytes!("../../../assets/fonts/CommitMono-400-Regular.ttf")[..],
-        &include_bytes!("../../../assets/fonts/CommitMono-700-Regular.ttf")[..],
-        &include_bytes!("../../../assets/fonts/IBMPlexSans-Medium.ttf")[..],
-        &include_bytes!("../../../assets/fonts/IBMPlexSans-Regular.ttf")[..],
-        &include_bytes!("../../../assets/fonts/IBMPlexSans-SemiBold.ttf")[..],
-        &include_bytes!("../../../assets/fonts/InstrumentSerif-Italic.ttf")[..],
-        &include_bytes!("../../../assets/fonts/InstrumentSerif-Regular.ttf")[..],
-        &include_bytes!("../../../assets/fonts/Literata-Italic.ttf")[..],
-        &include_bytes!("../../../assets/fonts/Literata-Medium.ttf")[..],
-        &include_bytes!("../../../assets/fonts/Literata-MediumItalic.ttf")[..],
-        &include_bytes!("../../../assets/fonts/Literata-Regular.ttf")[..],
-    ]
-    .into_iter()
-    .map(std::borrow::Cow::Borrowed)
-    .collect();
+    let fonts: Vec<std::borrow::Cow<'static, [u8]>> = crate::assets::FONTS
+        .iter()
+        .map(|(_, bytes)| std::borrow::Cow::Borrowed(*bytes))
+        .collect();
     if let Err(e) = cx.text_system().add_fonts(fonts) {
         eprintln!("fonts: {e}");
     }

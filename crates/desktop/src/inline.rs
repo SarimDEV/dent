@@ -1,0 +1,328 @@
+//! Pages the agent shows inside the chat (`show_visual`): a few live web
+//! views lent to the pages on screen, each fitted to its page's height, and
+//! a still of each page for when its live view can't show.
+//!
+//! The web view is a native layer over the window, so it can't be clipped,
+//! covered or moved in step with GPUI's drawing. A page is live only while
+//! its whole row is in view, nothing floats over the chat and the chat isn't
+//! scrolling; otherwise its last still is drawn in its place. Pages beyond
+//! the few live views wait their turn with a still, or an empty space of
+//! their height until they've been seen.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use gpui_kit::*;
+
+use crate::web::{PageEvent, Preview};
+
+/// A page in the chat: the artifact it is and which version.
+pub type Key = (&'static str, usize);
+
+/// How many pages can be live at once.
+const SLOTS: usize = 3;
+/// After the chat last moved, how long pages wait before going live again.
+const SETTLE: Duration = Duration::from_millis(160);
+/// A page's height before it has said, and the most it gets.
+pub const GUESS_H: f32 = 320.;
+pub const MIN_H: f32 = 80.;
+pub const MAX_H: f32 = 4000.;
+
+/// What a row hands over to show its page.
+pub struct Page {
+    pub path: &'static str,
+    pub version: usize,
+    pub bytes: Rc<[u8]>,
+    pub dir: Option<std::path::PathBuf>,
+    pub far: Option<crate::web::FarRoot>,
+}
+
+struct Slot {
+    page: Rc<RefCell<Preview>>,
+    key: Option<Key>,
+    /// The frame a row last placed it in.
+    drawn: u64,
+    /// That row was wholly in view.
+    whole: bool,
+}
+
+#[derive(Default)]
+pub struct Inline {
+    slots: Vec<Slot>,
+    /// Each page's height, in points, as it last laid out.
+    pub heights: HashMap<Key, f32>,
+    stills: HashMap<Key, Arc<RenderImage>>,
+    /// Stills replaced, for the window to free.
+    retired: Vec<Arc<RenderImage>>,
+    /// The chat's scroll position last frame, and when it last changed.
+    top: Option<(usize, f32)>,
+    moved_at: Option<Instant>,
+    theme: String,
+    /// No web view could be made (a test without a window, say).
+    broken: bool,
+}
+
+fn frame() -> u64 {
+    crate::ui::FRAME.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+impl Inline {
+    /// A row with its page on screen at `bounds`; `whole` when all of it is
+    /// in view. Lends it a live view when one is free or showing it already.
+    pub fn want(
+        &mut self,
+        key: Key,
+        page: &Page,
+        bounds: Bounds<Pixels>,
+        whole: bool,
+        window: &Window,
+    ) {
+        let now = frame();
+        let at = match self.slots.iter().position(|s| s.key == Some(key)) {
+            Some(i) => i,
+            // Only a page wholly in view takes a view; one half out of
+            // sight keeps its still.
+            None if !whole => return,
+            None => {
+                // A view no row placed this frame or the last.
+                let free = self
+                    .slots
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.drawn + 1 < now)
+                    .min_by_key(|(_, s)| s.drawn)
+                    .map(|(i, _)| i);
+                let i = match free {
+                    Some(i) => i,
+                    None if self.slots.len() < SLOTS && !self.broken => {
+                        let Some(p) = Preview::new_inline(window) else {
+                            self.broken = true;
+                            return;
+                        };
+                        p.set_theme(&self.theme);
+                        self.slots.push(Slot {
+                            page: Rc::new(RefCell::new(p)),
+                            key: None,
+                            drawn: 0,
+                            whole: false,
+                        });
+                        self.slots.len() - 1
+                    }
+                    None => return,
+                };
+                let slot = &mut self.slots[i];
+                {
+                    let mut p = slot.page.borrow_mut();
+                    p.set_visible(false);
+                    match &page.far {
+                        Some(far) => p.show_far(page.path, page.version, &page.bytes, far.clone()),
+                        None => p.show(page.path, page.version, &page.bytes, page.dir.as_deref()),
+                    }
+                }
+                slot.key = Some(key);
+                i
+            }
+        };
+        let slot = &mut self.slots[at];
+        slot.drawn = now;
+        slot.whole = whole;
+        slot.page.borrow_mut().place(bounds);
+    }
+
+    /// Once a frame, before drawing: which views show, and the stills
+    /// they've taken. `clear` when nothing floats over the chat.
+    pub fn show(&mut self, clear: bool, scroll: (usize, f32)) {
+        if self.top != Some(scroll) {
+            if self.top.is_some() {
+                self.moved_at = Some(Instant::now());
+            }
+            self.top = Some(scroll);
+        }
+        let settled = self.moved_at.is_none_or(|at| at.elapsed() >= SETTLE);
+        let now = frame();
+        for slot in &mut self.slots {
+            let placed = slot.drawn + 1 >= now;
+            let Some(key) = slot.key else {
+                slot.page.borrow_mut().set_visible(false);
+                continue;
+            };
+            // Fitted first: shown before its height is known, it would
+            // flash at the guess.
+            let fitted = self.heights.contains_key(&key);
+            let live = clear && settled && placed && slot.whole && fitted;
+            let mut p = slot.page.borrow_mut();
+            p.set_visible(live);
+            if !live {
+                p.release_focus();
+            }
+            // The view's picture of what it shows now (`snapshot` checks
+            // it's of this page), kept as this page's still.
+            if let Some(snap) = p.snapshot(size(px(0.), px(0.)), true)
+                && self
+                    .stills
+                    .get(&key)
+                    .is_none_or(|s| !Arc::ptr_eq(s, &snap.image))
+            {
+                if let Some(old) = self.stills.insert(key, snap.image) {
+                    self.retired.push(old);
+                }
+            }
+        }
+    }
+
+    /// The chat moved: pages step aside for their stills until it settles.
+    pub fn moved(&mut self) {
+        self.moved_at = Some(Instant::now());
+    }
+
+    /// Still settling after a move: the window draws again once it has.
+    pub fn settling(&self) -> bool {
+        self.moved_at.is_some_and(|at| at.elapsed() < SETTLE)
+    }
+
+    /// How many pages have a still, for checks.
+    pub fn stills(&self) -> usize {
+        self.stills.len()
+    }
+
+    /// How many pages are live on screen now, for checks.
+    pub fn live(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|s| s.page.borrow().is_visible())
+            .count()
+    }
+
+    pub fn still(&self, key: Key) -> Option<Arc<RenderImage>> {
+        self.stills.get(&key).cloned()
+    }
+
+    /// What the pages said since last asked, by page.
+    pub fn drain(&self) -> Vec<(Key, PageEvent)> {
+        let mut out = Vec::new();
+        for slot in &self.slots {
+            let Some(key) = slot.key else { continue };
+            out.extend(slot.page.borrow().drain().into_iter().map(|e| (key, e)));
+        }
+        out
+    }
+
+    /// Snapshots owed or events waiting: the window checks back.
+    pub fn tick(&self) -> bool {
+        self.slots.iter().any(|s| {
+            let p = s.page.borrow();
+            let owed = p.tick();
+            p.pending() || owed
+        })
+    }
+
+    /// Pictures the window should free.
+    pub fn retired(&mut self) -> Vec<Arc<RenderImage>> {
+        let mut out = std::mem::take(&mut self.retired);
+        for s in &self.slots {
+            out.extend(s.page.borrow().retired());
+        }
+        out
+    }
+
+    /// Another machine's pages ask for their own files through here.
+    pub fn take_far(&self) -> Vec<crate::web::FarAsk> {
+        self.slots
+            .iter()
+            .flat_map(|s| s.page.borrow().take_far())
+            .collect()
+    }
+
+    /// dent's colours changed: every page takes them, and old stills go.
+    pub fn set_theme(&mut self, json: String) {
+        if self.theme == json {
+            return;
+        }
+        for s in &self.slots {
+            s.page.borrow().set_theme(&json);
+        }
+        self.retired.extend(self.stills.drain().map(|(_, v)| v));
+        self.theme = json;
+    }
+
+    /// A page keeps the keyboard only after you pressed in it; otherwise
+    /// it goes back to dent, as the viewer's page does.
+    pub fn keep_keys(&self, pointer: Point<Pixels>) {
+        for s in &self.slots {
+            s.page.borrow().keep_keys_unless_pressed(pointer);
+        }
+    }
+}
+
+/// A page's height as the chat gives it room: what it said, within limits,
+/// or the guess until it has.
+pub fn height(said: Option<f32>) -> f32 {
+    said.unwrap_or(GUESS_H).clamp(MIN_H, MAX_H)
+}
+
+/// dent's colours and type as the CSS variables an inline page uses, named
+/// as pages commonly expect them (`--background`, `--foreground`,
+/// `--chart-1`…), as JSON for `Preview::set_theme`.
+pub fn theme_json(t: &crate::theme::Theme) -> String {
+    let hex = |c: Hsla| {
+        let c = c.to_rgb();
+        format!(
+            "#{:02x}{:02x}{:02x}",
+            (c.r * 255.).round() as u8,
+            (c.g * 255.).round() as u8,
+            (c.b * 255.).round() as u8
+        )
+    };
+    let mut vars: Vec<(String, String)> = vec![
+        ("background".into(), hex(t.surface)),
+        ("foreground".into(), hex(t.ink)),
+        ("muted".into(), hex(t.panel)),
+        ("muted-foreground".into(), hex(t.quiet)),
+        ("faint".into(), hex(t.faint)),
+        ("card".into(), hex(t.raised)),
+        ("card-foreground".into(), hex(t.ink)),
+        ("border".into(), hex(t.hairline)),
+        ("primary".into(), hex(t.ink)),
+        ("primary-foreground".into(), hex(t.surface)),
+        ("accent".into(), hex(t.working.0)),
+        ("destructive".into(), hex(t.removed)),
+        ("warning".into(), hex(t.waiting.0)),
+        ("success".into(), hex(t.done.0)),
+        ("info".into(), hex(t.working.0)),
+        ("added".into(), hex(t.added)),
+        ("removed".into(), hex(t.removed)),
+        ("radius".into(), "6px".into()),
+        (
+            "font-sans".into(),
+            "'IBM Plex Sans', -apple-system, system-ui, sans-serif".into(),
+        ),
+        ("font-serif".into(), "'Literata', Georgia, serif".into()),
+        (
+            "font-mono".into(),
+            "'Commit Mono', ui-monospace, Menlo, monospace".into(),
+        ),
+    ];
+    for (i, c) in t.spectrum.iter().enumerate() {
+        vars.push((format!("chart-{}", i + 1), hex(*c)));
+    }
+    let vars: serde_json::Map<String, serde_json::Value> = vars
+        .into_iter()
+        .map(|(k, v)| (k, serde_json::Value::String(v)))
+        .collect();
+    serde_json::json!({"dark": t.dark, "vars": vars}).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_page_gets_room_within_limits() {
+        use super::height;
+        assert_eq!(height(None), super::GUESS_H);
+        assert_eq!(height(Some(12.)), super::MIN_H);
+        assert_eq!(height(Some(512.)), 512.);
+        assert_eq!(height(Some(1e9)), super::MAX_H);
+    }
+}

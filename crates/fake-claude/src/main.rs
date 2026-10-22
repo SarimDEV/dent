@@ -1384,7 +1384,12 @@ impl Agent {
             let input = json!({"title": "Sign-ups by week", "html": VISUAL_PAGE});
             let id = self.tool("mcp__dent__show_visual", input, None);
             self.pause(300)?;
-            self.result(&id, "Shown beside the chat.", false, None);
+            self.result(
+                &id,
+                "Shown to the person above your reply. Don't mention or describe the page; reply with only what it doesn't already say.",
+                false,
+                None,
+            );
             self.say(
                 "Sign-ups doubled in week 3, after the launch post, and held.",
                 None,
@@ -1956,13 +1961,16 @@ fn base64(bytes: &[u8]) -> String {
 
 /// The page `show a visual` shows: a small bar chart, all inline.
 const VISUAL_PAGE: &str = r#"<!doctype html><html><head><meta charset="utf-8"><style>
-body{font:14px -apple-system,system-ui,sans-serif;margin:24px;color:#1d1d1f;background:#fff}
-h1{font-size:17px;margin:0 0 16px}.bars{display:flex;gap:14px;align-items:flex-end;height:180px}
-.bar{flex:1;background:linear-gradient(#7aa7ff,#3d6fe0);border-radius:6px 6px 0 0;position:relative}
-.bar span{position:absolute;top:-20px;left:0;right:0;text-align:center;font-size:12px;color:#555}
-.weeks{display:flex;gap:14px;margin-top:8px}.weeks div{flex:1;text-align:center;color:#888;font-size:12px}
+h1{font:600 15px var(--font-sans);margin:0 0 18px}
+.bars{display:flex;gap:14px;align-items:flex-end;height:180px}
+.bar{flex:1;background:var(--chart-1);border-radius:var(--radius) var(--radius) 0 0;position:relative}
+.bar.up{background:var(--chart-2)}
+.bar span{position:absolute;top:-20px;left:0;right:0;text-align:center;font-size:12px;color:var(--muted-foreground)}
+.weeks{display:flex;gap:14px;margin-top:8px}.weeks div{flex:1;text-align:center;color:var(--muted-foreground);font-size:12px}
+.note{margin-top:16px;padding:12px 16px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card)}
 </style></head><body><h1>Sign-ups by week</h1><div class="bars">
 <div class="bar" style="height:30%"><span>120</span></div><div class="bar" style="height:36%"><span>144</span></div>
-<div class="bar" style="height:72%"><span>290</span></div><div class="bar" style="height:70%"><span>281</span></div>
+<div class="bar up" style="height:72%"><span>290</span></div><div class="bar" style="height:70%"><span>281</span></div>
 <div class="bar" style="height:76%"><span>305</span></div></div>
-<div class="weeks"><div>W1</div><div>W2</div><div>W3</div><div>W4</div><div>W5</div></div></body></html>"#;
+<div class="weeks"><div>W1</div><div>W2</div><div>W3</div><div>W4</div><div>W5</div></div>
+<div class="note">Week 3 is the launch post.</div></body></html>"#;

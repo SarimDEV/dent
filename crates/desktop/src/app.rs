@@ -1099,6 +1099,15 @@ pub struct Dent {
     pub review: Vec<Attachment>,
     /// The conversation draws only the items on screen.
     pub transcript: ListState,
+    /// Pages the agent shows inside the chat.
+    pub inline: Rc<RefCell<crate::inline::Inline>>,
+    /// A popover drew over the chat this frame (the slash menu, stashed
+    /// drafts): pages there step aside next frame.
+    pub over_chat: std::cell::Cell<bool>,
+    /// The same, for the frame before.
+    pub over_chat_was: bool,
+    /// The chat's view as last laid out, and whether it follows the end.
+    pub chat_view: (Bounds<Pixels>, bool),
     /// The sidebar's rows, drawn only where they're on screen.
     pub inbox_list: ListState,
     pub inbox_sigs: Vec<u64>,
@@ -1828,6 +1837,10 @@ impl Dent {
             commenting: None,
             review: Vec::new(),
             transcript: ListState::new(0, ListAlignment::Top, px(600.)),
+            inline: Default::default(),
+            over_chat: Default::default(),
+            over_chat_was: false,
+            chat_view: (Bounds::default(), true),
             inbox_list: ListState::new(0, ListAlignment::Top, px(400.)),
             inbox_sigs: Vec::new(),
             transcript_sigs: (None, Vec::new()),
@@ -2072,10 +2085,17 @@ impl Dent {
     pub fn open_arts(&self, s: &Session) -> Vec<&'static str> {
         let closed = self.closed_tabs.get(&s.id);
         let opened = self.opened.get(&s.id).cloned().unwrap_or_default();
+        // A page the agent showed lives in the chat; it takes a tab only
+        // once opened beside it.
+        let in_chat = |a: &&'static str| {
+            self.art(a)
+                .is_some_and(|x| x.path.starts_with(dent_client_core::timeline::VISUAL_DIR))
+        };
         s.arts
             .iter()
             .copied()
-            .chain(opened.into_iter().filter(|a| !s.arts.contains(a)))
+            .filter(|a| !in_chat(a) || opened.contains(a))
+            .chain(opened.iter().copied().filter(|a| !s.arts.contains(a)))
             .filter(|a| {
                 closed
                     .and_then(|c| c.get(a))
@@ -8170,6 +8190,13 @@ impl Dent {
                 self.viewing.remove(art);
             }
         }
+        // Opened beside the chat: it has a tab from now on.
+        if let Some(id) = self.selected.clone() {
+            let list = self.opened.entry(id).or_default();
+            if !list.contains(&art) {
+                list.push(art);
+            }
+        }
         self.show_tab(Tab::Art(art), cx);
     }
 
@@ -8220,6 +8247,7 @@ impl Dent {
     /// Page events arrive from the web view; turn them into state.
     pub fn drain_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.serve_far(cx);
+        self.drain_inline(window, cx);
         let Some(p) = &self.preview else { return };
         let (events, showing, retired) = {
             let p = p.borrow();
@@ -8241,6 +8269,49 @@ impl Dent {
         cx.notify();
     }
 
+    /// Nothing floats over the chat: an inline page may show live.
+    pub fn inline_clear(&self) -> bool {
+        self.menu.is_none()
+            && self.palette.is_none()
+            && self.context.is_none()
+            && self.lightbox.is_none()
+            && self.switcher.is_none()
+            && !self.dragging
+            && !self.over_chat_was
+    }
+
+    /// What the chat's pages said: their heights, scrolls meant for the
+    /// chat, and links to open.
+    pub fn drain_inline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let retired = self.inline.borrow_mut().retired();
+        for image in retired {
+            let _ = window.drop_image(image);
+        }
+        let events = self.inline.borrow().drain();
+        if events.is_empty() {
+            return;
+        }
+        for (key, ev) in events {
+            match ev {
+                PageEvent::Height(h) => {
+                    let h = h.clamp(crate::inline::MIN_H, crate::inline::MAX_H);
+                    let old = self.inline.borrow_mut().heights.insert(key, h);
+                    if old.is_none_or(|o| (o - h).abs() >= 1.) {
+                        cx.notify();
+                    }
+                }
+                PageEvent::Wheel(dy) => {
+                    self.transcript.scroll_by(px(dy));
+                    self.inline.borrow_mut().moved();
+                    cx.notify();
+                }
+                PageEvent::External(url) => cx.open_url(&url),
+                // Clicked into: the page has the keyboard until you click back.
+                _ => {}
+            }
+        }
+    }
+
     /// Answer what another machine's page asked for: a video's range read
     /// from there (pinned to one version), or a picture or style copied
     /// here whole. What isn't known yet waits for the next frame.
@@ -8251,6 +8322,7 @@ impl Dent {
         if let Some(p) = &self.preview {
             asks.extend(p.borrow().take_far());
         }
+        asks.extend(self.inline.borrow().take_far());
         // A range with no answer in a long while (its link gone for good):
         // the player hears, rather than waiting forever.
         let late: Vec<u64> = self
@@ -8566,6 +8638,8 @@ impl Dent {
                     self.open_file_at(&url, None, cx);
                 }
                 PageEvent::External(url) => cx.open_url(&url),
+                // Only a page inside the chat reports these.
+                PageEvent::Height(_) | PageEvent::Wheel(_) => {}
             }
         }
         cx.notify();
@@ -8774,6 +8848,13 @@ impl Dent {
                 // Older versions fold to one line.
                 let latest = self.art(art).map(|a| a.versions.len()).unwrap_or(0);
                 (art, version, *version < latest, review).hash(&mut h);
+                // A page in the chat is as tall as it says.
+                self.inline
+                    .borrow()
+                    .heights
+                    .get(&(*art, *version))
+                    .map(|v| v.round() as i32)
+                    .hash(&mut h);
             }
             Item::Approval {
                 id, command, why, ..
@@ -9343,7 +9424,10 @@ impl Dent {
             let p = p.borrow();
             let owed = p.tick();
             p.pending() || owed
-        });
+        }) | {
+            let i = self.inline.borrow();
+            i.tick() | i.settling()
+        };
         let toast_expired = self
             .toast
             .as_ref()

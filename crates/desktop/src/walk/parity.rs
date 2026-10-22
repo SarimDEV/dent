@@ -83,21 +83,49 @@ pub(super) fn parity() -> Vec<(f32, Act)> {
                 10.,
             ),
         ),
+        (0.3, Call(to_end)),
         (
-            0.2,
-            Call(|d, _, cx| open_card(d, crate::data::Kind::Html, cx)),
-        ),
-        (
-            0.2,
+            0.1,
             Until(
-                "its card gets a picture of the page",
-                |d, _| !d.stills.is_empty(),
+                "it shows in the chat, as tall as the page says",
+                |d, _| {
+                    let said = d.inline.borrow().heights.values().next().copied();
+                    said.is_some_and(|h| {
+                        (h - crate::inline::GUESS_H).abs() > 1.
+                            && drawn(d, "inline-page")
+                                .is_some_and(|b| (b.size.height.as_f32() - h).abs() < 1.5)
+                    })
+                },
                 10.,
             ),
         ),
-        (0.3, Call(to_end)),
+        (
+            0.1,
+            Until(
+                "it's live there, with a still kept for when it can't be",
+                |d, _| d.inline.borrow().live() == 1 && d.inline.borrow().stills() == 1,
+                10.,
+            ),
+        ),
     ]);
-    both_themes(&mut v, "visual-card");
+    both_themes(&mut v, "visual-inline");
+    v.extend([
+        (0.2, Click("inline-open")),
+        (
+            0.1,
+            Until(
+                "Open beside shows it in the viewer too",
+                |d, _| {
+                    d.panel_open
+                        && current(d).is_some_and(|s| {
+                            matches!(d.tab(s), Tab::Art(a) if d.art(a).is_some_and(|a| a.kind == crate::data::Kind::Html))
+                        })
+                },
+                5.,
+            ),
+        ),
+        (0.8, Shot("visual-beside")),
+    ]);
     v.extend(new_session("we need a key for the payment tests"));
     v.extend([
         (
