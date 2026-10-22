@@ -922,13 +922,12 @@ fn detail(v: &SessionView) -> String {
         }
         // A subagent at work says how far it got.
         Wire::Background => agent_step(v).unwrap_or_else(|| {
-            format!(
-                "Waiting on {}",
-                v.background
-                    .first()
-                    .map(|t| t.description.clone())
-                    .unwrap_or_else(|| "background work".into())
-            )
+            // The task's own words are a sentence ("Start the dev
+            // server"), so they follow a label rather than finish one.
+            v.background
+                .first()
+                .map(|t| format!("In the background · {}", t.description))
+                .unwrap_or_else(|| "Work in the background".into())
         }),
         Wire::Interrupted => "Stopped".into(),
         Wire::Error => v
@@ -964,7 +963,9 @@ fn first_line(s: &str) -> String {
         .unwrap_or_default()
         .replace("**", "")
         .replace('`', "");
-    let l = l.as_str();
+    // A line that leads into a list ("Here's what I changed:") ends on its
+    // words, not the colon pointing at what the preview leaves out.
+    let l = l.strip_suffix(':').unwrap_or(&l).trim_end();
     let mut out: String = l.chars().take(90).collect();
     if l.chars().count() > 90 {
         out.push('…');

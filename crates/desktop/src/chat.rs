@@ -1697,7 +1697,21 @@ impl Dent {
                             )
                         } else {
                             let (fsid, fmsg) = (s.id.clone(), msg.clone());
+                            // Earlier versions of this message: step through
+                            // them, always shown.
+                            let stepper = s
+                                .versions
+                                .iter()
+                                .find(|(m, ..)| m == msg)
+                                .map(|&(_, at, cur, total)| {
+                                    self.version_stepper(&s.id, at, cur, total, cx)
+                                });
                             d.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(space::S1))
+                                    .child(
                                 div()
                                     .flex()
                                     .items_center()
@@ -1782,16 +1796,13 @@ impl Dent {
                                         }))
                                         .child(probe(&self.probes, format!("edit-from-{ix}"))),
                                     )),
+                                    )
+                                    // At the bubble's edge, where the eye
+                                    // leaves the message.
+                                    .children(stepper),
                             )
                         }
                     })
-                    // Earlier versions of this message: step through them.
-                    .children(
-                        s.versions
-                            .iter()
-                            .find(|(m, ..)| m == msg)
-                            .map(|&(_, at, cur, total)| self.version_stepper(&s.id, at, cur, total, cx)),
-                    )
                     .into_any_element()
             }
             Item::Text(src) => {
@@ -2721,6 +2732,9 @@ impl Dent {
                     .flex()
                     .items_start()
                     .gap(px(space::S2))
+                    // Its actions' words end on the column's edge, as
+                    // the composer's and the cards' do.
+                    .mr(px(-space::S2))
                     .ty(UI)
                     .text_color(t.quiet)
                     .child(
@@ -3022,7 +3036,7 @@ impl Dent {
                                             )
                                         }
                                     } else if ahead.is_some() {
-                                        "Queued · sends after the one above".into()
+                                        "Queued".into()
                                     } else if matches!(
                                         s.activity,
                                         Some(dent_protocol::Activity::SettingUp { .. })
@@ -6499,7 +6513,7 @@ pub fn fit_footer(room: f32, chips: [(String, String); 3], context: bool, hint: 
     let text = |t: &str| t.chars().count() as f32 * 7.2;
     let chip = |t: &str| if t.is_empty() { 44. } else { 52. + text(t) };
     let gap = space::S1;
-    let ctx_w = text("context 99%") + space::S2 + 7. + space::S1H;
+    let ctx_w = text("context 99%") + space::S2;
     let hint_w = text(hint) + space::S2;
     // The steps, least loss first.
     let mut steps: Vec<([bool; 3], [bool; 3], bool, bool)> = Vec::new();
@@ -6555,8 +6569,6 @@ pub fn fit_footer(room: f32, chips: [(String, String); 3], context: bool, hint: 
     }
 }
 
-/// The line under an approval or a plan saying how to answer by key: the
-/// keys themselves while its card has the keyboard, else how to get there.
 /// A note about an MCP server in trouble, worded as now ("The tickets MCP
 /// server …") or as older logs have it ("The MCP server tickets …").
 fn mcp_note(text: &str) -> bool {
@@ -6576,6 +6588,8 @@ fn key_num(n: &'static str, primary: bool, t: &theme::Theme) -> Div {
         .child(n)
 }
 
+/// The line under an approval or a plan saying how to answer by key: the
+/// keys themselves while its card has the keyboard, else how to get there.
 fn ask_keys(keyed: bool, on: &'static str, off: &'static str, t: &theme::Theme) -> Div {
     div()
         .ty(LABEL)

@@ -1932,7 +1932,12 @@ fn display_math(tex: &str, closed: bool, t: &Theme, key: &str, r: &mut R) -> Any
         t,
         r,
     );
-    hover_actions(body, copy, key, t).into_any_element()
+    // Centred under the prose it belongs to: on the reading measure when it
+    // fits there, else across the column, scrolling past that.
+    let measure = crate::ds::measure();
+    hover_actions(body, copy, key, t)
+        .when(w <= measure, |d| d.max_w(px(measure)))
+        .into_any_element()
 }
 
 /// A Mermaid diagram: rendered off the UI thread once its fence closes, its

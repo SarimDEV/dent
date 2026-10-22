@@ -343,9 +343,6 @@ impl Dent {
             .whitespace_nowrap()
             .flex_shrink(2.)
             .ty(LABEL)
-            .flex()
-            .items_center()
-            .gap(px(space::S1H))
             .text_color(if near { t.quiet } else { t.faint })
             .cursor_pointer()
             .hover(|d| d.text_color(t.ink))
@@ -354,11 +351,6 @@ impl Dent {
                 this.menu = None;
                 cx.notify();
             }))
-            // Signals are fills, never text: nearly full puts the needs
-            // square beside the words.
-            .when(near, |d| {
-                d.child(div().flex_none().size(px(7.)).bg(t.needs.0))
-            })
             // Whole percent: a tenth jitters the row's width as it grows and
             // claims more precision than the count has.
             .child(if pct >= 100. {
@@ -463,6 +455,11 @@ impl Dent {
             .items_center()
             .gap(px(space::S1))
             .children(first)
+            // Signals are fills, never text: nearly full puts the needs
+            // square beside the words.
+            .when(near, |d| {
+                d.child(div().flex_none().size(px(7.)).bg(t.needs.0))
+            })
             .child(gauge)
             .children(popover)
             .into_any_element()
