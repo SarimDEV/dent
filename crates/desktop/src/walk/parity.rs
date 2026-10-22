@@ -89,7 +89,16 @@ pub(super) fn parity() -> Vec<(f32, Act)> {
             Until(
                 "it shows in the chat, as tall as the page says",
                 |d, _| {
-                    let said = d.inline.borrow().heights.values().next().copied();
+                    // This session's page, by its art and version.
+                    let key = current(d).and_then(|s| {
+                        s.items.iter().find_map(|i| match i {
+                            Item::Made { art, version, .. } if d.in_chat(art) => {
+                                Some((*art, *version))
+                            }
+                            _ => None,
+                        })
+                    });
+                    let said = key.and_then(|k| d.inline.borrow().heights.get(&k).copied());
                     said.is_some_and(|h| {
                         (h - crate::inline::GUESS_H).abs() > 1.
                             && drawn(d, "inline-page")
@@ -103,7 +112,7 @@ pub(super) fn parity() -> Vec<(f32, Act)> {
             0.1,
             Until(
                 "it's live there, with a still kept for when it can't be",
-                |d, _| d.inline.borrow().live() == 1 && d.inline.borrow().stills() == 1,
+                |d, _| d.inline.borrow().live() == 1 && d.inline.borrow().stills() >= 1,
                 10.,
             ),
         ),

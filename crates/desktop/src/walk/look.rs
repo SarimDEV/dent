@@ -121,3 +121,87 @@ pub(super) fn fold() -> Vec<(f32, Act)> {
     ]);
     v
 }
+
+fn live(d: &Dent) -> usize {
+    d.inline.borrow().live()
+}
+
+/// Pages in the chat at their edges: more than can be live, scrolling,
+/// menus over them, another session, a tall one, a theme change.
+pub(super) fn pages() -> Vec<(f32, Act)> {
+    let mut v = new_session("show five visuals for the edges");
+    v.extend([
+        (
+            0.1,
+            Until("all five are shown", |d, _| says(d, "Five pages"), 30.),
+        ),
+        (
+            0.1,
+            Until(
+                "pages in the chat open no empty viewer beside it",
+                |d, _| current(d).is_some_and(|s| !d.shows_panel(s)),
+                2.,
+            ),
+        ),
+        (0.3, Call(to_end)),
+        (
+            0.1,
+            Until(
+                "the pages on screen go live, never more than three",
+                |d, _| (1..=3).contains(&live(d)),
+                10.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "the tall one says its full height",
+                |d, _| d.inline.borrow().heights.values().any(|h| *h > 1200.),
+                10.,
+            ),
+        ),
+        (0.2, Wheel("transcript", 300.)),
+        (
+            0.,
+            Until(
+                "scrolling, they step aside for their pictures",
+                |d, _| live(d) == 0,
+                1.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "still again, the ones in view go live",
+                |d, _| live(d) >= 1,
+                3.,
+            ),
+        ),
+        (0.2, Key("cmd-k")),
+        (
+            0.,
+            Until(
+                "the palette over the chat sends them to pictures",
+                |d, _| live(d) == 0,
+                1.,
+            ),
+        ),
+        (0.2, Key("escape")),
+        (
+            0.1,
+            Until("closed, they come back", |d, _| live(d) >= 1, 3.),
+        ),
+        (0.3, Call(to_end)),
+    ]);
+    both_themes(&mut v, "pages-end");
+    v.extend(new_session("first notes"));
+    v.extend([(
+        0.1,
+        Until(
+            "another session shows none of them",
+            |d, _| live(d) == 0,
+            3.,
+        ),
+    )]);
+    v
+}

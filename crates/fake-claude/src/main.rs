@@ -1397,6 +1397,41 @@ impl Agent {
             self.end("done", false);
             return Ok(());
         }
+        if lower.contains("five visuals") {
+            // Five pages in one turn, for the edges: a tall one, one whose
+            // script throws, one with a link, and two plain.
+            let tall: String = (1..=40)
+                .map(|i| format!("<div class=\"row\">Row {i}</div>"))
+                .collect();
+            let pages = [
+                ("Plain one", VISUAL_PAGE.to_string()),
+                (
+                    "Tall list",
+                    format!("<!doctype html><style>.row{{padding:12px 16px;border-bottom:1px solid var(--border)}}</style><body>{tall}</body>"),
+                ),
+                (
+                    "Throws",
+                    "<!doctype html><body><p>Before the error.</p><script>undefinedThing.call()</script></body>".to_string(),
+                ),
+                (
+                    "With a link",
+                    "<!doctype html><body><p><a href=\"https://example.com/docs\">The docs</a> say so.</p></body>".to_string(),
+                ),
+                ("Plain two", VISUAL_PAGE.replace("Sign-ups by week", "Sign-ups again")),
+            ];
+            for (title, html) in pages {
+                let id = self.tool(
+                    "mcp__dent__show_visual",
+                    json!({"title": title, "html": html}),
+                    None,
+                );
+                self.pause(200)?;
+                self.result(&id, "Shown to the person above your reply.", false, None);
+            }
+            self.say("Five pages, for the edges.", None)?;
+            self.end("done", false);
+            return Ok(());
+        }
         if lower.contains("look before") {
             // Checks the page first, as dent's tool lets it: a desktop draws
             // it and the picture comes back through the asks folder.

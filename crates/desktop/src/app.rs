@@ -2089,6 +2089,12 @@ impl Dent {
             .unwrap_or(Tab::Changes)
     }
 
+    /// A page the agent showed with dent's tool: it lives in the chat.
+    pub fn in_chat(&self, art: &str) -> bool {
+        self.art(art)
+            .is_some_and(|x| x.path.starts_with(dent_client_core::timeline::VISUAL_DIR))
+    }
+
     /// The files with a tab in this session's viewer: all it made, less
     /// those you closed and that haven't changed since.
     pub fn open_arts(&self, s: &Session) -> Vec<&'static str> {
@@ -2096,10 +2102,7 @@ impl Dent {
         let opened = self.opened.get(&s.id).cloned().unwrap_or_default();
         // A page the agent showed lives in the chat; it takes a tab only
         // once opened beside it.
-        let in_chat = |a: &&'static str| {
-            self.art(a)
-                .is_some_and(|x| x.path.starts_with(dent_client_core::timeline::VISUAL_DIR))
-        };
+        let in_chat = |a: &&'static str| self.in_chat(a);
         s.arts
             .iter()
             .copied()
