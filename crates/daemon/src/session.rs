@@ -85,6 +85,11 @@ pub enum Op {
         id: String,
         answer: Answer,
     },
+    /// A desktop's picture of a page the agent asked to see.
+    Looked {
+        key: String,
+        look: dent_protocol::Look,
+    },
     SetModel(String),
     SetPermission(Permission),
     /// Do what a command's sheet offers.
@@ -656,6 +661,7 @@ impl Session {
             }
             Op::Interrupt => self.interrupt().await,
             Op::Answer { id, answer } => self.answer(id, answer).await,
+            Op::Looked { key, look } => self.looked(&key, &look),
             // A running agent is asked first, and the change kept when it
             // agrees; otherwise the next agent starts with it.
             Op::SetModel(model) => {
@@ -1356,6 +1362,27 @@ impl Session {
         self.write(&msg).await?;
         self.asked.remove(&id);
         self.log(Body::Answered { id, answer });
+        Ok(())
+    }
+
+    /// A desktop's picture of a page: left where dent's tool waits for it
+    /// (`look-<key>.json`). The first one counts.
+    fn looked(&mut self, key: &str, look: &dent_protocol::Look) -> Result<()> {
+        // The key names a file: only what `look_key` makes.
+        if key.is_empty() || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+            bail!("not a look");
+        }
+        let dir = self.asks_dir();
+        std::fs::create_dir_all(&dir)?;
+        crate::plan_tool::sweep_looks(&dir);
+        let file = dir.join(format!("look-{key}.json"));
+        if file.exists() {
+            return Ok(());
+        }
+        // Written whole, then moved into place, so the tool never reads half.
+        let part = dir.join(format!("look-{key}.part"));
+        std::fs::write(&part, serde_json::to_vec(look)?)?;
+        std::fs::rename(&part, &file)?;
         Ok(())
     }
 

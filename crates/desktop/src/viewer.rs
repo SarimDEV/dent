@@ -166,7 +166,8 @@ impl Dent {
     /// Whether the viewer has anything for this session: what it made,
     /// what it changed, or a file you opened.
     pub fn has_viewer(&self, s: &Session) -> bool {
-        !s.arts.is_empty()
+        // A page shown in the chat counts once it's been opened beside it.
+        s.arts.iter().any(|a| !self.in_chat(a))
             || !s.diff.is_empty()
             || self.opened.get(&s.id).is_some_and(|o| !o.is_empty())
     }

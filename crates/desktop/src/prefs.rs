@@ -38,6 +38,10 @@ pub struct Prefs {
     /// The Mac may sleep while agents work.
     #[serde(default)]
     pub sleepy: bool,
+    /// Every turn's work shows as it came, rather than folding into one
+    /// "Worked for" line once the turn is done.
+    #[serde(default)]
+    pub show_all_work: bool,
     /// The shortcut that brings dent forward from any app (a name from
     /// `hotkey`'s choices); none kept means the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]

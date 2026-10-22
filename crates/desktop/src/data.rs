@@ -270,6 +270,8 @@ pub enum Fold<'a> {
     Command(&'a str, &'a str),
     /// A section of a command's sheet: session, item, section.
     Sheet(&'a str, usize, usize),
+    /// A finished turn's work, by the message that began it.
+    Turn(&'a str),
 }
 
 impl Fold<'_> {
@@ -277,6 +279,7 @@ impl Fold<'_> {
         match self {
             Fold::Message(id) => id.to_string(),
             Fold::Plan(ask) => format!("plan-open-{ask}"),
+            Fold::Turn(msg) => format!("turn-{msg}"),
             Fold::Report(call) => format!("report-{call}"),
             Fold::CallIn(s, call) => format!("call-in-all-{s}/{call}"),
             Fold::CallOut(s, call) => format!("call-out-all-{s}/{call}"),
@@ -500,6 +503,9 @@ pub struct Session {
     pub made_sig: usize,
     /// The agent's plan, as its latest todo list: (state, what, doing-form).
     pub todos: Vec<(String, String, String)>,
+    /// Pages the agent asked to see and no window has drawn yet: their
+    /// `look_key`, html, width and appearance as it asked.
+    pub looks: Vec<(String, Rc<str>, u32, String)>,
     /// Dev servers it started, by address.
     pub servers: Vec<String>,
     /// Videos, sounds and PDFs its replies named, by full path.
@@ -594,6 +600,7 @@ impl Session {
             media: Vec::new(),
             made_sig: 0,
             todos: Vec::new(),
+            looks: Vec::new(),
             agent_session: None,
             news: 0,
             seen: 0,

@@ -925,6 +925,7 @@ pub(super) fn checks() -> Vec<(f32, Act)> {
     v.extend(attaching());
     v.extend(turn_changes());
     v.extend(visuals());
+    v.extend(fold());
     v.extend(composing());
     v.extend(edges());
     v

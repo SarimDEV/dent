@@ -1384,9 +1384,103 @@ impl Agent {
             let input = json!({"title": "Sign-ups by week", "html": VISUAL_PAGE});
             let id = self.tool("mcp__dent__show_visual", input, None);
             self.pause(300)?;
-            self.result(&id, "Shown beside the chat.", false, None);
+            self.result(
+                &id,
+                "Shown to the person above your reply. Don't mention or describe the page; reply with only what it doesn't already say.",
+                false,
+                None,
+            );
             self.say(
                 "Sign-ups doubled in week 3, after the launch post, and held.",
+                None,
+            )?;
+            self.end("done", false);
+            return Ok(());
+        }
+        if lower.contains("five visuals") {
+            // Five pages in one turn, for the edges: a tall one, one whose
+            // script throws, one with a link, and two plain.
+            let tall: String = (1..=40)
+                .map(|i| format!("<div class=\"row\">Row {i}</div>"))
+                .collect();
+            let pages = [
+                ("Plain one", VISUAL_PAGE.to_string()),
+                (
+                    "Tall list",
+                    format!("<!doctype html><style>.row{{padding:12px 16px;border-bottom:1px solid var(--border)}}</style><body>{tall}</body>"),
+                ),
+                (
+                    "Throws",
+                    "<!doctype html><body><p>Before the error.</p><script>undefinedThing.call()</script></body>".to_string(),
+                ),
+                (
+                    "With a link",
+                    "<!doctype html><body><p><a href=\"https://example.com/docs\">The docs</a> say so.</p></body>".to_string(),
+                ),
+                ("Plain two", VISUAL_PAGE.replace("Sign-ups by week", "Sign-ups again")),
+            ];
+            for (title, html) in pages {
+                let id = self.tool(
+                    "mcp__dent__show_visual",
+                    json!({"title": title, "html": html}),
+                    None,
+                );
+                self.pause(200)?;
+                self.result(&id, "Shown to the person above your reply.", false, None);
+            }
+            self.say("Five pages, for the edges.", None)?;
+            self.end("done", false);
+            return Ok(());
+        }
+        if lower.contains("look before") {
+            // Checks the page first, as dent's tool lets it: a desktop draws
+            // it and the picture comes back through the asks folder.
+            let width = 720u32;
+            let input = json!({"html": VISUAL_PAGE, "width": width});
+            let id = self.tool("mcp__dent__preview_visual", input, None);
+            let Some(asks) = asks_dir() else {
+                self.result(&id, "dent can't draw pages here.", true, None);
+                self.end("done", false);
+                return Ok(());
+            };
+            let file = std::path::Path::new(&asks).join(format!(
+                "look-{}.json",
+                look_key(VISUAL_PAGE, width, "auto")
+            ));
+            let mut waited = 0;
+            let look = loop {
+                if let Ok(a) = std::fs::read_to_string(&file) {
+                    let _ = std::fs::remove_file(&file);
+                    break serde_json::from_str::<Value>(&a).unwrap_or(Value::Null);
+                }
+                if waited > 40_000 {
+                    break Value::Null;
+                }
+                self.pause(100)?;
+                waited += 100;
+            };
+            let Some(png) = look["png"].as_str().filter(|p| !p.is_empty()) else {
+                self.result(&id, "dent couldn't draw the page.", true, None);
+                self.end("done", false);
+                return Ok(());
+            };
+            let words = format!(
+                "Drawn at {width} px wide: contentHeight {} px.",
+                look["content_height"]
+            );
+            out(self.envelope(
+                json!({"type": "user", "message": {"role": "user", "content": [
+                    {"tool_use_id": id, "type": "tool_result", "is_error": false, "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png}},
+                        {"type": "text", "text": words}]}]}}),
+                None,
+            ));
+            let input = json!({"title": "Sign-ups by week", "html": VISUAL_PAGE});
+            let id = self.tool("mcp__dent__show_visual", input, None);
+            self.pause(300)?;
+            self.result(&id, "Shown to the person above your reply.", false, None);
+            self.say(
+                "Checked it first: it fits the column. Week 3 is the jump.",
                 None,
             )?;
             self.end("done", false);
@@ -1935,6 +2029,34 @@ const REAL_TURN: &str = include_str!("../assets/real-turn.jsonl");
 
 const LONG: &str = "Let me walk through the whole design before changing anything, because the pieces depend on each other more than it first looks.\n\n## The event log\n\nEvery session is a list of events, and each one gets a number. A client that drops off asks for everything after the last number it saw, so catching up and staying live are the same thing. Nothing is ever rewritten, which keeps the log simple to reason about and cheap to copy.\n\n## The agents\n\nThe agent runs as a child of a tiny holder process rather than of the daemon itself. That way the daemon can restart, crash or upgrade without the agent noticing: the holder keeps the pipes open and writes everything to disk, and the new daemon picks up from the last byte it recorded.\n\n## The clients\n\nThe desktop and the phone are views. They keep a cache so they open instantly, and they send commands to the daemon that owns the session. They never decide anything on their own, so two of them can't disagree about what happened.\n\n## What I'd change\n\n1. Batch events while catching up, so a phone isn't held back by the cost of each message.\n2. Store only complete messages, and stream the rest.\n3. Keep the last usage reading per account, since the agent only reports it when it changes.\n\nThat's the plan. Shall I start with the first one?";
 
+/// The folder dent's tools wait in, from the `--mcp-config` dent gave.
+fn asks_dir() -> Option<String> {
+    std::env::args()
+        .skip_while(|a| a != "--mcp-config")
+        .nth(1)
+        .and_then(|c| serde_json::from_str::<Value>(&c).ok())
+        .and_then(|c| {
+            c["mcpServers"]["dent"]["env"]["DENT_ASKS"]
+                .as_str()
+                .map(str::to_owned)
+        })
+}
+
+/// `dent_protocol::look_key`, kept here so the fake needs nothing of dent's.
+fn look_key(html: &str, width: u32, appearance: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in html
+        .as_bytes()
+        .iter()
+        .chain(&width.to_le_bytes())
+        .chain(appearance.as_bytes())
+    {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
 /// Standard base64, padded, as tool results carry pictures.
 fn base64(bytes: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -1956,13 +2078,28 @@ fn base64(bytes: &[u8]) -> String {
 
 /// The page `show a visual` shows: a small bar chart, all inline.
 const VISUAL_PAGE: &str = r#"<!doctype html><html><head><meta charset="utf-8"><style>
-body{font:14px -apple-system,system-ui,sans-serif;margin:24px;color:#1d1d1f;background:#fff}
-h1{font-size:17px;margin:0 0 16px}.bars{display:flex;gap:14px;align-items:flex-end;height:180px}
-.bar{flex:1;background:linear-gradient(#7aa7ff,#3d6fe0);border-radius:6px 6px 0 0;position:relative}
-.bar span{position:absolute;top:-20px;left:0;right:0;text-align:center;font-size:12px;color:#555}
-.weeks{display:flex;gap:14px;margin-top:8px}.weeks div{flex:1;text-align:center;color:#888;font-size:12px}
+h1{font:600 15px var(--font-sans);margin:0 0 18px}
+.bars{display:flex;gap:14px;align-items:flex-end;height:180px}
+.bar{flex:1;background:var(--chart-1);border-radius:var(--radius) var(--radius) 0 0;position:relative}
+.bar.up{background:var(--chart-2)}
+.bar span{position:absolute;top:-20px;left:0;right:0;text-align:center;font-size:12px;color:var(--muted-foreground)}
+.weeks{display:flex;gap:14px;margin-top:8px}.weeks div{flex:1;text-align:center;color:var(--muted-foreground);font-size:12px}
+.note{margin-top:16px;padding:12px 16px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card)}
 </style></head><body><h1>Sign-ups by week</h1><div class="bars">
 <div class="bar" style="height:30%"><span>120</span></div><div class="bar" style="height:36%"><span>144</span></div>
-<div class="bar" style="height:72%"><span>290</span></div><div class="bar" style="height:70%"><span>281</span></div>
+<div class="bar up" style="height:72%"><span>290</span></div><div class="bar" style="height:70%"><span>281</span></div>
 <div class="bar" style="height:76%"><span>305</span></div></div>
-<div class="weeks"><div>W1</div><div>W2</div><div>W3</div><div>W4</div><div>W5</div></div></body></html>"#;
+<div class="weeks"><div>W1</div><div>W2</div><div>W3</div><div>W4</div><div>W5</div></div>
+<div class="note">Week 3 is the launch post.</div></body></html>"#;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn its_look_key_is_dents() {
+        // Pinned in dent_protocol's tests too: the two copies agree.
+        assert_eq!(
+            super::look_key("<p>hi</p>", 700, "auto"),
+            "c9e372f659082b2c"
+        );
+    }
+}

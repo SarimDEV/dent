@@ -29,6 +29,7 @@ mod github;
 mod glyph;
 mod highlight;
 mod hotkey;
+mod inline;
 mod keys;
 mod lightbox;
 mod live;
@@ -387,6 +388,24 @@ impl Render for Dent {
             p.borrow_mut().set_visible(visible);
             p.borrow().keep_keys_unless_pressed(window.mouse_position());
         }
+        // Pages in the chat: live only with nothing over them and the chat
+        // still; dent's colours, as they are this frame.
+        self.over_chat_was = self.over_chat.replace(false);
+        let clear = self.inline_clear();
+        let top = self.transcript.logical_scroll_top();
+        {
+            let mut inline = self.inline.borrow_mut();
+            // The theme it's going to, not each step of a change: pages
+            // take it once.
+            inline.set_theme(crate::inline::theme_json(&if self.t.dark {
+                crate::theme::Theme::carbon()
+            } else {
+                crate::theme::Theme::paper()
+            }));
+            inline.show(clear, (top.item_ix, top.offset_in_item.as_f32()));
+            inline.keep_keys(window.mouse_position());
+        }
+        self.look_at_pages(window);
         let t = self.t;
         // Lay out from the window: the chat keeps its minimum, the viewer
         // shrinks first, and only then does the sidebar fold away.
@@ -976,7 +995,15 @@ impl Render for Dent {
             .children(self.pane_view(cx))
             .children(self.adding_view(cx))
             .children(self.context_view(window, cx))
-            .children(self.github_card(cx))
+            .children({
+                // A card over a link floats over the chat: pages under it
+                // give way to their stills.
+                let card = self.github_card(cx);
+                if card.is_some() {
+                    self.over_chat.set(true);
+                }
+                card
+            })
             // Over everything, menus painted late included.
             .children(
                 self.lightbox_view(window, cx)
@@ -987,23 +1014,10 @@ impl Render for Dent {
 
 /// The Book pairing, compiled in so the app needs nothing beside it (0032).
 fn load_fonts(cx: &mut App) {
-    let fonts: Vec<std::borrow::Cow<'static, [u8]>> = [
-        &include_bytes!("../../../assets/fonts/CommitMono-400-Italic.ttf")[..],
-        &include_bytes!("../../../assets/fonts/CommitMono-400-Regular.ttf")[..],
-        &include_bytes!("../../../assets/fonts/CommitMono-700-Regular.ttf")[..],
-        &include_bytes!("../../../assets/fonts/IBMPlexSans-Medium.ttf")[..],
-        &include_bytes!("../../../assets/fonts/IBMPlexSans-Regular.ttf")[..],
-        &include_bytes!("../../../assets/fonts/IBMPlexSans-SemiBold.ttf")[..],
-        &include_bytes!("../../../assets/fonts/InstrumentSerif-Italic.ttf")[..],
-        &include_bytes!("../../../assets/fonts/InstrumentSerif-Regular.ttf")[..],
-        &include_bytes!("../../../assets/fonts/Literata-Italic.ttf")[..],
-        &include_bytes!("../../../assets/fonts/Literata-Medium.ttf")[..],
-        &include_bytes!("../../../assets/fonts/Literata-MediumItalic.ttf")[..],
-        &include_bytes!("../../../assets/fonts/Literata-Regular.ttf")[..],
-    ]
-    .into_iter()
-    .map(std::borrow::Cow::Borrowed)
-    .collect();
+    let fonts: Vec<std::borrow::Cow<'static, [u8]>> = crate::assets::FONTS
+        .iter()
+        .map(|(_, bytes)| std::borrow::Cow::Borrowed(*bytes))
+        .collect();
     if let Err(e) = cx.text_system().add_fonts(fonts) {
         eprintln!("fonts: {e}");
     }
@@ -1146,6 +1160,11 @@ fn main() {
                 if walk.is_none() {
                     hotkey::set(&hotkey::chosen());
                 }
+                // Walks check every turn's work as it came; the fold has a
+                // scene of its own.
+                if walk.is_some() {
+                    d.fold_turns = false;
+                }
                 d.walk = walk;
                 d
             });
@@ -1158,6 +1177,7 @@ fn main() {
         // screen changes: a timer's second, a page's message. (A working
         // square asks for every frame itself, through `animating`.)
         let weak = view.downgrade();
+        let main_handle = main_window;
         cx.spawn(async move |cx| {
             loop {
                 cx.background_executor()
@@ -1166,6 +1186,17 @@ fn main() {
                 let Ok(due) = weak.update(cx, |this, _| this.tick_due()) else {
                     break;
                 };
+                // A page an agent asked to see is drawn even while the window
+                // draws nothing (minimized, on another Space): its look moves
+                // on here, not only in a frame.
+                let looking = weak
+                    .update(cx, |this, _| this.looks_waiting())
+                    .unwrap_or(false);
+                if looking {
+                    let _ = cx.update_window(main_handle, |_, window, cx| {
+                        let _ = weak.update(cx, |this, _| this.look_at_pages(window));
+                    });
+                }
                 if due && weak.update(cx, |_, cx| cx.notify()).is_err() {
                     break;
                 }

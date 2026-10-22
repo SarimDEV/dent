@@ -10,6 +10,60 @@ const OWN: &[(&str, &[u8])] = &[
     ("icons/claude.svg", include_bytes!("../icons/claude.svg")),
 ];
 
+/// The Book pairing, compiled in so the app needs nothing beside it (0032),
+/// by file name: the window's text uses them, and inline pages load them
+/// from `dent:` as `/.dent/fonts/<name>`.
+pub const FONTS: &[(&str, &[u8])] = &[
+    (
+        "CommitMono-400-Italic.ttf",
+        include_bytes!("../../../assets/fonts/CommitMono-400-Italic.ttf"),
+    ),
+    (
+        "CommitMono-400-Regular.ttf",
+        include_bytes!("../../../assets/fonts/CommitMono-400-Regular.ttf"),
+    ),
+    (
+        "CommitMono-700-Regular.ttf",
+        include_bytes!("../../../assets/fonts/CommitMono-700-Regular.ttf"),
+    ),
+    (
+        "IBMPlexSans-Medium.ttf",
+        include_bytes!("../../../assets/fonts/IBMPlexSans-Medium.ttf"),
+    ),
+    (
+        "IBMPlexSans-Regular.ttf",
+        include_bytes!("../../../assets/fonts/IBMPlexSans-Regular.ttf"),
+    ),
+    (
+        "IBMPlexSans-SemiBold.ttf",
+        include_bytes!("../../../assets/fonts/IBMPlexSans-SemiBold.ttf"),
+    ),
+    (
+        "InstrumentSerif-Italic.ttf",
+        include_bytes!("../../../assets/fonts/InstrumentSerif-Italic.ttf"),
+    ),
+    (
+        "InstrumentSerif-Regular.ttf",
+        include_bytes!("../../../assets/fonts/InstrumentSerif-Regular.ttf"),
+    ),
+    (
+        "Literata-Italic.ttf",
+        include_bytes!("../../../assets/fonts/Literata-Italic.ttf"),
+    ),
+    (
+        "Literata-Medium.ttf",
+        include_bytes!("../../../assets/fonts/Literata-Medium.ttf"),
+    ),
+    (
+        "Literata-MediumItalic.ttf",
+        include_bytes!("../../../assets/fonts/Literata-MediumItalic.ttf"),
+    ),
+    (
+        "Literata-Regular.ttf",
+        include_bytes!("../../../assets/fonts/Literata-Regular.ttf"),
+    ),
+];
+
 pub struct Assets;
 
 impl AssetSource for Assets {

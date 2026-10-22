@@ -53,3 +53,265 @@ pub(super) fn look() -> Vec<(f32, Act)> {
     both_themes(&mut v, "look-4-top");
     v
 }
+
+/// A finished turn's work folds into one "Worked for" line above its
+/// answer, and opens in place.
+pub(super) fn fold() -> Vec<(f32, Act)> {
+    let mut v = vec![(
+        0.1,
+        Call(|d, _, cx| {
+            d.fold_turns = true;
+            cx.notify();
+        }),
+    )];
+    v.extend(new_session("replay a real turn"));
+    v.extend([
+        (
+            0.1,
+            Until(
+                "while it works, nothing folds",
+                |d, _| drawn(d, "tool-row").is_some() && drawn(d, "worked").is_none(),
+                20.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "its test run waits for approval",
+                |d, _| has(d, |i| matches!(i, Item::Approval { .. })),
+                30.,
+            ),
+        ),
+        (0.2, Click("allow")),
+        (
+            0.1,
+            Until(
+                "done, its work folds into one line above the answer",
+                |d, _| {
+                    done_saying(d, "now counts words correctly")
+                        && drawn(d, "worked").is_some()
+                        && drawn(d, "tool-row").is_none()
+                },
+                30.,
+            ),
+        ),
+        (0.3, Call(to_end)),
+    ]);
+    both_themes(&mut v, "fold-closed");
+    v.extend([
+        (0.2, Click("worked")),
+        (
+            0.1,
+            Until(
+                "a click opens the work in place",
+                |d, _| drawn(d, "tool-row").is_some() && drawn(d, "worked").is_some(),
+                3.,
+            ),
+        ),
+        (0.4, Shot("fold-open")),
+        (0.2, Click("worked")),
+        (
+            0.1,
+            Until(
+                "and another folds it again",
+                |d, _| drawn(d, "tool-row").is_none(),
+                3.,
+            ),
+        ),
+    ]);
+    v
+}
+
+fn live(d: &Dent) -> usize {
+    d.inline.borrow().live()
+}
+
+/// Pages in the chat at their edges: more than can be live, scrolling,
+/// menus over them, another session, a tall one, a theme change.
+pub(super) fn pages() -> Vec<(f32, Act)> {
+    let mut v = new_session("show five visuals for the edges");
+    v.extend([
+        (
+            0.1,
+            Until("all five are shown", |d, _| says(d, "Five pages"), 30.),
+        ),
+        (
+            0.1,
+            Until(
+                "pages in the chat open no empty viewer beside it",
+                |d, _| current(d).is_some_and(|s| !d.shows_panel(s)),
+                2.,
+            ),
+        ),
+        (0.3, Call(to_end)),
+        (
+            0.1,
+            Until(
+                "the pages on screen go live, never more than three",
+                |d, _| (1..=3).contains(&live(d)),
+                10.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "the tall one says its full height",
+                |d, _| d.inline.borrow().heights.values().any(|h| *h > 1200.),
+                10.,
+            ),
+        ),
+        (0.1, Call(to_tall_page)),
+        (
+            0.3,
+            Until(
+                "too tall to be all in view, it's drawn off screen for its still",
+                |d, _| {
+                    let i = d.inline.borrow();
+                    i.off_screen() == 1
+                        && i.heights
+                            .iter()
+                            .any(|(k, h)| *h > 1200. && i.still(*k).is_some())
+                },
+                10.,
+            ),
+        ),
+        (0.3, Shot("pages-tall")),
+        (0.1, Call(to_end)),
+        (0.2, Wheel("transcript", 300.)),
+        (
+            0.,
+            Until(
+                "scrolling, they step aside for their pictures",
+                |d, _| live(d) == 0,
+                0.3,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "still again, the ones in view go live",
+                |d, _| live(d) >= 1,
+                3.,
+            ),
+        ),
+        (0.2, Key("cmd-k")),
+        (
+            0.,
+            Until(
+                "the palette over the chat sends them to pictures",
+                |d, _| live(d) == 0,
+                1.,
+            ),
+        ),
+        (0.2, Key("escape")),
+        (
+            0.1,
+            Until("closed, they come back", |d, _| live(d) >= 1, 3.),
+        ),
+        (0.3, Call(to_end)),
+    ]);
+    both_themes(&mut v, "pages-end");
+    v.extend(new_session("first notes"));
+    v.extend([(
+        0.1,
+        Until(
+            "another session shows none of them, at once",
+            |d, _| live(d) == 0,
+            0.5,
+        ),
+    )]);
+    v
+}
+
+/// When the window came back from the Dock, for the check that the look
+/// was answered before then.
+static RESTORED: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+/// A look asked for while dent is minimized: drawn and answered all the
+/// same, before the window comes back.
+pub(super) fn look_hidden() -> Vec<(f32, Act)> {
+    let mut v = new_session("look before you show the sign-ups");
+    v.extend([
+        (
+            0.,
+            Call(|_, w, cx| {
+                w.minimize_window();
+                // Back in a while, by itself: a minimized window draws no
+                // frames, so the walk can't bring it back.
+                let handle = w.window_handle();
+                cx.spawn(async move |_, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(8))
+                        .await;
+                    *RESTORED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+                    let _ = cx.update_window(handle, |_, w, _| w.activate_window());
+                })
+                .detach();
+            }),
+        ),
+        (
+            0.5,
+            Until(
+                "minimized, the agent still gets its picture of the page",
+                |d, _| {
+                    let restored = *RESTORED.lock().unwrap_or_else(|e| e.into_inner());
+                    says(d, "Checked it first")
+                        && matches!((d.looker.answered_at, restored), (Some(a), Some(r)) if a < r)
+                },
+                30.,
+            ),
+        ),
+    ]);
+    v
+}
+
+/// Where no web view can sit in the chat (Wayland; DENT_NO_INLINE_WEB here),
+/// a page is a card that opens it beside the chat.
+pub(super) fn pages_fallback() -> Vec<(f32, Act)> {
+    let mut v = new_session("show a visual of sign-ups");
+    v.extend([
+        (
+            0.1,
+            Until(
+                "the page is a card to open",
+                |d, _| drawn(d, "inline-card").is_some() && drawn(d, "inline-page").is_none(),
+                15.,
+            ),
+        ),
+        (0.3, Call(to_end)),
+        (0.4, Shot("pages-fallback")),
+        (0.2, Click("inline-card")),
+        (
+            0.1,
+            Until(
+                "a click opens it beside the chat",
+                |d, _| {
+                    d.panel_open
+                        && current(d)
+                            .is_some_and(|s| matches!(d.tab(s), Tab::Art(a) if d.in_chat(a)))
+                },
+                5.,
+            ),
+        ),
+    ]);
+    v
+}
+
+/// Scroll to the tallest page in the chat.
+fn to_tall_page(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
+    let tall = d
+        .inline
+        .borrow()
+        .heights
+        .iter()
+        .find(|(_, h)| **h > 1200.)
+        .map(|(k, _)| *k);
+    let at = tall.and_then(|(art, v)| {
+        current(d)?.items.iter().position(
+            |i| matches!(i, Item::Made { art: a, version, .. } if *a == art && *version == v),
+        )
+    });
+    if let Some(ix) = at {
+        d.scroll_to_item(ix, cx);
+    }
+}

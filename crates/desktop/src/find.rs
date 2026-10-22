@@ -490,6 +490,31 @@ impl Dent {
     }
 
     fn reveal_find(&mut self) {
+        // A match in the chat folded into a finished turn opens that turn.
+        let at = self
+            .find
+            .as_ref()
+            .filter(|f| f.scope == Scope::Chat)
+            .and_then(|f| f.hits.get(f.at))
+            .map(|h| h.0);
+        // (A closed turn's line stands in for its first item too.)
+        if let Some(ix) = at
+            && matches!(
+                self.turn_folds.get(ix),
+                Some(
+                    crate::chat::TurnFold::Hidden | crate::chat::TurnFold::Head { open: false, .. }
+                )
+            )
+            && let Some(crate::chat::TurnFold::Head { user, .. }) = self.turn_folds[..=ix]
+                .iter()
+                .rev()
+                .find(|f| matches!(f, crate::chat::TurnFold::Head { .. }))
+                .copied()
+            && let Some(s) = self.current_rc()
+            && let Some(Item::User { id, .. }) = s.items.get(user)
+        {
+            self.expanded.insert(crate::data::Fold::Turn(id).key());
+        }
         let Some(f) = self.find.as_mut() else { return };
         // A page counts as it looks: it's asked even for nothing found yet.
         if let Scope::Page(_) = f.scope

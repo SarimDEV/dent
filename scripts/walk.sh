@@ -77,7 +77,7 @@ profile=debug; release=()
 if [[ -n "${DENT_WALK_RELEASE:-}" ]]; then profile=release; release=(--release); fi
 cargo build -q ${release[@]+"${release[@]}"} -p dent-desktop -p dent-daemon -p dent-session-holder -p dent-fake-claude
 bin=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/$profile
-if [[ "$name" == "real" || "$name" == "compare" ]]; then
+if [[ "$name" == real* || "$name" == "compare" ]]; then
   # The real agent on its smallest model, signed in as you: your own home.
   status=0
   DENT_STATE="$root/state" DENT_WALK_PROJECT="${DENT_WALK_REPO:-$root/proj}" DENT_HOLDER_ORPHAN_MS=10000 \

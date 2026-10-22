@@ -80,6 +80,7 @@ pub fn argv(claude: &str, path: &str, l: &Launch<'_>) -> Vec<String> {
             [
                 crate::plan_tool::TOOL,
                 crate::plan_tool::VISUAL,
+                crate::plan_tool::LOOK,
                 crate::plan_tool::SECRET,
             ]
             .join(","),
@@ -111,7 +112,7 @@ pub fn argv(claude: &str, path: &str, l: &Launch<'_>) -> Vec<String> {
 }
 
 /// Added to every session's system prompt.
-const PLAN_NUDGE: &str = "Before you start any task with three or more steps, call the update_plan tool (from the dent server) with the whole plan, one short line per step. Call it again whenever a step starts or finishes, marking it in_progress or completed, so the plan always shows where you are, and mark every step completed before your final answer. Give every Bash command a short description of what it is for, starting with a verb. When you make a file for the person to look at (a video, a recording, a PDF), name its path in your reply. To show a chart, a diagram or a mock-up, use the show_visual tool rather than writing a file. If you need a secret (an API key, a token, a password), ask with the ask_secret tool, never in chat.";
+const PLAN_NUDGE: &str = "Before you start any task with three or more steps, call the update_plan tool (from the dent server) with the whole plan, one short line per step. Call it again whenever a step starts or finishes, marking it in_progress or completed, so the plan always shows where you are, and mark every step completed before your final answer. Give every Bash command a short description of what it is for, starting with a verb. When you make a file for the person to look at (a video, a recording, a PDF), name its path in your reply. To show a chart, a table, a diagram or a mock-up, use the show_visual tool rather than writing a file; it appears in the chat above your reply, so don't describe it again. Check a page with preview_visual first when its layout matters. If you need a secret (an API key, a token, a password), ask with the ask_secret tool, never in chat.";
 
 /// One question to a small, quick model with no tools, answered in one
 /// turn: titles, branch names, commit messages.

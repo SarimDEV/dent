@@ -1099,6 +1099,21 @@ pub struct Dent {
     pub review: Vec<Attachment>,
     /// The conversation draws only the items on screen.
     pub transcript: ListState,
+    /// Pages the agent shows inside the chat.
+    pub inline: Rc<RefCell<crate::inline::Inline>>,
+    /// Pages the agent asked to see before showing them.
+    pub looker: crate::inline::Looker,
+    /// A popover drew over the chat this frame (the slash menu, stashed
+    /// drafts): pages there step aside next frame.
+    pub over_chat: std::cell::Cell<bool>,
+    /// The same, for the frame before.
+    pub over_chat_was: bool,
+    /// The chat's view as last laid out, and whether it follows the end.
+    pub chat_view: (Bounds<Pixels>, bool),
+    /// Fold each finished turn's work into one line (a preference).
+    pub fold_turns: bool,
+    /// The open session's items, each as its turn's fold has it.
+    pub turn_folds: Vec<crate::chat::TurnFold>,
     /// The sidebar's rows, drawn only where they're on screen.
     pub inbox_list: ListState,
     pub inbox_sigs: Vec<u64>,
@@ -1828,6 +1843,13 @@ impl Dent {
             commenting: None,
             review: Vec::new(),
             transcript: ListState::new(0, ListAlignment::Top, px(600.)),
+            inline: Default::default(),
+            looker: Default::default(),
+            over_chat: Default::default(),
+            over_chat_was: false,
+            chat_view: (Bounds::default(), true),
+            fold_turns: !prefs.show_all_work,
+            turn_folds: Vec::new(),
             inbox_list: ListState::new(0, ListAlignment::Top, px(400.)),
             inbox_sigs: Vec::new(),
             transcript_sigs: (None, Vec::new()),
@@ -2067,15 +2089,25 @@ impl Dent {
             .unwrap_or(Tab::Changes)
     }
 
+    /// A page the agent showed with dent's tool: it lives in the chat.
+    pub fn in_chat(&self, art: &str) -> bool {
+        self.art(art)
+            .is_some_and(|x| x.path.starts_with(dent_client_core::timeline::VISUAL_DIR))
+    }
+
     /// The files with a tab in this session's viewer: all it made, less
     /// those you closed and that haven't changed since.
     pub fn open_arts(&self, s: &Session) -> Vec<&'static str> {
         let closed = self.closed_tabs.get(&s.id);
         let opened = self.opened.get(&s.id).cloned().unwrap_or_default();
+        // A page the agent showed lives in the chat; it takes a tab only
+        // once opened beside it.
+        let in_chat = |a: &&'static str| self.in_chat(a);
         s.arts
             .iter()
             .copied()
-            .chain(opened.into_iter().filter(|a| !s.arts.contains(a)))
+            .filter(|a| !in_chat(a) || opened.contains(a))
+            .chain(opened.iter().copied().filter(|a| !s.arts.contains(a)))
             .filter(|a| {
                 closed
                     .and_then(|c| c.get(a))
@@ -6248,6 +6280,7 @@ impl Dent {
             sidebar_off: self.sidebar_off,
             quiet: !crate::notify::SOUND.load(std::sync::atomic::Ordering::Relaxed),
             sleepy: !crate::notify::AWAKE.load(std::sync::atomic::Ordering::Relaxed),
+            show_all_work: !self.fold_turns,
             hotkey: Some(crate::hotkey::chosen()).filter(|h| h != crate::hotkey::DEFAULT),
             appearance: self.appearance,
             pinned: self.pinned.clone(),
@@ -8175,6 +8208,13 @@ impl Dent {
                 self.viewing.remove(art);
             }
         }
+        // Opened beside the chat: it has a tab from now on.
+        if let Some(id) = self.selected.clone() {
+            let list = self.opened.entry(id).or_default();
+            if !list.contains(&art) {
+                list.push(art);
+            }
+        }
         self.show_tab(Tab::Art(art), cx);
     }
 
@@ -8225,6 +8265,7 @@ impl Dent {
     /// Page events arrive from the web view; turn them into state.
     pub fn drain_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.serve_far(cx);
+        self.drain_inline(window, cx);
         let Some(p) = &self.preview else { return };
         let (events, showing, retired) = {
             let p = p.borrow();
@@ -8246,6 +8287,86 @@ impl Dent {
         cx.notify();
     }
 
+    /// A page an agent asked to see is waiting, or one is being drawn.
+    pub fn looks_waiting(&self) -> bool {
+        self.looker.busy() || self.sessions.iter().any(|s| !s.looks.is_empty())
+    }
+
+    /// Draw the pages agents asked to see, in any session, and send each
+    /// picture back to its daemon.
+    pub fn look_at_pages(&mut self, window: &Window) {
+        let dark = self.t.dark;
+        let mut waiting = std::collections::HashSet::new();
+        for s in &self.sessions {
+            for (key, ..) in &s.looks {
+                waiting.insert(format!("{}/{key}", s.id));
+            }
+        }
+        self.looker.keep_only(&waiting);
+        for s in &self.sessions {
+            for (key, html, width, appearance) in &s.looks {
+                let dark = match appearance.as_str() {
+                    "light" => false,
+                    "dark" => true,
+                    _ => dark,
+                };
+                self.looker.ask(&s.id, key, html, *width, dark);
+            }
+        }
+        if let Some((session, key, look)) = self.looker.step(window) {
+            self.live.send(Request::Looked { session, key, look });
+        }
+    }
+
+    /// Nothing floats over the chat: an inline page may show live.
+    pub fn inline_clear(&self) -> bool {
+        self.pane.is_none()
+            && !self.meter_open
+            && !self.keys_open
+            && self.adding.is_none()
+            && !self.dragging_sidebar
+            && self.menu.is_none()
+            && self.palette.is_none()
+            && self.context.is_none()
+            && self.lightbox.is_none()
+            && self.switcher.is_none()
+            && !self.dragging
+            && !self.over_chat_was
+    }
+
+    /// What the chat's pages said: their heights, scrolls meant for the
+    /// chat, and links to open.
+    pub fn drain_inline(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let retired = self.inline.borrow_mut().retired();
+        for image in retired {
+            let _ = window.drop_image(image);
+        }
+        let events = self.inline.borrow_mut().drain();
+        if events.is_empty() {
+            return;
+        }
+        for (key, ev) in events {
+            match ev {
+                PageEvent::Height(h) => {
+                    let h = h.clamp(crate::inline::MIN_H, crate::inline::MAX_H);
+                    let old = self.inline.borrow_mut().heights.insert(key, h);
+                    if old.is_none_or(|o| (o - h).abs() >= 1.) {
+                        cx.notify();
+                    }
+                }
+                // A sideways swipe has nothing for the chat; it isn't a move.
+                PageEvent::Wheel(dy) if dy != 0. => {
+                    self.transcript.scroll_by(px(dy));
+                    self.inline.borrow_mut().moved();
+                    cx.notify();
+                }
+                PageEvent::External(url) => cx.open_url(&url),
+                // Clicked into: the page has the keyboard until you click back.
+                _ => {}
+            }
+        }
+    }
+
     /// Answer what another machine's page asked for: a video's range read
     /// from there (pinned to one version), or a picture or style copied
     /// here whole. What isn't known yet waits for the next frame.
@@ -8256,6 +8377,7 @@ impl Dent {
         if let Some(p) = &self.preview {
             asks.extend(p.borrow().take_far());
         }
+        asks.extend(self.inline.borrow().take_far());
         // A range with no answer in a long while (its link gone for good):
         // the player hears, rather than waiting forever.
         let late: Vec<u64> = self
@@ -8571,6 +8693,8 @@ impl Dent {
                     self.open_file_at(&url, None, cx);
                 }
                 PageEvent::External(url) => cx.open_url(&url),
+                // Only a page inside the chat reports these.
+                PageEvent::Height(_) | PageEvent::Wheel(_) => {}
             }
         }
         cx.notify();
@@ -8676,6 +8800,22 @@ impl Dent {
         // The first queued message carries the working line above it, so
         // its height changes with the working state.
         let mut sigs = sigs;
+        // A finished turn's work folds into one line; an item's place in
+        // that fold is part of its height.
+        self.turn_folds = if self.fold_turns {
+            crate::chat::turn_folds(&s.items, |user| match s.items.get(user) {
+                Some(Item::User { id, .. }) => self.is_open(&crate::data::Fold::Turn(id)),
+                _ => false,
+            })
+        } else {
+            vec![crate::chat::TurnFold::Shown; s.items.len()]
+        };
+        for (sig, fold) in sigs.iter_mut().zip(&self.turn_folds) {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            fold.hash(&mut h);
+            *sig ^= h.finish();
+        }
         if let Some(q) = crate::chat::working_host(s) {
             sigs[q] ^= 0x9e37_79b9_7f4a_7c15;
         }
@@ -8779,6 +8919,13 @@ impl Dent {
                 // Older versions fold to one line.
                 let latest = self.art(art).map(|a| a.versions.len()).unwrap_or(0);
                 (art, version, *version < latest, review).hash(&mut h);
+                // A page in the chat is as tall as it says.
+                self.inline
+                    .borrow()
+                    .heights
+                    .get(&(*art, *version))
+                    .map(|v| v.round() as i32)
+                    .hash(&mut h);
             }
             Item::Approval {
                 id, command, why, ..
@@ -9348,7 +9495,10 @@ impl Dent {
             let p = p.borrow();
             let owed = p.tick();
             p.pending() || owed
-        });
+        }) | {
+            let i = self.inline.borrow();
+            i.tick() | i.settling()
+        } | self.looker.busy();
         let toast_expired = self
             .toast
             .as_ref()

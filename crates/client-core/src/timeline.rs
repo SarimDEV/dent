@@ -289,6 +289,15 @@ impl Call {
             "TodoWrite" => "Updated",
             other => other,
         };
+        // dent's own look at a page before showing it, at the width asked.
+        if self.name == LOOK_TOOL {
+            let width = v["width"].as_u64().unwrap_or(720);
+            return match &self.result {
+                None => format!("Looking at the page at {width} px"),
+                Some((true, _)) => "Couldn't look at the page".into(),
+                Some((false, _)) => format!("Looked at the page at {width} px"),
+            };
+        }
         // An MCP tool (`mcp__server__take_screenshot`) reads as its words,
         // in the tense of the moment, then its server: "Took screenshot ·
         // browser".
@@ -538,6 +547,9 @@ pub struct Version {
 /// Files the viewer can show.
 /// dent's own tool for showing the person a page it made.
 pub const VISUAL_TOOL: &str = "mcp__dent__show_visual";
+/// dent's tool for the agent to see a page before showing it: a desktop
+/// draws it and sends the picture back.
+pub const LOOK_TOOL: &str = "mcp__dent__preview_visual";
 
 /// Where a visual's page is kept, by its title: a name inside a folder no
 /// project has, so it never stands for a real file.

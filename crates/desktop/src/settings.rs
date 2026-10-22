@@ -585,6 +585,23 @@ impl Dent {
                     cx,
                     |_, window, cx| window.dispatch_action(Box::new(crate::app::KeepAwake), cx),
                 )),
+            Line::new("fold-turns", "Fold each finished turn's work")
+                .under("Into one “Worked for 2m” line above its answer, opened with a click")
+                .control(self.switch_for(
+                    "fold-turns-switch",
+                    self.fold_turns,
+                    if self.fold_turns {
+                        "Show every turn's work"
+                    } else {
+                        "Fold finished turns"
+                    },
+                    cx,
+                    |this, _, cx| {
+                        this.fold_turns = !this.fold_turns;
+                        this.prefs_changed();
+                        cx.notify();
+                    },
+                )),
             shortcut,
             Line::new("keys", "Keyboard shortcuts").control(self.small_button(
                 "keys-open",

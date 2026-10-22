@@ -347,6 +347,12 @@ pub fn session(
                         c.result.is_some()
                             || !open_asks.contains(&(c.name.clone(), c.input.clone()))
                     })
+                    // A page shown is in the chat itself: no line beside the
+                    // others in its group either.
+                    .filter(|c| {
+                        !(c.name == dent_client_core::timeline::VISUAL_TOOL
+                            && matches!(c.result, Some((false, _))))
+                    })
                     .cloned()
                     .collect();
                 if calls.is_empty() {
@@ -383,7 +389,12 @@ pub fn session(
                 {
                     summary = format!("{summary} · {}", crate::chat::duration(took / 1000));
                 }
-                let pictures = calls.iter().flat_map(|c| c.images.clone()).collect();
+                // A look at a page is the agent's: the page itself follows.
+                let pictures = calls
+                    .iter()
+                    .filter(|c| c.name != dent_client_core::timeline::LOOK_TOOL)
+                    .flat_map(|c| c.images.clone())
+                    .collect();
                 items.push(Item::Tools {
                     summary,
                     lines,
@@ -604,6 +615,7 @@ pub fn session(
         media: built.media.iter().map(|(_, p)| p.clone()).collect(),
         made_sig: v.made.iter().map(|m| m.versions.len()).sum::<usize>() + v.made.len() * 1000,
         todos: todos(v),
+        looks: looks(v),
         agent_session: v.agent_session.clone(),
         news: v.news,
         seen: v.seen,
@@ -740,6 +752,33 @@ const PLAN_TOOL: &str = "mcp__dent__update_plan";
 
 /// The agent's plan for the current turn, from its last plan call since
 /// your latest message: an earlier turn's plan is history, not this one's.
+/// Pages the agent asked to see (`preview_visual`) that haven't been
+/// answered: only the latest turn's calls can be waiting.
+fn looks(v: &SessionView) -> Vec<(String, std::rc::Rc<str>, u32, String)> {
+    v.entries
+        .iter()
+        .rev()
+        .take(64)
+        .filter_map(|e| match e {
+            Entry::Tools { calls } => Some(calls),
+            _ => None,
+        })
+        .flatten()
+        .filter(|c| c.name == dent_client_core::timeline::LOOK_TOOL && c.result.is_none())
+        .filter_map(|c| {
+            let i = c.input();
+            let html = i["html"].as_str()?.to_string();
+            let width = i["width"].as_u64().unwrap_or(720).clamp(240, 1600) as u32;
+            let appearance = i["appearance"]
+                .as_str()
+                .filter(|a| matches!(*a, "light" | "dark"))
+                .unwrap_or("auto");
+            let key = dent_protocol::look_key(&html, width, appearance);
+            Some((key, html.into(), width, appearance.to_string()))
+        })
+        .collect()
+}
+
 fn todos(v: &SessionView) -> Vec<(String, String, String)> {
     let last = v
         .entries
@@ -825,6 +864,8 @@ fn preparing(tool: &str, what: Option<&str>) -> String {
         },
         ("Bash", _) => "Writing a command".into(),
         (PLAN_TOOL | "TodoWrite", _) => "Updating the plan".into(),
+        (dent_client_core::timeline::LOOK_TOOL, _) => "Looking at the page".into(),
+        (dent_client_core::timeline::VISUAL_TOOL, _) => "Making a visual".into(),
         // Another server's tool, by its own name ("mcp__github__create_issue"
         // is "create issue").
         (t, _) => match t.strip_prefix("mcp__").and_then(|n| n.split_once("__")) {

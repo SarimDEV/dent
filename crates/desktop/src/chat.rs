@@ -923,6 +923,10 @@ impl Dent {
     fn chat(&mut self, s: &Session, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = self.t;
         self.sync_transcript(s);
+        self.chat_view = (
+            self.transcript.viewport_bounds(),
+            self.transcript.is_following_tail(),
+        );
         let count = self.transcript.item_count();
         // Only the items on screen are drawn, however long the session.
         let transcript = list(
@@ -939,6 +943,11 @@ impl Dent {
                 // any messages queued after it, so they never read as the
                 // thing being written.
                 let host = working_host(&s);
+                // Folded into its turn's line: nothing of its own to draw.
+                let fold = this.turn_folds.get(ix).copied().unwrap_or(TurnFold::Shown);
+                if fold == TurnFold::Hidden {
+                    return div().into_any_element();
+                }
                 let body = match s.items.get(ix) {
                     Some(item) if host == Some(ix) => div()
                         .flex()
@@ -950,6 +959,25 @@ impl Dent {
                     Some(item) => this.item(&s, ix, item, window, cx),
                     None if host.is_some() => div().into_any_element(),
                     None => this.working_line(&s),
+                };
+                // The turn's line stands where its work began; open, the
+                // work follows it.
+                let body = match fold {
+                    TurnFold::Head { took, user, open } => {
+                        let line = this.worked_line(&s, took, user, open, cx);
+                        if open {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(space::S2))
+                                .child(line)
+                                .child(body)
+                                .into_any_element()
+                        } else {
+                            line
+                        }
+                    }
+                    _ => body,
                 };
                 // While "Edit from here" asks, what would go fades.
                 let going = this.rewinding.as_ref().and_then(|(sid, msg)| {
@@ -3187,6 +3215,10 @@ impl Dent {
         let Some(a) = self.art(art).cloned() else {
             return div().into_any_element();
         };
+        // A page the agent showed with dent's tool lives in the chat itself.
+        if a.kind == Kind::Html && a.path.starts_with(dent_client_core::timeline::VISUAL_DIR) {
+            return self.inline_page(&a, version, cx);
+        }
         let latest = a.versions.len();
         let showing =
             self.panel_open && self.tab(s) == Tab::Art(art) && self.version(&a) == version;
@@ -3421,6 +3453,246 @@ impl Dent {
                     .child(probe(&self.probes, format!("made-still-{art}"))),
             )
             .child(card)
+            .into_any_element()
+    }
+
+    /// "Worked for 2m 14s ›": a finished turn's work, folded, opening
+    /// in place.
+    fn worked_line(
+        &self,
+        s: &Session,
+        took: u64,
+        user: usize,
+        open: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.t;
+        let Some(Item::User { id, .. }) = s.items.get(user) else {
+            return div().into_any_element();
+        };
+        let key = crate::data::Fold::Turn(id).key();
+        let words = if took >= 1000 {
+            format!("Worked for {}", duration(took / 1000))
+        } else {
+            "Worked for a moment".to_string()
+        };
+        let group = SharedString::from(format!("worked-g-{user}"));
+        div()
+            .id(SharedString::from(format!("worked-{user}")))
+            .group(group.clone())
+            .relative()
+            .flex()
+            .items_center()
+            .gap(px(space::S1H))
+            .ty(UI)
+            .text_color(t.quiet)
+            .cursor_pointer()
+            .on_press(cx.listener(move |this, _, _, cx| {
+                // Opening or closing never moves what's above: the line stays
+                // where it was and its work unfolds below it, rather than the
+                // chat holding to its end and pushing the line out of view.
+                let top = this.transcript.logical_scroll_top();
+                this.transcript.pause_following_tail();
+                this.transcript.scroll_to(top);
+                this.toggle_fold(&key);
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .group_hover(group, |d| d.text_color(t.ink))
+                    .child(words),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .child(crate::ui::disclosure("worked", open, 11., t.faint)),
+            )
+            .child(probe(&self.probes, "worked"))
+            .into_any_element()
+    }
+
+    /// A page the agent showed (`show_visual`), in the chat at its own
+    /// height on the chat's own background: live while wholly in view and
+    /// nothing floats over it, its still otherwise (`inline.rs`). Under it,
+    /// its name and ways to see it bigger.
+    fn inline_page(
+        &mut self,
+        a: &crate::data::Artifact,
+        version: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.t;
+        let art = a.id;
+        let Some(bytes) = a.versions.get(version.wrapping_sub(1)).cloned() else {
+            return div().into_any_element();
+        };
+        let key = (art, version);
+        // No web view can sit in the chat here (Wayland): the page is a card
+        // that opens it where one can.
+        if self.inline.borrow().broken {
+            return div()
+                .id(SharedString::from(format!("inline-card-{art}-{version}")))
+                .relative()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(space::S2))
+                .px(px(space::S3))
+                .py(px(space::S2))
+                .rounded(px(radius::LG))
+                .border_1()
+                .border_color(t.hairline)
+                .bg(t.raised)
+                .cursor_pointer()
+                .hover(|d| d.border_color(t.ink.opacity(0.3)))
+                .on_press(cx.listener(move |this, _, _, cx| this.open_art(art, Some(version), cx)))
+                .child(icon("app-window", 16., t.quiet))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .ty(UI)
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(t.ink)
+                        .child(a.title),
+                )
+                .child(div().flex_none().ty(UI).text_color(t.quiet).child("Open"))
+                .child(probe(&self.probes, "inline-card"))
+                .into_any_element();
+        }
+        let (h, still) = {
+            let i = self.inline.borrow();
+            (
+                crate::inline::height(i.heights.get(&key).copied()),
+                i.still(key),
+            )
+        };
+        let page = Rc::new(crate::inline::Page {
+            path: a.path,
+            version,
+            bytes: bytes.clone(),
+            dir: a.dir.clone(),
+            far: crate::viewer::far_root(a),
+        });
+        // Where it may show live: the chat's view, less the Latest pill's
+        // room over its foot while you read back.
+        // (Read before the list draws: its state is busy while rows do.)
+        let mut view = self.chat_view.0;
+        if !self.chat_view.1 {
+            view.size.height -= px(size::CONTROL + space::S2 * 2.);
+        }
+        let inline = self.inline.clone();
+        let name = a.title;
+        let open_name = a.path.rsplit('/').next().unwrap_or(a.path).to_string();
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            // Its name and actions sit apart from the page's own last line.
+            .gap(px(space::S2))
+            .child(
+                div()
+                    .id(SharedString::from(format!("inline-{art}-{version}")))
+                    .relative()
+                    .w_full()
+                    .h(px(h))
+                    .child(
+                        canvas(
+                            move |bounds, window, _| {
+                                let whole = view.size.height > px(0.)
+                                    && bounds.top() >= view.top() - px(0.5)
+                                    && bounds.bottom() <= view.bottom() + px(0.5);
+                                // Taller than the view, it can never be all in
+                                // view: it's drawn off screen for its still.
+                                let tall = bounds.size.height > view.size.height
+                                    && bounds.bottom() > view.top()
+                                    && bounds.top() < view.bottom();
+                                inline
+                                    .borrow_mut()
+                                    .want(key, &page, bounds, whole, tall, window);
+                                bounds
+                            },
+                            move |_, bounds, window, _| {
+                                // Its last picture underneath, at its own size from
+                                // the top: what shows while the live page can't.
+                                if let Some(image) = still {
+                                    let s = image.size(0);
+                                    let scale = window.scale_factor();
+                                    let at = Bounds::new(
+                                        bounds.origin,
+                                        size(
+                                            px(s.width.0 as f32 / scale),
+                                            px(s.height.0 as f32 / scale),
+                                        ),
+                                    );
+                                    window.with_content_mask(
+                                        Some(ContentMask { bounds }),
+                                        |window| {
+                                            let _ = window.paint_image(
+                                                at,
+                                                at,
+                                                Corners::default(),
+                                                image,
+                                                0,
+                                                false,
+                                            );
+                                        },
+                                    );
+                                }
+                            },
+                        )
+                        .size_full(),
+                    )
+                    .child(probe(&self.probes, "inline-page")),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S1))
+                    .ml(px(-space::S2))
+                    .child(
+                        div()
+                            .px(px(space::S2))
+                            .min_w_0()
+                            .truncate()
+                            .ty(LABEL)
+                            .text_color(t.faint)
+                            .child(name),
+                    )
+                    .child(
+                        ghost(
+                            SharedString::from(format!("inline-open-{art}-{version}")),
+                            "Open beside",
+                            &t,
+                        )
+                        .relative()
+                        .with_tip(tip("Show it beside the chat, larger", None, t))
+                        .on_press(
+                            cx.listener(move |this, _, _, cx| {
+                                this.open_art(art, Some(version), cx)
+                            }),
+                        )
+                        .child(probe(&self.probes, "inline-open")),
+                    )
+                    .child(
+                        ghost(
+                            SharedString::from(format!("inline-browser-{art}-{version}")),
+                            "Open in browser",
+                            &t,
+                        )
+                        .on_press(cx.listener(move |this, _, _, cx| {
+                            let path = std::env::temp_dir()
+                                .join(format!("dent-visual-v{version}-{open_name}"));
+                            // With dent's colours and type, as the chat draws it.
+                            let page = crate::inline::browser_copy(&bytes, &this.t);
+                            if std::fs::write(&path, page).is_ok() {
+                                cx.open_url(&format!("file://{}", path.display()));
+                            }
+                        })),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -4243,6 +4515,7 @@ impl Dent {
     fn slash_menu(&mut self, below: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = self.t;
         let c = self.completion(cx)?;
+        self.over_chat.set(true);
         let mention = c.token.kind == complete::Kind::Mention;
         let arg = c.token.kind == complete::Kind::Arg;
         let n = c.items.len();
@@ -6765,6 +7038,92 @@ pub fn turn_end_after(items: &[Item], ix: usize) -> Option<(u64, u64, bool)> {
     None
 }
 
+/// How a finished turn's work sits in the chat: folded into one "Worked
+/// for 2m 14s" line where it began, or as it came.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TurnFold {
+    Shown,
+    /// Folded away under the turn's line.
+    Hidden,
+    /// The turn's line, standing where its first work was: how long the
+    /// turn took (ms), the message that began it (by place), and whether
+    /// it's open.
+    Head {
+        took: u64,
+        user: usize,
+        open: bool,
+    },
+}
+
+/// Each item's place in its turn's fold. A finished turn folds what led to
+/// its answer: narration, tool groups, thoughts and small notes. Its
+/// answer, pages, cards, errors and your messages stay. A turn folds only
+/// when there's real work in it (a tool or a thought), and never while it
+/// runs. `open` says which turns (by their message's place) are open.
+pub fn turn_folds(items: &[Item], open: impl Fn(usize) -> bool) -> Vec<TurnFold> {
+    let mut out = vec![TurnFold::Shown; items.len()];
+    let mut start = 0;
+    while start < items.len() {
+        // A turn: your message, up to the next of yours.
+        let Some(user) = items[start..]
+            .iter()
+            .position(|i| matches!(i, Item::User { .. }))
+            .map(|p| start + p)
+        else {
+            break;
+        };
+        let end = items[user + 1..]
+            .iter()
+            .position(|i| matches!(i, Item::User { .. }))
+            .map_or(items.len(), |p| user + 1 + p);
+        start = end;
+        let Some((stop, took)) = items[user..end]
+            .iter()
+            .enumerate()
+            .find_map(|(k, i)| match i {
+                Item::TurnEnd { took, .. } => Some((user + k, *took)),
+                _ => None,
+            })
+        else {
+            continue;
+        };
+        // Its answer: the last words before it ended.
+        let Some(answer) = (user + 1..stop)
+            .rev()
+            .find(|&k| matches!(items[k], Item::Text(_)))
+        else {
+            continue;
+        };
+        let folds = |i: &Item| {
+            matches!(
+                i,
+                Item::Tools { .. }
+                    | Item::Thinking(..)
+                    | Item::Text(_)
+                    | Item::Note {
+                        kind: crate::data::NoteKind::Other,
+                        ..
+                    }
+            )
+        };
+        let work: Vec<usize> = (user + 1..answer).filter(|&k| folds(&items[k])).collect();
+        let real = work
+            .iter()
+            .any(|&k| matches!(items[k], Item::Tools { .. } | Item::Thinking(..)));
+        let (Some(&head), true) = (work.first(), real) else {
+            continue;
+        };
+        let open = open(user);
+        out[head] = TurnFold::Head { took, user, open };
+        if !open {
+            for &k in &work[1..] {
+                out[k] = TurnFold::Hidden;
+            }
+        }
+    }
+    out
+}
+
 /// A tool line: its verb quiet, what it worked on a step darker, both to
 /// ink while `hover` (the row's group) is under the pointer. Too long for
 /// the row, the object gives way first.
@@ -6872,6 +7231,114 @@ mod answer_tests {
         // A turn stopped before it said anything keeps a plain note.
         let bare = vec![note, Item::TurnEnd { at: 1, took: 0 }];
         assert!(turn_end_after(&bare, 0).is_none());
+    }
+
+    #[test]
+    fn a_finished_turn_folds_its_work_under_one_line() {
+        use super::{TurnFold, turn_folds};
+        let user = |id: &str| Item::User {
+            id: id.into(),
+            text: "do it".into(),
+            files: Vec::new(),
+            at: 0,
+        };
+        let text = |t: &str| Item::Text(t.into());
+        let tools = || Item::Tools {
+            summary: "Ran a command".into(),
+            lines: Vec::new(),
+            counted: false,
+            pictures: Vec::new(),
+        };
+        let end = Item::TurnEnd { at: 1, took: 9000 };
+        let items = vec![
+            user("a"),
+            text("Looking first."),
+            tools(),
+            Item::Thinking("hm".into(), 0),
+            text("Fixed."),
+            end.clone(),
+        ];
+        let f = turn_folds(&items, |_| false);
+        assert_eq!(f[0], TurnFold::Shown);
+        assert_eq!(
+            f[1],
+            TurnFold::Head {
+                took: 9000,
+                user: 0,
+                open: false
+            }
+        );
+        assert_eq!(&f[2..4], &[TurnFold::Hidden, TurnFold::Hidden]);
+        // The answer and the turn's end stay.
+        assert_eq!(&f[4..], &[TurnFold::Shown, TurnFold::Shown]);
+        // Opened, everything shows under its line.
+        let f = turn_folds(&items, |_| true);
+        assert_eq!(
+            f[1],
+            TurnFold::Head {
+                took: 9000,
+                user: 0,
+                open: true
+            }
+        );
+        assert!(f[2..].iter().all(|x| *x == TurnFold::Shown));
+        // Still running: nothing folds.
+        let running = &items[..5];
+        assert!(
+            turn_folds(running, |_| false)
+                .iter()
+                .all(|x| *x == TurnFold::Shown)
+        );
+        // Only words before the answer: nothing worth folding.
+        let chat = vec![user("b"), text("Sure."), text("Here it is."), end.clone()];
+        assert!(
+            turn_folds(&chat, |_| false)
+                .iter()
+                .all(|x| *x == TurnFold::Shown)
+        );
+        // A card in the middle stays where it is; work either side folds.
+        let mid = vec![
+            user("c"),
+            tools(),
+            Item::Note {
+                icon: "circle-alert",
+                text: "boom".into(),
+                kind: crate::data::NoteKind::Error,
+            },
+            tools(),
+            text("Done."),
+            end.clone(),
+        ];
+        let f = turn_folds(&mid, |_| false);
+        assert!(matches!(f[1], TurnFold::Head { .. }));
+        assert_eq!(f[2], TurnFold::Shown);
+        assert_eq!(f[3], TurnFold::Hidden);
+        // Two turns fold apart, each by its own message.
+        let two: Vec<Item> = items.iter().cloned().chain(items.iter().cloned()).collect();
+        let f = turn_folds(&two, |u| u == 6);
+        assert_eq!(
+            f[1],
+            TurnFold::Head {
+                took: 9000,
+                user: 0,
+                open: false
+            }
+        );
+        assert_eq!(
+            f[7],
+            TurnFold::Head {
+                took: 9000,
+                user: 6,
+                open: true
+            }
+        );
+        // No answer (stopped before words): nothing to fold to.
+        let none = vec![user("d"), tools(), end];
+        assert!(
+            turn_folds(&none, |_| false)
+                .iter()
+                .all(|x| *x == TurnFold::Shown)
+        );
     }
 
     #[test]
