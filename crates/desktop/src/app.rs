@@ -4863,7 +4863,12 @@ impl Dent {
             match (k.key.as_str(), plan) {
                 ("enter" | "1", _) => self.allow(&id, None, Scope::Once, cx),
                 ("2", false) => self.allow(&id, None, Scope::Session, cx),
-                ("3", false) if keeps => self.allow(&id, None, Scope::Project, cx),
+                // As its button: only where the agent can keep the rule.
+                ("3", false)
+                    if keeps && self.session(&id).is_some_and(|s| s.caps.project_rules) =>
+                {
+                    self.allow(&id, None, Scope::Project, cx)
+                }
                 ("2", true) | ("4", false) => self.deny(&id, None, window, cx),
                 _ => return false,
             }

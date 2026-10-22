@@ -344,7 +344,7 @@ pub fn status_square_at(status: Status, t: &Theme, scale: f32) -> Div {
     // Flat shapes, never pixel patterns, each its own form so a status
     // reads without its colour: needs is filled, done carries a check,
     // waiting a square within a square, idle an outline, and working (when
-    // it can't breathe) its paler fill.
+    // it can't breathe) its breathing square held still: inset, rounded.
     let line = (s / 8.).max(1.);
     let mark = match status {
         Status::Needs => div().size(px(s)).bg(signal),
@@ -355,10 +355,18 @@ pub fn status_square_at(status: Status, t: &Theme, scale: f32) -> Div {
             .items_center()
             .justify_center()
             .child(crate::ui::icon("check", s * 0.82, t.surface)),
+        // The breathing square held still: inset and rounded, so it never
+        // reads as Needs' full square however the colours fall.
         Status::Working => div()
-            .size(px(s))
+            .size(px(s * 0.84))
+            .rounded(px(s * 0.84 * 0.28))
             .bg(partner)
-            .child(div().size_full().bg(signal.opacity(0.65))),
+            .child(
+                div()
+                    .size_full()
+                    .rounded(px(s * 0.84 * 0.28))
+                    .bg(signal.opacity(0.65)),
+            ),
         Status::Waiting => div()
             .size(px(s))
             .border(px(line))
