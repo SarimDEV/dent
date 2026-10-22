@@ -1805,6 +1805,22 @@ impl Agent {
             ));
             return Ok(());
         }
+        // A long, mixed reply at the real agent's pace, to time drawing
+        // while a reply streams (the `bench` walk).
+        if lower.contains("stream bench") {
+            self.chunk_ms = 25;
+            // "stream bench 30" streams thirty parts.
+            let parts = lower
+                .split_whitespace()
+                .find_map(|w| w.parse().ok())
+                .unwrap_or(10);
+            let reply = bench_reply(parts);
+            let said = self.say(&reply, None);
+            self.chunk_ms = 40;
+            said?;
+            self.end(&reply, false);
+            return Ok(());
+        }
         if lower.contains("long table") {
             let mut t = String::from(
                 "Here are the 60 routes, slowest first:\n\n| # | Route | p95 |\n| --- | --- | ---: |\n",
@@ -2002,6 +2018,51 @@ Every event, timed:
         ));
     }
     s.push_str("\nThat's all sixty.");
+    s
+}
+
+/// About 20 KB of what replies are made of: headings, paragraphs with
+/// inline marks, nested lists, code and a table.
+fn bench_reply(parts: usize) -> String {
+    let mut s = String::from(
+        "I read through the sync layer end to end. Here's what I found, section by section.\n\n",
+    );
+    for n in 1..=parts {
+        s.push_str(&format!(
+            "## Part {n}: the `stage_{n}` path\n\n\
+             The **{n}th** stage takes each event from the log and checks it against what the client last saw. \
+             When the numbers agree it applies the event *in place*; when they don't, it asks for the gap first, \
+             so a client that drops off never applies anything twice. See `crates/sync/src/stage_{n}.rs` for the loop.\n\n\
+             - It reads the cursor once per batch.\n\
+             - It keeps the last {n} acknowledgements:\n  \
+               - the newest is checked first;\n  \
+               - older ones only on a restart.\n\
+             - It never blocks the UI thread.\n\n\
+             ```rust\n\
+             fn stage_{n}(log: &Log, cursor: &mut Cursor) -> Result<usize> {{\n\
+             \x20   let mut applied = 0;\n\
+             \x20   for event in log.after(cursor.seen) {{\n\
+             \x20       if event.number != cursor.seen + 1 {{\n\
+             \x20           return Err(Gap {{ from: cursor.seen, to: event.number }}.into());\n\
+             \x20       }}\n\
+             \x20       event.apply()?;\n\
+             \x20       cursor.seen = event.number;\n\
+             \x20       applied += 1;\n\
+             \x20   }}\n\
+             \x20   Ok(applied)\n\
+             }}\n\
+             ```\n\n\
+             | Case | Before | After |\n| --- | ---: | ---: |\n\
+             | catch up | {a} ms | {b} ms |\n| live | {c} ms | {d} ms |\n| restart | {e} ms | {f} ms |\n\n",
+            a = n * 12,
+            b = n * 3,
+            c = n + 4,
+            d = n + 1,
+            e = n * 40,
+            f = n * 9,
+        ));
+    }
+    s.push_str("That's every stage. Want me to start with the first?");
     s
 }
 

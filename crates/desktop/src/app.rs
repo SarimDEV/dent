@@ -623,6 +623,10 @@ fn reachable(url: &str) -> String {
 
 /// A session's search text, with the size it was made at.
 type SearchText = ((usize, u64), Rc<str>);
+/// An item's signature, its blocks' signatures (none if it's drawn whole)
+/// and, for a reply drawn a row per block, its blocks, so each row draws
+/// from them without looking the reply up again.
+pub type RowParts = (u64, Rc<[u64]>, Option<Rc<Vec<Block>>>);
 
 /// Where `commands` keeps the slash commands every session starts with.
 const EVERY: &str = "";
@@ -1117,9 +1121,19 @@ pub struct Dent {
     /// The sidebar's rows, drawn only where they're on screen.
     pub inbox_list: ListState,
     pub inbox_sigs: Vec<u64>,
-    /// What the list was last measured for: the session, and a signature per item.
+    /// What the list was last measured for: the session, and a signature per row.
     pub transcript_sigs: (Option<String>, Vec<u64>),
-    /// Items that just landed in the open chat, by index: when, and how
+    /// The open chat's list rows: an item each, a reply a row per block
+    /// (see `rows.rs`).
+    pub rows: crate::rows::Rows,
+    /// Each item's signature when its rows were last worked out, and its
+    /// blocks' signatures (none for an item drawn whole): only an item that
+    /// changed is parsed again.
+    pub row_parts: (Option<String>, Vec<RowParts>),
+    /// The row of a reply drawn a row per block that the pointer is on: an
+    /// older turn's actions show while it's anywhere on its last reply.
+    pub hover_row: Option<usize>,
+    /// Rows that just landed in the open chat, by index: when, and how
     /// far into the stagger they start (ms). They rise into place.
     pub row_born: HashMap<usize, (Instant, f32)>,
     /// The diff draws only the lines on screen.
@@ -1853,6 +1867,9 @@ impl Dent {
             inbox_list: ListState::new(0, ListAlignment::Top, px(400.)),
             inbox_sigs: Vec::new(),
             transcript_sigs: (None, Vec::new()),
+            rows: Default::default(),
+            row_parts: (None, Vec::new()),
+            hover_row: None,
             row_born: HashMap::new(),
             diff_list: ListState::new(0, ListAlignment::Top, px(400.)),
             text_list: ListState::new(0, ListAlignment::Top, px(400.)),
@@ -5113,7 +5130,7 @@ impl Dent {
             .filter(|(_, i)| matches!(i, Item::User { .. }))
             .map(|(ix, _)| ix)
             .collect();
-        let top = self.transcript.logical_scroll_top().item_ix;
+        let top = self.top_item();
         let at_end = self.transcript.is_following_tail();
         let to = if up {
             mine.iter().rev().find(|ix| **ix < top).copied()
@@ -5132,13 +5149,7 @@ impl Dent {
             return false;
         };
         // Reading back pauses following; reaching the end picks it up again.
-        self.transcript.set_follow_mode(FollowMode::Tail);
-        self.transcript.pause_following_tail();
-        self.transcript.scroll_to(ListOffset {
-            item_ix: ix,
-            offset_in_item: px(0.),
-        });
-        cx.notify();
+        self.scroll_to_item(ix, cx);
         true
     }
 
@@ -8778,8 +8789,9 @@ impl Dent {
     /// Keep the conversation list's measurements in step with its items:
     /// a new session starts at the end; changed items are measured again.
     pub fn sync_transcript(&mut self, s: &Session) {
+        use std::hash::{Hash, Hasher};
         let mut thoughts = 0;
-        let sigs: Vec<u64> = s
+        let item_sigs: Vec<u64> = s
             .items
             .iter()
             .enumerate()
@@ -8790,11 +8802,7 @@ impl Dent {
                 });
                 self.item_sig(&s.id, ix, i, thought.as_deref())
             })
-            .chain((s.status == Status::Working).then_some(u64::MAX))
             .collect();
-        // The first queued message carries the working line above it, so
-        // its height changes with the working state.
-        let mut sigs = sigs;
         // A finished turn's work folds into one line; an item's place in
         // that fold is part of its height.
         self.turn_folds = if self.fold_turns {
@@ -8805,15 +8813,47 @@ impl Dent {
         } else {
             vec![crate::chat::TurnFold::Shown; s.items.len()]
         };
-        for (sig, fold) in sigs.iter_mut().zip(&self.turn_folds) {
-            use std::hash::{Hash, Hasher};
+        // A reply is drawn a row per block; each item's blocks are worked
+        // out again only when it changes.
+        let parts = self.item_parts(s, &item_sigs);
+        let host = crate::chat::working_host(s);
+        let working = s.status == Status::Working;
+        // DENT_WHOLE_REPLIES draws each reply as one row, as before 0073,
+        // to compare against.
+        static WHOLE: std::sync::LazyLock<bool> =
+            std::sync::LazyLock::new(|| std::env::var_os("DENT_WHOLE_REPLIES").is_some());
+        let whole = *WHOLE;
+        let rows = crate::rows::Rows::derive(s.items.len(), working && host.is_none(), |ix| {
+            if whole { 1 } else { parts[ix].1.len() }
+        });
+        let was_rows = std::mem::replace(&mut self.rows, rows);
+        let mut sigs: Vec<u64> = Vec::with_capacity(self.rows.len());
+        for row in &self.rows.rows {
+            let Some(ix) = row.item else {
+                sigs.push(u64::MAX);
+                continue;
+            };
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            fold.hash(&mut h);
-            *sig ^= h.finish();
+            match row.part {
+                // The whole item's signature.
+                None => item_sigs[ix].hash(&mut h),
+                // A block's own, and whether it ends its reply (the gap or
+                // the turn's footer below it): earlier blocks don't change
+                // as later ones stream in.
+                Some(p) => {
+                    (p.block, parts[ix].1[p.block], row.last()).hash(&mut h);
+                    for f in crate::data::Fold::of(&s.id, ix, &s.items[ix]) {
+                        self.is_open(&f).hash(&mut h);
+                    }
+                }
+            }
+            self.turn_folds[ix].hash(&mut h);
+            // The first queued message carries the working line above it,
+            // so its height changes with the working state.
+            (host == Some(ix) && row.first()).hash(&mut h);
+            sigs.push(h.finish());
         }
-        if let Some(q) = crate::chat::working_host(s) {
-            sigs[q] ^= 0x9e37_79b9_7f4a_7c15;
-        }
+        self.row_parts = (Some(s.id.clone()), parts);
         let (id, old) = &self.transcript_sigs;
         if id.as_deref() != Some(s.id.as_str()) {
             // Leaving a session remembers where you were reading it.
@@ -8824,6 +8864,7 @@ impl Dent {
             }
             self.transcript.reset(sigs.len());
             self.row_born.clear();
+            self.hover_row = None;
             match self.read_at.get(&s.id).copied() {
                 // Back where you left it, unless you were at the end.
                 Some((at, false)) if at.item_ix < sigs.len() => {
@@ -8843,17 +8884,18 @@ impl Dent {
                 .position(|(a, b)| a != b)
                 .unwrap_or(old.len().min(sigs.len()));
             self.transcript.splice(first..old.len(), sigs.len() - first);
-            // A few items added at the end arrive; the working line's
-            // signature trails the items and isn't one of them. A batch
-            // (history loading) just appears.
-            let items = |v: &[u64]| v.len() - usize::from(v.last() == Some(&u64::MAX));
-            let (was, now) = (items(old), items(&sigs));
-            if first >= was && now > was && now - was <= ARRIVE_AT_ONCE {
+            // A few items added at the end arrive, each with all its rows;
+            // the working line's row trails the items and isn't one of
+            // them. A batch (history loading) just appears.
+            let (was, now) = (was_rows.items(), self.rows.items());
+            if first >= was_rows.end_of_items() && now > was && now - was <= ARRIVE_AT_ONCE {
                 let at = Instant::now();
                 for (k, ix) in (was..now).enumerate() {
                     let delay =
                         (k as f32 * crate::ds::motion::STAGGER).min(crate::ds::motion::STAGGER_CAP);
-                    self.row_born.insert(ix, (at, delay));
+                    for row in self.rows.of(ix) {
+                        self.row_born.insert(row, (at, delay));
+                    }
                 }
             }
         }
@@ -8862,6 +8904,63 @@ impl Dent {
         );
         self.row_born.retain(|_, (at, _)| at.elapsed() < settle);
         self.transcript_sigs = (Some(s.id.clone()), sigs);
+    }
+
+    /// Each item's signature and, for a reply drawn a row per block, its
+    /// blocks' signatures (empty for one drawn whole). Worked out again only
+    /// for an item whose signature changed since last time.
+    fn item_parts(&mut self, s: &Session, sigs: &[u64]) -> Vec<RowParts> {
+        use std::hash::Hasher;
+        let (id, old) = std::mem::take(&mut self.row_parts);
+        let old = if id.as_deref() == Some(s.id.as_str()) {
+            old
+        } else {
+            Vec::new()
+        };
+        let live = self.births.get(&s.id).map(|(ix, _)| *ix);
+        let none: Rc<[u64]> = Rc::from([]);
+        s.items
+            .iter()
+            .zip(sigs)
+            .enumerate()
+            .map(|(ix, (item, &sig))| {
+                // Streaming or finished, a reply is parsed differently.
+                let sig = if live == Some(ix) { !sig } else { sig };
+                if let Some(kept) = old.get(ix).filter(|(was, ..)| *was == sig) {
+                    return kept.clone();
+                }
+                let Item::Text(src) = item else {
+                    return (sig, none.clone(), None);
+                };
+                // As it's drawn: the reply streaming in from its stream.
+                let blocks = if live == Some(ix) {
+                    self.markdown_live(&s.id, src)
+                } else {
+                    self.markdown(src)
+                };
+                if blocks.len() < 2 {
+                    return (sig, none.clone(), None);
+                }
+                let each: Rc<[u64]> = blocks
+                    .iter()
+                    .map(|b| {
+                        let mut h = std::collections::hash_map::DefaultHasher::new();
+                        crate::markdown::block_sig(b, &mut h);
+                        h.finish()
+                    })
+                    .collect();
+                (sig, each, Some(blocks))
+            })
+            .collect()
+    }
+
+    /// The blocks of chat item `ix` of the open session, if it's a reply
+    /// drawn a row per block: as its rows were worked out this frame.
+    pub fn part_blocks(&self, sid: &str, ix: usize) -> Option<Rc<Vec<Block>>> {
+        let (id, parts) = &self.row_parts;
+        (id.as_deref() == Some(sid))
+            .then(|| parts.get(ix)?.2.clone())
+            .flatten()
     }
 
     /// Anything about an item that changes its height.
@@ -9206,10 +9305,21 @@ impl Dent {
         self.transcript.set_follow_mode(FollowMode::Tail);
         self.transcript.pause_following_tail();
         self.transcript.scroll_to(ListOffset {
-            item_ix: ix,
+            item_ix: self.item_row(ix),
             offset_in_item: px(0.),
         });
         cx.notify();
+    }
+
+    /// The chat's list row item `ix` starts on (the list speaks of rows).
+    pub fn item_row(&self, ix: usize) -> usize {
+        self.rows.of_item(ix).unwrap_or(self.rows.len())
+    }
+
+    /// The item at the top of the chat (the list speaks of rows).
+    pub fn top_item(&self) -> usize {
+        self.rows
+            .item_of(self.transcript.logical_scroll_top().item_ix)
     }
 
     pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {

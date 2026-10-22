@@ -21,6 +21,7 @@ use crate::theme::Status;
 
 mod ambient;
 mod attaching;
+mod bench;
 mod changes;
 mod checks;
 mod common;
@@ -55,11 +56,11 @@ mod visuals;
 mod worktrees;
 mod zoom;
 use {
-    ambient::*, attaching::*, changes::*, checks::*, common::*, composing::*, demo::*, edges::*,
-    failures::*, find::*, finish::*, keys::*, look::*, markdown::*, motion::*, narration::*,
-    parity::*, pickup::*, pins::*, polish::*, prs::*, queue::*, real::*, recall::*, reply::*,
-    setup::*, stills::*, sweep::*, switching::*, takeback::*, typing::*, view::*, visuals::*,
-    worktrees::*, zoom::*,
+    ambient::*, attaching::*, bench::*, changes::*, checks::*, common::*, composing::*, demo::*,
+    edges::*, failures::*, find::*, finish::*, keys::*, look::*, markdown::*, motion::*,
+    narration::*, parity::*, pickup::*, pins::*, polish::*, prs::*, queue::*, real::*, recall::*,
+    reply::*, setup::*, stills::*, sweep::*, switching::*, takeback::*, typing::*, view::*,
+    visuals::*, worktrees::*, zoom::*,
 };
 
 type Pred = fn(&Dent, &App) -> bool;
@@ -229,6 +230,7 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("changes", &[turn_changes, diff_swipe]),
     ("recall", &[recall]),
     ("visuals", &[visuals]),
+    ("bench", &[bench]),
     ("fold", &[fold]),
     ("pages", &[pages]),
     ("look-hidden", &[look_hidden]),
@@ -948,7 +950,7 @@ fn sweep_step(me: &Entity<Dent>, window: &mut Window, cx: &mut App) -> bool {
                 let at = this.current().and_then(|s| s.items.iter().position(f));
                 if let Some(ix) = at {
                     this.transcript.scroll_to(ListOffset {
-                        item_ix: ix,
+                        item_ix: this.item_row(ix),
                         offset_in_item: px(0.),
                     });
                     cx.notify();

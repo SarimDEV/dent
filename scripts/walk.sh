@@ -12,6 +12,7 @@
 #   scripts/walk.sh markdown [--shots DIR] [--dark] [--size WxH]   (only the maths, diagram and table reply)
 #   scripts/walk.sh attaching [--shots DIR] [--dark] [--size WxH]   (files and pictures: chips, the large view)
 #   scripts/walk.sh visuals [--shots DIR] [--dark] [--size WxH]   (coloured output, a folded paste, queued files, half-typed formatting)
+#   DENT_WALK_RELEASE=1 DENT_FRAME_TIMES=1 scripts/walk.sh bench   (a long reply streamed at the agent's pace, to time drawing; copy and Find across its rows)
 #   scripts/walk.sh edges [--shots DIR] [--dark] [--size WxH]   (odd and huge content, twenty files, thirty sessions, restarts mid-flow)
 #   DENT_WALK_PROMPT=... [DENT_WALK_REPO=DIR] [DENT_WALK_PERMISSION=full] scripts/walk.sh compare --shots DIR [--size WxH]
 #     (the real agent on one long turn, a still in each theme every ~2s; uses your limits)

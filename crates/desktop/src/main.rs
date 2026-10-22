@@ -48,6 +48,7 @@ mod pan_zoom;
 mod picker;
 mod popout;
 mod prefs;
+mod rows;
 mod select;
 mod settings;
 mod shell;

@@ -407,7 +407,7 @@ pub(super) fn checks() -> Vec<(f32, Act)> {
             Until(
                 "the down arrow takes you to your next message",
                 |d, _| {
-                    let top = d.transcript.logical_scroll_top().item_ix;
+                    let top = d.top_item();
                     top > 0 && current(d).is_some_and(|s| matches!(s.items.get(top), Some(Item::User { .. })))
                 },
                 2.,
@@ -428,7 +428,7 @@ pub(super) fn checks() -> Vec<(f32, Act)> {
             Until(
                 "Alt+Up jumps back through your own messages",
                 |d, _| {
-                    let top = d.transcript.logical_scroll_top().item_ix;
+                    let top = d.top_item();
                     top > 0
                         && current(d)
                             .is_some_and(|s| matches!(s.items.get(top), Some(Item::User { .. })))

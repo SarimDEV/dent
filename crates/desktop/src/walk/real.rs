@@ -103,7 +103,7 @@ pub(super) fn compare() -> Vec<(f32, Act)> {
     fn scroll(d: &mut Dent, at: fn(usize) -> usize, cx: &mut Context<Dent>) {
         let n = current(d).map_or(0, |s| s.items.len());
         d.transcript.scroll_to(ListOffset {
-            item_ix: at(n).min(n.saturating_sub(1)),
+            item_ix: d.item_row(at(n).min(n.saturating_sub(1))),
             offset_in_item: px(0.),
         });
         cx.notify();

@@ -731,6 +731,62 @@ fn flush(stack: &mut [Frame], cur: &mut Inline) {
 /// The words `blocks` draw as text, a piece at a time, in the order they're
 /// drawn: what ⌘F counts, so the count agrees with the tints. Maths and
 /// diagrams draw as pictures, not text.
+/// What a block's height can depend on, taken cheaply (lengths and ends
+/// of its text, not every byte): a block still streaming changes it with
+/// each chunk; a finished one never does. A row of the chat per block is
+/// measured again only when this changes.
+pub fn block_sig<H: std::hash::Hasher>(b: &Block, h: &mut H) {
+    use std::hash::Hash;
+    let fp = crate::data::fingerprint::<H>;
+    let inline = |i: &Inline, h: &mut H| {
+        fp(&i.text, h);
+        (i.runs.len(), i.math.len(), i.images.len()).hash(h);
+    };
+    std::mem::discriminant(b).hash(h);
+    match b {
+        Block::Heading(level, i) => {
+            level.hash(h);
+            inline(i, h);
+        }
+        Block::Para(i) => inline(i, h),
+        Block::List(items) => {
+            items.len().hash(h);
+            for item in items {
+                (item.number, item.task, item.blocks.len()).hash(h);
+                for b in &item.blocks {
+                    block_sig(b, h);
+                }
+            }
+        }
+        Block::Quote(callout, blocks) => {
+            callout.map(|c| c as u8).hash(h);
+            for b in blocks {
+                block_sig(b, h);
+            }
+        }
+        Block::Image(src, alt) => {
+            fp(src, h);
+            fp(alt, h);
+        }
+        Block::Code(lang, code, closed) => {
+            fp(lang, h);
+            fp(code, h);
+            closed.hash(h);
+        }
+        Block::Math(tex, closed) | Block::Diagram(tex, closed) => {
+            fp(tex, h);
+            closed.hash(h);
+        }
+        Block::Table(table) => {
+            (table.head.len(), table.rows.len()).hash(h);
+            for cell in table.rows.last().into_iter().flatten() {
+                inline(cell, h);
+            }
+        }
+        Block::Rule => {}
+    }
+}
+
 pub fn drawn(blocks: &[Block], out: &mut Vec<String>) {
     for b in blocks {
         match b {
@@ -1337,7 +1393,16 @@ pub fn render(blocks: &[Block], t: &Theme, doc: bool, r: &mut R) -> Div {
 /// subagent's report, and shouldn't read as the answer.
 pub fn render_with(blocks: &[Block], t: &Theme, doc: bool, quiet: bool, r: &mut R) -> Div {
     let prev = LINK_BASE.with(|b| b.replace(r.base.clone()));
-    let out = render_in(blocks, t, doc, r, space::S3, quiet, None, false);
+    let out = render_in(blocks, 0, t, doc, r, space::S3, quiet, None, false);
+    LINK_BASE.with(|b| *b.borrow_mut() = prev);
+    out
+}
+
+/// Blocks `from..` of a reply, drawn as they are in the whole: a long reply
+/// is a row of the chat per block, so only what's on screen is laid out.
+pub fn render_part(blocks: &[Block], from: usize, t: &Theme, r: &mut R) -> Div {
+    let prev = LINK_BASE.with(|b| b.replace(r.base.clone()));
+    let out = render_in(blocks, from, t, false, r, space::S3, false, None, false);
     LINK_BASE.with(|b| *b.borrow_mut() = prev);
     out
 }
@@ -1365,8 +1430,10 @@ fn prefixed<T>(more: &str, f: impl FnOnce() -> T) -> T {
 /// line by line when `tight` (inside a list item); `first` is what the first
 /// one copies with, like its list marker.
 #[allow(clippy::too_many_arguments)]
+/// `from` is where `blocks` start among the blocks they're part of.
 fn render_in(
     blocks: &[Block],
+    from: usize,
     t: &Theme,
     doc: bool,
     r: &mut R,
@@ -1381,7 +1448,7 @@ fn render_in(
     let bg = r.bg;
     let face = |ty: Type, family: &'static str, ink: Hsla| Face::of(ty, family, ink, bg);
     for (ix, b) in blocks.iter().enumerate() {
-        let key = format!("{}/{ix}", r.scope);
+        let key = format!("{}/{}", r.scope, from + ix);
         let prefix = COPY_PREFIX.with(|p| p.borrow().clone());
         let lead = match &first {
             Some(f) if ix == 0 => f.clone(),
@@ -1451,6 +1518,7 @@ fn render_in(
                     let body = prefixed(&" ".repeat(mark.len()), || {
                         render_in(
                             &item.blocks,
+                            0,
                             t,
                             doc,
                             r,
@@ -1493,6 +1561,7 @@ fn render_in(
                 let body = prefixed("> ", || {
                     render_in(
                         blocks,
+                        0,
                         t,
                         doc,
                         r,

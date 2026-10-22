@@ -584,7 +584,7 @@ impl Dent {
     /// and Alt+Down from the keyboard). An arrow with nowhere to go dims.
     fn message_arrows(&self, s: &Session, cx: &mut Context<Self>) -> Div {
         let t = self.t;
-        let top = self.transcript.logical_scroll_top().item_ix;
+        let top = self.top_item();
         let (prev, next) = s
             .items
             .iter()
@@ -775,6 +775,7 @@ impl Dent {
     ) -> AnyElement {
         let t = self.t;
         let group = SharedString::from(format!("reply-{ix}"));
+        let pointed = self.hover_row.map(|r| self.rows.item_of(r)) == Some(ix);
         // Everything the agent said in the turn, as Markdown.
         let start = s.items[..ix]
             .iter()
@@ -879,7 +880,9 @@ impl Dent {
                         .flex()
                         .items_center()
                         .gap(px(space::S1))
-                        .when(!latest, |d| d.reveal_on_hover(group.clone()))
+                        // (A reply drawn a row per block shows them while
+                        // the pointer is on any of its blocks.)
+                        .when(!latest && !pointed, |d| d.reveal_on_hover(group.clone()))
                         // In line with the reply's text.
                         .child(
                             div()
@@ -927,17 +930,34 @@ impl Dent {
             self.transcript.is_following_tail(),
         );
         let count = self.transcript.item_count();
-        // Only the items on screen are drawn, however long the session.
+        // Only the rows on screen are drawn, however long the session: an
+        // item each, a reply a row per block (`rows.rs`).
         let transcript = list(
             self.transcript.clone(),
-            cx.processor(move |this, ix: usize, window, cx| {
+            cx.processor(move |this, row: usize, window, cx| {
                 let Some(s) = this.current_rc() else {
                     return div().into_any_element();
                 };
+                let Some(r) = this.rows.get(row) else {
+                    return div().into_any_element();
+                };
+                // The working line's own row stands past the last item.
+                let ix = r.item.unwrap_or(s.items.len());
+                // The items, and the working line's row if it has one.
+                let count =
+                    this.rows.items() + usize::from(this.rows.end_of_items() < this.rows.len());
                 // Each message keeps its place in the chat's selection,
-                // drawn or not.
-                let _place =
-                    crate::select::item(crate::select::area(&format!("chat/{}", s.id)), ix);
+                // drawn or not; a reply's blocks keep theirs within it.
+                let area = crate::select::area(&format!("chat/{}", s.id));
+                let _place = match r.part {
+                    Some(p) => {
+                        // Find numbers this block's matches on from those
+                        // before it, drawn or not.
+                        crate::select::set_found(ix as u32, this.found_before(ix, p.block));
+                        crate::select::part(area, ix, p.block, p.of)
+                    }
+                    None => crate::select::item(area, ix),
+                };
                 // The working line sits under the reply being written, above
                 // any messages queued after it, so they never read as the
                 // thing being written.
@@ -947,22 +967,34 @@ impl Dent {
                 if fold == TurnFold::Hidden {
                     return div().into_any_element();
                 }
+                // Closed, the turn's line stands in for the whole item.
+                if matches!(fold, TurnFold::Head { open: false, .. }) && !r.first() {
+                    return div().into_any_element();
+                }
+                let drawn = |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| match (
+                    s.items.get(ix),
+                    r.part,
+                ) {
+                    (Some(item), Some(p)) => this.reply_part(&s, ix, item, p, window, cx),
+                    (Some(item), None) => this.item(&s, ix, item, window, cx),
+                    (None, _) => div().into_any_element(),
+                };
                 let body = match s.items.get(ix) {
-                    Some(item) if host == Some(ix) => div()
+                    Some(_) if host == Some(ix) && r.first() => div()
                         .flex()
                         .flex_col()
                         .gap(px(space::S4))
                         .child(this.working_line(&s))
-                        .child(this.item(&s, ix, item, window, cx))
+                        .child(drawn(this, window, cx))
                         .into_any_element(),
-                    Some(item) => this.item(&s, ix, item, window, cx),
+                    Some(_) => drawn(this, window, cx),
                     None if host.is_some() => div().into_any_element(),
                     None => this.working_line(&s),
                 };
                 // The turn's line stands where its work began; open, the
                 // work follows it.
                 let body = match fold {
-                    TurnFold::Head { took, user, open } => {
+                    TurnFold::Head { took, user, open } if r.first() => {
                         let line = this.worked_line(&s, took, user, open, cx);
                         if open {
                             div()
@@ -991,16 +1023,37 @@ impl Dent {
                 } else {
                     body
                 };
-                // The last reply in a turn carries the turn's time and actions.
-                let body = match turn_end_after(&s.items, ix) {
-                    Some(end) => this.with_reply_footer(&s, ix, end, body, cx),
-                    None => body,
+                // The last reply in a turn carries the turn's time and
+                // actions, under its last block.
+                let turn_end = turn_end_after(&s.items, ix);
+                let body = match turn_end {
+                    Some(end) if r.last() => this.with_reply_footer(&s, ix, end, body, cx),
+                    _ => body,
                 };
-                let ends_turn = turn_end_after(&s.items, ix).is_some();
+                // Pointing at any of its blocks shows an older turn's actions.
+                let body = match turn_end {
+                    Some(_) if r.part.is_some() => div()
+                        .id(("reply-part", row))
+                        .on_hover(cx.listener(move |this, on: &bool, _, cx| {
+                            let was = this.hover_row;
+                            if *on {
+                                this.hover_row = Some(row);
+                            } else if was == Some(row) {
+                                this.hover_row = None;
+                            }
+                            if this.hover_row != was {
+                                cx.notify();
+                            }
+                        }))
+                        .child(body)
+                        .into_any_element(),
+                    _ => body,
+                };
+                let ends_turn = turn_end.is_some() && r.last();
                 let marker = matches!(s.items.get(ix), Some(Item::TurnEnd { .. }));
                 // Just landed: it rises the last few pixels into place.
                 let arrive = (!crate::reduce_motion())
-                    .then(|| this.row_born.get(&ix))
+                    .then(|| this.row_born.get(&row))
                     .flatten()
                     .map(|(at, delay)| {
                         anim::ease_out(anim::progress_after(*at, *delay, motion::BASE))
@@ -1016,11 +1069,14 @@ impl Dent {
                             .w_full()
                             .max_w(px(size::COLUMN + space::S8 * 2.))
                             .px(px(space::S8))
-                            .when(ix == 0, |d| d.pt(px(space::S6)))
+                            .when(row == 0, |d| d.pt(px(space::S6)))
                             .when_some(arrive, |d, k| {
                                 d.relative().top(px((1. - k) * motion::RISE)).opacity(k)
                             })
-                            .pb(px(if ix + 1 == count && host.is_some() {
+                            .pb(px(if !r.last() {
+                                // Between a reply's blocks, as within one.
+                                space::S3
+                            } else if ix + 1 == count && host.is_some() {
                                 0.
                             } else if ix + 1 == count || (host.is_some() && ix + 2 == count) {
                                 space::S8
@@ -1522,6 +1578,140 @@ impl Dent {
             .into_any_element()
     }
 
+    /// A reply, as Markdown: whole, or (`part`) one block of it, for a reply
+    /// drawn a row per block.
+    fn reply_md(
+        &mut self,
+        s: &Session,
+        ix: usize,
+        src: &str,
+        part: Option<crate::rows::Part>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.t;
+        // What it says on the way sits a step back; the answer at
+        // the end of a turn reads in full ink.
+        let t = if is_answer(&s.items, ix, s.running()) {
+            t
+        } else {
+            t.narrating()
+        };
+        let births = self
+            .births
+            .get(&s.id)
+            .filter(|(i, _)| *i == ix)
+            .map(|(_, b)| b.clone());
+        // What its tables, wide blocks and diagrams remember is kept
+        // under which reply it is, not its place in the list: a
+        // thought or a note can land in front of it.
+        let at = format!(
+            "{}/t{}",
+            s.id,
+            s.items[..ix]
+                .iter()
+                .filter(|i| matches!(i, Item::Text(_)))
+                .count()
+        );
+        // The reply streaming in: only its unfinished end is parsed. A
+        // block of one has it from when its rows were worked out.
+        let streaming = births.is_some();
+        let blocks = match part.and_then(|_| self.part_blocks(&s.id, ix)) {
+            Some(b) => b,
+            None if streaming => self.markdown_live(&s.id, src),
+            None => self.markdown(src),
+        };
+        match (births, blocks.as_slice()) {
+            // A reply streaming in: each word fades in over 180 ms.
+            (Some(births), [markdown::Block::Para(inline)])
+                if part.is_none() && !crate::reduce_motion() =>
+            {
+                // Where each word ends, counted as births are (by
+                // spaces and line breaks), found by halving.
+                let breaks: Vec<usize> = inline
+                    .text
+                    .match_indices([' ', '\n'])
+                    .map(|(i, _)| i)
+                    .collect();
+                let fade = move |off: usize| {
+                    let k = breaks.partition_point(|&b| b < off);
+                    births
+                        .get(k)
+                        .map(|(_, at)| anim::ease_out(anim::progress(*at, motion::BASE)))
+                        .unwrap_or(1.)
+                };
+                let face = markdown::Face::of(READING, theme::body(), t.ink, t.surface);
+                div()
+                    // The measure it settles into once finished.
+                    .max_w(px(crate::ds::measure()))
+                    .ty(READING)
+                    .text_color(t.ink)
+                    .child(inline.element(
+                        &format!("{at}/0"),
+                        &t,
+                        face,
+                        Some(&fade),
+                        &self.mdv,
+                        window,
+                    ))
+                    .into_any_element()
+            }
+            _ => {
+                let mut r = markdown::R {
+                    live: streaming,
+                    counted: true,
+                    md: self.mdv.clone(),
+                    owner: cx.entity_id(),
+                    window,
+                    cx,
+                    scope: at.clone(),
+                    bg: t.surface,
+                    base: Some(std::path::PathBuf::from(&s.cwd)),
+                    session: Some((s.id.clone(), s.cwd.clone())),
+                };
+                match part {
+                    // One block, in a row of its own; the last row takes any
+                    // the rows were worked out without (they're worked out
+                    // as the reply changes, so that's at most a frame).
+                    Some(p) => {
+                        let from = p.block.min(blocks.len());
+                        let to = if p.block + 1 == p.of {
+                            blocks.len()
+                        } else {
+                            (p.block + 1).min(blocks.len())
+                        };
+                        div()
+                            .relative()
+                            .child(markdown::render_part(&blocks[from..to], from, &t, &mut r))
+                            .when(p.block == 0, |d| d.child(probe(&self.probes, "reply")))
+                            .into_any_element()
+                    }
+                    None => div()
+                        .relative()
+                        .child(markdown::render(blocks.as_slice(), &t, false, &mut r))
+                        .child(probe(&self.probes, "reply"))
+                        .into_any_element(),
+                }
+            }
+        }
+    }
+
+    /// Block `p` of chat item `ix`, a reply drawn a row per block.
+    fn reply_part(
+        &mut self,
+        s: &Session,
+        ix: usize,
+        item: &Item,
+        p: crate::rows::Part,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match item {
+            Item::Text(src) => self.reply_md(s, ix, src, Some(p), window, cx),
+            _ => self.item(s, ix, item, window, cx),
+        }
+    }
+
     fn item(
         &mut self,
         s: &Session,
@@ -1858,91 +2048,7 @@ impl Dent {
                     })
                     .into_any_element()
             }
-            Item::Text(src) => {
-                // What it says on the way sits a step back; the answer at
-                // the end of a turn reads in full ink.
-                let t = if is_answer(&s.items, ix, s.running()) {
-                    t
-                } else {
-                    t.narrating()
-                };
-                let births = self
-                    .births
-                    .get(&s.id)
-                    .filter(|(i, _)| *i == ix)
-                    .map(|(_, b)| b.clone());
-                // What its tables, wide blocks and diagrams remember is kept
-                // under which reply it is, not its place in the list: a
-                // thought or a note can land in front of it.
-                let at = format!(
-                    "{}/t{}",
-                    s.id,
-                    s.items[..ix]
-                        .iter()
-                        .filter(|i| matches!(i, Item::Text(_)))
-                        .count()
-                );
-                // The reply streaming in: only its unfinished end is parsed.
-                let streaming = births.is_some();
-                let blocks = if streaming {
-                    self.markdown_live(&s.id, src)
-                } else {
-                    self.markdown(src)
-                };
-                match (births, blocks.as_slice()) {
-                    // A reply streaming in: each word fades in over 180 ms.
-                    (Some(births), [markdown::Block::Para(inline)]) if !crate::reduce_motion() => {
-                        // Where each word ends, counted as births are (by
-                        // spaces and line breaks), found by halving.
-                        let breaks: Vec<usize> = inline
-                            .text
-                            .match_indices([' ', '\n'])
-                            .map(|(i, _)| i)
-                            .collect();
-                        let fade = move |off: usize| {
-                            let k = breaks.partition_point(|&b| b < off);
-                            births
-                                .get(k)
-                                .map(|(_, at)| anim::ease_out(anim::progress(*at, motion::BASE)))
-                                .unwrap_or(1.)
-                        };
-                        let face = markdown::Face::of(READING, theme::body(), t.ink, t.surface);
-                        div()
-                            // The measure it settles into once finished.
-                            .max_w(px(crate::ds::measure()))
-                            .ty(READING)
-                            .text_color(t.ink)
-                            .child(inline.element(
-                                &format!("{at}/0"),
-                                &t,
-                                face,
-                                Some(&fade),
-                                &self.mdv,
-                                window,
-                            ))
-                            .into_any_element()
-                    }
-                    _ => {
-                        let mut r = markdown::R {
-                            live: streaming,
-                            counted: true,
-                            md: self.mdv.clone(),
-                            owner: cx.entity_id(),
-                            window,
-                            cx,
-                            scope: at.clone(),
-                            bg: t.surface,
-                            base: Some(std::path::PathBuf::from(&s.cwd)),
-                            session: Some((s.id.clone(), s.cwd.clone())),
-                        };
-                        div()
-                            .relative()
-                            .child(markdown::render(blocks.as_slice(), &t, false, &mut r))
-                            .child(probe(&self.probes, "reply"))
-                            .into_any_element()
-                    }
-                }
-            }
+            Item::Text(src) => self.reply_md(s, ix, src, None, window, cx),
             Item::Tools {
                 summary,
                 lines,

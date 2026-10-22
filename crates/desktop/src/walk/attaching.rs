@@ -475,7 +475,7 @@ pub(super) fn attaching() -> Vec<(f32, Act)> {
                 "End goes back to the newest",
                 |d, _| {
                     let n = current(d).map_or(0, |s| s.items.len());
-                    n > 0 && d.transcript.bounds_for_item(n - 1).is_some()
+                    n > 0 && d.transcript.bounds_for_item(d.item_row(n - 1)).is_some()
                 },
                 3.,
             ),

@@ -159,6 +159,16 @@ struct Here {
     item: bool,
 }
 
+/// An item drawn a row per block: how many blocks it has, which have been
+/// laid out, and whether any holds rows of its own made later (a long
+/// table), whose rows out of sight were never drawn.
+#[derive(Default)]
+struct Parts {
+    of: u32,
+    drawn: std::collections::BTreeSet<u32>,
+    slotted: bool,
+}
+
 #[derive(Default)]
 struct State {
     sel: Option<Sel>,
@@ -175,6 +185,8 @@ struct State {
     /// under any other place are left from an older version of it.
     slots: HashMap<(Area, u32), Vec<u32>>,
     here: Vec<Here>,
+    /// Items drawn a row per block (a long reply): their blocks.
+    parts: HashMap<(Area, u32), Parts>,
     /// For areas drawn as a list: how many items, and each one's text, for
     /// items never drawn (a long chat never scrolled through).
     sources: HashMap<Area, Source>,
@@ -450,11 +462,38 @@ impl Drop for Scope {
 pub fn item(area: Area, ix: usize) -> Scope {
     with(|s| {
         s.slots.remove(&(area, ix as u32));
+        s.parts.remove(&(area, ix as u32));
         s.here.push(Here {
             area,
             path: vec![ix as u32],
             next: 0,
             item: true,
+        })
+    });
+    Scope(())
+}
+
+/// Text made while this lives is block `part` of item `ix` of `area`, an
+/// item of `of` blocks drawn a row per block: each block keeps its place in
+/// the item whether or not the blocks around it are drawn, so the item
+/// selects, copies and finds as one.
+pub fn part(area: Area, ix: usize, part: usize, of: usize) -> Scope {
+    with(|s| {
+        let key = (area, ix as u32);
+        // Counted pieces are of the item drawn whole.
+        s.counts.remove(&key);
+        s.slots.remove(&key);
+        let p = s.parts.entry(key).or_default();
+        if p.of != of as u32 {
+            p.of = of as u32;
+            p.drawn.retain(|b| *b < of as u32);
+        }
+        p.drawn.insert(part as u32);
+        s.here.push(Here {
+            area,
+            path: vec![ix as u32, part as u32],
+            next: 0,
+            item: false,
         })
     });
     Scope(())
@@ -590,6 +629,11 @@ pub fn slot() -> Slot {
         let area = h.area;
         if let [ix, n] = path[..] {
             s.slots.entry((area, ix)).or_default().push(n);
+        }
+        if let [ix, _, _] = path[..]
+            && let Some(p) = s.parts.get_mut(&(area, ix))
+        {
+            p.slotted = true;
         }
         Some((area, path))
     }))
@@ -1230,6 +1274,7 @@ pub fn counts(area: Area, needle: &str) -> Vec<(u32, usize)> {
 fn locate(
     area: Area,
     item: u32,
+    part: Option<u32>,
     k: usize,
     needle: &str,
     window: &Window,
@@ -1238,7 +1283,7 @@ fn locate(
     with(|s| {
         let mut seen = 0;
         for (path, text) in texts(s, area) {
-            if path.first() != Some(&item) {
+            if path.first() != Some(&item) || part.is_some_and(|b| path.get(1) != Some(&b)) {
                 continue;
             }
             let hits = matches(&text, needle);
@@ -1261,16 +1306,32 @@ fn locate(
     })
 }
 
-/// Whether the `k`th match of `needle` in `item` is on screen.
-pub fn in_view(area: Area, item: u32, k: usize, needle: &str, window: &Window) -> bool {
-    locate(area, item, k, needle, window)
+/// Whether the `k`th match of `needle` in `item` (in block `part` of it,
+/// for an item drawn a row per block) is on screen.
+pub fn in_view(
+    area: Area,
+    item: u32,
+    part: Option<u32>,
+    k: usize,
+    needle: &str,
+    window: &Window,
+) -> bool {
+    locate(area, item, part, k, needle, window)
         .is_some_and(|(y, view, _)| y >= view.top() && y + px(LINE) <= view.bottom())
 }
 
-/// Scroll `area` so the `k`th match of `needle` in `item` is in view, a
-/// third of the way down, if it's out of it. Returns whether it was found.
-pub fn reveal(area: Area, item: u32, k: usize, needle: &str, window: &Window) -> bool {
-    let Some((y, view, scroll)) = locate(area, item, k, needle, window) else {
+/// Scroll `area` so the `k`th match of `needle` in `item` (in block `part`
+/// of it, for an item drawn a row per block) is in view, a third of the way
+/// down, if it's out of it. Returns whether it was found.
+pub fn reveal(
+    area: Area,
+    item: u32,
+    part: Option<u32>,
+    k: usize,
+    needle: &str,
+    window: &Window,
+) -> bool {
+    let Some((y, view, scroll)) = locate(area, item, part, k, needle, window) else {
         return false;
     };
     if y < view.top() || y + px(LINE) > view.bottom() {
@@ -1287,6 +1348,13 @@ pub fn selected_area() -> Option<Area> {
 /// Whether a piece at `path` is part of its item as last laid out, not
 /// left from an older version of it.
 fn live(s: &State, area: Area, path: &[u32]) -> bool {
+    // A block of an item drawn a block per row: anything under a block it
+    // still has. (A piece straight under the item is of it drawn whole.)
+    if let (Some(ix), Some(b)) = (path.first(), path.get(1))
+        && let Some(p) = s.parts.get(&(area, *ix))
+    {
+        return path.len() > 2 && *b < p.of;
+    }
     match (path.first(), path.get(1)) {
         (Some(ix), Some(n)) => {
             s.counts.get(&(area, *ix)).is_none_or(|c| n < c)
@@ -1334,8 +1402,13 @@ pub fn copied() -> String {
                         area,
                         path: vec![ix + 1],
                     } <= end.key;
-                let partly_drawn = !s.counts.contains_key(&(area, ix))
-                    || s.slots.get(&(area, ix)).is_some_and(|v| !v.is_empty());
+                let partly_drawn = match s.parts.get(&(area, ix)) {
+                    Some(p) => (p.drawn.len() as u32) < p.of || p.slotted,
+                    None => {
+                        !s.counts.contains_key(&(area, ix))
+                            || s.slots.get(&(area, ix)).is_some_and(|v| !v.is_empty())
+                    }
+                };
                 if inside
                     && partly_drawn
                     && let Some(t) = text(ix as usize)
@@ -1764,6 +1837,30 @@ mod tests {
         assert_eq!(c.copy(0..8), "a $x^2$ b");
         // Part of a formula selected copies all of it.
         assert_eq!(c.copy(4..8), "$x^2$ b");
+    }
+
+    #[test]
+    fn a_reply_drawn_a_row_per_block_keeps_its_blocks_only() {
+        use super::{Parts, State, live};
+        let area = 7;
+        let mut s = State::default();
+        s.parts.insert(
+            (area, 3),
+            Parts {
+                of: 2,
+                drawn: [0].into(),
+                slotted: false,
+            },
+        );
+        // What its blocks made is live, rows of their own too...
+        assert!(live(&s, area, &[3, 1, 0]));
+        assert!(live(&s, area, &[3, 0, 2, 5]));
+        // ...but not past its last block, nor what it made drawn whole
+        // before it was split.
+        assert!(!live(&s, area, &[3, 2, 0]));
+        assert!(!live(&s, area, &[3, 0]));
+        // Other items are as they were.
+        assert!(live(&s, area, &[4, 0]));
     }
 
     #[test]
