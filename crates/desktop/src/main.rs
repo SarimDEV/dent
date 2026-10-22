@@ -1169,7 +1169,7 @@ fn main() {
         // screen changes: a timer's second, a page's message. (A working
         // square asks for every frame itself, through `animating`.)
         let weak = view.downgrade();
-        let main_handle = main_window.into();
+        let main_handle = main_window;
         cx.spawn(async move |cx| {
             loop {
                 cx.background_executor()
