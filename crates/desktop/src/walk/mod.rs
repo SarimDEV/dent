@@ -229,6 +229,7 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("changes", &[turn_changes, diff_swipe]),
     ("recall", &[recall]),
     ("visuals", &[visuals]),
+    ("fold", &[fold]),
     ("composing", &[composing]),
     ("edges", &[edges]),
     ("parity", &[parity]),

@@ -53,3 +53,71 @@ pub(super) fn look() -> Vec<(f32, Act)> {
     both_themes(&mut v, "look-4-top");
     v
 }
+
+/// A finished turn's work folds into one "Worked for" line above its
+/// answer, and opens in place.
+pub(super) fn fold() -> Vec<(f32, Act)> {
+    let mut v = vec![(
+        0.1,
+        Call(|d, _, cx| {
+            d.fold_turns = true;
+            cx.notify();
+        }),
+    )];
+    v.extend(new_session("replay a real turn"));
+    v.extend([
+        (
+            0.1,
+            Until(
+                "while it works, nothing folds",
+                |d, _| drawn(d, "tool-row").is_some() && drawn(d, "worked").is_none(),
+                20.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "its test run waits for approval",
+                |d, _| has(d, |i| matches!(i, Item::Approval { .. })),
+                30.,
+            ),
+        ),
+        (0.2, Click("allow")),
+        (
+            0.1,
+            Until(
+                "done, its work folds into one line above the answer",
+                |d, _| {
+                    done_saying(d, "now counts words correctly")
+                        && drawn(d, "worked").is_some()
+                        && drawn(d, "tool-row").is_none()
+                },
+                30.,
+            ),
+        ),
+        (0.3, Call(to_end)),
+    ]);
+    both_themes(&mut v, "fold-closed");
+    v.extend([
+        (0.2, Click("worked")),
+        (
+            0.1,
+            Until(
+                "a click opens the work in place",
+                |d, _| drawn(d, "tool-row").is_some() && drawn(d, "worked").is_some(),
+                3.,
+            ),
+        ),
+        (0.4, Shot("fold-open")),
+        (0.2, Click("worked")),
+        (
+            0.1,
+            Until(
+                "and another folds it again",
+                |d, _| drawn(d, "tool-row").is_none(),
+                3.,
+            ),
+        ),
+    ]);
+    v
+}

@@ -1146,6 +1146,11 @@ fn main() {
                 if walk.is_none() {
                     hotkey::set(&hotkey::chosen());
                 }
+                // Walks check every turn's work as it came; the fold has a
+                // scene of its own.
+                if walk.is_some() {
+                    d.fold_turns = false;
+                }
                 d.walk = walk;
                 d
             });

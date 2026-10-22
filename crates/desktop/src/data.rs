@@ -270,6 +270,8 @@ pub enum Fold<'a> {
     Command(&'a str, &'a str),
     /// A section of a command's sheet: session, item, section.
     Sheet(&'a str, usize, usize),
+    /// A finished turn's work, by the message that began it.
+    Turn(&'a str),
 }
 
 impl Fold<'_> {
@@ -277,6 +279,7 @@ impl Fold<'_> {
         match self {
             Fold::Message(id) => id.to_string(),
             Fold::Plan(ask) => format!("plan-open-{ask}"),
+            Fold::Turn(msg) => format!("turn-{msg}"),
             Fold::Report(call) => format!("report-{call}"),
             Fold::CallIn(s, call) => format!("call-in-all-{s}/{call}"),
             Fold::CallOut(s, call) => format!("call-out-all-{s}/{call}"),

@@ -1110,6 +1110,10 @@ pub struct Dent {
     pub over_chat_was: bool,
     /// The chat's view as last laid out, and whether it follows the end.
     pub chat_view: (Bounds<Pixels>, bool),
+    /// Fold each finished turn's work into one line (a preference).
+    pub fold_turns: bool,
+    /// The open session's items, each as its turn's fold has it.
+    pub turn_folds: Vec<crate::chat::TurnFold>,
     /// The sidebar's rows, drawn only where they're on screen.
     pub inbox_list: ListState,
     pub inbox_sigs: Vec<u64>,
@@ -1844,6 +1848,8 @@ impl Dent {
             over_chat: Default::default(),
             over_chat_was: false,
             chat_view: (Bounds::default(), true),
+            fold_turns: !prefs.show_all_work,
+            turn_folds: Vec::new(),
             inbox_list: ListState::new(0, ListAlignment::Top, px(400.)),
             inbox_sigs: Vec::new(),
             transcript_sigs: (None, Vec::new()),
@@ -6266,6 +6272,7 @@ impl Dent {
             sidebar_off: self.sidebar_off,
             quiet: !crate::notify::SOUND.load(std::sync::atomic::Ordering::Relaxed),
             sleepy: !crate::notify::AWAKE.load(std::sync::atomic::Ordering::Relaxed),
+            show_all_work: !self.fold_turns,
             hotkey: Some(crate::hotkey::chosen()).filter(|h| h != crate::hotkey::DEFAULT),
             appearance: self.appearance,
             pinned: self.pinned.clone(),
@@ -8767,6 +8774,22 @@ impl Dent {
         // The first queued message carries the working line above it, so
         // its height changes with the working state.
         let mut sigs = sigs;
+        // A finished turn's work folds into one line; an item's place in
+        // that fold is part of its height.
+        self.turn_folds = if self.fold_turns {
+            crate::chat::turn_folds(&s.items, |user| match s.items.get(user) {
+                Some(Item::User { id, .. }) => self.is_open(&crate::data::Fold::Turn(id)),
+                _ => false,
+            })
+        } else {
+            vec![crate::chat::TurnFold::Shown; s.items.len()]
+        };
+        for (sig, fold) in sigs.iter_mut().zip(&self.turn_folds) {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            fold.hash(&mut h);
+            *sig ^= h.finish();
+        }
         if let Some(q) = crate::chat::working_host(s) {
             sigs[q] ^= 0x9e37_79b9_7f4a_7c15;
         }
