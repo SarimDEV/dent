@@ -62,10 +62,15 @@ impl Dent {
         if !cramped && said {
             actions = actions.child(self.message_arrows(s, cx));
         }
-        if s.stopped && !s.closed && said {
+        // A failure's note offers Continue itself; one name, in one place.
+        let note_offers = matches!(
+            s.items.iter().rev().find(|i| !matches!(i, Item::TurnEnd { .. })),
+            Some(Item::Note { icon, .. }) if *icon == "circle-alert"
+        );
+        if s.stopped && !s.closed && said && !note_offers {
             let sid = id.clone();
             actions = actions.child(
-                button("resume", "Resume", false, &t)
+                button("resume", "Continue", false, &t)
                     .on_press(cx.listener(move |this, _, _, cx| this.resume(&sid, cx))),
             );
         }
@@ -669,9 +674,9 @@ impl Dent {
             .copied_key
             .as_ref()
             .is_some_and(|(k, at)| *k == key && at.elapsed() < Duration::from_millis(1300));
-        ghost(
+        crate::ui::ghost_with(
             SharedString::from(key.clone()),
-            if copied { "Copied" } else { "Copy" },
+            crate::ui::steady_label(if copied { "Copied" } else { "Copy" }, &["Copy", "Copied"]),
             &self.t,
         )
         .relative()
@@ -743,7 +748,7 @@ impl Dent {
                         .child(format!("+{added} −{removed}")),
                 )
             })
-            .child(div().text_color(t.ink).child("Review"))
+            .child(div().text_color(t.secondary()).child("Review"))
             .child(probe(&self.probes, format!("changed-{ix}")))
             .into_any_element()
     }
@@ -849,7 +854,6 @@ impl Dent {
                 Item::Changed { paths } => Some(self.changed_line(s, c, paths, cx)),
                 _ => None,
             });
-            let has_changes = changed.is_some();
             div()
                 .flex()
                 // A narrow column wraps the time and actions under the
@@ -866,9 +870,6 @@ impl Dent {
                         .items_center()
                         .gap(px(space::S1))
                         .when(!latest, |d| d.reveal_on_hover(group.clone()))
-                        .when(has_changes, |d| {
-                            d.child(div().ty(UI).text_color(t.faint).child("·"))
-                        })
                         // In line with the reply's text.
                         .child(
                             div()
@@ -1066,6 +1067,11 @@ impl Dent {
                     this.chat_context(e.position, window, cx)
                 }),
             )
+            // Find floats at the top; while it's open the chat starts under
+            // it, so nothing reads through the bar.
+            .when(find.is_some(), |d| {
+                d.pt(px(space::S2 + size::CONTROL + space::S2 - space::S1))
+            })
             .child(transcript)
             .child(probe(&self.probes, "transcript"))
             .children(find)
@@ -2139,7 +2145,7 @@ impl Dent {
                     // What the calls brought back as pictures shows whether
                     // the line is open or not: a screenshot is the point.
                     .when(!pictures.is_empty(), |d| {
-                        d.child(tool_pictures(&s.id, &s.cwd, ix, pictures, &t))
+                        d.child(tool_pictures(&s.id, &s.cwd, ix, pictures, &self.probes, &t))
                     })
                     .into_any_element()
             }
@@ -2259,6 +2265,7 @@ impl Dent {
                             .gap(px(space::S2))
                             .child(
                                 button("allow", "Allow once", true, &t)
+                                    .child(key_num("1", true, &t))
                                     .relative()
                                     .on_press(cx.listener(move |this, _, _, cx| {
                                         this.allow(&a, Some(&k1), Scope::Once, cx)
@@ -2267,6 +2274,7 @@ impl Dent {
                             )
                             .child(
                                 button("allow-session", "Allow for this session", false, &t)
+                                    .child(key_num("2", false, &t))
                                     .relative()
                                     .on_press(cx.listener(move |this, _, _, cx| {
                                         this.allow(&a2, Some(&k2), Scope::Session, cx)
@@ -2280,6 +2288,7 @@ impl Dent {
                                     false,
                                     &t,
                                 )
+                                .child(key_num("3", false, &t))
                                 .relative()
                                 .child(probe(&self.probes, "allow-project"));
                                 if *keeps && s.caps.project_rules {
@@ -2304,6 +2313,7 @@ impl Dent {
                             })
                             .child(
                                 button("deny", "Deny", false, &t)
+                                    .child(key_num("4", false, &t))
                                     .relative()
                                     .on_press(cx.listener(move |this, _, window, cx| {
                                         this.deny(&d, Some(&k3), window, cx)
@@ -2313,12 +2323,8 @@ impl Dent {
                     )
                     .child(ask_keys(
                         keyed,
-                        if *keeps {
-                            "↩ or 1 allows once · 2 for this session · 3 in this project · 4 denies"
-                        } else {
-                            "↩ or 1 allows once · 2 for this session · 4 denies"
-                        },
-                        "Esc, then a number, to answer by key",
+                        "Press a number, or ↩ to allow once",
+                        "Esc to answer by number",
                         &t,
                     ))
                     .into_any_element()
@@ -2387,6 +2393,7 @@ impl Dent {
                             .gap(px(space::S2))
                             .child(
                                 button("plan-go", "Start building", true, &t)
+                                    .child(key_num("1", true, &t))
                                     .relative()
                                     .on_press(cx.listener(move |this, _, _, cx| {
                                         this.allow(&a, Some(&k1), Scope::Once, cx)
@@ -2395,6 +2402,7 @@ impl Dent {
                             )
                             .child(
                                 button("plan-keep", "Keep planning", false, &t)
+                                    .child(key_num("2", false, &t))
                                     .relative()
                                     .on_press(cx.listener(move |this, _, window, cx| {
                                         this.deny(&d, Some(&k3), window, cx)
@@ -2404,8 +2412,8 @@ impl Dent {
                     )
                     .child(ask_keys(
                         keyed,
-                        "↩ or 1 starts building · 2 keeps planning, with what you typed",
-                        "Typed text is sent as what to change · Esc, then 1 or 2, to answer by key",
+                        "Press a number, or ↩ to start building · what you've typed goes with Keep planning",
+                        "What you type is sent as what to change · Esc to answer by number",
                         &t,
                     ))
                     .into_any_element()
@@ -2426,7 +2434,7 @@ impl Dent {
                 let hint = match (keyed, multi, fixed, many) {
                     (true, true, ..) => format!("Press 1–{n} to tick, ↩ to continue{back}"),
                     (true, false, ..) => format!("Press 1–{n} to pick{back}"),
-                    (false, _, true, _) => "Esc, then a number key, to pick".to_string(),
+                    (false, _, true, _) => "Esc to pick by number".to_string(),
                     (false, _, false, true) => {
                         "Answer each one, or type an answer in the box".to_string()
                     }
@@ -2700,10 +2708,13 @@ impl Dent {
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .map_or(0, |d| d.as_secs() as i64);
-                        format!(
-                            "Your {which} is used up. It resets at {}, in {}.",
-                            crate::data::clock(at as u64 * 1000),
-                            crate::data::span((at - now).max(0) as u64)
+                        (
+                            format!("Your {which} is used up"),
+                            format!(
+                                "It resets at {}, in {}.",
+                                crate::data::clock(at as u64 * 1000),
+                                crate::data::span((at - now).max(0) as u64)
+                            ),
                         )
                     });
                 div()
@@ -2723,18 +2734,24 @@ impl Dent {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(crate::select::text(
-                                SharedString::from(format!("note-{ix}")),
-                                text.clone(),
-                                &t,
-                            ))
-                            .when_some(limit, |d, l| d.child(div().text_color(t.ink).child(l))),
+                            // A used-up limit says so in plain words, which
+                            // and when, in place of the agent's own line.
+                            .map(|d| match limit {
+                                Some((head, when)) => d
+                                    .child(div().text_color(t.ink).child(head))
+                                    .child(div().child(when)),
+                                None => d.child(crate::select::text(
+                                    SharedString::from(format!("note-{ix}")),
+                                    text.clone(),
+                                    &t,
+                                )),
+                            }),
                     )
                     // An MCP server in trouble: its sheet reconnects it or
                     // signs in.
                     .when(
-                        text.starts_with("The MCP server ")
-                            && !matches!(s.items.get(ix + 1), Some(Item::Note { text: next, .. }) if next.starts_with("The MCP server ")),
+                        mcp_note(text)
+                            && !matches!(s.items.get(ix + 1), Some(Item::Note { text: next, .. }) if mcp_note(next)),
                         |d| {
                         let sid = s.id.clone();
                         d.child(
@@ -2783,7 +2800,7 @@ impl Dent {
                                                 div()
                                                     .px(px(space::S2))
                                                     .text_color(t.ink)
-                                                    .child(format!("Carries on at {when}")),
+                                                    .child(format!("Continues at {when}")),
                                             )
                                             .child(
                                                 ghost(
@@ -2798,7 +2815,7 @@ impl Dent {
                                             .into_any_element(),
                                         None => ghost(
                                             SharedString::from(format!("resume-{ix}")),
-                                            format!("Carry on at {when}"),
+                                            format!("Continue at {when}"),
                                             &t,
                                         )
                                         .relative()
@@ -2825,11 +2842,6 @@ impl Dent {
                                                 })),
                                             )
                                         })
-                                        .child(crate::ui::off_owned(
-                                            retry,
-                                            format!("Once it resets, at {when}"),
-                                            &t,
-                                        ))
                                 }
                                 None => {
                                     let again = s.id.clone();
@@ -2842,7 +2854,7 @@ impl Dent {
                                         .relative()
                                         .child(probe(&self.probes, format!("carry-on-{ix}")))
                                         .with_tip(crate::ui::tip_owned(
-                                            "Carry on from where it was cut off".to_string(),
+                                            "Pick up from where it was cut off".to_string(),
                                             t,
                                         ))
                                         .on_press(
@@ -3446,10 +3458,10 @@ impl Dent {
                             .min_w_0()
                             .ty(UI)
                             .text_color(t.quiet)
-                            .child("An earlier version, as it was. Replies go to the latest."),
+                            .child("Viewing an earlier version. Replies go to the latest."),
                     )
                     .child(
-                        ghost("fork-version", "Carry this one on", &t)
+                        ghost("fork-version", "Continue from here", &t)
                             .relative()
                             .child(probe(&self.probes, "fork-version"))
                             .on_press(cx.listener(move |this, _, _, cx| this.fork_version(&a, cx))),
@@ -3832,7 +3844,16 @@ impl Dent {
                         };
                         let mark = match st.as_str() {
                             "completed" => icon("check", 13., t.quiet).into_any_element(),
-                            "in_progress" => status_square(Status::Working, &t).into_any_element(),
+                            // Held up on you, the step waits as the session does.
+                            "in_progress" => status_square(
+                                if s.status == Status::Needs {
+                                    Status::Needs
+                                } else {
+                                    Status::Working
+                                },
+                                &t,
+                            )
+                            .into_any_element(),
                             _ => div()
                                 .size(px(9.))
                                 .rounded_full()
@@ -5940,7 +5961,14 @@ fn picture_path(session: &str, shown: &str, cwd: &str) -> Option<std::path::Path
 /// step together in the large view. One shows at a readable size; more
 /// sit in one row of small tiles, and past [`TOOL_TILES`] the last tile
 /// counts the rest.
-fn tool_pictures(session: &str, cwd: &str, ix: usize, paths: &[String], t: &theme::Theme) -> Div {
+fn tool_pictures(
+    session: &str,
+    cwd: &str,
+    ix: usize,
+    paths: &[String],
+    probes: &std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Bounds<Pixels>>>>,
+    t: &theme::Theme,
+) -> Div {
     // Each as it's here: this Mac's own, or the copy of another machine's
     // once it's come.
     // Drawn from copies kept from before, their machine away: marked.
@@ -5978,8 +6006,10 @@ fn tool_pictures(session: &str, cwd: &str, ix: usize, paths: &[String], t: &them
                 &set,
                 0,
                 frame()
+                    .relative()
                     .max_w_full()
                     .max_h(px(TOOL_PICTURE_H))
+                    .child(probe(probes, "tool-picture"))
                     .child(crate::markdown::sized(
                         img(set[0].path.clone()).object_fit(ObjectFit::Contain),
                         &set[0].path,
@@ -6469,7 +6499,7 @@ pub fn fit_footer(room: f32, chips: [(String, String); 3], context: bool, hint: 
     let text = |t: &str| t.chars().count() as f32 * 7.2;
     let chip = |t: &str| if t.is_empty() { 44. } else { 52. + text(t) };
     let gap = space::S1;
-    let ctx_w = text("context 9.9%") + space::S2;
+    let ctx_w = text("context 99%") + space::S2 + 7. + space::S1H;
     let hint_w = text(hint) + space::S2;
     // The steps, least loss first.
     let mut steps: Vec<([bool; 3], [bool; 3], bool, bool)> = Vec::new();
@@ -6527,6 +6557,25 @@ pub fn fit_footer(room: f32, chips: [(String, String); 3], context: bool, hint: 
 
 /// The line under an approval or a plan saying how to answer by key: the
 /// keys themselves while its card has the keyboard, else how to get there.
+/// A note about an MCP server in trouble, worded as now ("The tickets MCP
+/// server …") or as older logs have it ("The MCP server tickets …").
+fn mcp_note(text: &str) -> bool {
+    text.starts_with("The ") && text.contains("MCP server ")
+}
+
+/// The number key that answers with a button, faint inside it.
+fn key_num(n: &'static str, primary: bool, t: &theme::Theme) -> Div {
+    div()
+        .ty(NUMERAL)
+        .font_weight(FontWeight::NORMAL)
+        .text_color(if primary {
+            t.surface.opacity(0.55)
+        } else {
+            t.faint
+        })
+        .child(n)
+}
+
 fn ask_keys(keyed: bool, on: &'static str, off: &'static str, t: &theme::Theme) -> Div {
     div()
         .ty(LABEL)
@@ -6592,10 +6641,10 @@ pub fn is_answer(items: &[Item], ix: usize, running: bool) -> bool {
 pub fn turn_end_after(items: &[Item], ix: usize) -> Option<(u64, u64, bool)> {
     match items.get(ix) {
         Some(Item::Text(_)) => {}
-        // A turn you stopped says so straight under its words, and its time
-        // and actions follow the note.
+        // A turn you stopped, or one that failed, says so straight under its
+        // words, and its time and actions follow the note.
         Some(Item::Note {
-            kind: crate::data::NoteKind::Stopped,
+            kind: crate::data::NoteKind::Stopped | crate::data::NoteKind::Error,
             ..
         }) if items[..ix]
             .iter()
@@ -6610,7 +6659,7 @@ pub fn turn_end_after(items: &[Item], ix: usize) -> Option<(u64, u64, bool)> {
             | Item::User { .. }
             | Item::Queued { .. }
             | Item::Note {
-                kind: crate::data::NoteKind::Stopped,
+                kind: crate::data::NoteKind::Stopped | crate::data::NoteKind::Error,
                 ..
             } => return None,
             Item::TurnEnd { at, took } => {

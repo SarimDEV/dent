@@ -1241,9 +1241,11 @@ pub fn sized(i: Img, path: &std::path::Path, max_h: f32) -> Div {
     match crate::data::picture_dims(path) {
         Some((w, h)) => {
             let ratio = w as f32 / h as f32;
+            // A width of its own, not a share of the parent's: inside a
+            // row that sizes to its content, a share of nothing is nothing.
             div()
-                .w_full()
-                .max_w(px((w as f32).min(max_h * ratio)))
+                .w(px((w as f32).min(max_h * ratio)))
+                .max_w_full()
                 .aspect_ratio(ratio)
                 .child(i.size_full())
         }
@@ -1587,7 +1589,10 @@ fn copy_button(
         .text_color(if copied { t.ink } else { t.quiet })
         .cursor_pointer()
         .hover(|d| d.bg(t.hover()).text_color(t.ink))
-        .child(if copied { "Copied" } else { label })
+        .child(crate::ui::steady_label(
+            if copied { "Copied" } else { label },
+            &[label, "Copied"],
+        ))
         .child(crate::ui::probe(&probes, key.clone()))
         .on_press(move |_, _, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(text()));
@@ -2552,7 +2557,16 @@ fn table_block(table: &std::sync::Arc<Table>, t: &Theme, key: &str, r: &mut R) -
     // In the chat, Open shows it in the viewer, with room for every row.
     let open = counted.then(|| {
         let whole = table.clone();
-        crate::ui::ghost(SharedString::from(format!("md-open-{key}")), "Open", t)
+        div()
+            .id(SharedString::from(format!("md-open-{key}")))
+            .relative()
+            .px(px(space::S1H))
+            .rounded(px(radius::SM))
+            .ty(UI)
+            .text_color(t.quiet)
+            .cursor_pointer()
+            .hover(|d| d.bg(t.hover()).text_color(t.ink))
+            .child("Open")
             .child(crate::ui::probe(&probes, "md-open-table"))
             .on_click(move |_, window, _| {
                 OPEN_TABLE.with(|o| *o.borrow_mut() = Some(whole.markdown()));

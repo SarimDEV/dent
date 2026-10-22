@@ -1892,9 +1892,30 @@ fn clean_title(answer: &str) -> String {
         Some((head, _)) if head.split_whitespace().count() >= 2 => head.trim(),
         _ => t,
     };
-    // Past eight words it's a sentence, not a title.
+    // Past eight words it's a sentence, not a title: cut there, never on a
+    // word that leads on ("and a", "of the") or a trailing comma, and say
+    // it was cut.
     let words: Vec<&str> = t.split_whitespace().collect();
-    title(&words[..words.len().min(8)].join(" "))
+    if words.len() <= 8 {
+        return title(&words.join(" "));
+    }
+    let mut kept = &words[..8];
+    const LEADS_ON: &[&str] = &[
+        "a", "an", "the", "and", "or", "but", "of", "to", "in", "on", "for", "with", "at", "by",
+        "from", "into", "my", "our", "your", "its", "is", "are",
+    ];
+    while kept.len() > 2
+        && LEADS_ON.contains(
+            &kept[kept.len() - 1]
+                .trim_end_matches(',')
+                .to_lowercase()
+                .as_str(),
+        )
+    {
+        kept = &kept[..kept.len() - 1];
+    }
+    let cut = kept.join(" ");
+    title(&format!("{}…", cut.trim_end_matches([',', ';', ':'])))
 }
 
 /// Each session's branch and main checkout as last said, as JSON.
@@ -2092,6 +2113,10 @@ mod tests {
             "Cache with Redis"
         );
         assert_eq!(super::clean_title("# Landing page"), "Landing page");
+        assert_eq!(
+            super::clean_title("show me some math, a diagram and a table please"),
+            "show me some math, a diagram…"
+        );
         assert_eq!(
             super::clean_title("Checking the hero on mobile: the screenshot and more"),
             "Checking the hero on mobile"

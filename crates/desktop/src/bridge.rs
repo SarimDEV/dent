@@ -856,7 +856,7 @@ fn detail(v: &SessionView) -> String {
     }
     // Waiting for a used-up limit to reset, to carry on by itself.
     if let Some(at) = v.resume_at {
-        return format!("Carries on at {}", crate::data::clock(at * 1000));
+        return format!("Continues at {}", crate::data::clock(at * 1000));
     }
     match v.status {
         Wire::NeedsYou => match v.open_ask() {

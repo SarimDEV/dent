@@ -341,23 +341,34 @@ pub fn status_square_at(status: Status, t: &Theme, scale: f32) -> Div {
                     ),
             );
     }
-    let mark = div()
-        .size(px(s))
-        .flex()
-        .flex_col()
-        .children((0..4).map(move |y: usize| {
-            div().flex().children((0..4).map(move |x: usize| {
-                let on = match status {
-                    Status::Needs => true,
-                    Status::Done => x <= y,
-                    Status::Working => (x + y).is_multiple_of(2),
-                    Status::Waiting => x.is_multiple_of(2) && y.is_multiple_of(2),
-                    Status::Idle => x == 0 || y == 0 || x == 3 || y == 3,
-                };
-                let cell = div().size(px(s / 4.));
-                if on { cell.bg(signal) } else { cell }
-            }))
-        }));
+    // Flat shapes, never pixel patterns, each its own form so a status
+    // reads without its colour: needs is filled, done carries a check,
+    // waiting a square within a square, idle an outline, and working (when
+    // it can't breathe) its paler fill.
+    let line = (s / 8.).max(1.);
+    let mark = match status {
+        Status::Needs => div().size(px(s)).bg(signal),
+        Status::Done => div()
+            .size(px(s))
+            .bg(signal)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(crate::ui::icon("check", s * 0.82, t.surface)),
+        Status::Working => div()
+            .size(px(s))
+            .bg(partner)
+            .child(div().size_full().bg(signal.opacity(0.65))),
+        Status::Waiting => div()
+            .size(px(s))
+            .border(px(line))
+            .border_color(signal)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(div().size(px(s * 0.34)).bg(signal)),
+        Status::Idle => div().size(px(s)).border(px(line)).border_color(signal),
+    };
     div()
         .size(px(crate::ds::size::SQUARE))
         .flex_none()

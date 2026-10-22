@@ -290,7 +290,7 @@ pub fn limits(bars: &[Bar], t: &Theme) -> Div {
                         .child(
                             div()
                                 .flex_none()
-                                .text_color(if used >= 0.9 { t.needs.0 } else { t.quiet })
+                                .text_color(t.quiet)
                                 .child(format!("{:.0}% used", used * 100.)),
                         ),
                 )
@@ -343,7 +343,10 @@ impl Dent {
             .whitespace_nowrap()
             .flex_shrink(2.)
             .ty(LABEL)
-            .text_color(if near { t.needs.0 } else { t.faint })
+            .flex()
+            .items_center()
+            .gap(px(space::S1H))
+            .text_color(if near { t.quiet } else { t.faint })
             .cursor_pointer()
             .hover(|d| d.text_color(t.ink))
             .on_press(cx.listener(|this, _, _, cx| {
@@ -351,10 +354,19 @@ impl Dent {
                 this.menu = None;
                 cx.notify();
             }))
-            .child(if pct < 10. {
-                format!("context {pct:.1}%")
+            // Signals are fills, never text: nearly full puts the needs
+            // square beside the words.
+            .when(near, |d| {
+                d.child(div().flex_none().size(px(7.)).bg(t.needs.0))
+            })
+            // Whole percent: a tenth jitters the row's width as it grows and
+            // claims more precision than the count has.
+            .child(if pct >= 100. {
+                "context full".to_string()
+            } else if pct < 1. {
+                "context <1%".to_string()
             } else {
-                format!("context {pct:.0}%")
+                format!("context {}%", pct.floor() as u32)
             })
             .child(probe(&self.probes, "context-gauge"));
         let popover = open.then(|| {
@@ -432,7 +444,7 @@ impl Dent {
             let sid = s.id.clone();
             crate::ui::ghost("compact-first", "Compact", &t)
                 .relative()
-                .text_color(t.needs.0)
+                .text_color(t.ink)
                 .with_tip(tip_owned(
                     "The context is nearly full: summarize the conversation before the next message",
                     t,

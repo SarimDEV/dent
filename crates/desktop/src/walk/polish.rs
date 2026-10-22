@@ -14,6 +14,17 @@ pub(super) fn polish() -> Vec<(f32, Act)> {
             0.1,
             Until("the screenshot turn ends", |d, _| answered(d), 30.),
         ),
+        (
+            0.1,
+            Until(
+                "the tool's picture shows at a size you can see",
+                |d, _| {
+                    drawn(d, "tool-picture")
+                        .is_some_and(|b| b.size.width > px(200.) && b.size.height > px(100.))
+                },
+                3.,
+            ),
+        ),
         (0.6, Shot("screenshot")),
         (0.2, Call(open_every_group)),
         (0.3, Call(to_tools)),

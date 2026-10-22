@@ -1563,8 +1563,8 @@ impl Session {
                 // in, says so once in the chat.
                 for (name, status) in mcp {
                     let said = match status.as_str() {
-                        "failed" => format!("The MCP server {name} couldn't connect."),
-                        "needs-auth" => format!("The MCP server {name} needs you to sign in."),
+                        "failed" => format!("The {name} MCP server couldn't connect."),
+                        "needs-auth" => format!("The {name} MCP server needs you to sign in."),
                         _ => continue,
                     };
                     if self.mcp_told.insert(format!("{name}/{status}")) {
