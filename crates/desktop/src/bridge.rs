@@ -965,7 +965,10 @@ fn first_line(s: &str) -> String {
         .replace('`', "");
     // A line that leads into a list ("Here's what I changed:") ends on its
     // words, not the colon pointing at what the preview leaves out.
-    let l = l.strip_suffix(':').unwrap_or(&l).trim_end();
+    let l = match l.strip_suffix(':').map(str::trim_end) {
+        Some(cut) if !cut.is_empty() => cut,
+        _ => l.as_str(),
+    };
     let mut out: String = l.chars().take(90).collect();
     if l.chars().count() > 90 {
         out.push('…');
@@ -1536,6 +1539,22 @@ fn answered(tool: &str, input: &Value, a: &Answer, cwd: &Path) -> Item {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_preview_ends_on_words_not_a_colon() {
+        assert_eq!(super::first_line("What I changed:\n- a"), "What I changed");
+        assert_eq!(
+            super::first_line("**Why it failed:** the cache"),
+            "Why it failed: the cache"
+        );
+        // Only a colon is left as it is, rather than as nothing.
+        assert_eq!(super::first_line(":"), ":");
+        assert_eq!(super::first_line("Times 10:30:"), "Times 10:30");
+        assert_eq!(
+            super::first_line("Ends with emoji 🎉🚀:"),
+            "Ends with emoji 🎉🚀"
+        );
+    }
+
     #[test]
     fn an_edit_counts_only_the_lines_it_changes() {
         // One line changed amid its context.

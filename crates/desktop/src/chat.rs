@@ -2964,6 +2964,25 @@ impl Dent {
                             .flex()
                             .flex_col()
                             .gap(px(space::S1H))
+                            // Its folded pastes and the files it carries, as
+                            // they showed in the box, and first, as a sent
+                            // message has them.
+                            .when(!attachments.is_empty() || !pasted.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .gap(px(space::S1H))
+                                        .children(pasted.into_iter().map(|label| {
+                                            small_chip(ChipFace::Icon("file-text"), label, &t)
+                                        }))
+                                        .children(attachments.iter().map(|p| {
+                                            let a =
+                                                crate::app::Attachment::File { path: p.clone() };
+                                            small_chip(file_face(p), a.label(), &t)
+                                        })),
+                                )
+                            })
                             .when(!shown.is_empty(), |d| {
                                 d.child(crate::select::text(
                                     SharedString::from(format!("queued-text-{ix}")),
@@ -2988,24 +3007,6 @@ impl Dent {
                                         } else {
                                             "Show full message"
                                         }),
-                                )
-                            })
-                            // Its folded pastes and the files it carries, as
-                            // they showed in the box.
-                            .when(!attachments.is_empty() || !pasted.is_empty(), |d| {
-                                d.child(
-                                    div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .gap(px(space::S1H))
-                                        .children(pasted.into_iter().map(|label| {
-                                            small_chip(ChipFace::Icon("file-text"), label, &t)
-                                        }))
-                                        .children(attachments.iter().map(|p| {
-                                            let a =
-                                                crate::app::Attachment::File { path: p.clone() };
-                                            small_chip(file_face(p), a.label(), &t)
-                                        })),
                                 )
                             }),
                     )
@@ -3940,16 +3941,26 @@ impl Dent {
                         .justify_center()
                         .child(status_square(Status::Working, &t)),
                 )
-                .child(div().flex_1().min_w_0().truncate().text_color(t.ink).child(
-                    if task.description.trim().is_empty() {
-                        "Background work".to_string()
-                    } else {
-                        task.description.clone()
-                    },
-                ))
-                .when(!kind.is_empty(), |d| {
-                    d.child(div().flex_none().text_color(t.faint).child(kind))
-                })
+                // What kind it is stays with its name, small, apart from
+                // the actions at the end.
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_baseline()
+                        .gap(px(space::S1H))
+                        .child(div().min_w_0().truncate().text_color(t.ink).child(
+                            if task.description.trim().is_empty() {
+                                "Background work".to_string()
+                            } else {
+                                task.description.clone()
+                            },
+                        ))
+                        .when(!kind.is_empty(), |d| {
+                            d.child(div().flex_none().ty(LABEL).text_color(t.faint).child(kind))
+                        }),
+                )
                 .when_some(output, |d, path| {
                     d.child(
                         ghost(
@@ -6795,6 +6806,35 @@ mod answer_tests {
         // A turn stopped before it said anything keeps a plain note.
         let bare = vec![note, Item::TurnEnd { at: 1, took: 0 }];
         assert!(turn_end_after(&bare, 0).is_none());
+    }
+
+    #[test]
+    fn a_failed_turns_time_and_copy_follow_its_error() {
+        let error = Item::Note {
+            icon: "circle-alert",
+            text: "Claude Code stopped unexpectedly".into(),
+            kind: crate::data::NoteKind::Error,
+        };
+        let items = vec![
+            Item::Text("starting".into()),
+            error.clone(),
+            Item::TurnEnd { at: 1, took: 0 },
+        ];
+        assert!(turn_end_after(&items, 0).is_none());
+        assert!(turn_end_after(&items, 1).is_some());
+        // A failure before any words: no footer at all, as before.
+        let bare = vec![error.clone(), Item::TurnEnd { at: 1, took: 0 }];
+        assert!(turn_end_after(&bare, 0).is_none());
+        // It went on after the error and finished: the footer is the
+        // last words', not the error's.
+        let after = vec![
+            Item::Text("starting".into()),
+            error,
+            Item::Text("done after all".into()),
+            Item::TurnEnd { at: 1, took: 0 },
+        ];
+        assert!(turn_end_after(&after, 1).is_none());
+        assert!(turn_end_after(&after, 2).is_some());
     }
 
     #[test]

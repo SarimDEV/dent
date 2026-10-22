@@ -42,7 +42,7 @@ fn c(hex: u32) -> Hsla {
 
 impl Theme {
     /// Signal colours pair with a paler partner on Paper and a deeper one on
-    /// Carbon, for the dither.
+    /// Carbon, which the working square breathes from.
     pub fn paper() -> Self {
         Self {
             dark: false,

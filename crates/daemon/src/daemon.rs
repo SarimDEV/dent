@@ -2117,6 +2117,23 @@ mod tests {
             super::clean_title("show me some math, a diagram and a table please"),
             "show me some math, a diagram…"
         );
+        // Nothing but words that lead on: at least two stay.
+        assert_eq!(
+            super::clean_title("a the and of to in on for with by"),
+            "a the…"
+        );
+        // Eight words or fewer are left whole, leading word and all.
+        assert_eq!(
+            super::clean_title("Fix the bug in the parser of"),
+            "Fix the bug in the parser of"
+        );
+        // Not English, no spaces to cut at: the 60-character cap still holds.
+        let long = "日本語".repeat(40);
+        assert!(super::clean_title(&long).chars().count() <= 61);
+        assert_eq!(
+            super::clean_title("Move the cache, the queue, and the log, to Redis, today"),
+            "Move the cache, the queue, and the log…"
+        );
         assert_eq!(
             super::clean_title("Checking the hero on mobile: the screenshot and more"),
             "Checking the hero on mobile"

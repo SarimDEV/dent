@@ -2,7 +2,7 @@
 
 The tokens and rules that build this look (spacing, type scale, states, motion) are in [design-system.md](design-system.md).
 
-dent uses the Field Notes direction: warm paper in light mode, warm carbon in dark mode, fine grain, ink type, and status shown as small dithered pixel squares. HTML/CSS mockups of the main screen, docs, quick switcher and changes panel in both modes are in [design/mockups/](design/mockups/). They were written for a canvas runtime, so treat them as the exact reference for colours, type, sizes and layout rather than pages to open directly.
+dent uses the Field Notes direction: warm paper in light mode, warm carbon in dark mode, fine grain, ink type, and status shown as small flat squares, each status its own shape (filled, checked, nested, outlined) so it reads without its colour; no dither anywhere (the owner's call, 15 Oct). HTML/CSS mockups of the main screen, docs, quick switcher and changes panel in both modes are in [design/mockups/](design/mockups/). They were written for a canvas runtime, so treat them as the exact reference for colours, type, sizes and layout rather than pages to open directly.
 
 ## Why Field Notes
 
@@ -55,7 +55,7 @@ The default pairing is called Book: agent replies read like a page, and the inte
 ## Texture and motion
 
 - Grain is a pre-rendered noise texture: multiplied at low opacity on Paper, screened at lower opacity on Carbon.
-- Approval cards resolve in with a short dither dissolve, the theme switch is a 200 ms colour tween, and a working session's square breathes smoothly (the owner prefers smooth motion to stepped pixel animation, 16 Oct); reduced-motion settings make all of it instant. The full motion vocabulary and its rules are in [design-system.md](design-system.md).
+- Approval cards arrive as other rows do, the theme switch is a 200 ms colour tween, and a working session's square breathes smoothly (the owner prefers smooth motion to stepped pixel animation, 16 Oct); reduced-motion settings make all of it instant. The full motion vocabulary and its rules are in [design-system.md](design-system.md).
 - Nothing blurs live behind scrolling content, and every effect is held to the frame budgets in Reliability requirements.
 
 ## Fixes before building
