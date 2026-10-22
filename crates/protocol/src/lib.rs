@@ -533,6 +533,41 @@ pub enum Answer {
     Expired,
 }
 
+/// A page as a desktop drew it, for the agent to check before showing it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct Look {
+    /// A PNG of the page, base64.
+    pub png: String,
+    /// The width it was laid out at, in CSS pixels.
+    pub width: u32,
+    /// How tall the page is, and how much of it the picture holds.
+    pub content_height: u32,
+    pub captured_height: u32,
+    /// What it reported going wrong: errors, and lines it logged as errors.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub console: Vec<String>,
+    /// It couldn't be drawn: why, in a few words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed: Option<String>,
+}
+
+/// The name a look goes by, the same wherever it's worked out: the page,
+/// its width and the theme asked for (`auto`, `light`, `dark`), by FNV-1a,
+/// so it never changes between builds.
+pub fn look_key(html: &str, width: u32, appearance: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |bytes: &[u8]| {
+        for b in bytes {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+    eat(html.as_bytes());
+    eat(&width.to_le_bytes());
+    eat(appearance.as_bytes());
+    format!("{h:016x}")
+}
+
 /// Where a secret the agent asked for is kept.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1395,6 +1430,14 @@ pub enum Request {
         id: String,
         answer: Answer,
     },
+    /// A desktop looked at a page the agent asked to see (dent's
+    /// `preview_visual`), named by `look_key`: the picture goes back to the
+    /// agent. The first answer counts; later ones are dropped.
+    Looked {
+        session: SessionId,
+        key: String,
+        look: Look,
+    },
     SetModel {
         session: SessionId,
         model: String,
@@ -1862,6 +1905,7 @@ impl Request {
             | R::Requeue { session, .. }
             | R::Interrupt { session, .. }
             | R::Answer { session, .. }
+            | R::Looked { session, .. }
             | R::SetModel { session, .. }
             | R::SetPermission { session, .. }
             | R::SetEffort { session, .. }
@@ -2225,6 +2269,23 @@ pub mod b64 {
 
     #[cfg(test)]
     mod tests {
+        #[test]
+        fn a_look_key_never_changes() {
+            // The fake agent keeps its own copy of this; both must agree.
+            assert_eq!(
+                crate::look_key("<p>hi</p>", 700, "auto"),
+                "c9e372f659082b2c"
+            );
+            assert_ne!(
+                crate::look_key("<p>hi</p>", 700, "dark"),
+                crate::look_key("<p>hi</p>", 700, "auto")
+            );
+            assert_ne!(
+                crate::look_key("<p>hi</p>", 390, "auto"),
+                crate::look_key("<p>hi</p>", 700, "auto")
+            );
+        }
+
         #[test]
         fn round_trips() {
             for s in ["", "f", "fo", "foo", "foob", "fooba", "foobar"] {

@@ -126,6 +126,42 @@ pub(super) fn parity() -> Vec<(f32, Act)> {
         ),
         (0.8, Shot("visual-beside")),
     ]);
+    // The agent looks at its page before showing it: a window draws it out
+    // of sight and the picture goes back to the agent.
+    v.extend(new_session("look before you show the sign-ups"));
+    v.extend([
+        (
+            0.1,
+            Until(
+                "the agent sees its page, drawn by this window, before showing it",
+                |d, _| {
+                    says(d, "Checked it first")
+                        && current(d).is_some_and(|s| {
+                            s.items.iter().any(|i| matches!(i, Item::Tools { lines, .. } if lines.iter().any(|l| l.text.starts_with("Looked at the page"))))
+                        })
+                },
+                45.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "and then it shows in the chat",
+                |d, _| drawn(d, "inline-page").is_some(),
+                10.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "its picture stays the agent's: none in the chat",
+                |d, _| tool_picture_count(d) == 0,
+                2.,
+            ),
+        ),
+        (0.3, Call(to_end)),
+        (0.6, Shot("look-then-show")),
+    ]);
     v.extend(new_session("we need a key for the payment tests"));
     v.extend([
         (

@@ -500,6 +500,9 @@ pub struct Session {
     pub made_sig: usize,
     /// The agent's plan, as its latest todo list: (state, what, doing-form).
     pub todos: Vec<(String, String, String)>,
+    /// Pages the agent asked to see and no window has drawn yet: their
+    /// `look_key`, html, width and appearance as it asked.
+    pub looks: Vec<(String, Rc<str>, u32, String)>,
     /// Dev servers it started, by address.
     pub servers: Vec<String>,
     /// Videos, sounds and PDFs its replies named, by full path.
@@ -594,6 +597,7 @@ impl Session {
             media: Vec::new(),
             made_sig: 0,
             todos: Vec::new(),
+            looks: Vec::new(),
             agent_session: None,
             news: 0,
             seen: 0,

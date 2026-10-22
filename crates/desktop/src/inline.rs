@@ -323,3 +323,199 @@ mod tests {
         assert_eq!(height(Some(1e9)), super::MAX_H);
     }
 }
+
+/// Pages the agent asked to see before showing them (`preview_visual`):
+/// drawn one at a time in a web view just outside the window, fitted to
+/// their height, pictured, and sent back with what went wrong in them.
+#[derive(Default)]
+pub struct Looker {
+    page: Option<Rc<RefCell<Preview>>>,
+    queue: std::collections::VecDeque<Look>,
+    now: Option<Look>,
+    /// Keys answered or under way, so each is drawn once.
+    seen: std::collections::HashSet<String>,
+    n: usize,
+}
+
+struct Look {
+    session: String,
+    key: String,
+    html: String,
+    width: u32,
+    dark: bool,
+    began: Option<Instant>,
+    height: Option<f32>,
+    /// When it was last resized: it settles before its picture.
+    sized_at: Option<Instant>,
+    asked_still: bool,
+    console: Vec<String>,
+}
+
+/// How long a page has to draw before it's given up on.
+const LOOK_GIVE_UP: Duration = Duration::from_secs(15);
+/// The tallest picture sent back.
+const LOOK_MAX_H: f32 = 4000.;
+
+impl Looker {
+    /// A page asked to be seen, in this session: queued unless it already
+    /// was. `dark` is the theme it's drawn in.
+    pub fn ask(&mut self, session: &str, key: &str, html: &str, width: u32, dark: bool) {
+        if self.seen.contains(key) {
+            return;
+        }
+        let key = key.to_string();
+        self.seen.insert(key.clone());
+        self.queue.push_back(Look {
+            session: session.to_string(),
+            key,
+            html: html.to_string(),
+            width,
+            dark,
+            began: None,
+            height: None,
+            sized_at: None,
+            asked_still: false,
+            console: Vec::new(),
+        });
+    }
+
+    pub fn busy(&self) -> bool {
+        self.now.is_some() || !self.queue.is_empty()
+    }
+
+    /// One step, once a frame: returns a finished look to send.
+    pub fn step(&mut self, window: &Window) -> Option<(String, String, dent_protocol::Look)> {
+        if self.now.is_none() {
+            let mut next = self.queue.pop_front()?;
+            if self.page.is_none() {
+                match Preview::new_inline(window) {
+                    Some(p) => self.page = Some(Rc::new(RefCell::new(p))),
+                    None => {
+                        return Some(failed(next, "this window can't make a web view"));
+                    }
+                }
+            }
+            let page = self.page.clone()?;
+            let mut p = page.borrow_mut();
+            let t = if next.dark {
+                crate::theme::Theme::carbon()
+            } else {
+                crate::theme::Theme::paper()
+            };
+            p.set_theme(&theme_json(&t));
+            self.n += 1;
+            p.show(
+                ".dent-visuals/look.html",
+                self.n,
+                next.html.as_bytes(),
+                None,
+            );
+            p.place(off_screen(window, next.width as f32, 800.));
+            p.set_visible(true);
+            next.began = Some(Instant::now());
+            self.now = Some(next);
+            return None;
+        }
+        let page = self.page.clone()?;
+        let look = self.now.as_mut()?;
+        let events = page.borrow().drain();
+        for e in events {
+            match e {
+                PageEvent::Height(h) => {
+                    let h = h.clamp(1., LOOK_MAX_H);
+                    if look.height.is_none_or(|o| (o - h).abs() >= 1.) {
+                        look.height = Some(h);
+                        look.sized_at = Some(Instant::now());
+                        look.asked_still = false;
+                        page.borrow_mut()
+                            .place(off_screen(window, look.width as f32, h));
+                    }
+                }
+                PageEvent::Error(m) | PageEvent::Logged(m) if look.console.len() < 20 => {
+                    look.console.push(m.chars().take(500).collect());
+                }
+                _ => {}
+            }
+        }
+        let p = page.borrow();
+        // Settled: its last size held a moment, fonts and scripts done.
+        let settled = look
+            .sized_at
+            .is_some_and(|at| at.elapsed() >= Duration::from_millis(400));
+        if settled && !look.asked_still {
+            look.asked_still = true;
+            let _ = p.take_still();
+            p.take_snapshot();
+        }
+        if look.asked_still
+            && let Some((_, bytes, format)) = p.take_still()
+        {
+            drop(p);
+            let look = self.now.take()?;
+            page.borrow_mut().set_visible(false);
+            return Some(match png(&bytes, format) {
+                Some((png, w, h)) => (
+                    look.session,
+                    look.key,
+                    dent_protocol::Look {
+                        png,
+                        width: look.width,
+                        content_height: look.height.unwrap_or(0.).round() as u32,
+                        captured_height: if w > 0 {
+                            (h as f32 * look.width as f32 / w as f32).round() as u32
+                        } else {
+                            0
+                        },
+                        console: look.console,
+                        failed: None,
+                    },
+                ),
+                None => failed(look, "its picture couldn't be read"),
+            });
+        }
+        if look.began.is_some_and(|b| b.elapsed() >= LOOK_GIVE_UP) {
+            drop(p);
+            let look = self.now.take()?;
+            page.borrow_mut().set_visible(false);
+            let why = if look.height.is_none() {
+                "it never finished loading"
+            } else {
+                "it never settled long enough to picture"
+            };
+            return Some(failed(look, why));
+        }
+        None
+    }
+}
+
+fn failed(look: Look, why: &str) -> (String, String, dent_protocol::Look) {
+    (
+        look.session,
+        look.key,
+        dent_protocol::Look {
+            width: look.width,
+            console: look.console,
+            failed: Some(why.to_string()),
+            ..Default::default()
+        },
+    )
+}
+
+/// Just past the window's right edge: drawn, but never seen.
+fn off_screen(window: &Window, w: f32, h: f32) -> Bounds<Pixels> {
+    let right = window.viewport_size().width;
+    Bounds::new(point(right + px(40.), px(0.)), size(px(w), px(h)))
+}
+
+/// A still as PNG, base64, with its size in pixels.
+fn png(bytes: &[u8], format: ImageFormat) -> Option<(String, u32, u32)> {
+    let format = match format {
+        ImageFormat::Tiff => image::ImageFormat::Tiff,
+        _ => image::ImageFormat::Png,
+    };
+    let img = image::load_from_memory_with_format(bytes, format).ok()?;
+    let (w, h) = (img.width(), img.height());
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png).ok()?;
+    Some((dent_protocol::b64::encode(&out.into_inner()), w, h))
+}

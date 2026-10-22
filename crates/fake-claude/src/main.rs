@@ -1397,6 +1397,60 @@ impl Agent {
             self.end("done", false);
             return Ok(());
         }
+        if lower.contains("look before") {
+            // Checks the page first, as dent's tool lets it: a desktop draws
+            // it and the picture comes back through the asks folder.
+            let width = 700u32;
+            let input = json!({"html": VISUAL_PAGE, "width": width});
+            let id = self.tool("mcp__dent__preview_visual", input, None);
+            let Some(asks) = asks_dir() else {
+                self.result(&id, "dent can't draw pages here.", true, None);
+                self.end("done", false);
+                return Ok(());
+            };
+            let file = std::path::Path::new(&asks).join(format!(
+                "look-{}.json",
+                look_key(VISUAL_PAGE, width, "auto")
+            ));
+            let mut waited = 0;
+            let look = loop {
+                if let Ok(a) = std::fs::read_to_string(&file) {
+                    let _ = std::fs::remove_file(&file);
+                    break serde_json::from_str::<Value>(&a).unwrap_or(Value::Null);
+                }
+                if waited > 40_000 {
+                    break Value::Null;
+                }
+                self.pause(100)?;
+                waited += 100;
+            };
+            let Some(png) = look["png"].as_str().filter(|p| !p.is_empty()) else {
+                self.result(&id, "dent couldn't draw the page.", true, None);
+                self.end("done", false);
+                return Ok(());
+            };
+            let words = format!(
+                "Drawn at {width} px wide: contentHeight {} px.",
+                look["content_height"]
+            );
+            out(self.envelope(
+                json!({"type": "user", "message": {"role": "user", "content": [
+                    {"tool_use_id": id, "type": "tool_result", "is_error": false, "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png}},
+                        {"type": "text", "text": words}]}]}}),
+                None,
+            ));
+            let input = json!({"title": "Sign-ups by week", "html": VISUAL_PAGE});
+            let id = self.tool("mcp__dent__show_visual", input, None);
+            self.pause(300)?;
+            self.result(&id, "Shown to the person above your reply.", false, None);
+            self.say(
+                "Checked it first: it fits the column. Week 3 is the jump.",
+                None,
+            )?;
+            self.end("done", false);
+            return Ok(());
+        }
         if lower.contains("need a key") {
             // dent's secret tool waits for the person's answer in the folder
             // its server was given; so does this.
@@ -1940,6 +1994,34 @@ const REAL_TURN: &str = include_str!("../assets/real-turn.jsonl");
 
 const LONG: &str = "Let me walk through the whole design before changing anything, because the pieces depend on each other more than it first looks.\n\n## The event log\n\nEvery session is a list of events, and each one gets a number. A client that drops off asks for everything after the last number it saw, so catching up and staying live are the same thing. Nothing is ever rewritten, which keeps the log simple to reason about and cheap to copy.\n\n## The agents\n\nThe agent runs as a child of a tiny holder process rather than of the daemon itself. That way the daemon can restart, crash or upgrade without the agent noticing: the holder keeps the pipes open and writes everything to disk, and the new daemon picks up from the last byte it recorded.\n\n## The clients\n\nThe desktop and the phone are views. They keep a cache so they open instantly, and they send commands to the daemon that owns the session. They never decide anything on their own, so two of them can't disagree about what happened.\n\n## What I'd change\n\n1. Batch events while catching up, so a phone isn't held back by the cost of each message.\n2. Store only complete messages, and stream the rest.\n3. Keep the last usage reading per account, since the agent only reports it when it changes.\n\nThat's the plan. Shall I start with the first one?";
 
+/// The folder dent's tools wait in, from the `--mcp-config` dent gave.
+fn asks_dir() -> Option<String> {
+    std::env::args()
+        .skip_while(|a| a != "--mcp-config")
+        .nth(1)
+        .and_then(|c| serde_json::from_str::<Value>(&c).ok())
+        .and_then(|c| {
+            c["mcpServers"]["dent"]["env"]["DENT_ASKS"]
+                .as_str()
+                .map(str::to_owned)
+        })
+}
+
+/// `dent_protocol::look_key`, kept here so the fake needs nothing of dent's.
+fn look_key(html: &str, width: u32, appearance: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in html
+        .as_bytes()
+        .iter()
+        .chain(&width.to_le_bytes())
+        .chain(appearance.as_bytes())
+    {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
 /// Standard base64, padded, as tool results carry pictures.
 fn base64(bytes: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -1974,3 +2056,15 @@ h1{font:600 15px var(--font-sans);margin:0 0 18px}
 <div class="bar" style="height:76%"><span>305</span></div></div>
 <div class="weeks"><div>W1</div><div>W2</div><div>W3</div><div>W4</div><div>W5</div></div>
 <div class="note">Week 3 is the launch post.</div></body></html>"#;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn its_look_key_is_dents() {
+        // Pinned in dent_protocol's tests too: the two copies agree.
+        assert_eq!(
+            super::look_key("<p>hi</p>", 700, "auto"),
+            "c9e372f659082b2c"
+        );
+    }
+}

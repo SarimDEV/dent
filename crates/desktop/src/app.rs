@@ -1101,6 +1101,8 @@ pub struct Dent {
     pub transcript: ListState,
     /// Pages the agent shows inside the chat.
     pub inline: Rc<RefCell<crate::inline::Inline>>,
+    /// Pages the agent asked to see before showing them.
+    pub looker: crate::inline::Looker,
     /// A popover drew over the chat this frame (the slash menu, stashed
     /// drafts): pages there step aside next frame.
     pub over_chat: std::cell::Cell<bool>,
@@ -1838,6 +1840,7 @@ impl Dent {
             review: Vec::new(),
             transcript: ListState::new(0, ListAlignment::Top, px(600.)),
             inline: Default::default(),
+            looker: Default::default(),
             over_chat: Default::default(),
             over_chat_was: false,
             chat_view: (Bounds::default(), true),
@@ -8269,6 +8272,25 @@ impl Dent {
         cx.notify();
     }
 
+    /// Draw the pages agents asked to see, in any session, and send each
+    /// picture back to its daemon.
+    pub fn look_at_pages(&mut self, window: &Window) {
+        let dark = self.t.dark;
+        for s in &self.sessions {
+            for (key, html, width, appearance) in &s.looks {
+                let dark = match appearance.as_str() {
+                    "light" => false,
+                    "dark" => true,
+                    _ => dark,
+                };
+                self.looker.ask(&s.id, key, html, *width, dark);
+            }
+        }
+        if let Some((session, key, look)) = self.looker.step(window) {
+            self.live.send(Request::Looked { session, key, look });
+        }
+    }
+
     /// Nothing floats over the chat: an inline page may show live.
     pub fn inline_clear(&self) -> bool {
         self.menu.is_none()
@@ -9427,7 +9449,7 @@ impl Dent {
         }) | {
             let i = self.inline.borrow();
             i.tick() | i.settling()
-        };
+        } | self.looker.busy();
         let toast_expired = self
             .toast
             .as_ref()

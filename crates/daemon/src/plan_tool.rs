@@ -24,6 +24,7 @@ use serde_json::{Value, json};
 pub const TOOL: &str = "mcp__dent__update_plan";
 pub const VISUAL: &str = "mcp__dent__show_visual";
 pub const SECRET: &str = "mcp__dent__ask_secret";
+pub const LOOK: &str = "mcp__dent__preview_visual";
 
 /// The `--mcp-config` that adds this server, run by `exe`; `asks` is the
 /// folder its secret answers arrive in.
@@ -55,6 +56,18 @@ pub fn run() -> anyhow::Result<()> {
         let Ok(msg) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        if msg["method"] == "tools/call" && msg["params"]["name"] == "preview_visual" {
+            let out = out.clone();
+            std::thread::spawn(move || {
+                let dir = std::env::var_os("DENT_ASKS").map(std::path::PathBuf::from);
+                let result = look(dir.as_deref(), &msg["params"]["arguments"], LOOK_WAIT);
+                say(
+                    &out,
+                    json!({"jsonrpc": "2.0", "id": msg["id"].clone(), "result": result}),
+                );
+            });
+            continue;
+        }
         if msg["method"] == "tools/call" && msg["params"]["name"] == "ask_secret" {
             let out = out.clone();
             std::thread::spawn(move || {
@@ -74,6 +87,80 @@ pub fn run() -> anyhow::Result<()> {
 /// What `show_visual` tells the agent: what the page is for, where it shows
 /// and how to make it sit well in the chat.
 const VISUAL_DESCRIPTION: &str = "Show the person a finished visual inside the chat, above your reply: a chart, a table, a diagram, a mock-up, a comparison. Call it before you write that reply. They see the page, so your reply shouldn't announce it, say where it is or restate it: add only what the page doesn't say. Give one whole, self-contained HTML document (inline <style> and <script>; libraries may load from a CDN). Nothing is written to the project. Call it again with the same title to show a new version.\n\nHow it sits in the chat: on the chat's own background, about 700px wide, left-aligned with your reply, and exactly as tall as the page (the frame grows to fit, so the page never scrolls inside itself). So: no background on html or body, no outer card or banner; panels inside get at least 16px padding and var(--radius). Give charts a fixed pixel height. Never use viewport-height units (vh, svh, lvh, dvh) or height:100% on html or body: the frame follows the page's height, so a page that follows the frame grows without end, and it is refused.\n\nColours and type follow dent's light or dark theme through CSS variables, live: --background, --foreground, --muted, --muted-foreground, --card, --border, --primary, --primary-foreground, --accent, --destructive, --warning, --success, --info, --chart-1 to --chart-6, --radius, --font-sans, --font-serif, --font-mono. Use them rather than fixed colours. Links open in the person's browser.";
+
+/// What `preview_visual` tells the agent.
+const LOOK_DESCRIPTION: &str = "See a page as it will show in the chat before you show it with show_visual: dent draws it at the width you give (700 by default, the chat's column) in the person's theme and returns a picture, its height (contentHeight) and anything it reported going wrong in its console. Use it to check layout, overflow, wrapping and contrast, then fix and look again, or show it. It needs dent open on the person's computer; if it isn't, you'll be told.";
+
+/// How long a look may take before the agent hears none came.
+const LOOK_WAIT: Duration = Duration::from_secs(40);
+
+/// Wait for a desktop's picture of the page (`look-<key>.json`, left by
+/// the daemon), and give it to the agent as an image and a few words.
+fn look(dir: Option<&Path>, args: &Value, wait: Duration) -> Value {
+    let text = |t: &str| json!({"content": [{"type": "text", "text": t}], "isError": true});
+    let Some(dir) = dir else {
+        return text("dent can't draw pages here.");
+    };
+    let Some(html) = args["html"].as_str().filter(|h| !h.trim().is_empty()) else {
+        return text("Give the page's whole HTML document as `html`.");
+    };
+    if let Some(why) = page_refused(Some(html)) {
+        return text(&why);
+    }
+    let width = args["width"].as_u64().unwrap_or(700).clamp(240, 1600) as u32;
+    let appearance = match args["appearance"].as_str() {
+        Some(a @ ("light" | "dark")) => a,
+        _ => "auto",
+    };
+    let key = dent_protocol::look_key(html, width, appearance);
+    let file = dir.join(format!("look-{key}.json"));
+    let until = std::time::Instant::now() + wait;
+    loop {
+        if let Ok(bytes) = std::fs::read(&file)
+            && let Ok(l) = serde_json::from_slice::<dent_protocol::Look>(&bytes)
+        {
+            let _ = std::fs::remove_file(&file);
+            return looked(&l);
+        }
+        if std::time::Instant::now() >= until {
+            return text(
+                "dent couldn't draw the page: no dent window answered (it may be closed, or this machine is reached only from a phone). Check the HTML by reading it, then show it with show_visual.",
+            );
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+}
+
+/// A look as the agent gets it: the picture, then what it measured.
+fn looked(l: &dent_protocol::Look) -> Value {
+    if let Some(why) = &l.failed {
+        return json!({"content": [{"type": "text", "text": format!("dent couldn't draw the page: {why}")}], "isError": true});
+    }
+    let mut words = format!(
+        "Drawn at {} px wide: contentHeight {} px.",
+        l.width, l.content_height
+    );
+    if l.captured_height < l.content_height {
+        words.push_str(&format!(
+            " The picture shows the top {} px.",
+            l.captured_height
+        ));
+    }
+    if l.console.is_empty() {
+        words.push_str(" Nothing went wrong in its console.");
+    } else {
+        words.push_str("\nIts console:\n");
+        for line in &l.console {
+            words.push_str("- ");
+            words.push_str(line);
+            words.push('\n');
+        }
+    }
+    json!({"content": [
+        {"type": "image", "data": l.png, "mimeType": "image/png"},
+        {"type": "text", "text": words},
+    ]})
+}
 
 /// What the agent hears once a page is shown.
 const SHOWN: &str = "Shown to the person above your reply. Don't mention or describe the page; reply with only what it doesn't already say.";
@@ -208,6 +295,19 @@ fn answer(msg: &Value) -> Option<Value> {
                 },
             },
             {
+                "name": "preview_visual",
+                "description": LOOK_DESCRIPTION,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "html": {"type": "string", "description": "The whole HTML document, as you'd give show_visual."},
+                        "width": {"type": "integer", "minimum": 240, "maximum": 1600, "description": "The width to lay it out at, in CSS pixels. Defaults to 700, the chat's column; about 390 checks a phone."},
+                        "appearance": {"type": "string", "enum": ["auto", "light", "dark"], "description": "dent's theme to draw it in. Defaults to auto, the person's own."},
+                    },
+                    "required": ["html"],
+                },
+            },
+            {
                 "name": "ask_secret",
                 "description": "Ask the person for a secret (an API key, a token, a password) through a private card, and wait for them. You never see the value: it is saved where they choose, either the project's .env file or a file of this session's, under the name you give, and you are told which file. Load it in commands from there (for example `set -a; . <file>; set +a`) and never print, echo or log it. Never ask for secrets in chat, and never invent one.",
                 "inputSchema": {
@@ -300,6 +400,52 @@ pub fn said(name: &str, answer: &Value) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_look_waits_for_its_picture_and_gives_up_in_time() {
+        let dir = std::env::temp_dir().join(format!("dent-look-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let args = serde_json::json!({"html": "<p>hi</p>", "width": 390});
+        // No window answers: told so, quickly.
+        let none = super::look(Some(&dir), &args, std::time::Duration::from_millis(300));
+        assert_eq!(none["isError"], true);
+        assert!(
+            none["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("no dent window")
+        );
+        // One does, under the same key the desktop works out.
+        let key = dent_protocol::look_key("<p>hi</p>", 390, "auto");
+        let l = dent_protocol::Look {
+            png: "AAAA".into(),
+            width: 390,
+            content_height: 5000,
+            captured_height: 4000,
+            console: vec!["TypeError: x is undefined".into()],
+            failed: None,
+        };
+        std::fs::write(
+            dir.join(format!("look-{key}.json")),
+            serde_json::to_vec(&l).unwrap(),
+        )
+        .unwrap();
+        let got = super::look(Some(&dir), &args, std::time::Duration::from_secs(2));
+        assert_eq!(got["content"][0]["type"], "image");
+        let words = got["content"][1]["text"].as_str().unwrap();
+        assert!(words.contains("contentHeight 5000"), "{words}");
+        assert!(words.contains("top 4000"), "{words}");
+        assert!(words.contains("TypeError"), "{words}");
+        // Taken once: the file is gone.
+        assert!(!dir.join(format!("look-{key}.json")).exists());
+        // A page sized by the viewport is refused before anyone looks.
+        let vh = serde_json::json!({"html": "<style>body{height:100vh}</style>"});
+        assert_eq!(
+            super::look(Some(&dir), &vh, std::time::Duration::ZERO)["isError"],
+            true
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_page_sized_by_the_viewport_is_refused() {
         use super::viewport_height_unit as vh;
         assert_eq!(
@@ -352,7 +498,10 @@ mod tests {
             .iter()
             .filter_map(|t| t["name"].as_str())
             .collect();
-        assert_eq!(names, ["update_plan", "show_visual", "ask_secret"]);
+        assert_eq!(
+            names,
+            ["update_plan", "show_visual", "preview_visual", "ask_secret"]
+        );
         let call = answer(
             &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"update_plan","arguments":{"items":[]}}}),
         );

@@ -399,6 +399,7 @@ impl Render for Dent {
             inline.show(clear, (top.item_ix, top.offset_in_item.as_f32()));
             inline.keep_keys(window.mouse_position());
         }
+        self.look_at_pages(window);
         let t = self.t;
         // Lay out from the window: the chat keeps its minimum, the viewer
         // shrinks first, and only then does the sidebar fold away.

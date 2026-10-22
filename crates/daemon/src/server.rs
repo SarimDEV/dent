@@ -397,6 +397,10 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             d.command(&session, Op::Answer { id, answer }).await?;
             Reply::Ok
         }
+        Request::Looked { session, key, look } => {
+            d.command(&session, Op::Looked { key, look }).await?;
+            Reply::Ok
+        }
         Request::SetModel { session, model } => {
             d.command(&session, Op::SetModel(model)).await?;
             Reply::Ok
