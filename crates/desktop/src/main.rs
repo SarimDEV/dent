@@ -995,7 +995,15 @@ impl Render for Dent {
             .children(self.pane_view(cx))
             .children(self.adding_view(cx))
             .children(self.context_view(window, cx))
-            .children(self.github_card(cx))
+            .children({
+                // A card over a link floats over the chat: pages under it
+                // give way to their stills.
+                let card = self.github_card(cx);
+                if card.is_some() {
+                    self.over_chat.set(true);
+                }
+                card
+            })
             // Over everything, menus painted late included.
             .children(
                 self.lightbox_view(window, cx)

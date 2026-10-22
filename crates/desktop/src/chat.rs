@@ -3600,7 +3600,14 @@ impl Dent {
                                 let whole = view.size.height > px(0.)
                                     && bounds.top() >= view.top() - px(0.5)
                                     && bounds.bottom() <= view.bottom() + px(0.5);
-                                inline.borrow_mut().want(key, &page, bounds, whole, window);
+                                // Taller than the view, it can never be all in
+                                // view: it's drawn off screen for its still.
+                                let tall = bounds.size.height > view.size.height
+                                    && bounds.bottom() > view.top()
+                                    && bounds.top() < view.bottom();
+                                inline
+                                    .borrow_mut()
+                                    .want(key, &page, bounds, whole, tall, window);
                                 bounds
                             },
                             move |_, bounds, window, _| {

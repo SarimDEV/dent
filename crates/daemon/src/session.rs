@@ -1374,6 +1374,7 @@ impl Session {
         }
         let dir = self.asks_dir();
         std::fs::create_dir_all(&dir)?;
+        crate::plan_tool::sweep_looks(&dir);
         let file = dir.join(format!("look-{key}.json"));
         if file.exists() {
             return Ok(());

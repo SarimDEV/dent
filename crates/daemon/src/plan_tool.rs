@@ -92,7 +92,28 @@ const VISUAL_DESCRIPTION: &str = "Show the person a finished visual inside the c
 const LOOK_DESCRIPTION: &str = "See a page as it will show in the chat before you show it with show_visual: dent draws it at the width you give (720 by default, the chat's column) in the person's theme and returns a picture, its height (contentHeight) and anything it reported going wrong in its console. Use it to check layout, overflow, wrapping and contrast, then fix and look again, or show it. It needs dent open on the person's computer; if it isn't, you'll be told.";
 
 /// How long a look may take before the agent hears none came.
-const LOOK_WAIT: Duration = Duration::from_secs(40);
+pub const LOOK_WAIT: Duration = Duration::from_secs(40);
+
+/// Pictures no call can still be waiting for: answered after their call
+/// gave up, or by a second window. Each is a few MB, so they go.
+pub fn sweep_looks(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| m.elapsed().ok())
+            .is_some_and(|age| age >= LOOK_WAIT);
+        if name.starts_with("look-") && stale {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
 
 /// Wait for a desktop's picture of the page (`look-<key>.json`, left by
 /// the daemon), and give it to the agent as an image and a few words.
@@ -113,13 +134,15 @@ fn look(dir: Option<&Path>, args: &Value, wait: Duration) -> Value {
         .filter(|a| matches!(*a, "light" | "dark"))
         .unwrap_or("auto");
     let key = dent_protocol::look_key(html, width, appearance);
+    // A picture left from long ago (another theme, say) isn't this look's.
+    sweep_looks(dir);
     let file = dir.join(format!("look-{key}.json"));
     let until = std::time::Instant::now() + wait;
     loop {
         if let Ok(bytes) = std::fs::read(&file)
             && let Ok(l) = serde_json::from_slice::<dent_protocol::Look>(&bytes)
         {
-            let _ = std::fs::remove_file(&file);
+            // Left for a second call asking the same at once; swept later.
             return looked(&l);
         }
         if std::time::Instant::now() >= until {
@@ -434,7 +457,18 @@ mod tests {
         assert!(words.contains("contentHeight 5000"), "{words}");
         assert!(words.contains("top 4000"), "{words}");
         assert!(words.contains("TypeError"), "{words}");
-        // Taken once: the file is gone.
+        // A second call asking the same at once gets it too.
+        let again = super::look(Some(&dir), &args, std::time::Duration::from_secs(2));
+        assert_eq!(again["content"][0]["type"], "image");
+        // Once no call can be waiting for it, it's swept.
+        let old = std::time::SystemTime::now() - super::LOOK_WAIT;
+        std::fs::File::options()
+            .write(true)
+            .open(dir.join(format!("look-{key}.json")))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        super::sweep_looks(&dir);
         assert!(!dir.join(format!("look-{key}.json")).exists());
         // A page sized by the viewport is refused before anyone looks.
         let vh = serde_json::json!({"html": "<style>body{height:100vh}</style>"});

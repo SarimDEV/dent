@@ -160,6 +160,23 @@ pub(super) fn pages() -> Vec<(f32, Act)> {
                 10.,
             ),
         ),
+        (0.1, Call(to_tall_page)),
+        (
+            0.3,
+            Until(
+                "too tall to be all in view, it's drawn off screen for its still",
+                |d, _| {
+                    let i = d.inline.borrow();
+                    i.off_screen() == 1
+                        && i.heights
+                            .iter()
+                            .any(|(k, h)| *h > 1200. && i.still(*k).is_some())
+                },
+                10.,
+            ),
+        ),
+        (0.3, Shot("pages-tall")),
+        (0.1, Call(to_end)),
         (0.2, Wheel("transcript", 300.)),
         (
             0.,
@@ -278,4 +295,23 @@ pub(super) fn pages_fallback() -> Vec<(f32, Act)> {
         ),
     ]);
     v
+}
+
+/// Scroll to the tallest page in the chat.
+fn to_tall_page(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
+    let tall = d
+        .inline
+        .borrow()
+        .heights
+        .iter()
+        .find(|(_, h)| **h > 1200.)
+        .map(|(k, _)| *k);
+    let at = tall.and_then(|(art, v)| {
+        current(d)?.items.iter().position(
+            |i| matches!(i, Item::Made { art: a, version, .. } if *a == art && *version == v),
+        )
+    });
+    if let Some(ix) = at {
+        d.scroll_to_item(ix, cx);
+    }
 }
