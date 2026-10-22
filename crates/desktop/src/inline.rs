@@ -153,11 +153,9 @@ impl Inline {
             // flash at the guess.
             let fitted = self.heights.contains_key(&key);
             let live = clear && settled && placed && slot.whole && fitted;
+            // Hiding hands the keyboard back to dent too.
             let mut p = slot.page.borrow_mut();
             p.set_visible(live);
-            if !live {
-                p.release_focus();
-            }
             // The view's picture of what it shows now (`snapshot` checks
             // it's of this page), kept as this page's still.
             if let Some(snap) = p.snapshot(size(px(0.), px(0.)), true)
@@ -165,10 +163,9 @@ impl Inline {
                     .stills
                     .get(&key)
                     .is_none_or(|s| !Arc::ptr_eq(s, &snap.image))
+                && let Some(old) = self.stills.insert(key, snap.image)
             {
-                if let Some(old) = self.stills.insert(key, snap.image) {
-                    self.retired.push(old);
-                }
+                self.retired.push(old);
             }
         }
     }
