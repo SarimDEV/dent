@@ -2,8 +2,36 @@
 //! person's shell PATH, so ask their login shell once, the way a terminal
 //! would, and give agents that.
 
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::Duration;
+
+/// Where each login shell asked is written down while it runs: one whose
+/// daemon died before stopping it is found and stopped by the next. Left
+/// alone, such a shell can hang for good (seen by the hundred under tests
+/// that kill daemons), and one goes with every agent started.
+static ASKING: OnceLock<PathBuf> = OnceLock::new();
+
+/// Keep shells being asked under `state`, and stop any a daemon before
+/// this one left running.
+pub fn keep_track(state: &Path) {
+    let dir = state.join("env-shells");
+    let _ = std::fs::create_dir_all(&dir);
+    for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let left = std::fs::read_to_string(e.path()).ok();
+        let pid = e.file_name().to_string_lossy().parse::<i32>().ok();
+        if let (Some(pid), Some(started)) = (pid, left.and_then(|s| s.trim().parse().ok()))
+            && pid > 1
+            && crate::holder::started_at(pid, started)
+        {
+            // SAFETY: kill has no memory preconditions; it's the shell's group.
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+        }
+        let _ = std::fs::remove_file(e.path());
+    }
+    let _ = ASKING.set(dir);
+}
 
 /// What every agent runs with; which command each runs is its driver's
 /// ([`crate::agent::Driver::command`]).
@@ -143,6 +171,14 @@ fn login_env(shell: &str) -> Option<Vec<(String, String)>> {
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     let mut child = cmd.spawn().ok()?;
     let group = child.id() as i32;
+    let note = ASKING.get().map(|d| d.join(group.to_string()));
+    if let Some(n) = &note {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let _ = std::fs::write(n, now.to_string());
+    }
     // A slow or broken shell profile mustn't hold up the daemon.
     let (tx, rx) = std::sync::mpsc::channel();
     let mut out = child.stdout.take()?;
@@ -155,6 +191,9 @@ fn login_env(shell: &str) -> Option<Vec<(String, String)>> {
     // SAFETY: signalling the group we just made.
     unsafe { libc::kill(-group, libc::SIGKILL) };
     let _ = child.wait();
+    if let Some(n) = &note {
+        let _ = std::fs::remove_file(n);
+    }
     env_from(&got?)
 }
 

@@ -171,6 +171,7 @@ fn main() -> Result<()> {
     let _ = std::fs::remove_file(paths.state.join("stop-reason"));
 
     let store = store::Store::open(&paths.db())?;
+    env::keep_track(&paths.state);
     let env = env::AgentEnv::detect();
     let rt = tokio::runtime::Runtime::new()?;
     let run = rt.block_on(async move {
