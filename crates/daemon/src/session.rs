@@ -3111,9 +3111,38 @@ fn move_notice(arrived: &str) -> Option<String> {
         v["from_cwd"].as_str()?,
         v["to_cwd"].as_str()?,
     );
+    let branch = v["branch"]
+        .as_str()
+        .map(|b| format!(" {b}"))
+        .unwrap_or_default();
     Some(format!(
-        "[dent: this session moved to another machine. It worked in {old} on {from}; it works in {new} here, with the same files and changes. {old} isn't on this machine: use paths under {new} from now on.]"
+        "[dent: this session moved to another machine. It worked in {old} on {from}; it works in {new} here, with the same files and changes. {old} isn't on this machine: use paths under {new} from now on.{branch}]"
     ))
+}
+
+#[cfg(test)]
+mod move_notice_tests {
+    /// The agent hears where it is now, and, landed on a branch of its own,
+    /// which and why; an older daemon's note, without it, still reads.
+    #[test]
+    fn the_agent_hears_where_it_is_and_on_what_branch() {
+        let plain = r#"{"from_machine":"mac","from_cwd":"/a","to_cwd":"/b"}"#;
+        let n = super::move_notice(plain).unwrap();
+        assert!(
+            n.contains("It worked in /a on mac; it works in /b here"),
+            "{n}"
+        );
+        assert!(n.ends_with("from now on.]"), "{n}");
+        let beside = r#"{"from_machine":"mac","from_cwd":"/a","to_cwd":"/b",
+            "branch":"Its branch here is main-moved, not main: main is checked out in /p."}"#;
+        let n = super::move_notice(beside).unwrap();
+        assert!(
+            n.ends_with(
+                "from now on. Its branch here is main-moved, not main: main is checked out in /p.]"
+            ),
+            "{n}"
+        );
+    }
 }
 
 #[cfg(test)]

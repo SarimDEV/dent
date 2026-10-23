@@ -5028,3 +5028,67 @@ fn two_sessions_moving_in_at_once_clone_their_project_once() {
         .collect();
     assert_eq!(projects, vec!["app".to_string()], "cloned once");
 }
+
+/// Moved to a machine whose own checkout has its branch out, with a commit
+/// that machine hasn't: it lands on a branch of its own, says so, and the
+/// checkout there is as it was.
+#[test]
+fn a_move_onto_a_branch_checked_out_there_lands_beside_it() {
+    let m = Moves::new("beside", true);
+    git_in(&m.on_b, &["checkout", "-q", "work"]);
+    let before = git_in(&m.on_b, &["rev-parse", "HEAD"]);
+    std::fs::write(m.on_a.join("local.md"), "unpushed\n").unwrap();
+    git_in(&m.on_a, &["add", "local.md"]);
+    git_in(&m.on_a, &["commit", "-qm", "not pushed yet"]);
+    let mut a = m.a.client();
+    let mut b = m.b.client();
+    a.subscribe(0);
+    b.subscribe(0);
+    b.call(Request::AddProject {
+        path: m.on_b.display().to_string(),
+        create: false,
+    })
+    .unwrap();
+    let s = a.create(
+        &m.on_a.display().to_string(),
+        Permission::Full,
+        "remember the word plum",
+    );
+    a.wait_turns(&s, 1);
+    let to = carry(&mut a, &mut b, &s, "mvb1", 4096, None)
+        .unwrap()
+        .unwrap();
+    b.pump_for(Duration::from_millis(300));
+    let said = b.events(&to).into_iter().find_map(|e| match e {
+        Body::Notice { text } if text.starts_with("Moved here") => Some(text),
+        _ => None,
+    });
+    assert!(
+        said.as_deref()
+            .is_some_and(|t| t.contains("onto a new branch, work-moved: work is checked out in")),
+        "{said:?}"
+    );
+    let cwd = b
+        .events(&to)
+        .into_iter()
+        .find_map(|e| match e {
+            Body::Created { cwd, .. } => Some(cwd),
+            _ => None,
+        })
+        .unwrap();
+    let cwd = Path::new(&cwd);
+    assert_eq!(
+        git_in(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "work-moved"
+    );
+    assert!(git_in(cwd, &["log", "--format=%s"]).contains("not pushed yet"));
+    assert_eq!(git_in(&m.on_b, &["rev-parse", "HEAD"]), before);
+    assert_eq!(
+        git_in(&m.on_b, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "work"
+    );
+    let n = b.turns_done(&to);
+    b.say(&to, "r", "recall", false);
+    b.wait_turns(&to, n + 1);
+    assert!(b.text(&to).contains("remember the word plum"));
+}

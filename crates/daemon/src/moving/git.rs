@@ -360,31 +360,52 @@ pub fn apply(
         return Err("the bundle isn't the one the manifest describes".into());
     }
     let mut checkout = m.branch.clone();
+    let mut on = None;
     if !m.branch.is_empty() {
         let head = format!("refs/heads/{}", m.branch);
         let cur = git(repo, &["rev-parse", "-q", "--verify", &head], &[]).unwrap_or_default();
-        let elsewhere = git(repo, &["worktree", "list", "--porcelain"], &[])
-            .unwrap_or_default()
-            .lines()
-            .any(|l| l == format!("branch {head}"));
-        if elsewhere {
-            if cur == m.tip {
-                // Out elsewhere at the same commit: a detached worktree.
-                checkout.clear();
-            } else {
-                return Err(format!(
-                    "{} is checked out in another worktree here",
-                    m.branch
-                ));
+        let list = git(repo, &["worktree", "list", "--porcelain"], &[]).unwrap_or_default();
+        // Its branch here is the person's to keep as it is when it's
+        // checked out (as often as not in the main checkout), or has
+        // commits the session hasn't: the session lands on a branch of its
+        // own at its commit instead, said so, and nothing of theirs moves.
+        let mut path = "";
+        let mut out_at = None;
+        for l in list.lines() {
+            if let Some(p) = l.strip_prefix("worktree ") {
+                path = p;
+            } else if l == format!("branch {head}") {
+                out_at = Some(path.to_string());
             }
         }
-        if !cur.is_empty() && cur != m.tip {
-            if git(repo, &["merge-base", "--is-ancestor", &cur, &m.tip], &[]).is_err() {
-                return Err(format!(
-                    "{} has commits here the move doesn't; bring them together, then move again",
-                    m.branch
-                ));
+        let behind = !cur.is_empty()
+            && cur != m.tip
+            && git(repo, &["merge-base", "--is-ancestor", &cur, &m.tip], &[]).is_err();
+        let why = match out_at {
+            Some(p) => Some(format!("{} is checked out in {p}", m.branch)),
+            None if behind => Some(format!("{} here has commits it hasn't", m.branch)),
+            None => None,
+        };
+        if let Some(why) = why {
+            let mut name = format!("{}-moved", m.branch);
+            let mut n = 1;
+            while git(
+                repo,
+                &["rev-parse", "-q", "--verify", &format!("refs/heads/{name}")],
+                &[],
+            )
+            .is_ok()
+            {
+                n += 1;
+                name = format!("{}-moved-{n}", m.branch);
             }
+            let alt = format!("refs/heads/{name}");
+            git(repo, &["update-ref", &alt, &m.tip, ""], &[])?;
+            undo.steps
+                .push(vec!["update-ref".into(), "-d".into(), alt, m.tip.clone()]);
+            on = Some((name.clone(), why));
+            checkout = name;
+        } else if !cur.is_empty() && cur != m.tip {
             git(repo, &["update-ref", &head, &m.tip, &cur], &[])?;
             undo.steps.push(vec![
                 "update-ref".into(),
@@ -428,12 +449,12 @@ pub fn apply(
         &["read-tree", "-m", &format!("{}^{{tree}}", m.index)],
         &[],
     )?;
-    Ok(Applied(undo))
+    Ok(Applied(undo, on))
 }
 
 /// An apply that's done, undone if dropped before [`Applied::keep`]: the
 /// steps after it (placing the conversation) can still fail.
-pub struct Applied(Undo);
+pub struct Applied(Undo, Option<(String, String)>);
 
 impl std::fmt::Debug for Applied {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -442,6 +463,11 @@ impl std::fmt::Debug for Applied {
 }
 
 impl Applied {
+    /// The branch it landed on instead of its own, and why, when it did.
+    pub fn instead(&self) -> Option<&(String, String)> {
+        self.1.as_ref()
+    }
+
     pub fn keep(mut self) {
         self.0.done = true;
     }
@@ -599,30 +625,78 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Its branch here checked out (in the person's own checkout, say):
+    /// it lands on a branch of its own at its commit, and their checkout
+    /// and branch are as they were.
     #[test]
-    fn what_would_lose_work_is_refused_and_leaves_nothing_behind() {
+    fn a_branch_checked_out_here_is_left_and_it_lands_beside_it() {
+        let (base, src, dst) = rig("out");
+        let bundle = base.join("m4.bundle");
+        let m = pack(&src, "m4", &tips(&dst), &[], &bundle).unwrap();
+        sh(&dst, "git checkout -q work");
+        let before = out(&dst, &["rev-parse", "refs/heads/work"]);
+        let status = out(&dst, &["status", "--porcelain"]);
+        let new = base.join("dst-moved");
+        let a = apply(&dst, &m, "m4", &bundle, &new).unwrap();
+        let (name, why) = a.instead().cloned().unwrap();
+        assert_eq!(name, "work-moved");
+        assert!(why.starts_with("work is checked out in "), "{why}");
+        a.keep();
+        assert_eq!(view(&new), view(&src));
+        assert_eq!(
+            out(&new, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "work-moved"
+        );
+        assert_eq!(out(&dst, &["rev-parse", "--abbrev-ref", "HEAD"]), "work");
+        assert_eq!(out(&dst, &["rev-parse", "refs/heads/work"]), before);
+        assert_eq!(out(&dst, &["status", "--porcelain"]), status);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn nothing_of_theirs_moves_and_what_fails_leaves_nothing_behind() {
         let (base, src, dst) = rig("refuse");
         let bundle = base.join("m2.bundle");
         let m = pack(&src, "m2", &tips(&dst), &[], &bundle).unwrap();
-        // The branch moved on here: refused, branch untouched, no worktree.
+        // The branch moved on here: theirs is untouched, and it lands on a
+        // branch of its own; not kept, that goes again with the worktree.
         sh(
             &dst,
             "git checkout -q work && printf 'mine\\n' > mine.txt && git add mine.txt && git commit -qm mine && git checkout -q --detach",
         );
         let before = out(&dst, &["rev-parse", "refs/heads/work"]);
         let new = base.join("dst-moved");
-        let e = apply(&dst, &m, "m2", &bundle, &new).unwrap_err();
-        assert!(e.contains("has commits here"), "{e}");
+        let a = apply(&dst, &m, "m2", &bundle, &new).unwrap();
+        let (name, why) = a.instead().cloned().unwrap();
+        assert_eq!(name, "work-moved");
+        assert!(why.contains("has commits it hasn't"), "{why}");
+        assert_eq!(view(&new), view(&src));
         assert_eq!(out(&dst, &["rev-parse", "refs/heads/work"]), before);
+        drop(a);
         assert!(!new.exists());
+        assert!(
+            git(
+                &dst,
+                &["rev-parse", "-q", "--verify", "refs/heads/work-moved"],
+                &[]
+            )
+            .is_err()
+        );
         assert!(out(&dst, &["for-each-ref", "refs/dent"]).is_empty());
-        // A bundle cut short: refused, with nothing left behind.
-        let short = base.join("short.bundle");
-        let bytes = std::fs::read(&bundle).unwrap();
+        // A bundle cut short, where its commits aren't yet: refused, with
+        // nothing left behind. (Where they are already, from a try before,
+        // what's there is what the manifest names, and that's checked.)
+        let (base3, src3, dst3) = rig("short");
+        let b3 = base3.join("m5.bundle");
+        let m3 = pack(&src3, "m5", &tips(&dst3), &[], &b3).unwrap();
+        let short = base3.join("short.bundle");
+        let bytes = std::fs::read(&b3).unwrap();
         std::fs::write(&short, &bytes[..bytes.len() / 2]).unwrap();
-        assert!(apply(&dst, &m, "m2", &short, &new).is_err());
-        assert!(!new.exists());
-        assert!(out(&dst, &["for-each-ref", "refs/dent"]).is_empty());
+        let new3 = base3.join("dst-moved");
+        assert!(apply(&dst3, &m3, "m5", &short, &new3).is_err());
+        assert!(!new3.exists());
+        assert!(out(&dst3, &["for-each-ref", "refs/dent"]).is_empty());
+        let _ = std::fs::remove_dir_all(&base3);
         // The new folder there already: refused, and the branch it made is
         // taken out again, so a clean retry works.
         let (base2, src2, dst2) = rig("exists");
