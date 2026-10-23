@@ -95,23 +95,26 @@ fn run(state: &Path) -> std::io::Result<()> {
             continue;
         };
         for line in d.lines() {
-            if let Some(to) = line.strip_prefix("update ") {
-                let to = to.trim();
-                // The record on disk, in case an install changed it.
-                if let Ok(r) = Record::load(state) {
-                    rec = r;
-                }
-                if let Err(why) = update::preflight(state, &rec, to) {
-                    eprintln!("dent-launcher: refused {to}: {why}");
-                    d.say(&format!("refused {why}"));
-                    continue;
-                }
-                d.say("accepted");
-                let running = daemon.take().expect("running");
-                daemon = update::apply(state, &mut rec, running, to, &stopping)?;
-                tries = Backoff::default();
-                break;
+            // `update` is asked for; `auto-update` is the daemon's own idea.
+            let (to, auto) = match line.split_once(' ') {
+                Some(("update", v)) => (v.trim(), false),
+                Some(("auto-update", v)) => (v.trim(), true),
+                _ => continue,
+            };
+            // The record on disk, in case an install changed it.
+            if let Ok(r) = Record::load(state) {
+                rec = r;
             }
+            if let Err(why) = update::preflight(state, &rec, to, auto) {
+                eprintln!("dent-launcher: refused {to}: {why}");
+                d.say(&format!("refused {why}"));
+                continue;
+            }
+            d.say("accepted");
+            let running = daemon.take().expect("running");
+            daemon = update::apply(state, &mut rec, running, to, &stopping)?;
+            tries = Backoff::default();
+            break;
         }
         let Some(d) = daemon.as_mut() else { continue };
         if let Some(e) = d.ended() {

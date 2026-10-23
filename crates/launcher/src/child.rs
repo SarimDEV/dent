@@ -1,7 +1,8 @@
 //! A daemon the launcher runs, and the two pipes between them.
 //!
 //! The daemon finds them as descriptors 3 (its lines to the launcher:
-//! `prepared`, `update <version>`) and 4 (the launcher's to it:
+//! `prepared`, `update <version>`, `auto-update <version>`) and 4 (the
+//! launcher's to it:
 //! `committed`, `accepted`, `refused <why>`), named by `DENT_LAUNCHER_OUT`
 //! and `DENT_LAUNCHER_IN`. The launcher keeps its ends open while the
 //! daemon runs, so the daemon never reads an end of file as the launcher

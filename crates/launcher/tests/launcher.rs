@@ -45,6 +45,7 @@ fi
 R=$!
 while :; do
   if [ -f "$S/ask" ]; then echo "update $(cat "$S/ask")" >&3; rm -f "$S/ask"; fi
+  if [ -f "$S/ask-auto" ]; then echo "auto-update $(cat "$S/ask-auto")" >&3; rm -f "$S/ask-auto"; fi
   sleep 0.05 & wait $!
 done
 "#;
@@ -206,14 +207,31 @@ fn a_failed_migration_rolls_back_and_is_never_retried() {
     assert!(r.log().contains("rolled_back"), "{}", r.log());
     assert!(r.record().contains("active=a"));
     assert!(r.record().contains("never_retry=b"), "{}", r.record());
-    // Asked again: refused, and a keeps running.
-    r.ask("b");
+    // Not tried again on the daemon's own say-so...
+    std::fs::write(r.state.join("ask-auto"), "b").unwrap();
     assert!(
         r.saw("a heard refused b rolled back before", 1, 5.),
         "{}",
         r.log()
     );
     assert_eq!(r.log().matches("b start").count(), 1);
+    // ...but when someone asks for it, it's tried (and fails again here).
+    r.ask("b");
+    assert!(r.saw("b start trial=1", 2, 10.), "{}", r.log());
+    assert!(r.saw("a start trial=0", 3, 10.), "{}", r.log());
+}
+
+#[test]
+fn a_version_retried_by_hand_that_passes_is_held_back_no_more() {
+    let mut r = Rig::new("retry");
+    r.version("a", Trial::Migrates, 1);
+    r.version("b", Trial::Migrates, 1);
+    std::fs::write(r.state.join("launcher.state"), "active=a\nnever_retry=b\n").unwrap();
+    r.start(&[]);
+    assert!(r.saw("a start", 1, 5.));
+    r.ask("b");
+    assert!(r.saw("b heard committed", 1, 10.), "{}", r.log());
+    assert!(!r.record().contains("never_retry"), "{}", r.record());
 }
 
 #[test]

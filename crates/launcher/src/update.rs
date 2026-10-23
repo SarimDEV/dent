@@ -27,15 +27,18 @@ fn snapshots(state: &Path) -> PathBuf {
     state.join("snapshots")
 }
 
-/// Why an update can't go ahead, said before anything is stopped.
-pub fn preflight(state: &Path, rec: &Record, to: &str) -> Result<(), String> {
+/// Why an update can't go ahead, said before anything is stopped. `auto`
+/// when nobody asked for it: a version that rolled back is tried again only
+/// when someone does (it may have failed for something since put right,
+/// like a port another program held).
+pub fn preflight(state: &Path, rec: &Record, to: &str, auto: bool) -> Result<(), String> {
     if !valid_version(to) {
         return Err(format!("{to:?} isn't a version"));
     }
     if to == rec.active {
         return Err(format!("{to} already runs"));
     }
-    if rec.never_retry.iter().any(|v| v == to) {
+    if auto && rec.never_retry.iter().any(|v| v == to) {
         return Err(format!("{to} rolled back before"));
     }
     let dir = state.join("versions").join(to);
@@ -197,6 +200,8 @@ pub fn apply(
         None => {
             let from = rec.active.clone();
             rec.committed();
+            // Asked for again and passed this time: no longer held back.
+            rec.never_retry.retain(|v| v != to);
             rec.save(state)?; // durable before the daemon is told
             trial.say("committed");
             eprintln!("dent-launcher: {to} committed");
