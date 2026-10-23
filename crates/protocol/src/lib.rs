@@ -724,6 +724,10 @@ pub struct Returned {
     pub attachments: Vec<String>,
 }
 
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 /// What another machine needs to make its own checkout of a project
 /// ([`Request::Pack`]).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -743,6 +747,9 @@ pub struct Pack {
     /// listed.
     #[serde(default)]
     pub ignored: Vec<Ignored>,
+    /// How many more ignored files there are than are listed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub more: u32,
     /// Commits here on no remote, which a clone won't have.
     #[serde(default)]
     pub unpushed: u32,
@@ -784,9 +791,13 @@ pub struct GitRemote {
 pub struct Ignored {
     pub path: String,
     pub size: u64,
-    /// Offered ticked: an environment file (`.env`, `.env.local`).
+    /// Offered ticked: an environment file (`.env`, `.env.local`) small
+    /// enough to be settings.
     #[serde(default)]
     pub carry: bool,
+    /// An environment file, ticked or not (older daemons leave it out).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub env: bool,
 }
 
 /// A project to bring to the machine a new session starts on

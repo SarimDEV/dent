@@ -6449,6 +6449,13 @@ impl Entry {
             off: None,
         }
     }
+    /// A row that opens or closes the rows after it.
+    pub fn fold(key: String, name: &str, open: bool, act: Option<Act>) -> Self {
+        Self {
+            act,
+            ..Self::of(key, name, EntryKind::Fold(open))
+        }
+    }
     pub fn row(key: String, name: &str, note: Option<String>, on: bool, act: Option<Act>) -> Self {
         Self {
             note,

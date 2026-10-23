@@ -22,7 +22,187 @@ pub struct Draft {
     pub from: String,
     pub dir: String,
     pub pack: Pack,
+    pub files: FileChoice,
+}
+
+/// The ignored files chosen to go with a clone (Bring, or a move cloning
+/// its project there), and how much of their list shows.
+#[derive(Clone, Default)]
+pub struct FileChoice {
     pub ticked: BTreeSet<String>,
+    /// Every environment file listed, not only the first few.
+    pub all_env: bool,
+    /// The other ignored files listed at all.
+    pub others: bool,
+}
+
+/// Environment files listed before "Show all".
+const ENV_SHOWN: usize = 8;
+
+impl FileChoice {
+    /// As offered: the files its machine marks to carry.
+    pub fn of(pack: &Pack) -> Self {
+        Self {
+            ticked: pack
+                .ignored
+                .iter()
+                .filter(|i| i.carry)
+                .map(|i| i.path.clone())
+                .collect(),
+            ..Self::default()
+        }
+    }
+
+    /// What the ticked files come to.
+    pub fn bytes(&self, pack: &Pack) -> u64 {
+        pack.ignored
+            .iter()
+            .filter(|i| self.ticked.contains(&i.path))
+            .map(|i| i.size)
+            .sum()
+    }
+
+    /// More than may go with it.
+    pub fn too_much(&self, pack: &Pack) -> bool {
+        self.bytes(pack) > dent_protocol::CARRIED_MAX as u64
+    }
+
+    /// "and 3 files", for the line that says what a clone takes.
+    pub fn and_files(&self) -> String {
+        match self.ticked.len() {
+            0 => String::new(),
+            1 => " and 1 file".into(),
+            n => format!(" and {n} files"),
+        }
+    }
+}
+
+/// Where a menu's [`FileChoice`] lives, for its rows to change it.
+pub type Choice = fn(&mut Dent) -> Option<&mut FileChoice>;
+
+/// The rows choosing what goes with a clone, under the row that goes, keys
+/// starting `key`: how many are ticked and what they come to, environment
+/// files (all at once, the first few, the rest on asking), then the other
+/// ignored files on asking. Long lists stay short until asked.
+pub fn file_entries(key: &str, pack: &Pack, c: &FileChoice, choice: Choice, v: &mut Vec<Entry>) {
+    if pack.ignored.is_empty() {
+        return;
+    }
+    v.push(Entry::separator());
+    let bytes = c.bytes(pack);
+    let listed = pack.ignored.len() + pack.more as usize;
+    v.push(Entry::note(&format!(
+        "{} of {listed} file{} Git ignores ticked{}. Folders of what's installed or built, like node_modules, never go.",
+        c.ticked.len(),
+        if listed == 1 { "" } else { "s" },
+        if bytes > 0 {
+            format!(" · {}", size(bytes))
+        } else {
+            String::new()
+        }
+    )));
+    let file = |i: &dent_protocol::Ignored| {
+        let path = i.path.clone();
+        Entry::row(
+            format!("{key}-f-{}", i.path),
+            &i.path,
+            Some(size(i.size)),
+            c.ticked.contains(&i.path),
+            act(move |this, _, cx| {
+                if let Some(c) = choice(this)
+                    && !c.ticked.remove(&path)
+                {
+                    c.ticked.insert(path.clone());
+                }
+                cx.notify();
+            }),
+        )
+        .keeps_open()
+    };
+    let (env, rest): (Vec<_>, Vec<_>) = pack.ignored.iter().partition(|i| i.carry || i.env);
+    if !env.is_empty() {
+        // Ticked all at once: those small enough to be settings (one over
+        // 1 MB is ticked by hand, if at all).
+        let all: Vec<String> = env
+            .iter()
+            .filter(|i| i.carry)
+            .map(|i| i.path.clone())
+            .collect();
+        let ticked = all.iter().filter(|p| c.ticked.contains(*p)).count();
+        if !all.is_empty() {
+            v.push(
+                Entry::row(
+                    format!("{key}-env-all"),
+                    &format!("Environment files · {}", env.len()),
+                    Some(match ticked {
+                        n if n == all.len() => "All ticked · untick them all".into(),
+                        0 => "None ticked · tick them all".into(),
+                        n => format!("{n} ticked · tick them all"),
+                    }),
+                    ticked == all.len(),
+                    act(move |this, _, cx| {
+                        if let Some(c) = choice(this) {
+                            if all.iter().all(|p| c.ticked.contains(p)) {
+                                for p in &all {
+                                    c.ticked.remove(p);
+                                }
+                            } else {
+                                c.ticked.extend(all.iter().cloned());
+                            }
+                        }
+                        cx.notify();
+                    }),
+                )
+                .keeps_open(),
+            );
+        }
+        let shown = if c.all_env {
+            env.len()
+        } else {
+            env.len().min(ENV_SHOWN)
+        };
+        v.extend(env[..shown].iter().map(|i| file(i)));
+        if env.len() > ENV_SHOWN {
+            v.push(Entry::fold(
+                format!("{key}-env-more"),
+                &if c.all_env {
+                    "Show fewer".to_string()
+                } else {
+                    format!("Show all {}", env.len())
+                },
+                c.all_env,
+                act(move |this, _, cx| {
+                    if let Some(c) = choice(this) {
+                        c.all_env = !c.all_env;
+                    }
+                    // The rows after it moved: no row stays lit by
+                    // where it was.
+                    this.menu_ix = None;
+                    cx.notify();
+                }),
+            ));
+        }
+    }
+    if !rest.is_empty() {
+        v.push(Entry::fold(
+            format!("{key}-others"),
+            &format!("Other files Git ignores · {}", rest.len()),
+            c.others,
+            act(move |this, _, cx| {
+                if let Some(c) = choice(this) {
+                    c.others = !c.others;
+                }
+                this.menu_ix = None;
+                cx.notify();
+            }),
+        ));
+        if c.others {
+            v.extend(rest.iter().map(|i| file(i)));
+        }
+    }
+    if pack.more > 0 {
+        v.push(Entry::note(&format!("{} more aren't listed.", pack.more)));
+    }
 }
 
 /// A project the next session brings with it.
@@ -199,17 +379,11 @@ impl Dent {
                 ))
             }
             Ok(Some(pack)) => {
-                let ticked = pack
-                    .ignored
-                    .iter()
-                    .filter(|i| i.carry)
-                    .map(|i| i.path.clone())
-                    .collect();
                 self.bring_draft = Some(Draft {
                     from,
                     dir,
+                    files: FileChoice::of(&pack),
                     pack,
-                    ticked,
                 });
                 self.project_mode = Mode::Bring;
                 // Bring is lit, not the first ticked file: Return brings.
@@ -230,59 +404,42 @@ impl Dent {
         };
         let p = &d.pack;
         let here = self.machine_name(&self.defaults.machine);
-        let files = match d.ticked.len() {
-            0 => String::new(),
-            1 => " and 1 file".into(),
-            n => format!(" and {n} files"),
-        };
+        let files = d.files.and_files();
         let from = short(&p.remotes[0].url);
         let note = match &p.branch {
             Some(b) => format!("Clones {from} on {b}{files}"),
             None => format!("Clones {from}{files}"),
         };
-        v.push(
-            Entry::row(
-                "b-go".into(),
-                &format!("Bring {} to {here}", p.name),
-                Some(note),
-                false,
-                act(|this, _, cx| this.bring_chosen(cx)),
-            )
-            // Open while its files are read; it closes once they're here.
-            .keeps_open(),
-        );
+        let mut go = Entry::row(
+            "b-go".into(),
+            &format!("Bring {} to {here}", p.name),
+            Some(note),
+            false,
+            act(|this, _, cx| this.bring_chosen(cx)),
+        )
+        // Open while its files are read; it closes once they're here.
+        .keeps_open();
+        if d.files.too_much(p) {
+            go.note = Some(format!(
+                "The ticked files come to {}; at most {} go along",
+                size(d.files.bytes(p)),
+                size(dent_protocol::CARRIED_MAX as u64)
+            ));
+            go.off = Some("Untick some files first");
+            go.act = None;
+        }
+        v.push(go);
         // Work here a clone won't have: said before it's brought.
         if let Some(missing) = p.missing() {
             v.push(Entry::note(&missing));
         }
-        if p.ignored.is_empty() {
-            return;
-        }
-        v.push(Entry::separator());
-        v.push(Entry::note(&format!(
-            "Files Git ignores on {}, which a clone won't have",
-            self.machine_name(&d.from)
-        )));
-        for i in &p.ignored {
-            let path = i.path.clone();
-            v.push(
-                Entry::row(
-                    format!("b-f-{}", i.path),
-                    &i.path,
-                    Some(size(i.size)),
-                    d.ticked.contains(&i.path),
-                    act(move |this, _, cx| {
-                        if let Some(d) = this.bring_draft.as_mut()
-                            && !d.ticked.remove(&path)
-                        {
-                            d.ticked.insert(path.clone());
-                        }
-                        cx.notify();
-                    }),
-                )
-                .keeps_open(),
-            );
-        }
+        file_entries(
+            "b",
+            p,
+            &d.files,
+            |this| this.bring_draft.as_mut().map(|d| &mut d.files),
+            v,
+        );
     }
 
     /// Bring: read the ticked files on their machine, then it's chosen.
@@ -300,11 +457,14 @@ impl Dent {
             branch: d.pack.branch.clone(),
             files: Vec::new(),
         };
-        if d.ticked.is_empty() {
+        if d.files.too_much(&d.pack) {
+            return;
+        }
+        if d.files.ticked.is_empty() {
             self.bring_ready(bring);
         } else {
             let (from, dir) = (d.from.clone(), d.dir.clone());
-            let paths: Vec<String> = d.ticked.iter().cloned().collect();
+            let paths: Vec<String> = d.files.ticked.iter().cloned().collect();
             self.project_error = None;
             self.project_busy = Some(match paths.len() {
                 1 => format!("Reading {} on {}…", paths[0], self.machine_name(&from)),

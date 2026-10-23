@@ -558,7 +558,9 @@ pub(super) fn move_clone() -> Vec<(f32, Act)> {
                     row("move-clone-go").is_some()
                         && row("move-f-.env").is_some_and(|e| e.on)
                         && row("move-f-.env.local").is_some_and(|e| e.on)
-                        && row("move-f-notes.local.md").is_some_and(|e| !e.on)
+                        // The rest wait behind their fold.
+                        && row("move-others").is_some()
+                        && row("move-f-notes.local.md").is_none()
                         && !e.iter().any(|e| e.key.contains("node_modules"))
                         && d.menu.is_some()
                 },
@@ -566,15 +568,28 @@ pub(super) fn move_clone() -> Vec<(f32, Act)> {
             ),
         ),
         (0.5, Shot("clone-files")),
+        (0.1, Click("move-others")),
+        (
+            0.1,
+            Until(
+                "opened, the other ignored files show, unticked",
+                |d, _| {
+                    d.move_entries()
+                        .iter()
+                        .any(|e| e.key == "move-f-notes.local.md" && !e.on)
+                },
+                3.,
+            ),
+        ),
         (0.1, Click("move-f-notes.local.md")),
         (
             0.1,
             Until(
                 "a file ticked joins them",
                 |d, _| {
-                    d.move_clone
-                        .as_ref()
-                        .is_some_and(|c| c.ticked.contains("notes.local.md") && c.ticked.len() == 3)
+                    d.move_clone.as_ref().is_some_and(|c| {
+                        c.files.ticked.contains("notes.local.md") && c.files.ticked.len() == 3
+                    })
                 },
                 2.,
             ),
@@ -824,4 +839,144 @@ pub(super) fn move_beside_live() -> Vec<(f32, Act)> {
         ),
         (0.8, Shot("beside-arrived")),
     ]
+}
+
+/// The clone's list for a monorepo as people have them
+/// (`/tmp/rtscripts/envstress.sh` makes it): hundreds of environment
+/// files, packages' own inside node_modules and .venv, junk, files too big
+/// to tick, and more than may go at once.
+pub(super) fn move_clone_many() -> Vec<(f32, Act)> {
+    let mut v = new_session("hello there");
+    v.extend([
+        (0.1, Until("it answers", |d, _| answered(d), 20.)),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                if let Some(id) = current(d).map(|s| s.id.clone())
+                    && let Some(s) = d.core.list.get_mut(&id)
+                {
+                    s.cwd = "/tmp/envstress/mono".into();
+                }
+                let mut m = crate::machines::MachineView::saved(dent_remote::store::Saved {
+                    id: "aa01".into(),
+                    name: "dent-linux".into(),
+                    ..Default::default()
+                });
+                m.state = dent_client_core::machine::State::Online;
+                m.rtt = Some(18);
+                d.machines.push(m);
+                if let Some(id) = current(d).map(|s| s.id.clone()) {
+                    d.rebuild(&id);
+                }
+                cx.notify();
+            }),
+        ),
+        (0.3, Click("chip-sessionmachine")),
+        (0.1, Until("the menu opens", |d, _| d.menu.is_some(), 3.)),
+        (
+            0.1,
+            Call(|d, w, cx| {
+                if let Some(p) = d.move_probe.as_mut() {
+                    p.remotes = Some(vec![dent_protocol::GitRemote {
+                        name: "origin".into(),
+                        url: "git@github.com:ada/mono.git".into(),
+                    }]);
+                    p.has.insert("aa01".into(), false);
+                }
+                let e = d.move_entries().into_iter().find(|e| e.key == "move-aa01");
+                if let Some(e) = e {
+                    d.choose_entry(&e, w, cx);
+                }
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "hundreds of env files: the first few, the count, nothing from node_modules or .venv, no junk",
+                |d, _| {
+                    let e = d.move_entries();
+                    let files: Vec<_> = e.iter().filter(|e| e.key.starts_with("move-f-")).collect();
+                    let c = d.move_clone.as_ref();
+                    e.iter().any(|e| e.key == "move-env-more")
+                        && files.len() == 8
+                        && c.is_some_and(|c| {
+                            c.files.ticked.len() > 400
+                                && !c.files.ticked.iter().any(|p| {
+                                    p.contains("node_modules") || p.contains(".venv")
+                                })
+                                && !c.files.ticked.iter().any(|p| p.contains(".env.blob") || p.ends_with(".env.sample"))
+                        })
+                        && e.iter().any(|e| e.key == "move-clone-go" && e.choosable())
+                },
+                15.,
+            ),
+        ),
+        (0.5, Shot("many-first")),
+        (0.1, Call(|d, w, cx| choose(d, "move-env-more", w, cx))),
+        (
+            0.1,
+            Until(
+                "shown all, every one is listed",
+                |d, _| d.move_entries().iter().filter(|e| e.key.starts_with("move-f-")).count() > 400,
+                3.,
+            ),
+        ),
+        (0.5, Shot("many-all")),
+        (0.1, Call(|d, w, cx| choose(d, "move-env-more", w, cx))),
+        (0.2, Call(|d, w, cx| choose(d, "move-others", w, cx))),
+        (
+            0.1,
+            Until(
+                "the other ignored files open on asking",
+                |d, _| d.move_entries().iter().any(|e| e.key == "move-f-local.db"),
+                3.,
+            ),
+        ),
+        (0.5, Shot("many-others")),
+        (0.1, Call(|d, w, cx| choose(d, "move-env-all", w, cx))),
+        (
+            0.1,
+            Until(
+                "all at once ticks only those small enough to be settings",
+                |d, _| {
+                    d.move_clone.as_ref().is_some_and(|c| {
+                        !c.files.ticked.iter().any(|p| p.contains(".env.blob"))
+                    })
+                },
+                3.,
+            ),
+        ),
+        (
+            0.1,
+            Call(|d, w, cx| {
+                choose(d, "move-env-more", w, cx);
+                for i in 1..=15 {
+                    choose(d, &format!("move-f-.env.blob{i}"), w, cx);
+                }
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "ticked by hand past what may go: Clone and move waits, saying why",
+                |d, _| {
+                    d.move_entries().iter().any(|e| {
+                        e.key == "move-clone-go"
+                            && !e.choosable()
+                            && e.note.as_deref().is_some_and(|n| n.contains("at most"))
+                    })
+                },
+                3.,
+            ),
+        ),
+        (0.5, Shot("many-too-much")),
+    ]);
+    v
+}
+
+/// Choose the machine menu's entry `key`, wherever it's scrolled to.
+fn choose(d: &mut Dent, key: &str, w: &mut Window, cx: &mut Context<Dent>) {
+    if let Some(e) = d.move_entries().into_iter().find(|e| e.key == key) {
+        d.choose_entry(&e, w, cx);
+    }
 }
