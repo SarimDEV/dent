@@ -61,3 +61,17 @@ The holder already spares dent the worst part, agents dying on update. The launc
 
 - Three processes per machine: launcher, daemon and holder. The launcher and the holder are both small and stable. They aren't merged: the holder must never restart, and the launcher must be replaceable on its own.
 - Stage 3 of [remote-plan.md](../remote-plan.md) builds this. Stage 0 proved it with a prototype in the VM (R-E3, R-E4, [spike 13](../spikes/13-service-and-updates.md)).
+
+## As built (2026-10-22)
+
+The launcher is `crates/launcher`; the daemon's side is `crates/daemon/src/launcher.rs`, install and the service in `service.rs`. What building it settled:
+
+- **Two pipes, lines both ways.** The daemon finds them as descriptors 3 (to the launcher: `prepared`, `update <v>`, `auto-update <v>`) and 4 (from it: `committed`, `accepted`, `refused <why>`). No request files, nothing polled.
+- **The trial binds before it parks:** the local socket and the remote port. A version that can't take them fails its trial. Outside a trial, a remote port taken by another program only leaves remote access off.
+- **A rolled-back version is retried when someone asks for it** (`update`). It may have failed for something since put right, like a port another program held. Only an automatic update (`auto-update`) is refused; passing on a retry clears it.
+- **Versions are named by their version and a hash of the daemon and holder** (`0.1.0-3f2a9c1e`), so two builds of one version never share a folder. A version describes itself (`dent-daemon manifest`); the launcher and its record use `key=value` lines it reads with the standard library alone.
+- **The holder runs outside the service.** Under systemd it starts in a scope of its own (`systemd-run --user --scope`): stopping or restarting the service kills its whole cgroup, so restarting it mid-command no longer reaches the agents. On Linux its folder is in `XDG_RUNTIME_DIR`, which isn't swept the way `/tmp` is after ten days.
+- **`service.env` is read by the launcher at start** on both platforms (a LaunchAgent can't read an environment file itself).
+- **One daemon per machine, one way of running it.** The app never starts a daemon for a state folder with a launcher, nor asks one the launcher runs to restart beside a newer build (it would come back as the same version, again and again); `Welcome.managed` says which. The LaunchAgent (`sh.dent.launcher`) and the app's start-at-login item are refused together.
+- **A daemon finding its folder locked exits 75**, and the launcher waits 30 s rather than looping.
+- **Install over an older install is an update**: staged, then trialled through the running launcher. A changed launcher or service definition restarts the service first, saying "restart" to devices.

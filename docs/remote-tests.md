@@ -121,6 +121,21 @@ Tests marked **(owner)** need the owner's hands: the Mac's lid, the Mac's Wi-Fi,
 | R-E6 | Restart from inside | An agent on the VM runs the restart command | The restart completes through the service manager; the caller isn't left stopped |
 | R-E7 | LaunchAgent at logout **(owner)** | Log out of studio and back in | Matches what [0065](decisions/0065-launcher-and-updates.md) says the person is told |
 
+### Stage 3 results
+
+Run on 2026-10-22 against the real code (`dent-daemon install`, `dent-launcher`), on dent-linux (Ubuntu 24.04, systemd 255) and a Mac (scratch state folder):
+
+| Test | Result |
+| --- | --- |
+| Fresh install (Linux) | Unit, launcher, version and `service.env` written; the daemon answered in 0.9 s; Tailscale devices reached it at once |
+| R-E1, reboot | The VM rebooted; the service came back with no one logged in (linger on) |
+| R-E2, PATH and sign-in | PATH from the login shell found `claude` in `~/.local/bin`. The first haiku session said "Not logged in": the VM's token is exported from `.bashrc`. Fixed by [0074](decisions/0074-what-agents-get-from-the-login-shell.md); the next haiku session signed in, ran its tools and was titled |
+| Update with a real daemon | Committed in 1.4 s; the holder and a running agent kept their pids |
+| `systemctl --user restart dent` mid-command | A haiku agent's 20 s command finished (`slept-well`) and its turn completed under the new daemon |
+| R-E3 with the real daemon | A trial that couldn't take its port (another program held it) rolled back: the snapshot went back, all 57 events kept, the CLI said "…didn't start, so … runs again"; the version was held back from automatic retries, then retried by hand once the port was free, and committed |
+| The launcher's own cases | `crates/launcher/tests`: failed migration, a trial that never gets ready, cut off mid-restore and mid-trial, a newer launcher protocol, too little room, a crashed daemon, a locked folder, an unreadable record |
+| macOS LaunchAgent | Installed, updated (APFS clone snapshot of the database and its WAL files), a daemon killed with `-9` back within a second, reinstalled with a changed launcher (restarted), uninstalled with nothing left running. Found that `launchctl bootout` returns before the job has stopped; install and uninstall now wait for it |
+
 ## F. Owner checklist (one sitting, once there's a second device)
 
 Deferred until the phone app exists (2026-10-20). With one Mac, these tests can't be watched from the other end: the VM runs on the Mac, so it sleeps when the Mac does, and its link to the Mac doesn't use Wi-Fi. Stalls and freezes are covered from the VM side in [spike 12](spikes/12-link-under-real-networks.md). Run them with a reply streaming from studio to the phone:

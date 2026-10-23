@@ -155,6 +155,7 @@ impl Manager {
             Manager::Launchd => {
                 if restart {
                     let _ = run("launchctl", &["bootout", &launchd_target()]);
+                    self.wait_gone();
                 }
                 run("launchctl", &["print", &launchd_target()])
                     || run(
@@ -185,10 +186,21 @@ impl Manager {
             }
             Manager::Launchd => {
                 let _ = run("launchctl", &["bootout", &launchd_target()]);
+                self.wait_gone();
                 let _ = std::fs::remove_file(self.file());
             }
         }
         Ok(())
+    }
+
+    /// Wait for the service to finish stopping: `launchctl bootout` returns
+    /// while the launcher is still stopping its daemon, and a bootstrap made
+    /// meanwhile fails.
+    fn wait_gone(self) {
+        let until = Instant::now() + Duration::from_secs(15);
+        while self.running() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 }
 
