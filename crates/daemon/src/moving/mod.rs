@@ -347,6 +347,14 @@ impl Daemon {
             }
         };
         let cwd_s = cwd.display().to_string();
+        // Tests stand in for a daemon dying here: between the worktree and
+        // the import, the hardest place to pick up from.
+        if std::env::var_os("DENT_TEST_DIE_IN_ACCEPT").is_some() {
+            if let Some(a) = applied {
+                a.keep();
+            }
+            std::process::exit(9);
+        }
         // The agent's conversation, under a new id of its own.
         let agent_to = derived_uuid(&format!("{}/{}", m.from_machine, m.id));
         if !m.agent_session.is_empty()
@@ -416,12 +424,45 @@ impl Daemon {
         if let Some(a) = applied {
             a.keep();
         }
+        // Taken: what arrived is in place now, only its record is kept.
+        let _ = std::fs::remove_dir_all(&parts);
         let row = self
             .store()
             .session(&session)?
             .context("session row missing")?;
         crate::session::start(self.clone(), row, Vec::new());
         Ok(Reply::Created { session })
+    }
+}
+
+/// Packages of moves that ended a week ago or more go: kept that long so
+/// a carrier asking again gets its answer.
+pub fn sweep(state: &Path, store: &crate::store::Store) {
+    let week = std::time::Duration::from_secs(7 * 24 * 3600);
+    for e in std::fs::read_dir(state.join("moves"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= week);
+        let Ok(m) = pack::read_manifest(&e.path()) else {
+            continue;
+        };
+        let live = current(store, &m.from_session).is_some_and(|c| {
+            c.id == m.id
+                && matches!(
+                    c.state,
+                    dent_protocol::MoveState::Pending | dent_protocol::MoveState::Departing { .. }
+                )
+        });
+        if old && !live {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
     }
 }
 

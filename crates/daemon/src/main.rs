@@ -201,6 +201,7 @@ fn main() -> Result<()> {
             eprintln!("dent-daemon: committed");
         }
         d.restore().await?;
+        moving::sweep(&d.paths.state, &d.store());
         d.watch_prs();
         {
             let d = d.clone();

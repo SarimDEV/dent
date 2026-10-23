@@ -2713,6 +2713,39 @@ fn settled(outcome: &Outcome) -> Status {
 pub const RESUME_TEXT: &str =
     "Your usage limit has reset. Carry on from where you stopped, without redoing finished work.";
 
+/// What a move fences: anything that starts agent work or changes the
+/// session's folder or how its agent runs. Answers to the agent's own
+/// questions, stopping, reading and naming still work.
+fn fenced_by_moves(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::Send { .. }
+            | Op::Requeue { .. }
+            | Op::Rewind { .. }
+            | Op::SetModel(_)
+            | Op::SetPermission(_)
+            | Op::SetEffort(_)
+            | Op::Act { .. }
+            | Op::Restart
+            | Op::Resume(_)
+            | Op::Reopen
+            | Op::SetUp
+    )
+}
+/// What a session that moved here says to its agent before your first
+/// message: where it was, where it is, and that the old place isn't here.
+fn move_notice(arrived: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(arrived).ok()?;
+    let (from, old, new) = (
+        v["from_machine"].as_str()?,
+        v["from_cwd"].as_str()?,
+        v["to_cwd"].as_str()?,
+    );
+    Some(format!(
+        "[dent: this session moved to another machine. It worked in {old} on {from}; it works in {new} here, with the same files and changes. {old} isn't on this machine: use paths under {new} from now on.]"
+    ))
+}
+
 #[cfg(test)]
 mod requeue_tests {
     use super::*;
@@ -3063,38 +3096,4 @@ mod withdraw_tests {
         );
         assert_eq!(withdrawn_turns(&e), vec![4..=8]);
     }
-}
-
-/// What a move fences: anything that starts agent work or changes the
-/// session's folder or how its agent runs. Answers to the agent's own
-/// questions, stopping, reading and naming still work.
-fn fenced_by_moves(op: &Op) -> bool {
-    matches!(
-        op,
-        Op::Send { .. }
-            | Op::Requeue { .. }
-            | Op::Rewind { .. }
-            | Op::SetModel(_)
-            | Op::SetPermission(_)
-            | Op::SetEffort(_)
-            | Op::Act { .. }
-            | Op::Restart
-            | Op::Resume(_)
-            | Op::Reopen
-            | Op::SetUp
-    )
-}
-
-/// What a session that moved here says to its agent before your first
-/// message: where it was, where it is, and that the old place isn't here.
-fn move_notice(arrived: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(arrived).ok()?;
-    let (from, old, new) = (
-        v["from_machine"].as_str()?,
-        v["from_cwd"].as_str()?,
-        v["to_cwd"].as_str()?,
-    );
-    Some(format!(
-        "[dent: this session moved to another machine. It worked in {old} on {from}; it works in {new} here, with the same files and changes. {old} isn't on this machine: use paths under {new} from now on.]"
-    ))
 }

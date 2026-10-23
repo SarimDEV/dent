@@ -120,6 +120,10 @@ fn fill(s: &Session<'_>, id: &str, have: &[String], out: &Path) -> Result<MoveMa
         &out.join("events.jsonl"),
         (lines.join("\n") + "\n").as_bytes(),
     )?;
+    // Tests stand in for a daemon dying halfway through packing.
+    if std::env::var_os("DENT_TEST_DIE_IN_PACK").is_some() {
+        std::process::exit(9);
+    }
     // What dent saved for it: pictures pasted, files carried in.
     let saved = s.state.join("attachments").join(&row.id);
     for f in files_under(&saved) {

@@ -139,6 +139,8 @@ Exit: a session moves from the Mac to the Linux box mid-task and the agent carri
 
 - [0064](decisions/0064-moving-sessions.md) end to end, including Continue here and the text fallback.
 
+Status (2026-10-22): built and accepted. Moves are carried by `dent move`, with R-D3 automated and R-D5 run for real. Still to come: the app's move button and the record's link (a UI to design), cloning a project the target lacks as part of the move, and the text fallback when an agent can't resume.
+
 ### Stage 5: the phone
 
 The client core already holds the rules, so the phone is mostly UI plus the platform constraints in [0062](decisions/0062-liveness-and-retry.md#iphone) and [0061](decisions/0061-trust.md#iphone).

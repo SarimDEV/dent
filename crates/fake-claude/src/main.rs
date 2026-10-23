@@ -2189,18 +2189,6 @@ h1{font:600 15px var(--font-sans);margin:0 0 18px}
 <div class="weeks"><div>W1</div><div>W2</div><div>W3</div><div>W4</div><div>W5</div></div>
 <div class="note">Week 3 is the launch post.</div></body></html>"#;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn its_look_key_is_dents() {
-        // Pinned in dent_protocol's tests too: the two copies agree.
-        assert_eq!(
-            super::look_key("<p>hi</p>", 700, "auto"),
-            "c9e372f659082b2c"
-        );
-    }
-}
-
 /// Where Claude Code keeps conversations for the folder it runs in.
 fn transcript_folder() -> Option<std::path::PathBuf> {
     let cwd = std::env::current_dir().ok()?.display().to_string();
@@ -2214,7 +2202,6 @@ fn transcript_folder() -> Option<std::path::PathBuf> {
             .join(name),
     )
 }
-
 /// A conversation's transcript, wherever it is (Claude Code finds one by id
 /// across folders).
 fn transcript_path(id: &str) -> Option<std::path::PathBuf> {
@@ -2225,7 +2212,6 @@ fn transcript_path(id: &str) -> Option<std::path::PathBuf> {
         .map(|d| d.path().join(format!("{id}.jsonl")))
         .find(|p| p.exists())
 }
-
 fn transcript_add(id: &str, kind: &str, text: &str) {
     // Only when asked (a test with a scratch HOME): never into a real
     // Claude Code's folder.
@@ -2248,6 +2234,18 @@ fn transcript_add(id: &str, kind: &str, text: &str) {
             f,
             "{}",
             json!({"type": kind, "sessionId": id, "text": text})
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn its_look_key_is_dents() {
+        // Pinned in dent_protocol's tests too: the two copies agree.
+        assert_eq!(
+            super::look_key("<p>hi</p>", 700, "auto"),
+            "c9e372f659082b2c"
         );
     }
 }

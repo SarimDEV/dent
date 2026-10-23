@@ -11,10 +11,14 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-/// Where Claude Code keeps conversations for work in `cwd`: the path with
+/// Where Claude Code keeps conversations for work in `cwd`: its real path
+/// (Claude Code resolves links: `/tmp` is `/private/tmp` on a Mac) with
 /// every character but a letter or digit made a dash.
 pub fn folder_for(cwd: &str) -> PathBuf {
-    let name: String = cwd
+    let real = std::fs::canonicalize(cwd)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| cwd.to_string());
+    let name: String = real
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
@@ -78,9 +82,20 @@ pub fn place(dir: &Path, from: &str, to: &str, cwd: &str) -> Result<()> {
     Ok(())
 }
 
+/// Written whole, and readable by you alone, as Claude Code keeps its own:
+/// a conversation can hold anything you pasted.
 fn write_whole(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     let tmp = path.with_extension("dent-part");
-    std::fs::write(&tmp, bytes)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
@@ -88,12 +103,24 @@ fn write_whole(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn claude_codes_folder_is_the_path_with_dashes() {
+    fn claude_codes_folder_is_the_real_path_with_dashes() {
         let f = super::folder_for("/home/a.b/dent/worktrees/x_y");
         assert!(
             f.ends_with("-home-a-b-dent-worktrees-x-y"),
             "{}",
             f.display()
         );
+        // Through a link, as Claude Code sees it: where it really is.
+        let real = std::env::temp_dir().join(format!("dent-real-{}", std::process::id()));
+        let link = std::env::temp_dir().join(format!("dent-link-{}", std::process::id()));
+        std::fs::create_dir_all(&real).unwrap();
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(
+            super::folder_for(&link.display().to_string()),
+            super::folder_for(&std::fs::canonicalize(&real).unwrap().display().to_string())
+        );
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&real);
     }
 }

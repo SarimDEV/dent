@@ -3600,7 +3600,8 @@ fn reply(out: Result<Out, String>) -> Result<dent_protocol::Reply, String> {
 }
 
 /// Carry move `id` of `session` from `a` to `b`, `chunk` bytes at a time,
-/// as `dent move` does; `stop_after` chunks, it stops (an interruption).
+/// as `dent move` does; `stop_after` chunks, it stops (an interruption;
+/// `usize::MAX` stops once everything's sent, before asking to accept).
 /// Returns the session it became, or why it wasn't taken.
 fn carry(
     a: &mut Client,
@@ -3671,6 +3672,9 @@ fn carry(
             }
         }
         o => return Err(format!("{o:?}")),
+    }
+    if stop_after == Some(usize::MAX) {
+        return Err("all sent".into());
     }
     match reply(b.call(Request::MoveAccept { id: id.into() }))? {
         R::Created { session: s } => {
@@ -3958,4 +3962,137 @@ fn a_move_waits_for_the_turn_and_a_message_meanwhile_calls_it_off() {
         )
     });
     a.wait_turns(&t, 2);
+}
+
+#[test]
+fn a_target_that_dies_mid_accept_finishes_it_as_the_same_session() {
+    let mut m = Moves::new("dies", true);
+    let mut a = m.a.client();
+    let on_b = m.on_b.display().to_string();
+    // The machine it goes to dies between laying the work down and
+    // making the session.
+    m.b.kill();
+    m.b.env.push(("DENT_TEST_DIE_IN_ACCEPT".into(), "1".into()));
+    m.b.start();
+    let mut b = m.b.client();
+    b.call(Request::AddProject {
+        path: on_b.clone(),
+        create: false,
+    })
+    .unwrap();
+    a.subscribe(0);
+    let s = a.create(
+        &m.on_a.display().to_string(),
+        Permission::Full,
+        "remember the word plum",
+    );
+    a.wait_turns(&s, 1);
+    std::fs::write(m.on_a.join("wip.txt"), "half done\n").unwrap();
+    assert_eq!(
+        carry(&mut a, &mut b, &s, "mv7", 4096, Some(usize::MAX)).unwrap_err(),
+        "all sent"
+    );
+    b.send_req(Request::MoveAccept { id: "mv7".into() });
+    let until = Instant::now() + Duration::from_secs(10);
+    while m
+        .b
+        .daemon
+        .as_mut()
+        .is_some_and(|d| d.try_wait().unwrap().is_none())
+    {
+        assert!(Instant::now() < until, "it didn't die where asked");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Back up, it finishes: one session, its work in place.
+    m.b.env.retain(|(k, _)| k != "DENT_TEST_DIE_IN_ACCEPT");
+    m.b.kill();
+    m.b.start();
+    let mut b = m.b.client();
+    let to = carry(&mut a, &mut b, &s, "mv7", 4096, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        carry(&mut a, &mut b, &s, "mv7", 4096, None)
+            .unwrap()
+            .unwrap(),
+        to
+    );
+    b.subscribe(0);
+    b.pump(Duration::from_millis(300));
+    let cwd = b
+        .events(&to)
+        .iter()
+        .find_map(|e| match e {
+            Body::Created { cwd, .. } => Some(cwd.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&cwd).join("wip.txt")).unwrap(),
+        "half done\n"
+    );
+    let before = b.turns_done(&to);
+    b.say(&to, "r", "recall", false);
+    b.wait_turns(&to, before + 1);
+    assert!(
+        b.text(&to).contains("remember the word plum"),
+        "{}",
+        b.text(&to)
+    );
+}
+
+#[test]
+fn a_source_that_dies_while_packing_packs_again_and_the_move_finishes() {
+    let mut m = Moves::new("packdies", true);
+    let mut b = m.b.client();
+    b.call(Request::AddProject {
+        path: m.on_b.display().to_string(),
+        create: false,
+    })
+    .unwrap();
+    let mut a = m.a.client();
+    a.subscribe(0);
+    let s = a.create(
+        &m.on_a.display().to_string(),
+        Permission::Full,
+        "remember the word kiwi",
+    );
+    a.wait_turns(&s, 1);
+    m.a.kill();
+    m.a.env.push(("DENT_TEST_DIE_IN_PACK".into(), "1".into()));
+    m.a.start();
+    let mut a = m.a.client();
+    a.send_req(Request::MovePack {
+        session: s.clone(),
+        id: "mv8".into(),
+        to: "b".into(),
+        have: Some(Vec::new()),
+    });
+    let until = Instant::now() + Duration::from_secs(10);
+    while m
+        .a
+        .daemon
+        .as_mut()
+        .is_some_and(|d| d.try_wait().unwrap().is_none())
+    {
+        assert!(Instant::now() < until, "it didn't die where asked");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Fenced across the restart; packed afresh, and it goes.
+    m.a.env.retain(|(k, _)| k != "DENT_TEST_DIE_IN_PACK");
+    m.a.start();
+    let mut a = m.a.client();
+    let to = carry(&mut a, &mut b, &s, "mv8", 4096, None)
+        .unwrap()
+        .unwrap();
+    b.subscribe(0);
+    b.pump(Duration::from_millis(300));
+    let before = b.turns_done(&to);
+    b.say(&to, "r", "recall", false);
+    b.wait_turns(&to, before + 1);
+    assert!(
+        b.text(&to).contains("remember the word kiwi"),
+        "{}",
+        b.text(&to)
+    );
 }
