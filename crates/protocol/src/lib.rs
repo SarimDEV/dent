@@ -807,6 +807,20 @@ pub const CARRIED_MAX: usize = 40 << 20;
 /// session made before agents had names ran.
 pub const DEFAULT_AGENT: &str = "claude";
 
+/// What a session cut off mid-turn (a crash, a restart) is sent to carry
+/// on, naming the background work that stopped with it. One wording,
+/// whether you press Continue or it carries on by itself.
+pub fn carry_on_text(lost: &[String]) -> String {
+    let mut text = "You were cut off before the turn finished. Carry on from where you stopped, without redoing finished work.".to_string();
+    if !lost.is_empty() {
+        text.push_str(&format!(
+            " This background work stopped with you and isn't running now: {}. Start it again if it's still needed.",
+            lost.join(", ")
+        ));
+    }
+    text
+}
+
 /// What an agent can do, so clients offer only what works with it. Every
 /// flag is false for an agent that doesn't say, which hides the feature
 /// rather than offering something that fails.
