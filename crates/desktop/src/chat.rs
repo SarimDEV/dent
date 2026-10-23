@@ -1419,6 +1419,12 @@ impl Dent {
                 None,
                 false,
             ),
+            Some((Phase::Cloning, _)) => (
+                format!("Moving to {to}"),
+                format!("cloning {} there first", s.project),
+                None,
+                false,
+            ),
             Some((Phase::Sending { sent, total }, _)) => (
                 format!("Moving to {to}"),
                 format!("Sending {} of {}", mb(sent), mb(total)),
@@ -1458,8 +1464,10 @@ impl Dent {
             .map(|r| r.to.clone())
             .or_else(|| self.move_target(s));
         // Before anything went, it can be called off; after, only kept here.
-        let early =
-            !sent && run.is_some_and(|r| matches!(r.phase(), Phase::Asking | Phase::Waiting));
+        let early = !sent
+            && run.is_some_and(|r| {
+                matches!(r.phase(), Phase::Asking | Phase::Cloning | Phase::Waiting)
+            });
         Some(
             div()
                 .flex_none()

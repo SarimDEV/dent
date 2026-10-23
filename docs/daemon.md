@@ -135,6 +135,7 @@ A project can also be brought from another machine; the client both machines tru
   - The clone runs into a folder of its own beside the destination and is moved into place when whole. A clone over SSH that fails is tried again over HTTPS.
   - Then the other remotes are added and the branch is checked out, if that remote has it. The files are written in, each kept out of Git through `.git/info/exclude` if the clone's own rules don't ignore it.
   - A daemon restarted mid-clone starts the job over.
+- `BringProject { id, bring }` clones a project the same way for a session moving in ([0064](decisions/0064-moving-sessions.md)), without a session: in the background, answering `Cloning` while it runs and `ProjectMade` once it's there (at once when the repository is here already). Clones of one remote take turns, the second finding the first's checkout. A moved session's worktree gets the checkout's `.env*` files.
   - Done, the session's held messages go. Failed, they're given back (`Unqueued` with `returned`), so no agent runs in an empty folder. Markdown files changed by an agent show up as events, which drives live reload in the viewer and the "new docs" list per session.
 
 ## Checkpoints

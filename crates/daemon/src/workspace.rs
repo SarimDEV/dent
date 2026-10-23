@@ -232,7 +232,7 @@ fn has_branch(root: &Path, branch: &str) -> bool {
 /// The ignored `.env` files of the main checkout (secrets, local settings)
 /// copied into a new worktree, which git leaves without them. Folders git
 /// ignores whole (`node_modules`) aren't looked in.
-fn copy_env(root: &Path, to: &Path) {
+pub fn copy_env(root: &Path, to: &Path) {
     let Ok(list) = run(
         root,
         &[

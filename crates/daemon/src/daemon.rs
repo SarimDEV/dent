@@ -91,6 +91,9 @@ pub struct Daemon {
     awake: Mutex<Awake>,
     /// Sessions whose new worktree is being set up.
     setting_up: Mutex<std::collections::HashSet<String>>,
+    /// Projects being cloned for sessions moving in, by move id: `None`
+    /// while it runs, then how it went.
+    pub clones: Mutex<HashMap<String, Option<Result<dent_protocol::Reply, String>>>>,
     /// Identity, trust and pairing for devices on other machines.
     pub net: crate::remote::Net,
 }
@@ -166,6 +169,7 @@ impl Daemon {
                 hold: None,
             }),
             setting_up: Mutex::new(Default::default()),
+            clones: Mutex::new(Default::default()),
         })
     }
 

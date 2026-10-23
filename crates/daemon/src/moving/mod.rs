@@ -47,7 +47,8 @@ pub fn ended_key(id: &str) -> String {
 }
 
 /// One move's work at a time, whichever carrier asks: packing, writing and
-/// accepting the same id never overlap.
+/// accepting the same id never overlap. (Keyed `clone:URL`, one clone of a
+/// repository at a time.)
 async fn lock_move(id: &str) -> tokio::sync::OwnedMutexGuard<()> {
     type Locks = std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>;
     static LOCKS: std::sync::LazyLock<std::sync::Mutex<Locks>> =
@@ -94,6 +95,106 @@ async fn local_repo(d: &Daemon, remotes: &[GitRemote]) -> Option<PathBuf> {
 }
 
 impl Daemon {
+    /// `BringProject`: clone a project here for a session moving in, by
+    /// itself; asked again, how it's going. One here already (cloned
+    /// before a restart, or another way) is said at once.
+    pub async fn bring_project(
+        self: &Arc<Self>,
+        id: &str,
+        bring: Option<dent_protocol::Bring>,
+    ) -> Result<Reply> {
+        if !pack::valid_id(id) {
+            bail!("{id:?} isn't a move id");
+        }
+        let done = |path: PathBuf| Reply::ProjectMade {
+            path: path.display().to_string(),
+            warning: None,
+        };
+        {
+            let mut jobs = crate::daemon::lock(&self.clones);
+            match jobs.get(id) {
+                Some(None) => return Ok(Reply::Cloning),
+                Some(Some(Ok(r))) => return Ok(r.clone()),
+                // Failed: said once, and tried afresh when asked again.
+                Some(Some(Err(why))) => {
+                    let why = why.clone();
+                    jobs.remove(id);
+                    bail!("{why}");
+                }
+                None => {}
+            }
+        }
+        let Some(bring) = bring else {
+            bail!("no such clone here");
+        };
+        if let Some(root) = local_repo(self, &bring.remotes).await {
+            return Ok(done(root));
+        }
+        crate::daemon::lock(&self.clones).insert(id.to_string(), None);
+        let (d, id) = (self.clone(), id.to_string());
+        tokio::spawn(async move {
+            let got = d.clone_for_move(&id, bring).await;
+            crate::daemon::lock(&d.clones).insert(id, Some(got));
+        });
+        Ok(Reply::Cloning)
+    }
+
+    async fn clone_for_move(
+        self: &Arc<Self>,
+        id: &str,
+        mut b: dent_protocol::Bring,
+    ) -> Result<Reply, String> {
+        // Two sessions of one repository moving in at once clone it once:
+        // the second, its turn come, finds the first's checkout.
+        let url = b
+            .remotes
+            .first()
+            .map(|r| r.url.as_str())
+            .unwrap_or_default();
+        let _turn = lock_move(&format!("clone:{url}")).await;
+        if let Some(root) = local_repo(self, &b.remotes).await {
+            return Ok(Reply::ProjectMade {
+                path: root.display().to_string(),
+                warning: None,
+            });
+        }
+        // Tests hold clones open, so two overlap.
+        if std::env::var_os("DENT_TEST_SLOW_CLONE").is_some() {
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        }
+        let dest = crate::projects::free_in_root(&crate::projects::slug(&b.name))
+            .map_err(|e| format!("{e:#}"))?;
+        let staging = crate::bring::staging(&self.paths.state, &format!("move-{id}"));
+        let files = std::mem::take(&mut b.files);
+        // Cloned with no branch of its own: the moving session brings its
+        // branch, and lands in a worktree on it.
+        b.branch = None;
+        let (to, st) = (dest.clone(), staging.clone());
+        let got = tokio::task::spawn_blocking(move || {
+            crate::bring::stage(&st, &files)?;
+            let got = crate::bring::clone_into(&to, &b, &st)?;
+            // Its checkout holds no branch, so the session lands on its
+            // own (the one a clone checks out, as often as not) with what
+            // it has that the remote doesn't.
+            // (A remote whose default branch has no commits leaves none
+            // to hold.)
+            if crate::workspace::run(&to, &["rev-parse", "-q", "--verify", "HEAD"]).is_ok() {
+                crate::workspace::run(&to, &["checkout", "-q", "--detach"])?;
+            }
+            Ok(got)
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+        let _ = std::fs::remove_dir_all(&staging);
+        let (_, notes) = got?;
+        let path = dest.display().to_string();
+        crate::server::remember_project(self, &path).map_err(|e| format!("{e:#}"))?;
+        Ok(Reply::ProjectMade {
+            path,
+            warning: (!notes.is_empty()).then(|| notes.join("; ")),
+        })
+    }
+
     /// `MoveHave`: whether the repository is here, and what it has.
     pub async fn move_have(self: &Arc<Self>, remotes: &[GitRemote]) -> Reply {
         match local_repo(self, remotes).await {
@@ -414,7 +515,12 @@ impl Daemon {
                     parts.join("git.bundle"),
                 );
                 let applied = tokio::task::spawn_blocking(move || {
-                    git::apply(&root2, &r2, &id2, &bundle, &new2)
+                    let a = git::apply(&root2, &r2, &id2, &bundle, &new2)?;
+                    // Its settings and secrets here (`.env`), as a new
+                    // worktree gets: the checkout's, which a project
+                    // cloned for it took from the machine it left.
+                    crate::workspace::copy_env(&root2, &new2);
+                    Ok::<_, String>(a)
                 })
                 .await?;
                 match applied {

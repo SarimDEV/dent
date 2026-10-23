@@ -1727,6 +1727,17 @@ pub enum Request {
     CloneProject {
         url: String,
     },
+    /// Clone a project here for a session moving in that hasn't one
+    /// ([decision 0064](../../docs/decisions/0064-moving-sessions.md)):
+    /// into the projects folder, with the ignored files it carries. It
+    /// goes on by itself; asked again with the same `id` (and no `bring`
+    /// needed), it answers [`Reply::Cloning`] until it's done, then
+    /// [`Reply::ProjectMade`]. One here already is answered at once.
+    BringProject {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bring: Option<Bring>,
+    },
     /// What another machine needs to bring the project at `dir` there.
     /// Answered with [`Reply::Pack`].
     Pack {
@@ -1929,6 +1940,8 @@ pub enum Reply {
         remotes: Vec<GitRemote>,
     },
     MoveWaiting,
+    /// A project being cloned for a move ([`Request::BringProject`]).
+    Cloning,
     MovePacked {
         manifest: Box<MoveManifest>,
     },
@@ -2123,6 +2136,7 @@ impl Request {
             | R::HideProject { .. }
             | R::NewProject { .. }
             | R::CloneProject { .. }
+            | R::BringProject { .. }
             | R::Pack { .. }
             | R::ReadFiles { .. }
             | R::Repo { .. } => Vec::new(),
@@ -2180,6 +2194,7 @@ impl Out {
                 | Reply::MoveHave { .. }
                 | Reply::MoveRemotes { .. }
                 | Reply::MoveWaiting
+                | Reply::Cloning
                 | Reply::MovePacked { .. }
                 | Reply::MoveBytes { .. }
                 | Reply::MoveParts { .. }

@@ -148,6 +148,7 @@ pub(super) fn move_stopped() -> Vec<(f32, Act)> {
                         to_name: "dent-linux".into(),
                         out: None,
                         run: 0,
+                        clone: None,
                         stopped: Some(dent_client_core::carry::Ended::Stopped {
                             side: dent_client_core::carry::Side::To,
                             why: "dent-linux didn't answer".into(),
@@ -292,6 +293,7 @@ pub(super) fn move_limits() -> Vec<(f32, Act)> {
                         to_name: "Sarim's MacBook Pro (Work, 2024 M4 Max)".into(),
                         out: None,
                         run: 0,
+                        clone: None,
                         stopped: None,
                     },
                 );
@@ -414,6 +416,7 @@ pub(super) fn move_limits() -> Vec<(f32, Act)> {
                         to_name: "studio".into(),
                         out: None,
                         run: 0,
+                        clone: None,
                         stopped: Some(dent_client_core::carry::Ended::Stopped {
                             side: dent_client_core::carry::Side::To,
                             why: "studio didn't answer".into(),
@@ -474,3 +477,145 @@ pub(super) fn move_limits() -> Vec<(f32, Act)> {
 
 /// What [`move_limits`] found of the ids a move goes on with.
 static IDS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Moving to a machine without the project: its row offers to clone it
+/// there, and choosing that lists what the clone takes, the environment
+/// files ticked and the rest of what Git ignores to tick, before anything
+/// starts. The project's machine (this one) really answers.
+pub(super) fn move_clone() -> Vec<(f32, Act)> {
+    let mut v = new_session("hello there");
+    v.extend([
+        (0.1, Until("it answers", |d, _| answered(d), 20.)),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                let dir = std::env::var("DENT_WALK_PROJECT").unwrap_or_default();
+                let p = std::path::Path::new(&dir);
+                let _ = std::fs::write(
+                    p.join(".gitignore"),
+                    ".env*\nnotes.local.md\nnode_modules/\n",
+                );
+                let _ = std::fs::write(p.join(".env"), "API_KEY=walk\n");
+                let _ = std::fs::write(p.join(".env.local"), "DEBUG=1\n");
+                let _ = std::fs::write(p.join("notes.local.md"), "mine\n");
+                let _ = std::fs::create_dir_all(p.join("node_modules/x"));
+                let _ = std::fs::write(p.join("node_modules/x/i.js"), "1\n");
+                let _ = std::process::Command::new("git")
+                    .args(["remote", "add", "origin", "git@github.com:ada/app.git"])
+                    .current_dir(p)
+                    .status();
+                let mut m = crate::machines::MachineView::saved(dent_remote::store::Saved {
+                    id: "aa01".into(),
+                    name: "dent-linux".into(),
+                    ..Default::default()
+                });
+                m.state = dent_client_core::machine::State::Online;
+                m.rtt = Some(18);
+                d.machines.push(m);
+                cx.notify();
+            }),
+        ),
+        (0.3, Click("chip-sessionmachine")),
+        (0.1, Until("the menu opens", |d, _| d.menu.is_some(), 3.)),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                if let Some(p) = d.move_probe.as_mut() {
+                    p.remotes = Some(vec![dent_protocol::GitRemote {
+                        name: "origin".into(),
+                        url: "git@github.com:ada/app.git".into(),
+                    }]);
+                    p.has.insert("aa01".into(), false);
+                }
+                cx.notify();
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "a machine without it offers to clone it there",
+                |d, _| {
+                    d.move_entries().iter().any(|e| {
+                        e.key == "move-aa01"
+                            && e.choosable()
+                            && e.note
+                                .as_deref()
+                                .is_some_and(|n| n.ends_with("Clone it there"))
+                    })
+                },
+                3.,
+            ),
+        ),
+        (0.4, Shot("clone-offered")),
+        (0.1, Click("move-aa01")),
+        (
+            0.1,
+            Until(
+                "what the clone takes is listed, environment files ticked, the rest to tick",
+                |d, _| {
+                    let e = d.move_entries();
+                    let row = |k: &str| e.iter().find(|e| e.key == k);
+                    row("move-clone-go").is_some()
+                        && row("move-f-.env").is_some_and(|e| e.on)
+                        && row("move-f-.env.local").is_some_and(|e| e.on)
+                        && row("move-f-notes.local.md").is_some_and(|e| !e.on)
+                        && !e.iter().any(|e| e.key.contains("node_modules"))
+                        && d.menu.is_some()
+                },
+                10.,
+            ),
+        ),
+        (0.5, Shot("clone-files")),
+        (0.1, Click("move-f-notes.local.md")),
+        (
+            0.1,
+            Until(
+                "a file ticked joins them",
+                |d, _| {
+                    d.move_clone
+                        .as_ref()
+                        .is_some_and(|c| c.ticked.contains("notes.local.md") && c.ticked.len() == 3)
+                },
+                2.,
+            ),
+        ),
+        (0.3, Shot("clone-ticked")),
+        (0.1, Click("move-clone-back")),
+        (
+            0.1,
+            Until(
+                "back, the machines again",
+                |d, _| {
+                    d.move_clone.is_none() && d.move_entries().iter().any(|e| e.key == "move-aa01")
+                },
+                2.,
+            ),
+        ),
+        (0.1, Click("move-aa01")),
+        (
+            0.1,
+            Until(
+                "listed again",
+                |d, _| d.move_entries().iter().any(|e| e.key == "move-clone-go"),
+                10.,
+            ),
+        ),
+        (0.1, Click("move-clone-go")),
+        (
+            0.1,
+            Until(
+                "chosen, the move starts and takes the clone along",
+                |d, _| {
+                    d.menu.is_none()
+                        && (current(d).is_some_and(|s| {
+                            d.moves.get(&s.id).is_some_and(|r| {
+                                r.clone.as_ref().is_some_and(|c| c.paths.len() == 2)
+                            })
+                        }) || d.toast.is_some())
+                },
+                5.,
+            ),
+        ),
+    ]);
+    v
+}

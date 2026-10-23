@@ -534,6 +534,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             .map_err(|e| anyhow::anyhow!("{e}"))?;
             Reply::Ok
         }
+        Request::BringProject { id, bring } => d.bring_project(&id, bring).await?,
         Request::Pack { dir } => Reply::Pack {
             pack: tokio::task::spawn_blocking(move || crate::bring::pack(Path::new(&dir))).await?,
         },

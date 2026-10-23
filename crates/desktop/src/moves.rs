@@ -7,13 +7,13 @@
 //!
 //! [decision 0064]: ../../../docs/decisions/0064-moving-sessions.md
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
-use dent_client_core::carry::{Carrier, Ended, Phase, Side, Step};
+use dent_client_core::carry::{Carrier, CloneThere, Ended, Phase, Side, Step};
 use dent_client_core::fleet;
 use dent_client_core::machine::State;
-use dent_protocol::{GitRemote, Reply, Request};
+use dent_protocol::{Bring, GitRemote, Pack, Reply, Request};
 use gpui_kit::Context;
 
 use crate::app::{Dent, Waiting};
@@ -33,6 +33,20 @@ pub struct Run {
     /// Which run this is, so a timer or answer meant for an earlier run of
     /// the same session's move never reaches this one.
     pub run: u64,
+    /// The project it clones there first, kept for Retry.
+    pub clone: Option<CloneThere>,
+}
+
+/// Cloning a session's project to a machine without it, being chosen in
+/// the machine menu: what it needs, once its machine said, and the
+/// ignored files ticked to go along (environment files at first).
+pub struct CloneDraft {
+    pub session: String,
+    pub to: String,
+    /// The checkout it's cloned from, on the session's machine.
+    pub dir: String,
+    pub pack: Option<Result<Pack, String>>,
+    pub ticked: BTreeSet<String>,
 }
 
 /// Counts runs.
@@ -67,7 +81,7 @@ const PROBE_PATIENCE: Duration = Duration::from_secs(6);
 fn patience(req: &Request) -> Duration {
     Duration::from_secs(match req {
         Request::MovePack { have: Some(_), .. } | Request::MoveAccept { .. } => 600,
-        Request::MoveRead { .. } | Request::MoveWrite { .. } => 120,
+        Request::MoveRead { .. } | Request::MoveWrite { .. } | Request::ReadFiles { .. } => 120,
         _ => 60,
     })
 }
@@ -77,6 +91,24 @@ impl Dent {
     /// one). A move the session says is under way goes on with the same
     /// id, to the machine it was going to; anything else is a new move.
     pub fn start_move(&mut self, id: &str, to: &str, cx: &mut Context<Self>) {
+        // Retried: a clone it was to make there is made still.
+        let clone = self
+            .moves
+            .get(id)
+            .filter(|r| r.to == to)
+            .and_then(|r| r.clone.clone());
+        self.start_move_with(id, to, clone, cx);
+    }
+
+    /// [`Dent::start_move`], cloning the project there first if it has
+    /// none.
+    pub fn start_move_with(
+        &mut self,
+        id: &str,
+        to: &str,
+        clone: Option<CloneThere>,
+        cx: &mut Context<Self>,
+    ) {
         if self.moves.get(id).is_some_and(|r| r.stopped.is_none()) {
             return;
         }
@@ -107,6 +139,9 @@ impl Dent {
         };
         let mut carrier =
             Carrier::new(&plain, &move_id, &to_name).to_machine(&self.machine_key(to));
+        if let Some(c) = clone.clone() {
+            carrier = carrier.clone_there(c);
+        }
         let step = carrier.start();
         self.moves.insert(
             id.to_string(),
@@ -118,6 +153,7 @@ impl Dent {
                 out: None,
                 stopped: None,
                 run: RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                clone,
             },
         );
         self.move_step(id, step, cx);
@@ -484,6 +520,9 @@ impl Dent {
             return Vec::new();
         };
         let id = s.id.clone();
+        if let Some(c) = self.move_clone.as_ref().filter(|c| c.session == id) {
+            return self.clone_entries(c);
+        }
         let (here, _) = fleet::split(&id);
         let project = s.project.clone();
         let probe = self.move_probe.as_ref().filter(|p| p.session == id);
@@ -494,9 +533,9 @@ impl Dent {
         let has = |m: &str| probe.and_then(|p| p.has.get(m).copied());
         let unsure = |m: &str| probe.is_some_and(|p| p.unsure.contains("") || p.unsure.contains(m));
         // Under way already: only where it's going, and that's not chosen
-        // again (its banner carries it).
-        // A stopped run counts only while the session says the move is
-        // under way: one that ended there since holds nothing.
+        // again (its banner carries it). A stopped run counts only while
+        // the session says the move is under way: one that ended there
+        // since holds nothing.
         let live = self.live_move(&id).is_some();
         let going = self
             .moves
@@ -513,6 +552,16 @@ impl Dent {
                 move |this: &mut Dent, _: &mut gpui_kit::Window, cx: &mut Context<Dent>| {
                     this.menu = None;
                     this.start_move(&id, &to, cx);
+                },
+            ))
+        };
+        // Without the project: chosen, it opens what cloning it there
+        // takes, to look over before anything starts.
+        let clone = |to: String| -> Option<crate::chat::Act> {
+            let id = id.clone();
+            Some(std::rc::Rc::new(
+                move |this: &mut Dent, _: &mut gpui_kit::Window, cx: &mut Context<Dent>| {
+                    this.look_to_clone(&id, &to, cx);
                 },
             ))
         };
@@ -534,19 +583,24 @@ impl Dent {
         let mut v = Vec::new();
         // This Mac, when the session runs elsewhere.
         if !here.is_empty() {
+            let lacks = has("") == Some(false) && !anywhere;
             let mut e = Entry::row(
                 "move-this".into(),
                 &self.machine_name(""),
-                Some(match has("") {
-                    Some(false) if !anywhere => format!("Doesn't have {project}"),
-                    _ => "This Mac".into(),
+                Some(if lacks {
+                    format!("Doesn't have {project} · Clone it here")
+                } else {
+                    "This Mac".into()
                 }),
                 false,
-                go(String::new()),
+                if lacks {
+                    clone(String::new())
+                } else {
+                    go(String::new())
+                },
             );
-            if has("") == Some(false) && !anywhere {
-                e.off = Some("It doesn't have this project; bring it there first");
-                e.act = None;
+            if lacks {
+                e = e.keeps_open();
             }
             hold(&mut e, &self.machine_name(""), "");
             v.push(e);
@@ -556,12 +610,12 @@ impl Dent {
                 continue;
             }
             let ms = m.rtt.map(|ms| format!(" · {ms} ms")).unwrap_or_default();
+            let lacks = matches!(Standing::of(m), Standing::Online)
+                && has(&m.id) == Some(false)
+                && !anywhere;
             let (note, off): (String, Option<&'static str>) = match Standing::of(m) {
                 Standing::Online => match has(&m.id) {
-                    Some(false) if !anywhere => (
-                        format!("Doesn't have {project}"),
-                        Some("It doesn't have this project; bring it there first"),
-                    ),
+                    _ if lacks => (format!("Doesn't have {project} · Clone it there"), None),
                     Some(true) => (format!("Has {project}{ms}"), None),
                     _ if anywhere || unsure(&m.id) => (format!("Online{ms}"), None),
                     _ => (format!("Checking for {project}…{ms}"), None),
@@ -580,8 +634,15 @@ impl Dent {
                 &crate::data::machine_short(m.name()),
                 Some(note),
                 false,
-                go(m.id.clone()),
+                if lacks {
+                    clone(m.id.clone())
+                } else {
+                    go(m.id.clone())
+                },
             );
+            if lacks {
+                e = e.keeps_open();
+            }
             if off.is_some() {
                 e.off = off;
                 e.act = None;
@@ -592,6 +653,179 @@ impl Dent {
         v.push(Entry::note(
             "It goes when this turn ends, with its uncommitted work and its whole conversation.",
         ));
+        v
+    }
+}
+
+impl Dent {
+    /// Ask the session's machine what cloning its project to `to` takes:
+    /// its remotes and the files Git ignores.
+    pub fn look_to_clone(&mut self, id: &str, to: &str, cx: &mut Context<Self>) {
+        let Some(s) = self.session(id) else {
+            return;
+        };
+        let dir = s.root.clone().unwrap_or_else(|| s.cwd.clone());
+        let (from, _) = fleet::split(id);
+        let n = self.live.send_to(from, Request::Pack { dir: dir.clone() });
+        self.waiting_insert(n, Waiting::MoveClonePack(id.to_string(), to.to_string()));
+        self.move_clone = Some(CloneDraft {
+            session: id.to_string(),
+            to: to.to_string(),
+            dir,
+            pack: None,
+            ticked: BTreeSet::new(),
+        });
+        self.menu_ix = None;
+        cx.notify();
+    }
+
+    /// What cloning it takes came, or why it can't be cloned.
+    pub fn clone_pack_came(
+        &mut self,
+        id: &str,
+        to: &str,
+        pack: Result<Option<Pack>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let there = self.machine_name(to);
+        let Some(c) = self
+            .move_clone
+            .as_mut()
+            .filter(|c| c.session == id && c.to == to && c.pack.is_none())
+        else {
+            return;
+        };
+        let name = Dent::project_name(&c.dir);
+        c.pack = Some(match pack {
+            Err(e) => Err(e),
+            Ok(None) => Err(format!(
+                "{name} isn't a Git repository, so it can't be cloned"
+            )),
+            Ok(Some(p)) if p.remotes.is_empty() => Err(format!(
+                "{name} has no remote {there} can clone from: push it somewhere first"
+            )),
+            Ok(Some(p)) => {
+                c.ticked = p
+                    .ignored
+                    .iter()
+                    .filter(|i| i.carry)
+                    .map(|i| i.path.clone())
+                    .collect();
+                Ok(p)
+            }
+        });
+        // Clone and move is lit: Return goes.
+        let at = self
+            .move_entries()
+            .iter()
+            .position(|e| e.key == "move-clone-go");
+        self.menu_ix = at;
+        cx.notify();
+    }
+
+    /// The machine menu while a clone is looked over: Clone and move, then
+    /// the files Git ignores, each ticked to come along or not.
+    fn clone_entries(&self, c: &CloneDraft) -> Vec<crate::chat::Entry> {
+        use crate::chat::Entry;
+        let there = self.machine_name(&c.to);
+        let back = {
+            Some(std::rc::Rc::new(
+                |this: &mut Dent, _: &mut gpui_kit::Window, cx: &mut Context<Dent>| {
+                    this.move_clone = None;
+                    this.menu_ix = None;
+                    cx.notify();
+                },
+            ) as crate::chat::Act)
+        };
+        let mut v = vec![
+            Entry::row(
+                "move-clone-back".into(),
+                "‹ Other machines",
+                None,
+                false,
+                back,
+            )
+            .keeps_open(),
+        ];
+        let p = match &c.pack {
+            None => {
+                v.push(Entry::note(&format!(
+                    "Looking at {} here…",
+                    Dent::project_name(&c.dir)
+                )));
+                return v;
+            }
+            Some(Err(e)) => {
+                v.push(Entry::note(e));
+                return v;
+            }
+            Some(Ok(p)) => p,
+        };
+        let files = match c.ticked.len() {
+            0 => String::new(),
+            1 => " and 1 file".into(),
+            n => format!(" and {n} files"),
+        };
+        let (id, to) = (c.session.clone(), c.to.clone());
+        let clone = CloneThere {
+            dir: c.dir.clone(),
+            paths: c.ticked.iter().cloned().collect(),
+            bring: Bring {
+                name: p.name.clone(),
+                remotes: p.remotes.clone(),
+                branch: None,
+                files: Vec::new(),
+            },
+        };
+        v.push(Entry::row(
+            "move-clone-go".into(),
+            &format!(
+                "Clone {} to {} and move",
+                p.name,
+                crate::data::machine_short(&there)
+            ),
+            Some(format!(
+                "Clones {}{files}, then moves it there",
+                crate::bring::short(&p.remotes[0].url)
+            )),
+            false,
+            Some(std::rc::Rc::new(
+                move |this: &mut Dent, _: &mut gpui_kit::Window, cx: &mut Context<Dent>| {
+                    this.menu = None;
+                    this.move_clone = None;
+                    this.start_move_with(&id, &to, Some(clone.clone()), cx);
+                },
+            )),
+        ));
+        if p.ignored.is_empty() {
+            return v;
+        }
+        v.push(Entry::separator());
+        v.push(Entry::note(
+            "Files Git ignores, which a clone won't have. Folders like node_modules and build output aren't copied.",
+        ));
+        for i in &p.ignored {
+            let path = i.path.clone();
+            v.push(
+                Entry::row(
+                    format!("move-f-{}", i.path),
+                    &i.path,
+                    Some(crate::bring::size(i.size)),
+                    c.ticked.contains(&i.path),
+                    Some(std::rc::Rc::new(
+                        move |this: &mut Dent, _: &mut gpui_kit::Window, cx: &mut Context<Dent>| {
+                            if let Some(c) = this.move_clone.as_mut()
+                                && !c.ticked.remove(&path)
+                            {
+                                c.ticked.insert(path.clone());
+                            }
+                            cx.notify();
+                        },
+                    )),
+                )
+                .keeps_open(),
+            );
+        }
         v
     }
 }

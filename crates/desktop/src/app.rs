@@ -683,6 +683,9 @@ pub enum Waiting {
     MoveRemotes(String),
     /// Whether a machine has a session's repository.
     MoveHas(String, String),
+    /// What cloning a session's project needs (its remotes, its ignored
+    /// files), for a move to the machine named.
+    MoveClonePack(String, String),
     /// An agent's models, by [`App::model_key`].
     Models(String),
     /// An agent's usage.
@@ -965,6 +968,9 @@ pub struct Dent {
     /// What the other machines have of the session whose machine menu is
     /// open.
     pub move_probe: Option<crate::moves::Probe>,
+    /// A clone being chosen in the machine menu, to move the session to
+    /// a machine without its project.
+    pub move_clone: Option<crate::moves::CloneDraft>,
     /// Each session's changes, from the daemon.
     pub changes: HashMap<String, Rc<Vec<FileDiff>>>,
     /// Choices made so far on a question, by question id.
@@ -1830,6 +1836,7 @@ impl Dent {
             waiting: HashMap::new(),
             moves: HashMap::new(),
             move_probe: None,
+            move_clone: None,
             changes: HashMap::new(),
             picks: HashMap::new(),
             creating: false,
@@ -3688,6 +3695,16 @@ impl Dent {
             (Waiting::Pack(from, dir, to), Out::Error { message }) => {
                 self.pack_came(from, dir, to, Err(message), cx)
             }
+            (
+                Waiting::MoveClonePack(id, to),
+                Out::Reply {
+                    reply: Reply::Pack { pack },
+                },
+            ) => self.clone_pack_came(&id, &to, Ok(pack), cx),
+            (Waiting::MoveClonePack(id, to), Out::Error { message }) => {
+                self.clone_pack_came(&id, &to, Err(message), cx)
+            }
+            (Waiting::MoveClonePack(..), _) => {}
             (
                 Waiting::BringFiles(bring, to),
                 Out::Reply {
@@ -5918,6 +5935,7 @@ impl Dent {
             Menu::Project => self.open_project_picker(window, cx),
             Menu::SessionMachine => {
                 if let Some(id) = self.selected.clone() {
+                    self.move_clone = None;
                     self.probe_machines_then(&id, cx);
                 }
             }
