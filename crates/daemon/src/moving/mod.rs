@@ -125,7 +125,13 @@ impl Daemon {
         let Some(have) = have else {
             let row = self.store().session(session)?.context("no such session")?;
             let remotes = tokio::task::spawn_blocking(move || {
-                git::repo_of(Path::new(&row.cwd))
+                // dent's scratch folder moves as no repository, as packing
+                // treats it, even where it sits inside a checkout.
+                let cwd = Path::new(&row.cwd);
+                if cwd.starts_with(scratch()) {
+                    return Vec::new();
+                }
+                git::repo_of(cwd)
                     .map(|(root, _)| git::remotes(&root))
                     .unwrap_or_default()
             })

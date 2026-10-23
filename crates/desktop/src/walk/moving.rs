@@ -93,8 +93,8 @@ pub(super) fn move_live() -> Vec<(f32, Act)> {
             0.1,
             Until(
                 "from there, this Mac is offered",
-                |d, cx| {
-                    d.menu_entries(crate::app::Menu::SessionMachine, cx)
+                |d, _| {
+                    d.move_entries()
                         .iter()
                         .any(|e| e.key == "move-this" && e.choosable())
                 },
