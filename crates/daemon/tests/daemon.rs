@@ -3,6 +3,8 @@
 //!
 //! These protect sessions and data, so they run with `cargo test`.
 
+mod common;
+
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -135,28 +137,19 @@ impl World {
         self.project.display().to_string()
     }
 
-    /// The holder's pid, from its lock file.
+    fn agent_pids(&self) -> Vec<i32> {
+        common::agent_pids(&self.state)
+    }
+
     fn holder_pid(&self) -> Option<i32> {
-        let tmp = std::env::var_os("TMPDIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/tmp"));
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in self.state.as_os_str().as_encoded_bytes() {
-            h ^= u64::from(*b);
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        let lock = tmp.join(format!("dent-{h:016x}")).join("holder.lock");
-        std::fs::read_to_string(lock).ok()?.trim().parse().ok()
+        common::holder_pid(&self.state)
     }
 }
 
 impl Drop for World {
     fn drop(&mut self) {
         self.kill();
-        if let Some(pid) = self.holder_pid() {
-            // SAFETY: kill has no memory preconditions.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
-        }
+        common::stop_all(&self.state);
         if let Some(root) = self.state.parent() {
             let _ = std::fs::remove_dir_all(root);
         }
@@ -1601,8 +1594,12 @@ fn a_dead_holder_interrupts_the_turn_and_the_session_carries_on() {
     let w = World::new(&[("FAKE_CLAUDE_SPEED", "0.5")]);
     let mut c = w.client();
     c.subscribe(0);
-    let s = c.create(&w.cwd(), Permission::Ask, "a long answer please");
+    // Quiet, as an agent deep in a long command is: nothing it writes
+    // fails to make it notice the holder has gone.
+    let s = c.create(&w.cwd(), Permission::Ask, "work quietly please");
     c.wait(&s, "the turn to start", |b| matches!(b, Body::TurnStarted));
+    let agents = w.agent_pids();
+    assert_eq!(agents.len(), 1);
     let pid = w.holder_pid().expect("holder running");
     // SAFETY: kill has no memory preconditions.
     unsafe { libc::kill(pid, libc::SIGKILL) };
@@ -1614,6 +1611,14 @@ fn a_dead_holder_interrupts_the_turn_and_the_session_carries_on() {
             }
         )
     });
+    // The agent the holder left running is stopped: it would go on
+    // working beside the one that carries on.
+    let until = Instant::now() + Duration::from_secs(5);
+    // SAFETY: kill with signal 0 only asks whether the process is there.
+    while unsafe { libc::kill(agents[0], 0) } == 0 {
+        assert!(Instant::now() < until, "the old agent is still running");
+        std::thread::sleep(Duration::from_millis(100));
+    }
     c.say(&s, "2", "short", false);
     c.wait_turns(&s, 1);
 }
@@ -4575,4 +4580,64 @@ fn worktrees_made_at_once_never_land_in_or_disturb_the_main_checkout() {
         n + 1
     );
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// An agent that runs away with memory (nothing stops it on macOS): its
+/// session says so past the warning limit, and past the stopping limit
+/// dent stops it, the turn ending with why. Nothing carries on by itself,
+/// and the next message starts it again.
+#[test]
+fn an_agent_using_too_much_memory_is_warned_about_then_stopped() {
+    let w = World::new(&[
+        ("FAKE_CLAUDE_SPEED", "1"),
+        ("FAKE_CLAUDE_HOG_MB", "300"),
+        ("DENT_MEMORY_EVERY_MS", "200"),
+        ("DENT_MEMORY_WARN", &(100u64 << 20).to_string()),
+        ("DENT_MEMORY_STOP", &(250u64 << 20).to_string()),
+    ]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Full, "eat memory please");
+    let ended = c.wait(&s, "the agent stopped", |b| {
+        matches!(
+            b,
+            Body::TurnEnded {
+                outcome: Outcome::Interrupted { .. }
+            }
+        )
+    });
+    let Body::TurnEnded {
+        outcome: Outcome::Interrupted {
+            reason: Some(reason),
+        },
+    } = ended
+    else {
+        panic!("{ended:?}")
+    };
+    assert!(
+        reason.contains("of memory, past this machine's limit"),
+        "{reason}"
+    );
+    c.pump_for(Duration::from_secs(6));
+    assert_eq!(carry_ons(&c, &s), 0);
+    c.say(&s, "after", "short", false);
+    c.wait_turns(&s, 1);
+    // Past the warning alone: said once, and the turn goes on to finish.
+    let w = World::new(&[
+        ("FAKE_CLAUDE_SPEED", "0.1"),
+        ("FAKE_CLAUDE_HOG_MB", "300"),
+        ("DENT_MEMORY_EVERY_MS", "200"),
+        ("DENT_MEMORY_WARN", &(100u64 << 20).to_string()),
+    ]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Full, "eat memory please");
+    c.wait_turns(&s, 1);
+    assert_eq!(
+        c.count(
+            &s,
+            |b| matches!(b, Body::Notice { text } if text.contains("of memory. dent stops it at"))
+        ),
+        1
+    );
 }

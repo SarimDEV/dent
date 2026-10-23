@@ -24,6 +24,7 @@ mod holder;
 mod launcher;
 mod login;
 mod machine;
+mod memory;
 mod moving;
 mod paths;
 mod plan_tool;
@@ -203,6 +204,7 @@ fn main() -> Result<()> {
         d.restore().await?;
         moving::sweep(&d.paths.state, &d.store());
         d.watch_prs();
+        tokio::spawn(d.clone().watch_memory());
         {
             let d = d.clone();
             tokio::spawn(async move {

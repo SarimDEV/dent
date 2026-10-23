@@ -8,6 +8,8 @@
 //!
 //! [remote-plan.md]: ../../../docs/remote-plan.md
 
+mod common;
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -170,6 +172,7 @@ impl Drop for Daemon {
             let _ = c.kill();
             let _ = c.wait();
         }
+        common::stop_all(&self.state);
         // A failing test shows what its daemon said.
         if std::thread::panicking() {
             let log = self.state.with_file_name("daemon.log");

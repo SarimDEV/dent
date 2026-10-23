@@ -1281,6 +1281,20 @@ impl Agent {
             self.end("done", false);
             return Ok(());
         }
+        if lower.contains("eat memory") {
+            // Holds this much, every page touched so it's really resident.
+            let mb: usize = std::env::var("FAKE_CLAUDE_HOG_MB")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300);
+            let hog = vec![1u8; mb << 20];
+            self.say("Loading everything into memory, ", None)?;
+            self.pause(60_000)?;
+            std::hint::black_box(&hog);
+            self.say("done.", None)?;
+            self.end("done", false);
+            return Ok(());
+        }
         if lower.contains("work quietly") {
             self.pause(60_000)?;
             self.say("Done.", None)?;

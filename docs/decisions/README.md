@@ -74,3 +74,4 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0072. A finished turn's work folds into one line](0072-finished-turns-fold.md)
 - [0073. The chat's list draws a reply a row per block](0073-a-reply-is-a-row-per-block.md)
 - [0074. What agents get from the login shell](0074-what-agents-get-from-the-login-shell.md)
+- [0075. A watch on each agent's memory](0075-agent-memory-watch.md)

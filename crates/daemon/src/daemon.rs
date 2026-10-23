@@ -580,6 +580,45 @@ impl Daemon {
     }
 
     /// Hand holder output to the session whose process it is.
+    /// Measures every agent now and then ([`crate::memory`]): a session
+    /// whose agent uses more than the warning limit hears how much, and
+    /// acts on it.
+    pub async fn watch_memory(self: Arc<Self>) {
+        let every = crate::memory::every();
+        let warn = crate::memory::limits().warn;
+        loop {
+            tokio::time::sleep(every).await;
+            // Only a holder already running: measuring never starts one.
+            let Some(h) = self.holder.lock().await.clone() else {
+                continue;
+            };
+            let Ok(procs) = h.list().await else { continue };
+            let live: Vec<_> = procs
+                .into_iter()
+                .filter(|p| !p.exited && p.pid > 1)
+                .collect();
+            if live.is_empty() {
+                continue;
+            }
+            let groups = tokio::task::spawn_blocking(crate::memory::by_group)
+                .await
+                .unwrap_or_default();
+            for p in live {
+                if let Some(&bytes) = groups.get(&p.pid)
+                    && bytes >= warn
+                {
+                    self.route(
+                        &p.id,
+                        Op::Memory {
+                            proc: p.id.clone(),
+                            bytes,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     fn route(&self, proc: &str, op: Op) {
         let Some((session, _)) = proc.rsplit_once('-') else {
             return;
