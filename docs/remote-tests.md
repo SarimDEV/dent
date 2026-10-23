@@ -138,6 +138,18 @@ Run on 2026-10-22 against the real code (`dent-daemon install`, `dent-launcher`)
 | The launcher's own cases | `crates/launcher/tests`: failed migration, a trial that never gets ready, cut off mid-restore and mid-trial, a newer launcher protocol, too little room, a crashed daemon, a locked folder, an unreadable record |
 | macOS LaunchAgent | Installed, updated (APFS clone snapshot of the database and its WAL files), a daemon killed with `-9` back within a second, reinstalled with a changed launcher (restarted), uninstalled with nothing left running. Found that `launchctl bootout` returns before the job has stopped; install and uninstall now wait for it |
 
+### Stage 4 results
+
+Run on 2026-10-22 against the built moves:
+
+| Test | Result |
+| --- | --- |
+| R-D5, Mac to VM, real haiku | A haiku session on a Mac daemon wrote a plan (uncommitted) knowing a codeword, then moved to the VM's service in 0.8 s (transcript, bundle and events: 247 KB). Asked there to carry on, it recalled the codeword and its plan, did the steps, worked only under the new worktree and redid nothing. The Mac's session was left a record pointing to it, and refused new messages ("It moved to lima-dent-linux; carry on there") |
+| R-D5, two folders on one machine | Moved between two daemons on one Mac, the old folder still there: the agent wrote only into its new worktree; the old folder gained nothing |
+| R-D3, automated (`crates/daemon/tests/daemon.rs`) | Pending until the turn ends, and a message calls it off. Cut off mid-transfer with both daemons restarted: picked up with the same id, and calling it off then is refused (Continue here only). The target dying inside its accept, after laying the work down: on retry, one session, its work and conversation in place. The source dying while packing: packed afresh after the restart, and it went. Continue here after part was sent: it works again. A target without the project: not accepted, nothing written, and the session works again |
+| R-D2, R-D4 (`moving::git`) | The spike's worktree (unpushed commits, staged then edited, renames, a mode change, both kinds of deletion, untracked and force-added ignored files, binaries) arrives identical; a diverged branch, a cut-short bundle and a nested checkout are refused with nothing left behind, and a clean retry after a refusal works |
+| Found and fixed on the way | A placed transcript was readable by everyone (now 0600, as Claude Code keeps its own); its folder name missed links (`/tmp` is `/private/tmp`); repositories were matched only by remotes that can be cloned from, so one with a path or `file://` remote was never found |
+
 ## F. Owner checklist (one sitting, once there's a second device)
 
 Deferred until the phone app exists (2026-10-20). With one Mac, these tests can't be watched from the other end: the VM runs on the Mac, so it sleeps when the Mac does, and its link to the Mac doesn't use Wi-Fi. Stalls and freezes are covered from the VM side in [spike 12](spikes/12-link-under-real-networks.md). Run them with a reply streaming from studio to the phone:

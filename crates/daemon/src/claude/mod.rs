@@ -7,6 +7,7 @@
 
 pub mod check;
 pub mod commands;
+pub mod moving;
 pub mod sheets;
 pub mod terminal;
 pub mod usage;
@@ -532,6 +533,20 @@ impl Driver for Claude {
 
     fn command(&self) -> String {
         std::env::var("DENT_CLAUDE").unwrap_or_else(|_| "claude".into())
+    }
+
+    fn conversation(&self, agent_session: &str) -> Option<Vec<(std::path::PathBuf, String)>> {
+        moving::conversation(agent_session)
+    }
+
+    fn place_conversation(
+        &self,
+        dir: &std::path::Path,
+        from: &str,
+        to: &str,
+        cwd: &str,
+    ) -> anyhow::Result<()> {
+        moving::place(dir, from, to, cwd)
     }
 
     fn env_names(&self) -> &'static [&'static str] {

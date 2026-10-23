@@ -203,16 +203,14 @@ Devices on other machines reach the daemon over the network ([remote-plan.md](re
 
 ## Moving sessions between machines
 
-> Being replaced by [0064](decisions/0064-moving-sessions.md) (proposed): a new id on the target, a guarded move, and git as a snapshot commit in a bundle rather than a patch.
+A session moves to another machine as [0064](decisions/0064-moving-sessions.md) has it, carried by a client both machines trust (`dent move MACHINE SESSION --to MACHINE`).
 
-Any session can move to another machine, for example from the laptop to the EC2 box before closing the lid.
-
-1. The source daemon pauses the session at a turn boundary.
-2. It sends the target the event log, the agent's own transcript, and the workspace state: the branch, unpushed commits as a git bundle, and uncommitted changes as a patch.
-3. The target clones the repo if it lacks it, applies that state, imports the transcript and resumes the agent.
-4. The session keeps its identity and history; the old machine shows where it moved.
-
-If the target lacks a secret or a tool the session used, the move is refused with what is missing, before anything stops.
+- It waits for the turn, and work left running, to end. A message you send meanwhile calls the move off.
+- Then it's fenced: nothing starts agent work or changes its folder until the move ends.
+- Its work travels exactly, even what's staged and what isn't, as two commits in a git bundle of what the other machine lacks. Its agent's own conversation and dent's history go with it.
+- On the other machine it becomes a session of its own, in a new worktree of the same project, and its agent resumes with its whole context, told first where it now is.
+- The machine it left keeps a record that points to it.
+- Stopped anywhere, the same command picks up. Called off before anything was sent, or with Continue here after, it works where it was.
 
 ## Automations
 

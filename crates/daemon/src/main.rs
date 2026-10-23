@@ -24,6 +24,7 @@ mod holder;
 mod launcher;
 mod login;
 mod machine;
+mod moving;
 mod paths;
 mod plan_tool;
 mod power;
@@ -200,6 +201,7 @@ fn main() -> Result<()> {
             eprintln!("dent-daemon: committed");
         }
         d.restore().await?;
+        moving::sweep(&d.paths.state, &d.store());
         d.watch_prs();
         {
             let d = d.clone();

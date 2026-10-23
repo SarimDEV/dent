@@ -117,6 +117,8 @@ pub enum Op {
         signal: Option<i32>,
     },
     HolderLost,
+    /// A step in moving it to another machine.
+    Move(crate::moving::state::Step),
 }
 
 struct Proc {
@@ -217,6 +219,8 @@ struct Session {
     /// until its target shows (`None` after).
     preparing: Option<(String, Option<String>)>,
     background: Vec<Task>,
+    /// Its move to another machine, while there is one, or once it moved.
+    moving: Option<crate::moving::state::Move>,
     /// Which tool call started each background task.
     task_calls: HashMap<String, String>,
     /// The thinking streaming now, and the sentence of it on the working
@@ -305,6 +309,7 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
         said: false,
         preparing: None,
         background: Vec::new(),
+        moving: None,
         task_calls: HashMap::new(),
         mcp_told: HashSet::new(),
         thinking: String::new(),
@@ -331,6 +336,12 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
         watch: None,
     };
     s.rebuild();
+    s.moving =
+        s.d.store()
+            .get(&crate::moving::move_key(&s.id))
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_str(&v).ok());
     // A side question this daemon never saw finish won't be answered now.
     if let Ok(events) = s.d.store().session_events(&s.id) {
         let mut open: Vec<String> = Vec::new();
@@ -616,7 +627,20 @@ impl Session {
     }
 
     async fn op(&mut self, op: Op) -> Result<()> {
+        // A session on its way to another machine starts nothing here, and
+        // one that went is a record (decision 0064).
+        if fenced_by_moves(&op)
+            && let Some(why) = crate::moving::state::fence(self.moving.as_ref())
+        {
+            anyhow::bail!(why);
+        }
+        // A message while the move waits for the turn to end calls it off:
+        // you're still working here.
+        if matches!(op, Op::Send { .. }) {
+            self.move_step(crate::moving::state::Step::Message)?;
+        }
         match op {
+            Op::Move(step) => self.move_op(step),
             Op::Send {
                 id,
                 text,
@@ -913,7 +937,99 @@ impl Session {
         }
     }
 
+    /// A step in its move: persisted, then said.
+    fn move_step(&mut self, step: crate::moving::state::Step) -> Result<()> {
+        let was = self.moving.clone();
+        let now = crate::moving::state::next(was.as_ref(), step).map_err(anyhow::Error::msg)?;
+        if now == was {
+            return Ok(());
+        }
+        let key = crate::moving::move_key(&self.id);
+        match &now {
+            Some(m) => self.d.store().put(&key, &serde_json::to_string(m)?)?,
+            None => self.d.store().del(&key)?,
+        }
+        if let Some(m) = &now {
+            self.log(Body::Move {
+                id: m.id.clone(),
+                to: m.to.clone(),
+                state: m.state.clone(),
+                to_session: m.to_session.clone(),
+            });
+        }
+        // Over (called off, failed, kept here): its package goes, and its
+        // id is spent.
+        if let Some(m) = now.as_ref().filter(|m| {
+            !matches!(
+                m.state,
+                dent_protocol::MoveState::Pending
+                    | dent_protocol::MoveState::Departing { .. }
+                    | dent_protocol::MoveState::Departed
+            )
+        }) {
+            let _ = self.d.store().put(&crate::moving::ended_key(&m.id), "1");
+            let _ = std::fs::remove_dir_all(crate::moving::pack::dir(&self.d.paths.state, &m.id));
+        }
+        // Over (called off, failed, kept here): nothing is kept of it.
+        self.moving = now.filter(|m| {
+            matches!(
+                m.state,
+                dent_protocol::MoveState::Pending
+                    | dent_protocol::MoveState::Departing { .. }
+                    | dent_protocol::MoveState::Departed
+            )
+        });
+        if self.moving.is_none() {
+            self.d.store().del(&key)?;
+        }
+        Ok(())
+    }
+
+    fn move_op(&mut self, step: crate::moving::state::Step) -> Result<()> {
+        use crate::moving::state::Step;
+        let step = match step {
+            Step::Start { id, to, .. } => {
+                // A move that ended doesn't start again under its id: its
+                // package is gone, and the session has moved on since.
+                let ended = self
+                    .d
+                    .store()
+                    .get(&crate::moving::ended_key(&id))
+                    .ok()
+                    .flatten()
+                    .is_some();
+                if ended && self.moving.as_ref().is_none_or(|m| m.id != id) {
+                    anyhow::bail!("that move ended; move it again (a new move, without its id)");
+                }
+                // Messages waiting would start a turn here once it's fenced.
+                if !self.held.is_empty() {
+                    anyhow::bail!("send or take back the messages waiting first, then move it");
+                }
+                // Carrying on when a limit resets would start work after
+                // it's fenced, here or on the other machine.
+                if self.moving.is_none() && self.wake.take().is_some() {
+                    self.log(Body::Resume { at: None });
+                }
+                // Busy: it waits for the turn, and work left running, to end.
+                let busy = self.in_turn || !self.background.is_empty();
+                Step::Start { id, to, busy }
+            }
+            other => other,
+        };
+        self.move_step(step)
+    }
+
     fn update_status(&mut self) {
+        // The turn (and work it left) it waited for is over: fenced now.
+        if self
+            .moving
+            .as_ref()
+            .is_some_and(|m| m.state == dent_protocol::MoveState::Pending)
+            && !self.in_turn
+            && self.background.is_empty()
+        {
+            let _ = self.move_step(crate::moving::state::Step::Quiet);
+        }
         let s = if !self.asked.is_empty() {
             Status::NeedsYou
         } else if self.in_turn {
@@ -1002,8 +1118,24 @@ impl Session {
             });
             return Err(e);
         }
-        let msg = self.agent.message(text, steer, attachments);
-        if let Err(e) = self.write(&msg).await {
+        // Moved here: the agent hears first where it is now, or it reaches
+        // for the old machine's paths (spike 09).
+        let arrived = self
+            .d
+            .store()
+            .get(&crate::moving::arrived_key(&self.id))
+            .ok()
+            .flatten();
+        let text = match arrived.as_deref().and_then(move_notice) {
+            Some(notice) => std::borrow::Cow::Owned(format!("{notice}\n\n{text}")),
+            None => std::borrow::Cow::Borrowed(text),
+        };
+        let msg = self.agent.message(&text, steer, attachments);
+        let written = self.write(&msg).await;
+        if written.is_ok() && arrived.is_some() {
+            let _ = self.d.store().del(&crate::moving::arrived_key(&self.id));
+        }
+        if let Err(e) = written {
             // The agent went between starting and now. A new message gets
             // one more go with a new agent; a steer belonged to the turn.
             let again = if steer {
@@ -1517,10 +1649,12 @@ impl Session {
                 let _ = self.control(Ctl::Refresh { command }).await;
             }
         }
-        // A used-up limit has reset: carry on where the turn stopped.
+        // A used-up limit has reset: carry on where the turn stopped. Not
+        // while it's moving or moved: that would run it here too.
         if self
             .wake
             .is_some_and(|at| at <= crate::daemon::now_ms() / 1000)
+            && crate::moving::state::fence(self.moving.as_ref()).is_none()
         {
             self.wake = None;
             self.log(Body::Resume { at: None });
@@ -2610,6 +2744,39 @@ fn settled(outcome: &Outcome) -> Status {
 /// What a session sends itself when its used-up limit resets.
 pub const RESUME_TEXT: &str =
     "Your usage limit has reset. Carry on from where you stopped, without redoing finished work.";
+
+/// What a move fences: anything that starts agent work or changes the
+/// session's folder or how its agent runs. Answers to the agent's own
+/// questions, stopping, reading and naming still work.
+fn fenced_by_moves(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::Send { .. }
+            | Op::Requeue { .. }
+            | Op::Rewind { .. }
+            | Op::SetModel(_)
+            | Op::SetPermission(_)
+            | Op::SetEffort(_)
+            | Op::Act { .. }
+            | Op::Restart
+            | Op::Resume(_)
+            | Op::Reopen
+            | Op::SetUp
+    )
+}
+/// What a session that moved here says to its agent before your first
+/// message: where it was, where it is, and that the old place isn't here.
+fn move_notice(arrived: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(arrived).ok()?;
+    let (from, old, new) = (
+        v["from_machine"].as_str()?,
+        v["from_cwd"].as_str()?,
+        v["to_cwd"].as_str()?,
+    );
+    Some(format!(
+        "[dent: this session moved to another machine. It worked in {old} on {from}; it works in {new} here, with the same files and changes. {old} isn't on this machine: use paths under {new} from now on.]"
+    ))
+}
 
 #[cfg(test)]
 mod requeue_tests {

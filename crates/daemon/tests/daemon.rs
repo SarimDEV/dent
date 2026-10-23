@@ -3503,3 +3503,687 @@ fn a_steer_sent_while_a_turn_stops_waits_for_it_to_end() {
     );
     c.wait_turns(&s, 1);
 }
+
+// ---- Moving a session between machines (decision 0064) ----
+
+/// Two machines: each a daemon with a home of its own, the same project
+/// cloned on both from one origin, the fake agent keeping transcripts.
+struct Moves {
+    root: PathBuf,
+    a: World,
+    b: World,
+    /// The project's checkout on each.
+    on_a: PathBuf,
+    on_b: PathBuf,
+}
+
+fn git_in(dir: &Path, args: &[&str]) -> String {
+    let o = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .unwrap();
+    assert!(
+        o.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    String::from_utf8_lossy(&o.stdout).trim().to_string()
+}
+
+impl Moves {
+    fn new(tag: &str, b_has_project: bool) -> Self {
+        let root = std::env::temp_dir().join(format!("dent-move-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (home_a, home_b) = (root.join("home-a"), root.join("home-b"));
+        std::fs::create_dir_all(&home_a).unwrap();
+        std::fs::create_dir_all(&home_b).unwrap();
+        let origin = root.join("origin.git");
+        git_in(&root, &["init", "-q", "--bare", origin.to_str().unwrap()]);
+        // A URL, as a real remote is (paths on one machine aren't carried).
+        let url = format!("file://{}", origin.display());
+        let on_a = home_a.join("app");
+        git_in(&root, &["clone", "-q", &url, on_a.to_str().unwrap()]);
+        std::fs::write(on_a.join("README.md"), "app\n").unwrap();
+        git_in(&on_a, &["checkout", "-q", "-b", "work"]);
+        git_in(&on_a, &["add", "."]);
+        git_in(&on_a, &["commit", "-qm", "base"]);
+        git_in(&on_a, &["push", "-q", "origin", "work"]);
+        let on_b = home_b.join("app");
+        if b_has_project {
+            git_in(&root, &["clone", "-q", &url, on_b.to_str().unwrap()]);
+        }
+        let env = |home: &Path| {
+            vec![
+                ("HOME".to_string(), home.display().to_string()),
+                ("FAKE_CLAUDE_TRANSCRIPTS".to_string(), "1".to_string()),
+                ("FAKE_CLAUDE_STRICT_RESUME".to_string(), "1".to_string()),
+            ]
+        };
+        let ea = env(&home_a);
+        let eb = env(&home_b);
+        let a = World::new(
+            &ea.iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let b = World::new(
+            &eb.iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        Moves {
+            root,
+            a,
+            b,
+            on_a,
+            on_b,
+        }
+    }
+}
+
+impl Drop for Moves {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn reply(out: Result<Out, String>) -> Result<dent_protocol::Reply, String> {
+    match out? {
+        Out::Reply { reply } => Ok(reply),
+        o => Err(format!("{o:?}")),
+    }
+}
+
+/// Carry move `id` of `session` from `a` to `b`, `chunk` bytes at a time,
+/// as `dent move` does; `stop_after` chunks, it stops (an interruption;
+/// `usize::MAX` stops once everything's sent, before asking to accept).
+/// Returns the session it became, or why it wasn't taken.
+fn carry(
+    a: &mut Client,
+    b: &mut Client,
+    session: &str,
+    id: &str,
+    chunk: u32,
+    stop_after: Option<usize>,
+) -> Result<Result<String, String>, String> {
+    use dent_protocol::Reply as R;
+    let pack = |have: Option<Vec<String>>| Request::MovePack {
+        session: session.into(),
+        id: id.into(),
+        to: "b".into(),
+        have,
+    };
+    let R::MoveRemotes { remotes } = reply(a.call(pack(None)))? else {
+        return Err("no remotes".into());
+    };
+    let R::MoveHave { tips, .. } = reply(b.call(Request::MoveHave { remotes }))? else {
+        return Err("no have".into());
+    };
+    let manifest = loop {
+        match reply(a.call(pack(Some(tips.clone()))))? {
+            R::MovePacked { manifest } => break manifest,
+            R::MoveWaiting => std::thread::sleep(Duration::from_millis(200)),
+            o => return Err(format!("{o:?}")),
+        }
+    };
+    let mut sent = 0;
+    match reply(b.call(Request::MoveIn {
+        manifest: manifest.clone(),
+    }))? {
+        R::Created { session } => return Ok(Ok(session)),
+        R::MoveParts { have } => {
+            for p in &manifest.parts {
+                let mut at = have
+                    .iter()
+                    .find(|(n, _)| *n == p.name)
+                    .map_or(0, |(_, n)| *n);
+                while at < p.bytes {
+                    if stop_after.is_some_and(|n| sent >= n) {
+                        return Err("stopped".into());
+                    }
+                    let R::MoveBytes {
+                        bytes_b64, offset, ..
+                    } = reply(a.call(Request::MoveRead {
+                        id: id.into(),
+                        part: p.name.clone(),
+                        offset: at,
+                        len: chunk,
+                    }))?
+                    else {
+                        return Err("no bytes".into());
+                    };
+                    let R::MoveWrote { have } = reply(b.call(Request::MoveWrite {
+                        id: id.into(),
+                        part: p.name.clone(),
+                        offset,
+                        bytes_b64,
+                    }))?
+                    else {
+                        return Err("not written".into());
+                    };
+                    at = have;
+                    sent += 1;
+                }
+            }
+        }
+        o => return Err(format!("{o:?}")),
+    }
+    if stop_after == Some(usize::MAX) {
+        return Err("all sent".into());
+    }
+    match reply(b.call(Request::MoveAccept { id: id.into() }))? {
+        R::Created { session: s } => {
+            reply(a.call(Request::MoveEnded {
+                session: session.into(),
+                id: id.into(),
+                to_session: Some(s.clone()),
+                not_accepted: None,
+            }))?;
+            Ok(Ok(s))
+        }
+        R::MoveNotAccepted { why } => {
+            reply(a.call(Request::MoveEnded {
+                session: session.into(),
+                id: id.into(),
+                to_session: None,
+                not_accepted: Some(why.clone()),
+            }))?;
+            Ok(Err(why))
+        }
+        o => Err(format!("{o:?}")),
+    }
+}
+
+#[test]
+fn a_session_moves_with_its_conversation_and_its_uncommitted_work() {
+    let m = Moves::new("whole", true);
+    let mut a = m.a.client();
+    let mut b = m.b.client();
+    a.subscribe(0);
+    b.subscribe(0);
+    b.call(Request::AddProject {
+        path: m.on_b.display().to_string(),
+        create: false,
+    })
+    .unwrap();
+    let s = a.create(
+        &m.on_a.display().to_string(),
+        Permission::Full,
+        "remember the word apricot",
+    );
+    a.wait_turns(&s, 1);
+    // Work in progress: a new file and an edit, never committed.
+    std::fs::write(m.on_a.join("notes.md"), "draft\n").unwrap();
+    std::fs::write(m.on_a.join("README.md"), "app, edited\n").unwrap();
+    let to = carry(&mut a, &mut b, &s, "mv1", 300, None)
+        .unwrap()
+        .unwrap();
+    // On the machine it left: a record that points there, fenced.
+    a.pump(Duration::from_millis(300));
+    assert!(a.events(&s).iter().any(|e| matches!(
+        e,
+        Body::Move { state: dent_protocol::MoveState::Departed, to_session: Some(t), .. } if *t == to
+    )));
+    let refused = a.call(Request::Send {
+        session: s.clone(),
+        id: "after".into(),
+        text: "still here?".into(),
+        steer: false,
+        attachments: Vec::new(),
+        files: Vec::new(),
+    });
+    assert!(refused.unwrap_err().contains("moved to b"));
+    // On the machine it went to: its conversation carried on, told it moved.
+    // (Its history came with it: one turn done already.)
+    b.pump(Duration::from_millis(200));
+    let before = b.turns_done(&to);
+    b.say(&to, "r1", "recall", false);
+    b.wait_turns(&to, before + 1);
+    let said = b.text(&to);
+    assert!(
+        said.contains("You first said: remember the word apricot"),
+        "{said}"
+    );
+    assert!(said.contains("Told it moved: true"), "{said}");
+    // Its folder: a worktree of the same project, with the work as it was.
+    let row_cwd = b
+        .events(&to)
+        .iter()
+        .find_map(|e| match e {
+            Body::Created { cwd, .. } => Some(cwd.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let cwd = Path::new(&row_cwd);
+    assert_eq!(
+        std::fs::read_to_string(cwd.join("notes.md")).unwrap(),
+        "draft\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(cwd.join("README.md")).unwrap(),
+        "app, edited\n"
+    );
+    assert_eq!(git_in(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]), "work");
+    // Told again (a carrier that lost the answer): the same session.
+    assert_eq!(
+        carry(&mut a, &mut b, &s, "mv1", 300, None)
+            .unwrap()
+            .unwrap(),
+        to
+    );
+}
+
+#[test]
+fn a_move_cut_off_anywhere_picks_up_with_the_same_id() {
+    let mut m = Moves::new("cut", true);
+    let mut a = m.a.client();
+    let mut b = m.b.client();
+    b.call(Request::AddProject {
+        path: m.on_b.display().to_string(),
+        create: false,
+    })
+    .unwrap();
+    a.subscribe(0);
+    let s = a.create(
+        &m.on_a.display().to_string(),
+        Permission::Full,
+        "remember the word fig",
+    );
+    a.wait_turns(&s, 1);
+    // The carrier stops mid-transfer.
+    assert_eq!(
+        carry(&mut a, &mut b, &s, "mv2", 200, Some(3)).unwrap_err(),
+        "stopped"
+    );
+    // Both machines restart meanwhile.
+    m.b.kill();
+    m.b.start();
+    m.a.kill();
+    m.a.start();
+    let mut a = m.a.client();
+    let mut b = m.b.client();
+    // Cancelling now is refused: the other machine may hold a copy.
+    let cancel = reply(a.call(Request::MoveStop {
+        session: s.clone(),
+        id: "mv2".into(),
+        continue_here: false,
+    }));
+    assert!(cancel.unwrap_err().contains("Continue here"));
+    // Picked up: the same package, what's there kept, and it arrives.
+    let to = carry(&mut a, &mut b, &s, "mv2", 200, None)
+        .unwrap()
+        .unwrap();
+    b.subscribe(0);
+    b.pump(Duration::from_millis(200));
+    let before = b.turns_done(&to);
+    b.say(&to, "r1", "recall", false);
+    b.wait_turns(&to, before + 1);
+    assert!(
+        b.text(&to).contains("remember the word fig"),
+        "{}",
+        b.text(&to)
+    );
+}
+
+#[test]
+fn a_move_the_other_machine_cant_take_leaves_the_session_working_here() {
+    let m = Moves::new("refused", false);
+    let mut a = m.a.client();
+    let mut b = m.b.client();
+    a.subscribe(0);
+    let s = a.create(
+        &m.on_a.display().to_string(),
+        Permission::Full,
+        "hello there",
+    );
+    a.wait_turns(&s, 1);
+    let why = carry(&mut a, &mut b, &s, "mv3", 4096, None)
+        .unwrap()
+        .unwrap_err();
+    assert!(why.contains("doesn't have the project"), "{why}");
+    // Not taken: it works here again, as it was.
+    a.say(&s, "again", "and again", false);
+    a.wait_turns(&s, 2);
+    assert!(a.events(&s).iter().any(|e| matches!(
+        e,
+        Body::Move {
+            state: dent_protocol::MoveState::Failed { .. },
+            ..
+        }
+    )));
+}
+
+#[test]
+fn kept_here_after_it_may_have_gone_the_session_works_again() {
+    let m = Moves::new("kept", true);
+    let mut a = m.a.client();
+    let mut b = m.b.client();
+    b.call(Request::AddProject {
+        path: m.on_b.display().to_string(),
+        create: false,
+    })
+    .unwrap();
+    a.subscribe(0);
+    let s = a.create(&m.on_a.display().to_string(), Permission::Full, "hello");
+    a.wait_turns(&s, 1);
+    assert!(carry(&mut a, &mut b, &s, "mv4", 200, Some(1)).is_err());
+    // While it's on its way, nothing starts here.
+    let fenced = a.call(Request::Send {
+        session: s.clone(),
+        id: "x".into(),
+        text: "wait".into(),
+        steer: false,
+        attachments: Vec::new(),
+        files: Vec::new(),
+    });
+    assert!(fenced.unwrap_err().contains("moving to b"));
+    reply(a.call(Request::MoveStop {
+        session: s.clone(),
+        id: "mv4".into(),
+        continue_here: true,
+    }))
+    .unwrap();
+    a.say(&s, "y", "carry on", false);
+    a.wait_turns(&s, 2);
+}
+
+#[test]
+fn a_move_waits_for_the_turn_and_a_message_meanwhile_calls_it_off() {
+    let m = Moves::new("pending", true);
+    let mut a = m.a.client();
+    a.subscribe(0);
+    let pack = |s: &str, id: &str| Request::MovePack {
+        session: s.into(),
+        id: id.into(),
+        to: "b".into(),
+        have: Some(Vec::new()),
+    };
+    // Asked while it works: it waits, then packs once the turn is over.
+    let s = a.create(
+        &m.on_a.display().to_string(),
+        Permission::Full,
+        "a long answer, slowly",
+    );
+    a.wait(&s, "it works", |b| {
+        matches!(
+            b,
+            Body::Status {
+                status: Status::Working
+            }
+        )
+    });
+    assert!(matches!(
+        reply(a.call(pack(&s, "mv5"))).unwrap(),
+        dent_protocol::Reply::MoveWaiting
+    ));
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        match reply(a.call(pack(&s, "mv5"))).unwrap() {
+            dent_protocol::Reply::MovePacked { .. } => break,
+            dent_protocol::Reply::MoveWaiting => {}
+            o => panic!("{o:?}"),
+        }
+        assert!(Instant::now() < until, "never packed");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(a.turns_done(&s), 1, "it packed after the turn, not during");
+    // Another, asked while it works, then you write to it: the move gives
+    // way and the message runs here.
+    let t = a.create(
+        &m.on_a.display().to_string(),
+        Permission::Full,
+        "another long answer, slowly",
+    );
+    a.wait(&t, "it works", |b| {
+        matches!(
+            b,
+            Body::Status {
+                status: Status::Working
+            }
+        )
+    });
+    assert!(matches!(
+        reply(a.call(pack(&t, "mv6"))).unwrap(),
+        dent_protocol::Reply::MoveWaiting
+    ));
+    a.say(&t, "more", "and one more thing", false);
+    a.wait(&t, "the move is called off", |b| {
+        matches!(
+            b,
+            Body::Move {
+                state: dent_protocol::MoveState::Cancelled,
+                ..
+            }
+        )
+    });
+    a.wait_turns(&t, 2);
+}
+
+#[test]
+fn a_target_that_dies_mid_accept_finishes_it_as_the_same_session() {
+    let mut m = Moves::new("dies", true);
+    let mut a = m.a.client();
+    let on_b = m.on_b.display().to_string();
+    // The machine it goes to dies between laying the work down and
+    // making the session.
+    m.b.kill();
+    m.b.env.push(("DENT_TEST_DIE_IN_ACCEPT".into(), "1".into()));
+    m.b.start();
+    let mut b = m.b.client();
+    b.call(Request::AddProject {
+        path: on_b.clone(),
+        create: false,
+    })
+    .unwrap();
+    a.subscribe(0);
+    let s = a.create(
+        &m.on_a.display().to_string(),
+        Permission::Full,
+        "remember the word plum",
+    );
+    a.wait_turns(&s, 1);
+    std::fs::write(m.on_a.join("wip.txt"), "half done\n").unwrap();
+    assert_eq!(
+        carry(&mut a, &mut b, &s, "mv7", 4096, Some(usize::MAX)).unwrap_err(),
+        "all sent"
+    );
+    b.send_req(Request::MoveAccept { id: "mv7".into() });
+    let until = Instant::now() + Duration::from_secs(10);
+    while m
+        .b
+        .daemon
+        .as_mut()
+        .is_some_and(|d| d.try_wait().unwrap().is_none())
+    {
+        assert!(Instant::now() < until, "it didn't die where asked");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Back up, it finishes: one session, its work in place.
+    m.b.env.retain(|(k, _)| k != "DENT_TEST_DIE_IN_ACCEPT");
+    m.b.kill();
+    m.b.start();
+    let mut b = m.b.client();
+    let to = carry(&mut a, &mut b, &s, "mv7", 4096, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        carry(&mut a, &mut b, &s, "mv7", 4096, None)
+            .unwrap()
+            .unwrap(),
+        to
+    );
+    b.subscribe(0);
+    b.pump(Duration::from_millis(300));
+    let cwd = b
+        .events(&to)
+        .iter()
+        .find_map(|e| match e {
+            Body::Created { cwd, .. } => Some(cwd.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&cwd).join("wip.txt")).unwrap(),
+        "half done\n"
+    );
+    let before = b.turns_done(&to);
+    b.say(&to, "r", "recall", false);
+    b.wait_turns(&to, before + 1);
+    assert!(
+        b.text(&to).contains("remember the word plum"),
+        "{}",
+        b.text(&to)
+    );
+}
+
+#[test]
+fn a_source_that_dies_while_packing_packs_again_and_the_move_finishes() {
+    let mut m = Moves::new("packdies", true);
+    let mut b = m.b.client();
+    b.call(Request::AddProject {
+        path: m.on_b.display().to_string(),
+        create: false,
+    })
+    .unwrap();
+    let mut a = m.a.client();
+    a.subscribe(0);
+    let s = a.create(
+        &m.on_a.display().to_string(),
+        Permission::Full,
+        "remember the word kiwi",
+    );
+    a.wait_turns(&s, 1);
+    m.a.kill();
+    m.a.env.push(("DENT_TEST_DIE_IN_PACK".into(), "1".into()));
+    m.a.start();
+    let mut a = m.a.client();
+    a.send_req(Request::MovePack {
+        session: s.clone(),
+        id: "mv8".into(),
+        to: "b".into(),
+        have: Some(Vec::new()),
+    });
+    let until = Instant::now() + Duration::from_secs(10);
+    while m
+        .a
+        .daemon
+        .as_mut()
+        .is_some_and(|d| d.try_wait().unwrap().is_none())
+    {
+        assert!(Instant::now() < until, "it didn't die where asked");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Fenced across the restart; packed afresh, and it goes.
+    m.a.env.retain(|(k, _)| k != "DENT_TEST_DIE_IN_PACK");
+    m.a.start();
+    let mut a = m.a.client();
+    let to = carry(&mut a, &mut b, &s, "mv8", 4096, None)
+        .unwrap()
+        .unwrap();
+    b.subscribe(0);
+    b.pump(Duration::from_millis(300));
+    let before = b.turns_done(&to);
+    b.say(&to, "r", "recall", false);
+    b.wait_turns(&to, before + 1);
+    assert!(
+        b.text(&to).contains("remember the word kiwi"),
+        "{}",
+        b.text(&to)
+    );
+}
+
+#[test]
+fn a_move_called_off_after_packing_sends_nothing_and_its_id_is_spent() {
+    let m = Moves::new("calledoff", true);
+    let mut a = m.a.client();
+    let mut b = m.b.client();
+    b.call(Request::AddProject {
+        path: m.on_b.display().to_string(),
+        create: false,
+    })
+    .unwrap();
+    a.subscribe(0);
+    let s = a.create(
+        &m.on_a.display().to_string(),
+        Permission::Full,
+        "remember the word pear",
+    );
+    a.wait_turns(&s, 1);
+    // Packed, then called off before anything was read.
+    let packed = reply(a.call(Request::MovePack {
+        session: s.clone(),
+        id: "mv9".into(),
+        to: "b".into(),
+        have: Some(Vec::new()),
+    }))
+    .unwrap();
+    assert!(matches!(packed, dent_protocol::Reply::MovePacked { .. }));
+    reply(a.call(Request::MoveStop {
+        session: s.clone(),
+        id: "mv9".into(),
+        continue_here: false,
+    }))
+    .unwrap();
+    // A carrier that carries on gets nothing.
+    let read = reply(a.call(Request::MoveRead {
+        id: "mv9".into(),
+        part: "events.jsonl".into(),
+        offset: 0,
+        len: 100,
+    }));
+    assert!(read.is_err(), "{read:?}");
+    // And the same id doesn't start again: the session has moved on since.
+    let again = carry(&mut a, &mut b, &s, "mv9", 4096, None);
+    assert!(again.unwrap_err().contains("that move ended"));
+    // It works here.
+    a.say(&s, "x", "still here", false);
+    a.wait_turns(&s, 2);
+}
+
+#[test]
+fn going_back_to_before_a_turn_works_after_the_move() {
+    let m = Moves::new("rewind", true);
+    let mut a = m.a.client();
+    let mut b = m.b.client();
+    b.call(Request::AddProject {
+        path: m.on_b.display().to_string(),
+        create: false,
+    })
+    .unwrap();
+    a.subscribe(0);
+    let s = a.create(
+        &m.on_a.display().to_string(),
+        Permission::Full,
+        "remember the word grape",
+    );
+    a.wait_turns(&s, 1);
+    // Made after the first message's checkpoint.
+    std::fs::write(m.on_a.join("later.txt"), "later\n").unwrap();
+    let to = carry(&mut a, &mut b, &s, "mv10", 4096, None)
+        .unwrap()
+        .unwrap();
+    b.subscribe(0);
+    b.pump(Duration::from_millis(300));
+    let cwd = b
+        .events(&to)
+        .iter()
+        .find_map(|e| match e {
+            Body::Created { cwd, .. } => Some(cwd.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(Path::new(&cwd).join("later.txt").exists());
+    // The checkpoint came with it: files go back to before that turn.
+    b.call(Request::Rewind {
+        session: to.clone(),
+        to: "m-remember the word grape".into(),
+        files: true,
+    })
+    .unwrap();
+    assert!(!Path::new(&cwd).join("later.txt").exists());
+}

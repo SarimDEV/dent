@@ -1,6 +1,6 @@
 # 0064. Moving a session: a new id on the target, a guarded move, the real transcript, git in a bundle
 
-Status: proposed (2026-10-20) · R-D1 passed ([spike 09](../spikes/09-moving-sessions.md)), R-D2 and most of R-D4 passed ([spike 11](../spikes/11-moving-git.md)); still to confirm: [R-D3, R-D5](../remote-tests.md#d-moving-sessions) · Supersedes the steps in [daemon.md](../daemon.md#moving-sessions-between-machines) · Plan: [remote-plan.md](../remote-plan.md)
+Status: accepted (2026-10-22, after R-D3 and R-D5 passed against the built code; [results](../remote-tests.md#stage-4-results)) · R-D1 passed ([spike 09](../spikes/09-moving-sessions.md)), R-D2 and most of R-D4 passed ([spike 11](../spikes/11-moving-git.md)) · Supersedes the steps in [daemon.md](../daemon.md#moving-sessions-between-machines) · Plan: [remote-plan.md](../remote-plan.md)
 
 ## Decision
 
@@ -75,6 +75,7 @@ The transcript is re-keyed to the new session's agent id, then `--resume` runs f
 
 - Ignored files outside the carry list.
 - Running terminals and dev servers.
+- Claude Code's own per-project memory (`~/.claude/projects/<folder>/memory/`): it belongs to the project on that machine, not to one session.
 
 ### Interruption points
 
@@ -98,3 +99,43 @@ The failure study gave the protocol: the state machine, the uncertain mark, the 
 
 - [daemon.md](../daemon.md#moving-sessions-between-machines) is rewritten to this record once it's accepted.
 - Moves arrive with stage 4 of the plan, after links, projects and the launcher.
+
+## Building it (2026-10-22)
+
+How the code is laid out, so each part can be built and tested on its own:
+
+- **`daemon/src/moving/`:** `state.rs` (the source's states, written as `Body::Move` events, and the fence), `pack.rs` (the git snapshot and bundle, ported from [spikes/move-git](../../spikes/move-git), and the conversation's parts), `accept.rs` (the target's steps) and `mod.rs` (requests).
+- **A move's folder on each side.** On the source it's `moves/<id>/`: its parts, a `manifest.json` (written with fsync), and `uncertain` once anything may have been sent. On the target it's `moves-in/<id>/`: parts as they arrive, and `accepted` holding the new session's id.
+- **Parts:**
+  - `git.bundle`, for a session in a repository;
+  - `transcript.jsonl`, the agent's own transcript;
+  - `agent/…`, its side files (subagents, saved tool results);
+  - `events.jsonl`, dent's events as bodies;
+  - `files/…`, attachments dent saved for it.
+
+  Each part is listed in the manifest with its size and SHA-256.
+- **Requests, all carried by a client both machines trust:**
+  - to the target first: `MoveHave`, which says which of the source's remotes it has as a repository, and its commit tips;
+  - to the source: `MovePack` (with those tips; pending, then departing, then packed);
+  - `MoveRead` for each part, as a ranged read, as files are read;
+  - to the target: `MoveIn` with the manifest (idempotent by id), `MoveWrite` for each chunk at its offset, then `MoveAccept`, which answers the new session, or a typed not-accepted when it wrote nothing;
+  - back to the source: `MoveDone` with that session (departed). `MoveCancel` and `MoveContinueHere` are the ways back.
+- **Where it lands:**
+  - In a repository the target has, the move goes into a new worktree there, under `~/dent/worktrees/<project>/<branch>-<move>`. The repository is found among the target's projects by any remote, its address written any way (`git@host:a/b.git` and `https://host/a/b` are one). Remotes name the repository; whether one can be cloned from is a separate matter.
+  - Without one, the target says so ("bring the project here first") before it writes anything. Cloning it as part of the move is still to come.
+  - A session in dent's scratch folder lands in the target's.
+  - A folder that isn't a repository and isn't the scratch folder can't move yet. That's said when it's packed, and the session works again.
+- **Ids that come out the same every time.** The target's session id and the agent's new conversation id come from (source machine, source session, move id). An accept cut short after its import finishes as the same session. A worktree an earlier try left, which the move's folder records, is made again.
+- **One live copy, kept so:**
+  - A part is read only while its move is going ahead. Called off or kept here, nothing more of it leaves.
+  - A move that ended keeps its id spent: it's never packed again under it, since the session has moved on since. A new move takes a new id.
+  - Each id's packing, writing and accepting run one at a time, whoever carries them.
+  - A "carry on when the limit resets" is dropped as a move starts, rather than run on either machine.
+  - A target that said not accepted says so every time it's asked again.
+  - Parts still to come, or damaged on the way, aren't a refusal: the carrier carries on.
+- **What's said anew on the target:** besides what the session was made with and its agent's conversation, how it stands, where it works in git and its pull request are said by the target, not imported. The snapshots its turns were taken at travel in the bundle (kept there under `refs/dent/moved/<id>/`), so going back to before a turn works after a move.
+- **Also fenced:** commits and pushes from the header, discarding a change, removing the worktree and making a side question into a session.
+- **The agent hears it moved** with its first message on the target: where it was, where it is, and that the old folder isn't on this machine. It's kept until said; you never see it.
+- **Transcripts are placed readable by you alone,** as Claude Code keeps its own, under the folder of the target's real path (Claude Code resolves links).
+- **Tidying:** the target removes what arrived once it's taken. The source keeps a package a week after its move ends, so a carrier asking again gets its answer.
+- **`dent move SESSION --to MACHINE`** in the CLI carries it. It resumes from what each side says it has, so it can be stopped and run again with the same move id at any point.

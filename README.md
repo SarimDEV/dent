@@ -25,7 +25,7 @@ target/release/dent-daemon install   # runs it as a service; listens on port 748
 target/release/dent-daemon pair      # shows a pairing code, for devices not on your Tailscale account
 ```
 
-Then in the app, Settings › Machines › Add machine, with its address (and that code). Later builds go in with `dent-daemon update DIR`: the new version is tried first and the old one comes back if it doesn't start, while agents keep running. `dent-daemon status` says how it stands. What the service runs with (PATH, and anything else agents need) is in `service.env` in its state folder; devices on the same network (not Tailscale) need `DENT_REMOTE_LAN=1` there.
+Then in the app, Settings › Machines › Add machine, with its address (and that code). Later builds go in with `dent-daemon update DIR`: the new version is tried first and the old one comes back if it doesn't start, while agents keep running. `dent-daemon status` says how it stands. A session moves between machines with `dent move MACHINE SESSION --to MACHINE`: its work, uncommitted changes included, and its agent's whole conversation go with it, into a new worktree of the same project there. What the service runs with (PATH, and anything else agents need) is in `service.env` in its state folder; devices on the same network (not Tailscale) need `DENT_REMOTE_LAN=1` there.
 
 ## License
 

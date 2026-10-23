@@ -14,7 +14,9 @@
 pub mod log;
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use anyhow::Result;
 
 use dent_protocol::{
     Account, Act, AgentInfo, Answer, Body, Caps, Command, CommandOutcome, Model, Part, Permission,
@@ -162,6 +164,24 @@ pub trait Driver: Send + Sync {
     /// saved under `media`.
     fn import(&self, _agent_session: &str, _media: &Path) -> Option<Imported> {
         None
+    }
+
+    /// The files a conversation lives in, for moving it to another machine
+    /// (decision 0064): each, and its name in the move, the transcript
+    /// first as `transcript.jsonl`. `None` when this agent's conversations
+    /// can't move.
+    fn conversation(&self, _agent_session: &str) -> Option<Vec<(PathBuf, String)>> {
+        None
+    }
+
+    /// Put a conversation moved here in place, as `to` (its new id), for
+    /// work in `cwd`, from the move's files in `dir` (named as
+    /// [`Driver::conversation`] named them), so it resumes from `cwd`.
+    fn place_conversation(&self, _dir: &Path, _from: &str, _to: &str, _cwd: &str) -> Result<()> {
+        anyhow::bail!(
+            "{}'s conversations can't move between machines yet",
+            self.name()
+        )
     }
 }
 

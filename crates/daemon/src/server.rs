@@ -304,6 +304,47 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             });
             Reply::Ok
         }
+        // Moving a session (decision 0064): each side's part, asked by the
+        // client carrying it.
+        Request::MoveHave { remotes } => d.move_have(&remotes).await,
+        Request::MovePack {
+            session,
+            id,
+            to,
+            have,
+        } => d.move_pack(&session, &id, &to, have).await?,
+        Request::MoveRead {
+            id,
+            part,
+            offset,
+            len,
+        } => d.move_read(&id, &part, offset, len).await?,
+        Request::MoveIn { manifest } => d.move_in(&manifest)?,
+        Request::MoveWrite {
+            id,
+            part,
+            offset,
+            bytes_b64,
+        } => d.move_write(&id, &part, offset, &bytes_b64).await?,
+        Request::MoveAccept { id } => d.move_accept(&id).await?,
+        Request::MoveEnded {
+            session,
+            id,
+            to_session,
+            not_accepted,
+        } => {
+            d.move_ended(&session, &id, to_session, not_accepted)
+                .await?;
+            Reply::Ok
+        }
+        Request::MoveStop {
+            session,
+            id,
+            continue_here,
+        } => {
+            d.move_stop(&session, &id, continue_here).await?;
+            Reply::Ok
+        }
         // The launcher trials it; this daemon is stopped if it's taken on.
         Request::Update { version } => {
             let Some(l) = crate::launcher::get() else {
@@ -376,17 +417,24 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             until,
             id,
         } => Reply::Created {
-            session: match until {
-                Some(seq) => d.fork_until(&session, seq, id.as_deref()).await?,
-                None => d.fork(&session, before.as_deref(), id.as_deref()).await?,
+            session: {
+                crate::moving::check(&d.store(), &session)?;
+                match until {
+                    Some(seq) => d.fork_until(&session, seq, id.as_deref()).await?,
+                    None => d.fork(&session, before.as_deref(), id.as_deref()).await?,
+                }
             },
         },
         Request::Aside { session, id, text } => {
+            crate::moving::check(&d.store(), &session)?;
             d.aside(&session, &id, &text).await?;
             Reply::Ok
         }
         Request::PromoteAside { session, id } => Reply::Created {
-            session: d.promote_aside(&session, &id).await?,
+            session: {
+                crate::moving::check(&d.store(), &session)?;
+                d.promote_aside(&session, &id).await?
+            },
         },
         Request::Unqueue { session, id } => {
             d.command(&session, Op::Unqueue { id }).await?;
@@ -471,6 +519,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             Reply::Ok
         }
         Request::RemoveWorktree { session, force } => {
+            crate::moving::check(&d.store(), &session)?;
             let cwd = cwd_of(d, &session)?;
             // Only ever a linked worktree: never a project's main checkout.
             let root = crate::workspace::main_checkout(Path::new(&cwd))
@@ -513,6 +562,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             action,
             message,
         } => {
+            crate::moving::check(&d.store(), &session)?;
             let cwd = cwd_of(d, &session)?;
             let (summary, url) = d.git(d.agent_of(&session), &cwd, action, message).await?;
             d.note_workspace(&session, &cwd).await;
@@ -697,6 +747,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             hunk,
             turn,
         } => {
+            crate::moving::check(&d.store(), &session)?;
             let cwd = cwd_of(d, &session)?;
             let base = match &turn {
                 Some(msg) => match turn_span(d, &session, msg)? {
@@ -849,7 +900,7 @@ pub(crate) fn remember_project(d: &Daemon, path: &str) -> Result<()> {
     Ok(())
 }
 
-async fn project_list(d: &Daemon) -> Result<Vec<dent_protocol::Project>> {
+pub async fn project_list(d: &Daemon) -> Result<Vec<dent_protocol::Project>> {
     let recent: Vec<(String, u64)> = d
         .store()
         .sessions()?
