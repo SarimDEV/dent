@@ -1266,7 +1266,7 @@ impl Session {
             },
         );
         let ooms = crate::scopes::oom_kills();
-        let argv = crate::scopes::agent(argv);
+        let argv = crate::scopes::agent(crate::launcher::scrubbed(argv));
         h.spawn(&proc, argv, Some(self.cwd.clone().into()), env.vars.clone())
             .await?;
         self.resume_at = None;

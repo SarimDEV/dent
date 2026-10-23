@@ -54,6 +54,19 @@ const VARS: [&str; 6] = [
     "DENT_UPDATE_OUTCOME",
 ];
 
+/// `argv` without what the launcher and systemd give their daemon, for an
+/// agent: the holder keeps the environment it started with across daemon
+/// updates, so one an older daemon started may still have them.
+pub fn scrubbed(argv: Vec<String>) -> Vec<String> {
+    let mut v = vec!["/usr/bin/env".to_string()];
+    for var in VARS.iter().chain(&["INVOCATION_ID"]) {
+        v.push("-u".into());
+        v.push((*var).into());
+    }
+    v.extend(argv);
+    v
+}
+
 /// Take what the launcher gave, if it ran this daemon. Call first thing in
 /// `main`, before any thread starts (it changes the environment).
 pub fn init() {
