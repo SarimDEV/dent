@@ -9,6 +9,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use dent_client_core::carry::{Carrier, Ended, Phase, Side, Step};
 use dent_protocol::{Out, Reply, Request};
 use dent_remote::remote::{Event, Remote};
 use tokio::sync::mpsc;
@@ -87,138 +88,57 @@ pub async fn run(args: &[String]) -> Result<()> {
     // Named as this device knows it, which is what the chat on the machine
     // it leaves says it went to.
     let target = super::saved(&to_name)?.name;
-    let pack = |have: Option<Vec<String>>| Request::MovePack {
-        session: session.to_string(),
-        id: id.clone(),
-        to: target.clone(),
-        have,
-    };
-    // What the other machine has of the repository, for the bundle to
-    // leave out.
-    let Reply::MoveRemotes { remotes } = from.ask(pack(None), 30).await? else {
-        bail!("{from_name} didn't say the session's remotes");
-    };
-    let in_repo = !remotes.is_empty();
-    let have = match to.ask(Request::MoveHave { remotes }, 60).await? {
-        // Said before anything's packed or fenced: nothing to undo.
-        Reply::MoveHave { found: false, .. } if in_repo => bail!(
-            "{to_name} doesn't have this project; bring it there first, then move the session"
-        ),
-        Reply::MoveHave { tips, .. } => tips,
-        other => bail!("{to_name}: unexpected answer {other:?}"),
-    };
-    // Packed once the turn (and work left running) ends.
-    let manifest = loop {
-        match from.ask(pack(Some(have.clone())), 600).await? {
-            Reply::MovePacked { manifest } => break manifest,
-            Reply::MoveWaiting => {
-                eprintln!("  waiting for the turn on {from_name} to end…");
-                tokio::time::sleep(Duration::from_secs(2)).await;
+    let mut carrier = Carrier::new(session, &id, &target);
+    let mut step = carrier.start();
+    let mut said = None;
+    let outcome = loop {
+        let (side, req) = match step {
+            Step::Done(r) => break r,
+            Step::Ask(side, req) => (side, req),
+            Step::Wait(ms, side, req) => {
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                (side, req)
             }
-            other => bail!("{from_name}: unexpected answer {other:?}"),
+        };
+        let (asker, secs) = match side {
+            Side::From => (&mut from, 600),
+            Side::To => (&mut to, 600),
+        };
+        let answer = asker.ask(req, secs).await.map_err(|e| format!("{e:#}"));
+        step = carrier.answer(side, answer);
+        // Each phase said once.
+        let now = match carrier.phase() {
+            Phase::Waiting => Some(format!("waiting for the turn on {from_name} to end…")),
+            Phase::Sending { total, .. } => Some(format!("sending {} KB", total.div_ceil(1024))),
+            Phase::Arriving => Some(format!("arriving on {to_name}…")),
+            _ => None,
+        };
+        if now.is_some() && now != said {
+            eprintln!("  {}", now.clone().unwrap_or_default());
+            said = now;
         }
     };
-    let total: u64 = manifest.parts.iter().map(|p| p.bytes).sum();
-    eprintln!(
-        "  packed: {} parts, {} KB",
-        manifest.parts.len(),
-        total.div_ceil(1024)
-    );
-    let arrived = match to
-        .ask(
-            Request::MoveIn {
-                manifest: manifest.clone(),
-            },
-            60,
-        )
-        .await?
-    {
-        Reply::Created { session } => Some(session),
-        Reply::MoveParts { have } => {
-            for p in &manifest.parts {
-                let mut at = have
-                    .iter()
-                    .find(|(n, _)| *n == p.name)
-                    .map_or(0, |(_, n)| *n);
-                while at < p.bytes {
-                    let Reply::MoveBytes {
-                        bytes_b64, offset, ..
-                    } = from
-                        .ask(
-                            Request::MoveRead {
-                                id: id.clone(),
-                                part: p.name.clone(),
-                                offset: at,
-                                len: 512 * 1024,
-                            },
-                            120,
-                        )
-                        .await?
-                    else {
-                        bail!("{from_name} didn't send {}", p.name);
-                    };
-                    let Reply::MoveWrote { have } = to
-                        .ask(
-                            Request::MoveWrite {
-                                id: id.clone(),
-                                part: p.name.clone(),
-                                offset,
-                                bytes_b64,
-                            },
-                            120,
-                        )
-                        .await?
-                    else {
-                        bail!("{to_name} didn't take {}", p.name);
-                    };
-                    if have <= at {
-                        bail!("{to_name} stopped taking {} at {at} bytes", p.name);
-                    }
-                    at = have;
-                }
-            }
-            None
-        }
-        other => bail!("{to_name}: unexpected answer {other:?}"),
-    };
-    let outcome = match arrived {
-        Some(s) => Ok(s),
-        None => match to.ask(Request::MoveAccept { id: id.clone() }, 600).await? {
-            Reply::Created { session } => Ok(session),
-            Reply::MoveNotAccepted { why } => Err(why),
-            other => bail!("{to_name}: unexpected answer {other:?}"),
-        },
-    };
-    // The machine it left hears how it ended.
-    let (to_session, not_accepted) = match &outcome {
-        Ok(s) => (Some(unqualified(s)), None),
-        Err(why) => (None, Some(why.clone())),
-    };
-    from.ask(
-        Request::MoveEnded {
-            session: session.to_string(),
-            id: id.clone(),
-            to_session,
-            not_accepted,
-        },
-        60,
-    )
-    .await?;
     from.remote.stop();
     to.remote.stop();
     match outcome {
         Ok(s) => {
-            println!("moved: {to_name} {}", unqualified(&s));
+            println!("moved: {to_name} {s}");
             Ok(())
         }
-        Err(why) => bail!("{to_name} didn't take it: {why}; it works on {from_name} again"),
+        Err(Ended::NoProject) => bail!(
+            "{to_name} doesn't have this project; bring it there first, then move the session"
+        ),
+        Err(Ended::NotAccepted(why)) => {
+            bail!("{to_name} didn't take it: {why}; it works on {from_name} again")
+        }
+        Err(Ended::Stopped { side, why }) => {
+            let name = match side {
+                Side::From => from_name.as_str(),
+                Side::To => to_name.as_str(),
+            };
+            bail!("{name}: {why} (run again with --id {id} to pick up)")
+        }
     }
-}
-
-/// A session's id as its own machine names it (a client may prefix the
-/// machine).
-fn unqualified(s: &str) -> String {
-    s.rsplit_once('/').map_or(s, |(_, id)| id).to_string()
 }
 
 fn new_id() -> String {
