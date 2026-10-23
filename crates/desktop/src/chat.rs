@@ -1750,6 +1750,15 @@ impl Dent {
     ) -> AnyElement {
         let t = self.t;
         match item {
+            // Sent by dent itself (carrying on): a quiet line, not yours.
+            Item::User { text, .. } if dent_protocol::by_dent(text).is_some() => {
+                crate::cards::note_line(
+                    dent_protocol::by_dent(text).unwrap_or_default(),
+                    "rotate-ccw-clock",
+                    &t,
+                )
+                .into_any_element()
+            }
             // A command, as it was run, until its answer comes.
             Item::User { text, files, .. } if crate::draft::sent_command(text, files).is_some() => {
                 crate::cards::command_line(text, "terminal", t.quiet, &t).into_any_element()

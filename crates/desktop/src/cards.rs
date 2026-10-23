@@ -114,6 +114,30 @@ pub fn command_line(typed: &str, glyph: &str, color: Hsla, t: &Theme) -> Div {
         )
 }
 
+/// A line dent says in the chat by itself: an icon and quiet words, in
+/// the reply's type (not code, as [`command_line`]).
+pub fn note_line(words: &str, glyph: &str, t: &Theme) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(space::S2))
+        .child(
+            div()
+                .w(px(space::S4))
+                .flex_none()
+                .flex()
+                .justify_center()
+                .child(icon(glyph, 13., t.quiet)),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_color(t.quiet)
+                .child(words.to_string()),
+        )
+}
+
 /// The parts of a meter, darkest first, in the ink: a share of the whole
 /// reads by its weight, not by a colour to look up.
 fn tone(i: usize, t: &Theme) -> Hsla {

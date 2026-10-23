@@ -659,7 +659,7 @@ impl Session {
             self.background_gone();
             if self.in_turn {
                 self.end_turn(Outcome::Interrupted {
-                    reason: Some("dent restarted while the agent was starting".into()),
+                    reason: Some("dent restarted before the agent started.".into()),
                 });
             }
             self.release_held_soon();
@@ -703,7 +703,7 @@ impl Session {
         } else {
             let _ = self.d.store().clear_proc(&self.id);
             self.stop_left_behind(&proc);
-            self.cut_off("dent restarted while the agent was working");
+            self.cut_off("This turn was cut off when dent restarted.");
         }
         self.release_held_soon();
     }
@@ -1021,7 +1021,9 @@ impl Session {
                     let _ = self.d.store().clear_proc(&self.id);
                     self.stop_left_behind(&p.id);
                     self.controls_gone();
-                    self.cut_off("the process holding the agent stopped");
+                    self.cut_off(
+                        "This turn was cut off: the part of dent that runs agents stopped.",
+                    );
                     drop(p);
                 }
                 if !self.in_turn && self.asked.is_empty() && !self.held.is_empty() {
@@ -2715,7 +2717,13 @@ impl Session {
                     "Couldn't find {name} (`{}`). Install it, then send again.",
                     self.agent.command()
                 ))
-            } else if last.is_empty() || p.over.is_some() {
+            } else if let Some(used) = p.over {
+                Some(format!(
+                    "dent stopped {name}: it used {} of memory, past this machine's limit of {}.",
+                    crate::memory::words(used),
+                    crate::memory::words(crate::memory::limits().stop)
+                ))
+            } else if last.is_empty() {
                 Some(format!("{name} stopped unexpectedly ({why})"))
             } else {
                 Some(format!("{name} stopped unexpectedly ({why}): {last}"))
@@ -2899,8 +2907,7 @@ const RECAP_MAX: usize = 24 * 1024;
 fn recap(events: &[dent_protocol::Event], max: usize, now: Option<&str>) -> String {
     let gone = withdrawn_ids(events);
     let taken_back = withdrawn_turns(events);
-    let by_dent =
-        |t: &str| t == RESUME_TEXT || t.starts_with("You were cut off before the turn finished.");
+    let by_dent = |t: &str| dent_protocol::by_dent(t).is_some();
     // (message id, for rewinds; what was said)
     let mut turns: Vec<(Option<String>, String)> = Vec::new();
     let mut held: HashMap<String, String> = HashMap::new();
@@ -3066,9 +3073,7 @@ fn settled(outcome: &Outcome) -> Status {
     }
 }
 
-/// What a session sends itself when its used-up limit resets.
-pub const RESUME_TEXT: &str =
-    "Your usage limit has reset. Carry on from where you stopped, without redoing finished work.";
+pub use dent_protocol::RESUME_TEXT;
 
 /// What a move fences: anything that starts agent work or changes the
 /// session's folder or how its agent runs. Answers to the agent's own
