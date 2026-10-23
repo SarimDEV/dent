@@ -7,7 +7,7 @@
 //!
 //! [decision 0064]: ../../../docs/decisions/0064-moving-sessions.md
 
-use dent_protocol::{MoveManifest, Reply, Request, SessionId};
+use dent_protocol::{Bring, GitRemote, MoveManifest, Reply, Request, SessionId};
 
 /// Which machine to ask.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +49,8 @@ pub enum Ended {
 pub enum Phase {
     /// Asking each machine what it has.
     Asking,
+    /// The machine it goes to is cloning the project for it.
+    Cloning,
     /// Waiting for the turn (and work left running) to end.
     Waiting,
     /// Sending what was packed.
@@ -76,14 +78,32 @@ enum At {
     Write,
     Accept,
     Ended(Result<SessionId, String>),
+    /// Reading the ignored files the clone takes, on the machine it leaves.
+    Files,
+    /// The machine it goes to cloning the project.
+    Clone,
     /// Calling the move off on the machine it leaves: the other has no
     /// project.
     NoProject,
     Done,
 }
 
+/// A project to clone on the machine it goes to, when that has none:
+/// from these remotes, with these ignored files read from `dir` on the
+/// machine it leaves.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CloneThere {
+    pub dir: String,
+    pub paths: Vec<String>,
+    pub bring: Bring,
+}
+
 pub struct Carrier {
     session: SessionId,
+    clone: Option<CloneThere>,
+    /// Cloned already this time: not cloned again.
+    cloned: bool,
+    remotes: Vec<GitRemote>,
     id: String,
     to_name: String,
     to_machine: String,
@@ -110,6 +130,9 @@ impl Carrier {
             id: id.to_string(),
             to_name: to_name.to_string(),
             to_machine: String::new(),
+            clone: None,
+            cloned: false,
+            remotes: Vec::new(),
             at: At::Remotes,
             in_repo: false,
             tips: Vec::new(),
@@ -133,6 +156,23 @@ impl Carrier {
     pub fn to_machine(mut self, id: &str) -> Self {
         self.to_machine = id.to_string();
         self
+    }
+
+    /// Clone the project there first if it hasn't one.
+    pub fn clone_there(mut self, c: CloneThere) -> Self {
+        self.clone = Some(c);
+        self
+    }
+
+    fn bring_project(&self, with_files: bool) -> Request {
+        Request::BringProject {
+            id: self.id.clone(),
+            bring: self
+                .clone
+                .as_ref()
+                .filter(|_| with_files)
+                .map(|c| c.bring.clone()),
+        }
     }
 
     pub fn id(&self) -> &str {
@@ -185,6 +225,22 @@ impl Carrier {
                 _ => Step::Done(Err(Ended::NoProject)),
             };
         }
+        // A clone there forgotten (its daemon restarted) is begun again;
+        // one too old to clone says so plainly.
+        if matches!(self.at, At::Clone)
+            && let Err(why) = &answer
+        {
+            if why.contains("no such clone") {
+                return Step::Ask(Side::To, self.bring_project(true));
+            }
+            if why.contains("unknown variant") {
+                let to = self.to_name.clone();
+                return self.stop(
+                    Side::To,
+                    format!("{to} runs an older dent, which can't clone it: update dent there"),
+                );
+            }
+        }
         let reply = match answer {
             Ok(r) => r,
             Err(why) => return self.stop(side, why),
@@ -192,8 +248,52 @@ impl Carrier {
         match (std::mem::replace(&mut self.at, At::Done), reply) {
             (At::Remotes, Reply::MoveRemotes { remotes }) => {
                 self.in_repo = !remotes.is_empty();
+                self.remotes = remotes.clone();
                 self.at = At::Have;
                 Step::Ask(Side::To, Request::MoveHave { remotes })
+            }
+            // Not there, and to be cloned: its files first, then the clone.
+            (At::Have, Reply::MoveHave { found: false, .. })
+                if self.in_repo && !self.cloned && self.clone.is_some() =>
+            {
+                self.phase = Phase::Cloning;
+                let c = self.clone.as_ref().expect("checked");
+                if c.paths.is_empty() {
+                    self.at = At::Clone;
+                    Step::Ask(Side::To, self.bring_project(true))
+                } else {
+                    self.at = At::Files;
+                    Step::Ask(
+                        Side::From,
+                        Request::ReadFiles {
+                            dir: c.dir.clone(),
+                            paths: c.paths.clone(),
+                        },
+                    )
+                }
+            }
+            (At::Files, Reply::Carried { files }) => {
+                if let Some(c) = self.clone.as_mut() {
+                    c.bring.files = files;
+                }
+                self.at = At::Clone;
+                Step::Ask(Side::To, self.bring_project(true))
+            }
+            (At::Clone, Reply::Cloning) => {
+                self.at = At::Clone;
+                Step::Wait(WAIT_MS, Side::To, self.bring_project(false))
+            }
+            // Cloned: asked again, it's found, and the move goes on.
+            (At::Clone, Reply::ProjectMade { .. }) => {
+                self.cloned = true;
+                self.phase = Phase::Asking;
+                self.at = At::Have;
+                Step::Ask(
+                    Side::To,
+                    Request::MoveHave {
+                        remotes: self.remotes.clone(),
+                    },
+                )
             }
             (At::Have, Reply::MoveHave { found, tips }) => {
                 // Gone there since an earlier carrier began, the session may
@@ -272,7 +372,7 @@ impl Carrier {
             }
             (at, other) => {
                 let side = match at {
-                    At::Remotes | At::Pack | At::Read | At::Ended(_) => Side::From,
+                    At::Remotes | At::Pack | At::Read | At::Files | At::Ended(_) => Side::From,
                     _ => Side::To,
                 };
                 self.stop(side, format!("unexpected answer {other:?}"))
@@ -402,6 +502,15 @@ mod tests {
         /// Fail the nth write (1-based) with this.
         fail_write: Option<(usize, String)>,
         writes: usize,
+        /// Cloning there: how many times it says it's still cloning, the
+        /// asks it had, whether it forgets one once (a restart), whether
+        /// it's too old to clone, and whether the clone is the repository.
+        clone_polls: usize,
+        clone_asks: Vec<Option<Bring>>,
+        forget_clone: bool,
+        old: bool,
+        clone_finds: bool,
+        files_read: Option<Vec<String>>,
     }
 
     impl Pair {
@@ -423,6 +532,12 @@ mod tests {
                 accepted: false,
                 fail_write: None,
                 writes: 0,
+                clone_polls: 0,
+                clone_asks: Vec::new(),
+                forget_clone: false,
+                old: false,
+                clone_finds: true,
+                files_read: None,
             }
         }
 
@@ -569,6 +684,37 @@ mod tests {
                     }
                     Ok(Reply::Ok)
                 }
+                (Side::From, Request::ReadFiles { paths, .. }) => {
+                    self.files_read = Some(paths.clone());
+                    Ok(Reply::Carried {
+                        files: paths
+                            .iter()
+                            .map(|p| dent_protocol::Carried {
+                                name: p.clone(),
+                                bytes_b64: b64::encode(b"KEY=1"),
+                            })
+                            .collect(),
+                    })
+                }
+                (Side::To, Request::BringProject { bring, .. }) => {
+                    if self.old {
+                        return Err("unknown variant `bring_project`".into());
+                    }
+                    self.clone_asks.push(bring.clone());
+                    if bring.is_none() && self.forget_clone {
+                        self.forget_clone = false;
+                        return Err("no such clone here".into());
+                    }
+                    if self.clone_polls > 0 {
+                        self.clone_polls -= 1;
+                        return Ok(Reply::Cloning);
+                    }
+                    self.found = self.clone_finds;
+                    Ok(Reply::ProjectMade {
+                        path: "/p/app".into(),
+                        warning: None,
+                    })
+                }
                 (side, other) => panic!("{side:?} asked {other:?}"),
             }
         }
@@ -593,6 +739,86 @@ mod tests {
             }
             panic!("never ended");
         }
+    }
+
+    fn clone(paths: &[&str]) -> CloneThere {
+        CloneThere {
+            dir: "/w".into(),
+            paths: paths.iter().map(|p| p.to_string()).collect(),
+            bring: Bring {
+                name: "app".into(),
+                remotes: vec![GitRemote {
+                    name: "origin".into(),
+                    url: "git@h:o/r".into(),
+                }],
+                branch: None,
+                files: Vec::new(),
+            },
+        }
+    }
+
+    /// Not there: the ticked files are read where it leaves, the project
+    /// is cloned there with them (asked once with them, then only how
+    /// it's going), and the move goes on as usual.
+    #[test]
+    fn a_project_cloned_there_first_then_it_moves() {
+        let mut p = Pair::new(&[("events.jsonl", 2000)]);
+        p.found = false;
+        p.clone_polls = 2;
+        let mut c = Carrier::new("s1", "m1", "dent-linux")
+            .clone_there(clone(&[".env", "config/.env.local"]))
+            .with_chunk(512);
+        let (r, waits) = p.run(&mut c);
+        assert_eq!(r, Ok("s9".into()));
+        assert_eq!(waits, 2);
+        assert_eq!(
+            p.files_read.as_deref(),
+            Some(&[".env".to_string(), "config/.env.local".to_string()][..])
+        );
+        let first = p.clone_asks[0].as_ref().expect("the first ask carries it");
+        assert_eq!(first.files.len(), 2);
+        assert!(p.clone_asks[1..].iter().all(Option::is_none));
+        assert_eq!(p.got["events.jsonl"].len(), 2000);
+    }
+
+    /// Nothing ticked: nothing read; a clone forgotten there (its daemon
+    /// restarted) is asked for again, whole.
+    #[test]
+    fn a_clone_forgotten_there_is_begun_again() {
+        let mut p = Pair::new(&[("events.jsonl", 10)]);
+        p.found = false;
+        p.clone_polls = 1;
+        p.forget_clone = true;
+        let mut c = Carrier::new("s1", "m1", "dent-linux").clone_there(clone(&[]));
+        let (r, _) = p.run(&mut c);
+        assert_eq!(r, Ok("s9".into()));
+        assert!(p.files_read.is_none());
+        let whole = p.clone_asks.iter().filter(|a| a.is_some()).count();
+        assert_eq!(whole, 2, "{:?}", p.clone_asks);
+    }
+
+    /// Too old there to clone: it says so, before anything was packed. A
+    /// clone that isn't the repository after all ends as no project, once.
+    #[test]
+    fn a_clone_that_cant_be_had_ends_plainly() {
+        let mut p = Pair::new(&[("events.jsonl", 10)]);
+        p.found = false;
+        p.old = true;
+        let mut c = Carrier::new("s1", "m1", "dent-linux").clone_there(clone(&[]));
+        let (r, _) = p.run(&mut c);
+        let Err(Ended::Stopped { why, .. }) = r else {
+            panic!("{r:?}")
+        };
+        assert!(why.contains("older dent"), "{why}");
+        assert_eq!(p.packs_with_have, 0);
+
+        let mut p = Pair::new(&[("events.jsonl", 10)]);
+        p.found = false;
+        p.clone_finds = false;
+        let mut c = Carrier::new("s1", "m1", "dent-linux").clone_there(clone(&[]));
+        let (r, _) = p.run(&mut c);
+        assert_eq!(r, Err(Ended::NoProject));
+        assert_eq!(p.clone_asks.len(), 1);
     }
 
     #[test]

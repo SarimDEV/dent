@@ -3816,12 +3816,23 @@ fn carry_then(
     id: &str,
     chunk: u32,
     stop_after: Option<usize>,
-    mut before_accept: impl FnMut(),
+    before_accept: impl FnMut(),
 ) -> Result<Result<String, String>, String> {
-    use dent_client_core::carry::{Carrier, Ended, Side, Step};
-    let mut c = Carrier::new(session, id, "b")
+    let c = dent_client_core::carry::Carrier::new(session, id, "b")
         .to_machine("b-key")
         .with_chunk(chunk);
+    drive(a, b, c, stop_after, before_accept)
+}
+
+/// Run carrier `c` between the two machines to its end.
+fn drive(
+    a: &mut Client,
+    b: &mut Client,
+    mut c: dent_client_core::carry::Carrier,
+    stop_after: Option<usize>,
+    mut before_accept: impl FnMut(),
+) -> Result<Result<String, String>, String> {
+    use dent_client_core::carry::{Ended, Side, Step};
     let mut step = c.start();
     let mut reads = 0;
     loop {
@@ -4834,4 +4845,186 @@ fn sessions_moved_at_once_each_arrive_whole_and_apart() {
             .unwrap();
         assert!(folders.insert(cwd.clone()), "two landed in {cwd}");
     }
+}
+
+/// Moved to a machine without the project, cloning it there first: the
+/// clone lands in that machine's projects with the ignored files ticked,
+/// and the session lands in a worktree of it with its uncommitted work and
+/// those files, carrying on its conversation.
+#[test]
+fn a_session_moves_to_a_machine_that_clones_its_project_first() {
+    use dent_client_core::carry::{Carrier, CloneThere};
+    let m = Moves::new("clone", false);
+    std::fs::write(
+        m.on_a.join(".gitignore"),
+        ".env\nnode_modules/\nconfig/master.key\n",
+    )
+    .unwrap();
+    git_in(&m.on_a, &["add", ".gitignore"]);
+    git_in(&m.on_a, &["commit", "-qm", "ignore"]);
+    git_in(&m.on_a, &["push", "-q", "origin", "work"]);
+    // Its branch is the one a clone checks out, and it has a commit not
+    // pushed: the clone mustn't hold the branch the session lands on.
+    git_in(
+        &m.root,
+        &[
+            "--git-dir",
+            "origin.git",
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/work",
+        ],
+    );
+    std::fs::write(m.on_a.join("local.md"), "unpushed\n").unwrap();
+    git_in(&m.on_a, &["add", "local.md"]);
+    git_in(&m.on_a, &["commit", "-qm", "not pushed yet"]);
+    std::fs::write(m.on_a.join(".env"), "KEY=from-a\n").unwrap();
+    std::fs::create_dir_all(m.on_a.join("config")).unwrap();
+    std::fs::write(m.on_a.join("config/master.key"), "k3y\n").unwrap();
+    let mut a = m.a.client();
+    let mut b = m.b.client();
+    a.subscribe(0);
+    b.subscribe(0);
+    let s = a.create(
+        &m.on_a.display().to_string(),
+        Permission::Full,
+        "remember the word fig",
+    );
+    a.wait_turns(&s, 1);
+    std::fs::write(m.on_a.join("notes.md"), "draft\n").unwrap();
+    let url = git_in(&m.on_a, &["remote", "get-url", "origin"]);
+    let c = Carrier::new(&s, "mvc1", "b")
+        .with_chunk(4096)
+        .clone_there(CloneThere {
+            dir: m.on_a.display().to_string(),
+            paths: vec![".env".into(), "config/master.key".into()],
+            bring: dent_protocol::Bring {
+                name: "app".into(),
+                remotes: vec![dent_protocol::GitRemote {
+                    name: "origin".into(),
+                    url: url.trim().to_string(),
+                }],
+                branch: Some("work".into()),
+                files: Vec::new(),
+            },
+        });
+    let to = drive(&mut a, &mut b, c, None, || {}).unwrap().unwrap();
+    b.pump_for(Duration::from_millis(300));
+    let cwd = b
+        .events(&to)
+        .into_iter()
+        .find_map(|e| match e {
+            Body::Created { cwd, .. } => Some(cwd),
+            _ => None,
+        })
+        .unwrap();
+    let cwd = Path::new(&cwd);
+    // Said at once where it works in git: its project's checkout.
+    let root = b.events(&to).into_iter().find_map(|e| match e {
+        Body::Workspace { root, .. } => root,
+        _ => None,
+    });
+    assert!(
+        root.as_deref()
+            .is_some_and(|r| r.ends_with("dent/projects/app")),
+        "{root:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(cwd.join("notes.md")).unwrap(),
+        "draft\n"
+    );
+    assert_eq!(
+        git_in(cwd, &["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        "work"
+    );
+    assert!(
+        git_in(cwd, &["log", "--format=%s"]).contains("not pushed yet"),
+        "log: {} | local.md: {:?} | cwd {}",
+        git_in(cwd, &["log", "--oneline", "--all", "-n", "8"]),
+        std::fs::read_to_string(cwd.join("local.md")),
+        cwd.display()
+    );
+    assert_eq!(
+        std::fs::read_to_string(cwd.join(".env")).unwrap(),
+        "KEY=from-a\n",
+        "the worktree has the ticked .env"
+    );
+    assert_eq!(
+        std::fs::read_to_string(cwd.join("config/master.key")).unwrap(),
+        "k3y\n",
+        "and the other file ticked"
+    );
+    // The clone itself, kept as one of that machine's projects.
+    let cloned = m.root.join("home-b/dent/projects/app");
+    assert_eq!(
+        std::fs::read_to_string(cloned.join(".env")).unwrap(),
+        "KEY=from-a\n"
+    );
+    let before = b.turns_done(&to);
+    b.say(&to, "r", "recall", false);
+    b.wait_turns(&to, before + 1);
+    assert!(
+        b.text(&to).contains("remember the word fig"),
+        "{}",
+        b.text(&to)
+    );
+}
+
+/// Two sessions of one repository moved at once to a machine without it:
+/// it's cloned there once, and both land in worktrees of that clone.
+#[test]
+fn two_sessions_moving_in_at_once_clone_their_project_once() {
+    use dent_client_core::carry::{Carrier, CloneThere};
+    let mut m = Moves::new("clone2", false);
+    m.b.kill();
+    m.b.env.push(("DENT_TEST_SLOW_CLONE".into(), "1".into()));
+    m.b.start();
+    let mut a = m.a.client();
+    a.subscribe(0);
+    let url = git_in(&m.on_a, &["remote", "get-url", "origin"]);
+    let sessions: Vec<String> = ["one", "two"]
+        .iter()
+        .map(|w| {
+            let s = a.create(
+                &m.on_a.display().to_string(),
+                Permission::Full,
+                &format!("remember {w}"),
+            );
+            a.wait_turns(&s, 1);
+            s
+        })
+        .collect();
+    let handles: Vec<_> = sessions
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let (mut a, mut b) = (m.a.client(), m.b.client());
+            let c = Carrier::new(s, &format!("mvd{i}"), "b")
+                .with_chunk(4096)
+                .clone_there(CloneThere {
+                    dir: m.on_a.display().to_string(),
+                    paths: Vec::new(),
+                    bring: dent_protocol::Bring {
+                        name: "app".into(),
+                        remotes: vec![dent_protocol::GitRemote {
+                            name: "origin".into(),
+                            url: url.trim().to_string(),
+                        }],
+                        branch: None,
+                        files: Vec::new(),
+                    },
+                });
+            std::thread::spawn(move || drive(&mut a, &mut b, c, None, || {}))
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap().unwrap().unwrap();
+    }
+    let projects: Vec<String> = std::fs::read_dir(m.root.join("home-b/dent/projects"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    assert_eq!(projects, vec!["app".to_string()], "cloned once");
 }

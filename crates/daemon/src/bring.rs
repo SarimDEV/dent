@@ -174,7 +174,7 @@ fn plain_name(name: &str) -> bool {
 /// `rel` under `dest`, if writing it there stays there: no folder on the
 /// way is a link (a clone can hold `web -> ~/.ssh`). `None` also when
 /// something's already at the end, link or not: the project's own.
-fn writable(dest: &Path, rel: &Path) -> Option<PathBuf> {
+pub(crate) fn writable(dest: &Path, rel: &Path) -> Option<PathBuf> {
     // However a name reaches it (another case, another spelling the disk
     // reads as the same), nothing goes into the repository.
     let git = dest.join(".git").canonicalize().ok();

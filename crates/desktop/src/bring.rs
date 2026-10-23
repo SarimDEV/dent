@@ -38,7 +38,7 @@ fn act(f: impl Fn(&mut Dent, &mut Window, &mut Context<Dent>) + 'static) -> Opti
 }
 
 /// File sizes in a word: 312 B, 4 KB, 1.2 MB.
-fn size(bytes: u64) -> String {
+pub fn size(bytes: u64) -> String {
     match bytes {
         0..1024 => format!("{bytes} B"),
         1024..1_048_576 => format!("{} KB", bytes.div_ceil(1024)),
@@ -48,7 +48,7 @@ fn size(bytes: u64) -> String {
 
 /// A remote's address without its scheme or `.git`, to say where a clone
 /// comes from: `github.com/ada/app`.
-fn short(url: &str) -> String {
+pub fn short(url: &str) -> String {
     let s = url
         .trim_start_matches("https://")
         .trim_start_matches("http://")

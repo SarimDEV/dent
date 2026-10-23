@@ -232,7 +232,7 @@ fn has_branch(root: &Path, branch: &str) -> bool {
 /// The ignored `.env` files of the main checkout (secrets, local settings)
 /// copied into a new worktree, which git leaves without them. Folders git
 /// ignores whole (`node_modules`) aren't looked in.
-fn copy_env(root: &Path, to: &Path) {
+pub fn copy_env(root: &Path, to: &Path) {
     let Ok(list) = run(
         root,
         &[
@@ -251,19 +251,37 @@ fn copy_env(root: &Path, to: &Path) {
         .filter(|p| !p.is_empty() && !p.ends_with('/'))
     {
         let name = rel.rsplit('/').next().unwrap_or(rel);
-        if !name.starts_with(".env") {
-            continue;
+        if name.starts_with(".env") {
+            copy_file(root, to, rel);
         }
-        let (from, dest) = (root.join(rel), to.join(rel));
-        if !from.is_file() || dest.exists() {
-            continue;
-        }
-        if let Some(parent) = dest.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Err(e) = std::fs::copy(&from, &dest) {
-            eprintln!("dent-daemon: couldn't copy {rel} into a new worktree: {e}");
-        }
+    }
+}
+
+/// Files `paths` of the main checkout, as `root` names them, copied into
+/// a new worktree that hasn't them: those a project cloned for a session
+/// moving in took from the machine it left.
+pub fn copy_files(root: &Path, to: &Path, paths: &[String]) {
+    for rel in paths {
+        copy_file(root, to, rel);
+    }
+}
+
+/// One file of the main checkout into a worktree: only where nothing is
+/// yet, and never through a link or into the repository's metadata, what
+/// the worktree's commits put there notwithstanding.
+fn copy_file(root: &Path, to: &Path, rel: &str) {
+    let from = root.join(rel);
+    if !from.is_file() || from.is_symlink() {
+        return;
+    }
+    let Some(dest) = crate::bring::writable(to, Path::new(rel)) else {
+        return;
+    };
+    if let Some(parent) = dest.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::copy(&from, &dest) {
+        eprintln!("dent-daemon: couldn't copy {rel} into a new worktree: {e}");
     }
 }
 
@@ -467,6 +485,42 @@ mod tests {
         // The branch stays, and the worktree comes back on it.
         restore(&wt, &root, &named).unwrap();
         assert_eq!(super::branch(&wt).as_deref(), Some(named.as_str()));
+    }
+
+    /// A file goes into a worktree only where nothing is: never over what's
+    /// there, through a link the worktree's commits put in, or into its
+    /// repository's metadata.
+    #[test]
+    fn files_copied_in_never_land_outside_the_worktree() {
+        let base = std::env::temp_dir().join(format!("dent-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (root, to, outside) = (base.join("root"), base.join("wt"), base.join("outside"));
+        for d in [&root.join("web"), &to, &outside] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(root.join("web/.env"), "SECRET=1\n").unwrap();
+        std::fs::write(root.join(".env"), "TOP=1\n").unwrap();
+        std::fs::write(root.join("key"), "k\n").unwrap();
+        std::os::unix::fs::symlink(&outside, to.join("web")).unwrap();
+        std::fs::write(to.join(".env"), "MINE=1\n").unwrap();
+        copy_files(
+            &root,
+            &to,
+            &[
+                "web/.env".into(),
+                ".env".into(),
+                "key".into(),
+                "../x".into(),
+            ],
+        );
+        assert!(!outside.join(".env").exists(), "through the link");
+        assert_eq!(
+            std::fs::read_to_string(to.join(".env")).unwrap(),
+            "MINE=1\n"
+        );
+        assert_eq!(std::fs::read_to_string(to.join("key")).unwrap(), "k\n");
+        assert!(!base.join("x").exists());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
