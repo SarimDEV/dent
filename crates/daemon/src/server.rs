@@ -304,6 +304,47 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             });
             Reply::Ok
         }
+        // Moving a session (decision 0064): each side's part, asked by the
+        // client carrying it.
+        Request::MoveHave { remotes } => d.move_have(&remotes).await,
+        Request::MovePack {
+            session,
+            id,
+            to,
+            have,
+        } => d.move_pack(&session, &id, &to, have).await?,
+        Request::MoveRead {
+            id,
+            part,
+            offset,
+            len,
+        } => d.move_read(&id, &part, offset, len).await?,
+        Request::MoveIn { manifest } => d.move_in(&manifest)?,
+        Request::MoveWrite {
+            id,
+            part,
+            offset,
+            bytes_b64,
+        } => d.move_write(&id, &part, offset, &bytes_b64)?,
+        Request::MoveAccept { id } => d.move_accept(&id).await?,
+        Request::MoveEnded {
+            session,
+            id,
+            to_session,
+            not_accepted,
+        } => {
+            d.move_ended(&session, &id, to_session, not_accepted)
+                .await?;
+            Reply::Ok
+        }
+        Request::MoveStop {
+            session,
+            id,
+            continue_here,
+        } => {
+            d.move_stop(&session, &id, continue_here).await?;
+            Reply::Ok
+        }
         // The launcher trials it; this daemon is stopped if it's taken on.
         Request::Update { version } => {
             let Some(l) = crate::launcher::get() else {
@@ -853,7 +894,7 @@ pub(crate) fn remember_project(d: &Daemon, path: &str) -> Result<()> {
     Ok(())
 }
 
-async fn project_list(d: &Daemon) -> Result<Vec<dent_protocol::Project>> {
+pub async fn project_list(d: &Daemon) -> Result<Vec<dent_protocol::Project>> {
     let recent: Vec<(String, u64)> = d
         .store()
         .sessions()?

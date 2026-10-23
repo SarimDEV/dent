@@ -219,7 +219,9 @@ fn main() {
         }
     }
     // Claude Code with no record of the conversation it was asked to resume.
-    if std::env::var_os("FAKE_CLAUDE_FORGET").is_some() && arg("--resume").is_some() {
+    let strict = std::env::var_os("FAKE_CLAUDE_STRICT_RESUME").is_some()
+        && arg("--resume").is_some_and(|id| transcript_path(&id).is_none());
+    if (strict || std::env::var_os("FAKE_CLAUDE_FORGET").is_some()) && arg("--resume").is_some() {
         while let Ok(v) = a.rx.recv() {
             if v["type"] == "user" {
                 break;
@@ -927,6 +929,8 @@ impl Agent {
     fn turn(&mut self, text: &str) -> Result<(), ()> {
         self.show_mcp |= text.to_lowercase().contains("mcp trouble");
         self.init();
+        // As Claude Code keeps its conversations, for moves to carry.
+        transcript_add(&self.session, "user", text);
         if !self.sent_limits {
             self.sent_limits = true;
             let now = SystemTime::now()
@@ -1061,6 +1065,24 @@ impl Agent {
         }
         if lower.contains("replay a real turn") {
             return self.replay(ask);
+        }
+        // What it remembers of the conversation, from its transcript, and
+        // whether it was told it moved (a moved session's first message).
+        if lower.contains("recall") {
+            let first = transcript_path(&self.session)
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|t| {
+                    t.lines().find_map(|l| {
+                        let v: Value = serde_json::from_str(l).ok()?;
+                        (v["type"] == "user").then(|| v["text"].as_str().map(str::to_string))?
+                    })
+                })
+                .unwrap_or_default();
+            let told = text.contains("[dent: this session moved");
+            let reply = format!("You first said: {first}. Told it moved: {told}.");
+            self.say(&reply, None)?;
+            self.end(&reply, false);
+            return Ok(());
         }
         // Says exactly what follows, for a test to put any reply in the
         // chat (pictures, links, odd paths).
@@ -2175,6 +2197,57 @@ mod tests {
         assert_eq!(
             super::look_key("<p>hi</p>", 700, "auto"),
             "c9e372f659082b2c"
+        );
+    }
+}
+
+/// Where Claude Code keeps conversations for the folder it runs in.
+fn transcript_folder() -> Option<std::path::PathBuf> {
+    let cwd = std::env::current_dir().ok()?.display().to_string();
+    let name: String = cwd
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    Some(
+        std::path::PathBuf::from(std::env::var_os("HOME")?)
+            .join(".claude/projects")
+            .join(name),
+    )
+}
+
+/// A conversation's transcript, wherever it is (Claude Code finds one by id
+/// across folders).
+fn transcript_path(id: &str) -> Option<std::path::PathBuf> {
+    let root = std::path::PathBuf::from(std::env::var_os("HOME")?).join(".claude/projects");
+    std::fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .map(|d| d.path().join(format!("{id}.jsonl")))
+        .find(|p| p.exists())
+}
+
+fn transcript_add(id: &str, kind: &str, text: &str) {
+    // Only when asked (a test with a scratch HOME): never into a real
+    // Claude Code's folder.
+    if std::env::var_os("FAKE_CLAUDE_TRANSCRIPTS").is_none() {
+        return;
+    }
+    let path =
+        transcript_path(id).or_else(|| Some(transcript_folder()?.join(format!("{id}.jsonl"))));
+    let Some(path) = path else { return };
+    if let Some(p) = path.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        let _ = writeln!(
+            f,
+            "{}",
+            json!({"type": kind, "sessionId": id, "text": text})
         );
     }
 }

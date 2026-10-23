@@ -36,6 +36,8 @@ use dent_remote::host;
 use dent_remote::store::{Saved, device_keys, device_name, load, save};
 use tokio::sync::mpsc;
 
+mod moving;
+
 fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter()
         .position(|a| a == name)
@@ -73,6 +75,7 @@ async fn main() -> Result<()> {
         Some("watch") => watch(&args[1..]).await,
         Some("ask") => ask(&args[1..]).await,
         Some("call") => call(&args[1..]).await,
+        Some("move") => moving::run(&args[1..]).await,
         Some("get") => get(&args[1..]).await,
         Some("wake") => {
             let name = args.get(1).context("dent wake NAME")?;
@@ -86,7 +89,7 @@ async fn main() -> Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: dent machine add HOST:PORT [--code CODE] | dent machines | dent machine remove NAME | dent watch [NAME...] [--secs N] | dent ask NAME TEXT [--file PATH]... [--cwd DIR | --bring DIR] | dent wake NAME | dent call NAME JSON | dent get NAME SESSION PATH [OUT]"
+                "usage: dent machine add HOST:PORT [--code CODE] | dent machines | dent machine remove NAME | dent watch [NAME...] [--secs N] | dent ask NAME TEXT [--file PATH]... [--cwd DIR | --bring DIR] | dent wake NAME | dent call NAME JSON | dent get NAME SESSION PATH [OUT] | dent move NAME SESSION --to NAME [--id ID]"
             );
             Ok(())
         }

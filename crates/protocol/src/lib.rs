@@ -1563,6 +1563,67 @@ pub enum Request {
     /// Exit so a newer daemon can take over. Agents keep running in the
     /// session holder, and the client starts the new daemon.
     Restart,
+    /// Moving a session ([decision 0064](../../docs/decisions/0064-moving-sessions.md)),
+    /// carried by a client both machines trust. To the machine it goes to
+    /// first: whether it has the repository (by any of these remotes), and
+    /// the commits it has, for the bundle to leave out.
+    MoveHave {
+        remotes: Vec<GitRemote>,
+    },
+    /// To the machine it leaves: move `session` to machine `to` as move
+    /// `id`. Without `have`, nothing starts: it answers the session's Git
+    /// remotes (`MoveRemotes`), to ask the other machine what it has. With
+    /// it, it waits for the turn to end (answered `MoveWaiting`), then
+    /// fences and packs it (`MovePacked`), leaving out commits in `have`.
+    /// Asked again with the same id, it answers where it stands.
+    MovePack {
+        session: SessionId,
+        id: String,
+        to: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        have: Option<Vec<String>>,
+    },
+    /// A ranged read of one of a packed move's parts.
+    MoveRead {
+        id: String,
+        part: String,
+        offset: u64,
+        len: u32,
+    },
+    /// To the machine it goes to: a move arriving. Answers how much of each
+    /// part is there (`MoveParts`), or the session it made, if it took it.
+    MoveIn {
+        manifest: Box<MoveManifest>,
+    },
+    MoveWrite {
+        id: String,
+        part: String,
+        offset: u64,
+        bytes_b64: String,
+    },
+    /// Make the session from what arrived: `Created`, or `MoveNotAccepted`
+    /// when it took nothing (said only before it wrote anything).
+    MoveAccept {
+        id: String,
+    },
+    /// Back to the machine it left: how it ended. `to_session` arrived;
+    /// otherwise `not_accepted` says why it didn't.
+    MoveEnded {
+        session: SessionId,
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_session: Option<SessionId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        not_accepted: Option<String>,
+    },
+    /// Call the move off (only before anything was sent), or keep the
+    /// session here whatever was sent (`continue_here`).
+    MoveStop {
+        session: SessionId,
+        id: String,
+        #[serde(default)]
+        continue_here: bool,
+    },
     /// Under the launcher: run `version`, already staged on the machine
     /// (`dent-daemon update DIR`). It's trialled and rolled back if it
     /// fails; the answer says whether the launcher took it on.
@@ -1817,6 +1878,32 @@ pub enum Reply {
         update: Option<Box<UpdateOutcome>>,
     },
     Ok,
+    /// Answers to a move's requests.
+    MoveHave {
+        found: bool,
+        tips: Vec<String>,
+    },
+    MoveRemotes {
+        remotes: Vec<GitRemote>,
+    },
+    MoveWaiting,
+    MovePacked {
+        manifest: Box<MoveManifest>,
+    },
+    MoveBytes {
+        offset: u64,
+        total: u64,
+        bytes_b64: String,
+    },
+    MoveParts {
+        have: Vec<(String, u64)>,
+    },
+    MoveWrote {
+        have: u64,
+    },
+    MoveNotAccepted {
+        why: String,
+    },
     Pairing {
         code: String,
         /// When the code stops working, in ms since the epoch.
@@ -1945,6 +2032,9 @@ impl Request {
             | R::Reopen { session }
             | R::Resume { session, .. }
             | R::StopTask { session, .. }
+            | R::MovePack { session, .. }
+            | R::MoveEnded { session, .. }
+            | R::MoveStop { session, .. }
             | R::Seen { session, .. }
             | R::Retitle { session }
             | R::Aside { session, .. }
@@ -1980,6 +2070,11 @@ impl Request {
             | R::Adopt { .. }
             | R::Restart
             | R::Update { .. }
+            | R::MoveHave { .. }
+            | R::MoveRead { .. }
+            | R::MoveIn { .. }
+            | R::MoveWrite { .. }
+            | R::MoveAccept { .. }
             | R::FilesIn { .. }
             | R::Folders { .. }
             | R::AddProject { .. }
@@ -2038,7 +2133,16 @@ impl Out {
                 | Reply::Carried { .. }
                 | Reply::GitStatus { .. }
                 | Reply::PrBrief { .. }
-                | Reply::GitDone { .. } => Vec::new(),
+                | Reply::GitDone { .. }
+                // A move's manifest keeps the ids of the machine it left.
+                | Reply::MoveHave { .. }
+                | Reply::MoveRemotes { .. }
+                | Reply::MoveWaiting
+                | Reply::MovePacked { .. }
+                | Reply::MoveBytes { .. }
+                | Reply::MoveParts { .. }
+                | Reply::MoveWrote { .. }
+                | Reply::MoveNotAccepted { .. } => Vec::new(),
             },
             Out::Resync { .. } | Out::Error { .. } | Out::Models { .. } | Out::CaughtUp { .. } => {
                 Vec::new()
@@ -2121,6 +2225,10 @@ pub struct MoveManifest {
     /// In a repository: what moves of it. `None` for dent's scratch folder.
     #[serde(default)]
     pub repo: Option<MoveRepo>,
+    /// Where dent kept the files it saved for the session there, as its
+    /// events name them (they come as the `files/…` parts).
+    #[serde(default)]
+    pub files_from: String,
     pub parts: Vec<MovePart>,
 }
 

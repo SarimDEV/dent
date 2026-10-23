@@ -1,10 +1,25 @@
 //! Moving a session to another machine ([decision 0064]): the source's
-//! states and fence (`state`), packing (`pack`) and accepting (`accept`).
+//! states and fence (`state`), the git snapshot (`git`), packing (`pack`)
+//! and arriving (`accept`), and here the requests a carrier makes of each
+//! side. Every request is answered so it can be asked again: a carrier
+//! stopped at any point starts over with the same move id.
 //!
 //! [decision 0064]: ../../../../docs/decisions/0064-moving-sessions.md
 
+pub mod accept;
 pub mod git;
+pub mod pack;
 pub mod state;
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use anyhow::{Context, Result, bail};
+use dent_protocol::{Body, GitRemote, MoveManifest, Reply, b64};
+
+use crate::daemon::Daemon;
+use crate::session::Op;
+use state::Step;
 
 /// A session's move as kept, if it has one.
 pub fn current(store: &crate::store::Store, session: &str) -> Option<state::Move> {
@@ -23,4 +38,460 @@ pub fn check(store: &crate::store::Store, session: &str) -> anyhow::Result<()> {
 /// Where a session's move is kept in the store.
 pub fn move_key(session: &str) -> String {
     format!("move/{session}")
+}
+
+/// What a session that arrived here tells its agent first: where it came
+/// from. Kept until said.
+pub fn arrived_key(session: &str) -> String {
+    format!("moved/{session}")
+}
+
+/// The most a part is read or written in one go.
+pub const CHUNK: u32 = 512 * 1024;
+
+fn scratch() -> PathBuf {
+    crate::paths::home().join("dent/scratch")
+}
+
+/// The local repository with one of `remotes`, from the projects this
+/// machine knows: its main checkout.
+async fn local_repo(d: &Daemon, remotes: &[GitRemote]) -> Option<PathBuf> {
+    let projects = crate::server::project_list(d).await.ok()?;
+    let remotes = remotes.to_vec();
+    tokio::task::spawn_blocking(move || {
+        projects.into_iter().find_map(|p| {
+            let path = PathBuf::from(&p.path);
+            let here = git::remotes(&path);
+            here.iter()
+                .any(|h| remotes.iter().any(|r| accept::same_remote(&h.url, &r.url)))
+                .then_some(path)
+        })
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+impl Daemon {
+    /// `MoveHave`: whether the repository is here, and what it has.
+    pub async fn move_have(self: &Arc<Self>, remotes: &[GitRemote]) -> Reply {
+        match local_repo(self, remotes).await {
+            Some(root) => Reply::MoveHave {
+                found: true,
+                tips: tokio::task::spawn_blocking(move || git::tips(&root))
+                    .await
+                    .unwrap_or_default(),
+            },
+            None => Reply::MoveHave {
+                found: false,
+                tips: Vec::new(),
+            },
+        }
+    }
+
+    /// `MovePack`: start the move (or find where it stands), and once the
+    /// session is quiet and fenced, pack it.
+    pub async fn move_pack(
+        self: &Arc<Self>,
+        session: &str,
+        id: &str,
+        to: &str,
+        have: Option<Vec<String>>,
+    ) -> Result<Reply> {
+        if !pack::valid_id(id) {
+            bail!("{id:?} isn't a move id");
+        }
+        let Some(have) = have else {
+            let row = self.store().session(session)?.context("no such session")?;
+            let remotes = tokio::task::spawn_blocking(move || {
+                git::repo_of(Path::new(&row.cwd))
+                    .map(|(root, _)| git::remotes(&root))
+                    .unwrap_or_default()
+            })
+            .await?;
+            return Ok(Reply::MoveRemotes { remotes });
+        };
+        self.command(
+            session,
+            Op::Move(Step::Start {
+                id: id.into(),
+                to: to.into(),
+                busy: false,
+            }),
+        )
+        .await?;
+        let m = current(&self.store(), session).context("the move ended")?;
+        if m.state == dent_protocol::MoveState::Pending {
+            return Ok(Reply::MoveWaiting);
+        }
+        // Gone already, by this move: what it was packed as, so a carrier
+        // that lost the answer finishes the same way.
+        if m.state == dent_protocol::MoveState::Departed {
+            if m.id == id
+                && let Ok(manifest) = pack::read_manifest(&pack::dir(&self.paths.state, id))
+            {
+                return Ok(Reply::MovePacked {
+                    manifest: Box::new(manifest),
+                });
+            }
+            bail!("it moved to {} already", m.to);
+        }
+        let row = self.store().session(session)?.context("no such session")?;
+        let events = self.store().session_events(session)?;
+        let driver = crate::agent::named(Some(&row.agent))?;
+        let (state, machine, id2) = (self.paths.state.clone(), self.net.id(), id.to_string());
+        let manifest = tokio::task::spawn_blocking(move || {
+            pack::pack(
+                &pack::Session {
+                    state: &state,
+                    machine: &machine,
+                    row: &row,
+                    driver,
+                    events: &events,
+                    scratch: &scratch(),
+                },
+                &id2,
+                &have,
+            )
+        })
+        .await?;
+        match manifest {
+            Ok(manifest) => Ok(Reply::MovePacked {
+                manifest: Box::new(manifest),
+            }),
+            // Nothing was sent: it works here again, saying why.
+            Err(why) => {
+                let _ = self
+                    .command(
+                        session,
+                        Op::Move(Step::NotAccepted {
+                            id: id.into(),
+                            why: why.clone(),
+                        }),
+                    )
+                    .await;
+                bail!("{why}")
+            }
+        }
+    }
+
+    /// `MoveRead`: a ranged read of a packed part. The first read marks the
+    /// move as maybe sent: from now on only Continue here undoes it.
+    pub async fn move_read(
+        self: &Arc<Self>,
+        id: &str,
+        part: &str,
+        offset: u64,
+        len: u32,
+    ) -> Result<Reply> {
+        let dir = pack::dir(&self.paths.state, id);
+        let m = pack::read_manifest(&dir).context("no packed move by that id")?;
+        if !m.parts.iter().any(|p| p.name == part) {
+            bail!("{part:?} isn't part of this move");
+        }
+        if current(&self.store(), &m.from_session)
+            .is_some_and(|c| c.state == dent_protocol::MoveState::Departing { sent: false })
+        {
+            self.command(&m.from_session, Op::Move(Step::Sending { id: id.into() }))
+                .await?;
+        }
+        let path = dir.join(part);
+        let len = len.min(CHUNK) as u64;
+        let (bytes, total) =
+            tokio::task::spawn_blocking(move || -> std::io::Result<(Vec<u8>, u64)> {
+                use std::io::{Read, Seek, SeekFrom};
+                let mut f = std::fs::File::open(&path)?;
+                let total = f.metadata()?.len();
+                f.seek(SeekFrom::Start(offset.min(total)))?;
+                let mut buf = Vec::new();
+                f.take(len).read_to_end(&mut buf)?;
+                Ok((buf, total))
+            })
+            .await??;
+        Ok(Reply::MoveBytes {
+            offset,
+            total,
+            bytes_b64: b64::encode(&bytes),
+        })
+    }
+
+    /// `MoveIn`: a move arriving, or arrived.
+    pub fn move_in(&self, m: &MoveManifest) -> Result<Reply> {
+        if let Some(session) = accept::accepted(&self.paths.state, &m.id) {
+            return Ok(Reply::Created { session });
+        }
+        let have = accept::begin(&self.paths.state, m).map_err(anyhow::Error::msg)?;
+        Ok(Reply::MoveParts { have })
+    }
+
+    pub fn move_write(&self, id: &str, part: &str, offset: u64, bytes_b64: &str) -> Result<Reply> {
+        let data = b64::decode(bytes_b64).context("not base64")?;
+        let have = accept::write(&self.paths.state, id, part, offset, &data)
+            .map_err(anyhow::Error::msg)?;
+        Ok(Reply::MoveWrote { have })
+    }
+
+    /// `MoveEnded`, on the machine it left: arrived (departed), or not
+    /// accepted (it works here again).
+    pub async fn move_ended(
+        self: &Arc<Self>,
+        session: &str,
+        id: &str,
+        to_session: Option<String>,
+        not_accepted: Option<String>,
+    ) -> Result<()> {
+        let step = match (to_session, not_accepted) {
+            (Some(to_session), _) => Step::Arrived {
+                id: id.into(),
+                to_session,
+            },
+            (None, Some(why)) => Step::NotAccepted { id: id.into(), why },
+            (None, None) => bail!("say how the move ended"),
+        };
+        self.command(session, Op::Move(step)).await
+    }
+
+    pub async fn move_stop(
+        self: &Arc<Self>,
+        session: &str,
+        id: &str,
+        continue_here: bool,
+    ) -> Result<()> {
+        let step = if continue_here {
+            Step::ContinueHere { id: id.into() }
+        } else {
+            Step::Cancel { id: id.into() }
+        };
+        self.command(session, Op::Move(step)).await
+    }
+
+    /// `MoveAccept`: make the session here from what arrived.
+    pub async fn move_accept(self: &Arc<Self>, id: &str) -> Result<Reply> {
+        let state = self.paths.state.clone();
+        if let Some(session) = accept::accepted(&state, id) {
+            return Ok(Reply::Created { session });
+        }
+        let m = accept::manifest(&state, id).map_err(anyhow::Error::msg)?;
+        let session = derived_session(&m);
+        // Made already by an accept cut short after the import: it's this
+        // move's, so it's said as accepted now.
+        if self.store().session(&session)?.is_some() {
+            mark_accepted(&state, id, &session)?;
+            return Ok(Reply::Created { session });
+        }
+        let not = |why: String| Ok(Reply::MoveNotAccepted { why });
+        if let Err(why) = accept::verify(&state, &m) {
+            return not(why);
+        }
+        let Ok(driver) = crate::agent::named(Some(&m.agent)) else {
+            return not(format!("{} isn't an agent this machine has", m.agent));
+        };
+        // Where it lands.
+        let parts = accept::inbox(&state, id).join("parts");
+        let (cwd, applied) = match &m.repo {
+            None => (scratch(), None),
+            Some(r) => {
+                let Some(root) = local_repo(self, &r.remotes).await else {
+                    return not("this machine doesn't have the project; bring it here first".into());
+                };
+                let name = root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let leaf = if r.branch.is_empty() {
+                    "moved".to_string()
+                } else {
+                    r.branch.replace('/', "-")
+                };
+                let new = crate::workspace::worktrees_root()
+                    .join(&name)
+                    .join(format!("{leaf}-{}", &id[..id.len().min(8)]));
+                // One an accept cut short made is this move's: made again.
+                let landing = accept::inbox(&state, id).join("landing");
+                if std::fs::read_to_string(&landing).ok().as_deref()
+                    == Some(&new.display().to_string())
+                    && new.exists()
+                {
+                    let _ = crate::workspace::run(
+                        &root,
+                        &["worktree", "remove", "--force", &new.display().to_string()],
+                    );
+                    let _ = std::fs::remove_dir_all(&new);
+                }
+                if let Some(p) = new.parent() {
+                    std::fs::create_dir_all(p)?;
+                }
+                std::fs::write(&landing, new.display().to_string())?;
+                let (r2, id2, root2, new2, bundle) = (
+                    r.clone(),
+                    id.to_string(),
+                    root.clone(),
+                    new.clone(),
+                    parts.join("git.bundle"),
+                );
+                let applied = tokio::task::spawn_blocking(move || {
+                    git::apply(&root2, &r2, &id2, &bundle, &new2)
+                })
+                .await?;
+                match applied {
+                    Ok(a) => (
+                        if r.subdir.is_empty() {
+                            new
+                        } else {
+                            new.join(&r.subdir)
+                        },
+                        Some(a),
+                    ),
+                    Err(why) => return not(why),
+                }
+            }
+        };
+        let cwd_s = cwd.display().to_string();
+        // The agent's conversation, under a new id of its own.
+        let agent_to = derived_uuid(&format!("{}/{}", m.from_machine, m.id));
+        if !m.agent_session.is_empty()
+            && let Err(e) = driver.place_conversation(&parts, &m.agent_session, &agent_to, &cwd_s)
+        {
+            return not(format!("{e:#}"));
+        }
+        // What dent saved for it.
+        let files = state.join("attachments").join(&session);
+        let from_files = parts.join("files");
+        for f in pack::files_under(&from_files) {
+            let rel = f.strip_prefix(&from_files)?;
+            let to = files.join(rel);
+            if let Some(p) = to.parent() {
+                std::fs::create_dir_all(p)?;
+            }
+            std::fs::copy(&f, &to)?;
+        }
+        // dent's record of it, as this machine's.
+        let events = match history(&parts, &m, &files) {
+            Ok(e) => e,
+            Err(why) => return not(why),
+        };
+        let mut bodies = vec![(
+            crate::daemon::now_ms(),
+            Body::Created {
+                agent: m.agent.clone(),
+                cwd: cwd_s.clone(),
+                model: m.model.clone(),
+                permission: m.permission,
+                title: m.title.clone(),
+            },
+        )];
+        bodies.extend(events);
+        let now = crate::daemon::now_ms();
+        bodies.push((
+            now,
+            Body::Agent {
+                agent_session: (!m.agent_session.is_empty()).then(|| agent_to.clone()),
+                version: None,
+            },
+        ));
+        bodies.push((
+            now,
+            Body::Notice {
+                text: format!("Moved here from {}", m.from_machine),
+            },
+        ));
+        bodies.push((
+            now,
+            Body::Status {
+                status: dent_protocol::Status::Done,
+            },
+        ));
+        let arrived = serde_json::json!({
+            "from_machine": m.from_machine,
+            "from_cwd": m.cwd,
+            "to_cwd": cwd_s,
+        })
+        .to_string();
+        let kv = vec![
+            (arrived_key(&session), arrived),
+            (crate::daemon::titled_key(&session), "1".to_string()),
+        ];
+        self.import(&session, &bodies, &kv)?;
+        mark_accepted(&state, id, &session)?;
+        if let Some(a) = applied {
+            a.keep();
+        }
+        let row = self
+            .store()
+            .session(&session)?
+            .context("session row missing")?;
+        crate::session::start(self.clone(), row, Vec::new());
+        Ok(Reply::Created { session })
+    }
+}
+
+/// The moved session's id here, the same for every try of one move.
+fn derived_session(m: &MoveManifest) -> String {
+    let h = fnv(&format!("{}/{}/{}", m.from_machine, m.from_session, m.id));
+    format!("s{h:016x}m")
+}
+
+/// A version-4-shaped id from `seed`, the same each time.
+fn derived_uuid(seed: &str) -> String {
+    let (a, b) = (fnv(seed), fnv(&format!("{seed}#")));
+    let h = format!("{a:016x}{b:016x}");
+    format!(
+        "{}-{}-4{}-a{}-{}",
+        &h[..8],
+        &h[8..12],
+        &h[13..16],
+        &h[17..20],
+        &h[20..32]
+    )
+}
+
+fn fnv(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+fn mark_accepted(state: &Path, id: &str, session: &str) -> Result<()> {
+    let file = accept::inbox(state, id).join("accepted");
+    let tmp = file.with_extension("part");
+    std::fs::write(&tmp, session)?;
+    std::fs::File::open(&tmp)?.sync_all()?;
+    std::fs::rename(&tmp, &file)?;
+    Ok(())
+}
+
+/// The events that came, as this machine's: what the session was made with
+/// and which agent conversation it ran are said anew, and the files dent
+/// saved for it are where they are here.
+fn history(parts: &Path, m: &MoveManifest, files: &Path) -> Result<Vec<(u64, Body)>, String> {
+    let text = std::fs::read_to_string(parts.join("events.jsonl")).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let line = if m.files_from.is_empty() {
+            line.to_string()
+        } else {
+            line.replace(&m.files_from, &files.display().to_string())
+        };
+        #[derive(serde::Deserialize)]
+        struct Line {
+            at: u64,
+            body: Body,
+        }
+        let Ok(l) = serde_json::from_str::<Line>(&line) else {
+            // A kind of event this daemon doesn't know (from a newer one):
+            // left out rather than refused.
+            continue;
+        };
+        if matches!(
+            l.body,
+            Body::Created { .. } | Body::Agent { .. } | Body::Status { .. } | Body::Move { .. }
+        ) {
+            continue;
+        }
+        out.push((l.at, l.body));
+    }
+    Ok(out)
 }

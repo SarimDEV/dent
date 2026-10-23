@@ -127,6 +127,42 @@ impl Store {
         })
     }
 
+    /// A whole session at once (one moved here): each event with when it
+    /// happened, and `kv` pairs, in one transaction, so it's all here or
+    /// none of it is. Returns the events as stored.
+    pub fn import(
+        &mut self,
+        session: &str,
+        events: &[(u64, Body)],
+        kv: &[(String, String)],
+    ) -> Result<Vec<Event>> {
+        let tx = self.db.transaction()?;
+        let mut out = Vec::with_capacity(events.len());
+        for (at, body) in events {
+            let json = serde_json::to_string(body)?;
+            tx.execute(
+                "INSERT INTO events (session, at, body) VALUES (?1, ?2, ?3)",
+                params![session, *at as i64, json],
+            )?;
+            let seq = tx.last_insert_rowid() as u64;
+            project(&tx, session, *at, body)?;
+            out.push(Event {
+                seq,
+                session: session.into(),
+                at: *at,
+                body: body.clone(),
+            });
+        }
+        for (k, v) in kv {
+            tx.execute(
+                "INSERT INTO kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
+                params![k, v],
+            )?;
+        }
+        tx.commit()?;
+        Ok(out)
+    }
+
     /// Name the next agent process for a session and make it current.
     pub fn next_proc(&self, session: &str) -> Result<String> {
         let n: i64 = self.db.query_row(

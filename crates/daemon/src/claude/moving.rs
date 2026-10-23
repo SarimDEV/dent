@@ -1,0 +1,99 @@
+//! Claude Code's side of moving a session ([decision 0064], [spike 09]):
+//! its transcript (`~/.claude/projects/<folder>/<id>.jsonl`) and the side
+//! files beside it (`<id>/`: subagents, saved tool results), carried and
+//! put in place for the new folder under a new id, which resumes with full
+//! context.
+//!
+//! [decision 0064]: ../../../../docs/decisions/0064-moving-sessions.md
+//! [spike 09]: ../../../../docs/spikes/09-moving-sessions.md
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+
+/// Where Claude Code keeps conversations for work in `cwd`: the path with
+/// every character but a letter or digit made a dash.
+pub fn folder_for(cwd: &str) -> PathBuf {
+    let name: String = cwd
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    super::terminal::store().join(name)
+}
+
+/// The conversation's files and their names in the move.
+pub fn conversation(agent_session: &str) -> Option<Vec<(PathBuf, String)>> {
+    let transcript = super::terminal::find(agent_session)?;
+    let mut out = vec![(transcript.clone(), "transcript.jsonl".to_string())];
+    let side = transcript.with_extension("");
+    for f in files_under(&side) {
+        let rel = f.strip_prefix(&side).ok()?.display().to_string();
+        out.push((f, format!("agent/{rel}")));
+    }
+    Some(out)
+}
+
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        match e.file_type() {
+            Ok(t) if t.is_dir() => out.extend(files_under(&p)),
+            Ok(t) if t.is_file() => out.push(p),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Put a moved conversation in place for `cwd` as `to`: the transcript and
+/// its side files, with the old id made the new one throughout (the CLI
+/// resumes a re-keyed transcript with its whole context).
+pub fn place(dir: &Path, from: &str, to: &str, cwd: &str) -> Result<()> {
+    let dest = folder_for(cwd);
+    std::fs::create_dir_all(&dest).context("make Claude Code's folder for it")?;
+    let rekey = |bytes: Vec<u8>| match String::from_utf8(bytes) {
+        Ok(text) if !from.is_empty() => text.replace(from, to).into_bytes(),
+        Ok(text) => text.into_bytes(),
+        Err(e) => e.into_bytes(),
+    };
+    let transcript = std::fs::read(dir.join("transcript.jsonl")).context("the transcript")?;
+    write_whole(&dest.join(format!("{to}.jsonl")), &rekey(transcript))?;
+    let side = dir.join("agent");
+    for f in files_under(&side) {
+        let rel = f.strip_prefix(&side)?;
+        // A side file's path can't leave the conversation's own folder.
+        if rel
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            continue;
+        }
+        let at = dest.join(to).join(rel);
+        if let Some(p) = at.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        write_whole(&at, &rekey(std::fs::read(&f)?))?;
+    }
+    Ok(())
+}
+
+fn write_whole(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("dent-part");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn claude_codes_folder_is_the_path_with_dashes() {
+        let f = super::folder_for("/home/a.b/dent/worktrees/x_y");
+        assert!(
+            f.ends_with("-home-a-b-dent-worktrees-x-y"),
+            "{}",
+            f.display()
+        );
+    }
+}

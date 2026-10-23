@@ -12,7 +12,7 @@ use serde_json::Value;
 use crate::agent::{Imported, log};
 use crate::claude::wire;
 
-fn store() -> PathBuf {
+pub fn store() -> PathBuf {
     crate::paths::home().join(".claude/projects")
 }
 

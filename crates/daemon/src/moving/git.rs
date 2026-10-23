@@ -214,6 +214,25 @@ fn tempdir(root: &Path) -> Result<PathBuf, String> {
     Ok(t)
 }
 
+/// Every remote of the repository at `root`, `origin` first: what names the
+/// repository, so the other machine finds its own copy of it (whether any
+/// can be cloned from is another matter).
+pub fn remotes(root: &Path) -> Vec<dent_protocol::GitRemote> {
+    let mut out: Vec<dent_protocol::GitRemote> = git(root, &["remote"], &[])
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|name| {
+            let url = git(root, &["remote", "get-url", name], &[]).ok()?;
+            Some(dent_protocol::GitRemote {
+                name: name.to_string(),
+                url,
+            })
+        })
+        .collect();
+    out.sort_by_key(|r| r.name != "origin");
+    out
+}
+
 /// The commits `root` already has, for the other side to leave out: every
 /// branch, remote branch and tag tip.
 pub fn tips(root: &Path) -> Vec<String> {
@@ -240,7 +259,13 @@ pub fn tips(root: &Path) -> Vec<String> {
 /// what the manifest says; anything made is undone on any failure after
 /// that. The bundle's bytes are checked against the manifest's SHA-256
 /// first (git's own check passes a bundle cut short in its header).
-pub fn apply(repo: &Path, m: &MoveRepo, id: &str, bundle: &Path, new: &Path) -> Result<(), String> {
+pub fn apply(
+    repo: &Path,
+    m: &MoveRepo,
+    id: &str,
+    bundle: &Path,
+    new: &Path,
+) -> Result<Applied, String> {
     let snap_ref = format!("refs/dent/move/{id}/snapshot");
     let index_ref = format!("refs/dent/move/{id}/index");
     let heads = git(
@@ -370,8 +395,23 @@ pub fn apply(repo: &Path, m: &MoveRepo, id: &str, bundle: &Path, new: &Path) -> 
         &["read-tree", "-m", &format!("{}^{{tree}}", m.index)],
         &[],
     )?;
-    undo.done = true;
-    Ok(())
+    Ok(Applied(undo))
+}
+
+/// An apply that's done, undone if dropped before [`Applied::keep`]: the
+/// steps after it (placing the conversation) can still fail.
+pub struct Applied(Undo);
+
+impl std::fmt::Debug for Applied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Applied")
+    }
+}
+
+impl Applied {
+    pub fn keep(mut self) {
+        self.0.done = true;
+    }
 }
 
 /// What an apply made, undone unless it finished: the worktree first (a
@@ -515,7 +555,7 @@ mod tests {
         // The person's own index and refs are as they were.
         assert!(out(&src, &["for-each-ref", "refs/dent"]).is_empty());
         let new = base.join("dst-moved");
-        apply(&dst, &m, "m1", &bundle, &new).unwrap();
+        apply(&dst, &m, "m1", &bundle, &new).unwrap().keep();
         assert_eq!(view(&new), view(&src));
         // Ignored folders stay behind; the moved branch is where it was.
         assert!(!new.join("node_modules").exists());
@@ -566,7 +606,7 @@ mod tests {
             .is_err()
         );
         let fine = base2.join("fine");
-        apply(&dst2, &m2, "m3", &b2, &fine).unwrap();
+        apply(&dst2, &m2, "m3", &b2, &fine).unwrap().keep();
         assert_eq!(view(&fine), view(&src2));
         // A separate checkout inside: refused on the source, before packing.
         sh(

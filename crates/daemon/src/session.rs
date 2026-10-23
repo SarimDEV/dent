@@ -1088,8 +1088,24 @@ impl Session {
             });
             return Err(e);
         }
-        let msg = self.agent.message(text, steer, attachments);
-        if let Err(e) = self.write(&msg).await {
+        // Moved here: the agent hears first where it is now, or it reaches
+        // for the old machine's paths (spike 09).
+        let arrived = self
+            .d
+            .store()
+            .get(&crate::moving::arrived_key(&self.id))
+            .ok()
+            .flatten();
+        let text = match arrived.as_deref().and_then(move_notice) {
+            Some(notice) => std::borrow::Cow::Owned(format!("{notice}\n\n{text}")),
+            None => std::borrow::Cow::Borrowed(text),
+        };
+        let msg = self.agent.message(&text, steer, attachments);
+        let written = self.write(&msg).await;
+        if written.is_ok() && arrived.is_some() {
+            let _ = self.d.store().del(&crate::moving::arrived_key(&self.id));
+        }
+        if let Err(e) = written {
             // The agent went between starting and now. A new message gets
             // one more go with a new agent; a steer belonged to the turn.
             let again = if steer {
@@ -3067,4 +3083,18 @@ fn fenced_by_moves(op: &Op) -> bool {
             | Op::Reopen
             | Op::SetUp
     )
+}
+
+/// What a session that moved here says to its agent before your first
+/// message: where it was, where it is, and that the old place isn't here.
+fn move_notice(arrived: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(arrived).ok()?;
+    let (from, old, new) = (
+        v["from_machine"].as_str()?,
+        v["from_cwd"].as_str()?,
+        v["to_cwd"].as_str()?,
+    );
+    Some(format!(
+        "[dent: this session moved to another machine. It worked in {old} on {from}; it works in {new} here, with the same files and changes. {old} isn't on this machine: use paths under {new} from now on.]"
+    ))
 }

@@ -195,6 +195,21 @@ impl Daemon {
     /// the event is on the live feed, so the feed carries events in `seq`
     /// order: a subscriber skips anything at or below the last seq it
     /// sent, and an event overtaken by a later one would be lost to it.
+    /// A whole session at once, with when each thing happened, and `kv`
+    /// pairs, all or nothing; then told to clients as if appended.
+    pub fn import(
+        &self,
+        session: &str,
+        bodies: &[(u64, Body)],
+        kv: &[(String, String)],
+    ) -> Result<()> {
+        let events = self.store().import(session, bodies, kv)?;
+        for ev in events {
+            let _ = self.live.send(Arc::new(Live::Event(ev)));
+        }
+        Ok(())
+    }
+
     pub fn append(&self, session: &str, body: Body, src: Option<Source<'_>>) -> Result<Event> {
         let mut store = self.store();
         let ev = store.append(session, now_ms(), &body, src)?;
