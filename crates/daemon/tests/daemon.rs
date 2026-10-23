@@ -1657,19 +1657,27 @@ fn a_turn_a_reboot_cut_off_carries_on_by_itself_once() {
     w.start();
     let mut c = w.client();
     c.subscribe(0);
+    c.wait(&s, "the interruption", |b| {
+        matches!(
+            b,
+            Body::TurnEnded {
+                outcome: Outcome::Interrupted { .. }
+            }
+        )
+    });
+    // Down again before it carried on: the next daemon still does, once.
+    w.kill();
+    drop(c);
+    w.start();
+    let mut c = w.client();
+    c.subscribe(0);
     c.wait(
         &s,
         "carrying on",
         |b| matches!(b, Body::User { text, .. } if text.starts_with("You were cut off")),
     );
     c.wait_turns(&s, 1);
-    // Down again once it's done: nothing more to carry on.
-    w.kill();
-    drop(c);
-    w.start();
-    let mut c = w.client();
-    c.subscribe(0);
-    c.pump_for(Duration::from_secs(7));
+    c.pump_for(Duration::from_secs(6));
     assert_eq!(carry_ons(&c, &s), 1);
     assert_eq!(interruptions(&c, &s), 1);
 }
@@ -1709,6 +1717,25 @@ fn a_turn_waiting_on_you_or_answered_first_never_carries_on_by_itself() {
     c.wait_turns(&t, 1);
     c.pump_for(Duration::from_secs(6));
     assert_eq!(carry_ons(&c, &t), 0);
+    // Cut off, then you press Stop: it stays stopped.
+    let u = c.create(&w.cwd(), Permission::Full, "one more long answer please");
+    c.wait(&u, "the turn to start", |b| matches!(b, Body::TurnStarted));
+    kill_holder(&w);
+    c.wait(&u, "the interruption", |b| {
+        matches!(
+            b,
+            Body::TurnEnded {
+                outcome: Outcome::Interrupted { .. }
+            }
+        )
+    });
+    c.call(Request::Interrupt {
+        session: u.clone(),
+        by: None,
+    })
+    .unwrap();
+    c.pump_for(Duration::from_secs(7));
+    assert_eq!(carry_ons(&c, &u), 0);
 }
 
 #[test]

@@ -401,6 +401,35 @@ impl Session {
         serde_json::from_str(&v).ok()
     }
 
+    fn carry_ons_key(&self) -> String {
+        format!("carry_ons.{}", self.id)
+    }
+
+    /// When it carried on by itself lately, in Unix seconds.
+    fn carry_ons(&self) -> Vec<u64> {
+        let now = crate::daemon::now_ms() / 1000;
+        let mut times: Vec<u64> = self
+            .d
+            .store()
+            .get(&self.carry_ons_key())
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_str(&v).ok())
+            .unwrap_or_default();
+        times.retain(|t| t + CARRY_ON_WINDOW > now);
+        times
+    }
+
+    /// Counts carrying on now. Not counted (the store failing), it doesn't
+    /// go: it waits for you rather than risk a loop.
+    fn count_carry_on(&self) -> bool {
+        let mut times = self.carry_ons();
+        times.push(crate::daemon::now_ms() / 1000);
+        serde_json::to_string(&times)
+            .ok()
+            .is_some_and(|v| self.d.store().put(&self.carry_ons_key(), &v).is_ok())
+    }
+
     /// You did something first: it doesn't carry on by itself.
     fn call_off_carry_on(&mut self) {
         if self.carry_on_at.take().is_some() {
@@ -428,18 +457,8 @@ impl Session {
         {
             return;
         }
-        let now = crate::daemon::now_ms() / 1000;
-        let key = format!("carry_ons.{}", self.id);
-        let mut times: Vec<u64> = self
-            .d
-            .store()
-            .get(&key)
-            .ok()
-            .flatten()
-            .and_then(|v| serde_json::from_str(&v).ok())
-            .unwrap_or_default();
-        times.retain(|t| t + CARRY_ON_WINDOW > now);
-        if times.len() >= CARRY_ON_MAX {
+        // Only times it really carried on count: those you took over don't.
+        if self.carry_ons().len() >= CARRY_ON_MAX {
             self.log(Body::Notice {
                 text: format!(
                     "Cut off {CARRY_ON_MAX} times in {} minutes, so it waits for you to continue.",
@@ -448,16 +467,10 @@ impl Session {
             });
             return;
         }
-        times.push(now);
         let due = (crate::daemon::new_id(), dent_protocol::carry_on_text(&lost));
-        let store = self.d.store();
-        let kept = serde_json::to_string(&times)
+        let kept = serde_json::to_string(&due)
             .ok()
-            .is_some_and(|v| store.put(&key, &v).is_ok())
-            && serde_json::to_string(&due)
-                .ok()
-                .is_some_and(|v| store.put(&self.carry_on_key(), &v).is_ok());
-        // Not kept, not counted: it waits for you rather than risk a loop.
+            .is_some_and(|v| self.d.store().put(&self.carry_on_key(), &v).is_ok());
         if kept {
             self.carry_on_at = Some(Instant::now() + RELEASE_GRACE);
         }
@@ -1556,8 +1569,10 @@ impl Session {
     /// then by letting go of it.
     async fn interrupt(&mut self) -> Result<()> {
         // Stop means nothing more arrives: held messages come back, those
-        // left waiting across a restart (about to go) too.
+        // left waiting across a restart (about to go) too, and carrying on
+        // by itself.
         self.release_at = None;
+        self.call_off_carry_on();
         for (id, _, _) in std::mem::take(&mut self.held) {
             self.log(Body::Unqueued { id, returned: None });
         }
@@ -1690,6 +1705,7 @@ impl Session {
                 && !self.in_turn
                 && self.asked.is_empty()
                 && crate::moving::state::fence(self.moving.as_ref()).is_none()
+                && self.count_carry_on()
             {
                 let _ = self.send(id, text, false, Vec::new()).await;
             }
