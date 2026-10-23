@@ -1577,6 +1577,11 @@ impl Session {
             self.log(Body::Unqueued { id, returned: None });
         }
         if !self.in_turn {
+            // Stopped before its first turn (its worktree still setting
+            // up): it reads stopped, never as a session still starting.
+            if self.settled == Status::New {
+                self.settled = Status::Interrupted;
+            }
             return Ok(());
         }
         self.steered = false;

@@ -18,6 +18,32 @@ const PREFIX: &str = "dent/";
 pub const SETUP: &str = ".dent/setup";
 const MAX_BRANCHES: usize = 200;
 
+/// Runs `f`, which adds, removes or prunes `dir`'s repository's worktrees,
+/// while no other such change to that repository runs in this daemon: two
+/// `git worktree add`s at once can each read the other's half-made entry
+/// and fail. Keyed by the git folder every worktree of a repository shares.
+pub fn one_at_a_time<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+    use std::collections::HashMap;
+    use std::sync::{Arc, LazyLock, Mutex};
+    static LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
+        LazyLock::new(Default::default);
+    let key = run(
+        dir,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .ok()
+    .and_then(|d| std::fs::canonicalize(d.trim()).ok())
+    .unwrap_or_else(|| dir.to_path_buf());
+    let lock = LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(key)
+        .or_default()
+        .clone();
+    let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+    f()
+}
+
 /// git, its output, or what it said went wrong.
 pub fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new("git")
@@ -183,7 +209,9 @@ pub fn make(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let p = path.display().to_string();
-    run(&root, &["worktree", "add", "-b", &branch, &p, &base])?;
+    one_at_a_time(&root, || {
+        run(&root, &["worktree", "add", "-b", &branch, &p, &base])
+    })?;
     copy_env(&root, &path);
     Ok((path, branch, root))
 }
@@ -346,6 +374,10 @@ pub fn rename(worktree: &Path, old: &str, wanted: &str) -> Result<String, String
 /// Take a worktree away; its branch stays. Without `force`, one with
 /// changes not committed is kept. One already gone is forgotten.
 pub fn remove(worktree: &Path, root: &Path, force: bool) -> Result<(), String> {
+    one_at_a_time(root, || remove_now(worktree, root, force))
+}
+
+fn remove_now(worktree: &Path, root: &Path, force: bool) -> Result<(), String> {
     if !worktree.exists() {
         return run(root, &["worktree", "prune"]).map(|_| ());
     }
@@ -366,12 +398,14 @@ pub fn remove(worktree: &Path, root: &Path, force: bool) -> Result<(), String> {
 
 /// Bring back a removed worktree on its branch, for a session reopened.
 pub fn restore(worktree: &Path, root: &Path, branch: &str) -> Result<(), String> {
-    let _ = run(root, &["worktree", "prune"]);
     if let Some(parent) = worktree.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let p = worktree.display().to_string();
-    run(root, &["worktree", "add", &p, branch])?;
+    one_at_a_time(root, || {
+        let _ = run(root, &["worktree", "prune"]);
+        run(root, &["worktree", "add", &p, branch])
+    })?;
     copy_env(root, worktree);
     Ok(())
 }

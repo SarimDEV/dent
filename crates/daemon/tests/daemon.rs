@@ -4354,3 +4354,222 @@ fn going_back_to_before_a_turn_works_after_the_move() {
     .unwrap();
     assert!(!Path::new(&cwd).join("later.txt").exists());
 }
+
+/// Resident memory of a process, in KiB.
+fn rss_kib(pid: u32) -> u64 {
+    let out = Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0)
+}
+
+/// Many agents at once, each streaming a lot: every turn finishes, one
+/// client watching them all sees every event once and in order, and the
+/// daemon's memory stays bounded: it grows with sessions running at once,
+/// never with turns. `DENT_LOAD_SHAPE=40x4` (sessions x turns) runs it
+/// heavier; 10x14 showed it flat from the fifth turn on (2026-10-23).
+#[test]
+fn many_agents_at_once_all_finish_seen_once_and_memory_stays_bounded() {
+    let (sessions, turns): (usize, usize) = std::env::var("DENT_LOAD_SHAPE")
+        .ok()
+        .and_then(|v| {
+            let (a, b) = v.split_once('x')?;
+            Some((a.parse().ok()?, b.parse().ok()?))
+        })
+        .unwrap_or((12, 2));
+    let w = World::new(&[("FAKE_CLAUDE_SPEED", "0.02")]);
+    let pid = w.daemon.as_ref().unwrap().id();
+    let mut c = w.client();
+    c.subscribe(0);
+    let before = rss_kib(pid);
+    let ids: Vec<String> = (0..sessions)
+        .map(|n| {
+            c.create(
+                &w.cwd(),
+                Permission::Full,
+                &format!("ten thousand lines, number {n}"),
+            )
+        })
+        .collect();
+    let mut peak = 0;
+    for t in 1..=turns {
+        let until = Instant::now() + Duration::from_secs(120);
+        while ids.iter().any(|s| c.turns_done(s) < t) {
+            assert!(Instant::now() < until, "turn {t} didn't finish everywhere");
+            c.pump(Duration::from_millis(100));
+            peak = peak.max(rss_kib(pid));
+        }
+        if t < turns {
+            for (n, s) in ids.iter().enumerate() {
+                c.say(
+                    s,
+                    &format!("again-{t}-{n}"),
+                    "ten thousand lines again",
+                    false,
+                );
+            }
+        }
+    }
+    c.pump_for(Duration::from_secs(2));
+    // Every event once, in order, with no gaps.
+    let seqs: Vec<u64> = c.events.lock().unwrap().iter().map(|e| e.seq).collect();
+    assert!(seqs.windows(2).all(|w| w[1] == w[0] + 1), "gaps or repeats");
+    for s in &ids {
+        assert_eq!(c.turns_done(s), turns, "{s}");
+        assert_eq!(interruptions(&c, s), 0, "{s}");
+    }
+    let after = rss_kib(pid);
+    let holder = w.holder_pid().map(|p| rss_kib(p as u32)).unwrap_or(0);
+    eprintln!(
+        "{sessions} sessions x {turns} turns of 10,000 lines: daemon {before} KiB before, {peak} peak, {after} after; holder {holder} KiB"
+    );
+    // Generous bounds that still catch a reply kept per session in memory
+    // (each is about 600 KB) or a leak per turn.
+    assert!(peak < 400 * 1024, "daemon peaked at {peak} KiB");
+    assert!(holder < 200 * 1024, "holder at {holder} KiB");
+}
+
+/// T3's worst worktree reports: new threads landing in the main checkout,
+/// and stops breaking it. Many sessions asked for at once, each in a new
+/// worktree, some stopped while setting up: every one works in a folder of
+/// its own, and the main checkout (its branch, HEAD and uncommitted
+/// changes) is exactly as it was.
+#[test]
+fn worktrees_made_at_once_never_land_in_or_disturb_the_main_checkout() {
+    let home = std::env::temp_dir().join(format!("dent-wt{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let mut w = World::new(&[("HOME", home.to_str().unwrap())]);
+    let project = w.project.clone();
+    let git = |args: &[&str]| -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&project)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    std::fs::create_dir_all(w.project.join(".dent")).unwrap();
+    std::fs::write(w.project.join(".dent/setup"), "sleep 1\n").unwrap();
+    git(&["add", ".dent/setup"]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-qm",
+        "setup",
+    ]);
+    // Work in progress in the main checkout.
+    std::fs::write(w.project.join("README.md"), "hello\nmine, unsaved\n").unwrap();
+    std::fs::write(w.project.join("scratch.txt"), "untracked\n").unwrap();
+    let (branch, head, status) = (
+        git(&["branch", "--show-current"]),
+        git(&["rev-parse", "HEAD"]),
+        git(&["status", "--porcelain"]),
+    );
+    let n = 12;
+    let made: Vec<String> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..n)
+            .map(|i| {
+                let w = &w;
+                scope.spawn(move || {
+                    let mut c = w.client();
+                    match c.call(Request::Create {
+                        agent: None,
+                        cwd: w.cwd(),
+                        worktree: Some(dent_protocol::NewWorktree::default()),
+                        model: None,
+                        permission: Permission::Full,
+                        effort: None,
+                        id: format!("wt{i}"),
+                        text: format!("hello {i}"),
+                        attachments: Vec::new(),
+                        files: Vec::new(),
+                        bring: None,
+                    }) {
+                        Ok(Out::Reply {
+                            reply: dent_protocol::Reply::Created { session },
+                        }) => {
+                            // Every third is stopped at once, mid-setup.
+                            if i % 3 == 0 {
+                                c.call(Request::Interrupt {
+                                    session: session.clone(),
+                                    by: None,
+                                })
+                                .unwrap();
+                            }
+                            session
+                        }
+                        other => panic!("create {i}: {other:?}"),
+                    }
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let mut c = w.client();
+    c.subscribe(0);
+    let until = Instant::now() + Duration::from_secs(60);
+    let quiet = |c: &Client, s: &str| {
+        matches!(
+            c.status(s),
+            Some(Status::Done | Status::Interrupted | Status::Error)
+        )
+    };
+    while made.iter().any(|s| !quiet(&c, s)) {
+        assert!(
+            Instant::now() < until,
+            "sessions never settled: {:#?}",
+            made.iter()
+                .enumerate()
+                .filter(|(_, s)| !quiet(&c, s))
+                .map(|(i, s)| (i, c.events(s)))
+                .collect::<Vec<_>>()
+        );
+        c.pump(Duration::from_millis(100));
+    }
+    // Settled for good: a restarted daemon reads them the same.
+    drop(c);
+    w.kill();
+    w.start();
+    let mut c = w.client();
+    c.subscribe(0);
+    c.pump_for(Duration::from_secs(1));
+    for s in &made {
+        assert!(quiet(&c, s), "{s} reads {:?} after a restart", c.status(s));
+    }
+    let mut dirs = std::collections::HashSet::new();
+    for s in &made {
+        let cwd = c
+            .events(s)
+            .iter()
+            .find_map(|b| match b {
+                Body::Created { cwd, .. } => Some(cwd.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_ne!(cwd, w.cwd(), "{s} landed in the main checkout");
+        assert!(
+            std::path::Path::new(&cwd).starts_with(&home),
+            "{s} works in {cwd}"
+        );
+        assert!(dirs.insert(cwd.clone()), "two sessions share {cwd}");
+    }
+    assert_eq!(git(&["branch", "--show-current"]), branch);
+    assert_eq!(git(&["rev-parse", "HEAD"]), head);
+    assert_eq!(git(&["status", "--porcelain"]), status);
+    assert_eq!(
+        git(&["worktree", "list", "--porcelain"])
+            .lines()
+            .filter(|l| l.starts_with("worktree "))
+            .count(),
+        n + 1
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
