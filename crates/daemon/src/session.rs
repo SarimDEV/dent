@@ -24,6 +24,11 @@ use crate::store::{Row, Source};
 /// How long messages left waiting across a restart wait for reconnecting
 /// clients before they go.
 const RELEASE_GRACE: Duration = Duration::from_secs(5);
+/// A turn cut off by a reboot or the holder dying carries on by itself,
+/// but not after this many times in [`CARRY_ON_WINDOW`] seconds: something
+/// in it may be what keeps bringing the machine down.
+const CARRY_ON_MAX: usize = 3;
+const CARRY_ON_WINDOW: u64 = 300;
 
 /// An agent with nothing to do is stopped after this long, and resumed from
 /// its transcript on the next message.
@@ -243,6 +248,9 @@ struct Session {
     /// When messages left waiting across a restart go, if nothing has
     /// taken them back by then.
     release_at: Option<Instant>,
+    /// When a turn dent's own restart cut off carries on by itself, unless
+    /// you do something first. What it sends is kept in the store.
+    carry_on_at: Option<Instant>,
     stop_at: Option<Instant>,
     /// When a starting agent must have answered by.
     start_by: Option<Instant>,
@@ -324,6 +332,7 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
         max_context: None,
         idle_at: None,
         release_at: None,
+        carry_on_at: None,
         stop_at: None,
         start_by: None,
         owed: false,
@@ -336,6 +345,14 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
         watch: None,
     };
     s.rebuild();
+    // Carrying on was due when the last daemon went: still is.
+    if let Some((id, _)) = s.carry_on() {
+        if s.seen.contains(&id) {
+            let _ = s.d.store().del(&s.carry_on_key());
+        } else {
+            s.carry_on_at = Some(Instant::now() + RELEASE_GRACE);
+        }
+    }
     s.moving =
         s.d.store()
             .get(&crate::moving::move_key(&s.id))
@@ -371,6 +388,79 @@ impl Session {
     /// Where a stop asked for this session is kept.
     fn stop_key(&self) -> String {
         format!("stop.{}", self.id)
+    }
+
+    /// Where the message it carries on with is kept, until it's sent.
+    fn carry_on_key(&self) -> String {
+        format!("carry_on.{}", self.id)
+    }
+
+    /// The message it carries on with, as (id, text), if one is due.
+    fn carry_on(&self) -> Option<(String, String)> {
+        let v = self.d.store().get(&self.carry_on_key()).ok().flatten()?;
+        serde_json::from_str(&v).ok()
+    }
+
+    /// You did something first: it doesn't carry on by itself.
+    fn call_off_carry_on(&mut self) {
+        if self.carry_on_at.take().is_some() {
+            let _ = self.d.store().del(&self.carry_on_key());
+        }
+    }
+
+    /// The agent's process went with something that was neither it nor
+    /// you: the machine restarting, or the holder dying. The turn ends, and
+    /// carries on by itself in a moment, unless it was waiting on you,
+    /// messages wait to go instead, or it's been cut off too often lately.
+    fn cut_off(&mut self, reason: &str) {
+        let lost = self.background_gone();
+        if !self.in_turn {
+            return;
+        }
+        // Waiting on you, or being stopped by you: yours to carry on.
+        let waiting = !self.asked.is_empty() || self.stop_asked;
+        self.end_turn(Outcome::Interrupted {
+            reason: Some(reason.into()),
+        });
+        if waiting
+            || !self.held.is_empty()
+            || crate::moving::state::fence(self.moving.as_ref()).is_some()
+        {
+            return;
+        }
+        let now = crate::daemon::now_ms() / 1000;
+        let key = format!("carry_ons.{}", self.id);
+        let mut times: Vec<u64> = self
+            .d
+            .store()
+            .get(&key)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_str(&v).ok())
+            .unwrap_or_default();
+        times.retain(|t| t + CARRY_ON_WINDOW > now);
+        if times.len() >= CARRY_ON_MAX {
+            self.log(Body::Notice {
+                text: format!(
+                    "Cut off {CARRY_ON_MAX} times in {} minutes, so it waits for you to continue.",
+                    CARRY_ON_WINDOW / 60
+                ),
+            });
+            return;
+        }
+        times.push(now);
+        let due = (crate::daemon::new_id(), dent_protocol::carry_on_text(&lost));
+        let store = self.d.store();
+        let kept = serde_json::to_string(&times)
+            .ok()
+            .is_some_and(|v| store.put(&key, &v).is_ok())
+            && serde_json::to_string(&due)
+                .ok()
+                .is_some_and(|v| store.put(&self.carry_on_key(), &v).is_ok());
+        // Not kept, not counted: it waits for you rather than risk a loop.
+        if kept {
+            self.carry_on_at = Some(Instant::now() + RELEASE_GRACE);
+        }
     }
 
     /// Recover what's in memory from the log.
@@ -572,12 +662,7 @@ impl Session {
             }
         } else {
             let _ = self.d.store().clear_proc(&self.id);
-            self.background_gone();
-            if self.in_turn {
-                self.end_turn(Outcome::Interrupted {
-                    reason: Some("dent restarted while the agent was working".into()),
-                });
-            }
+            self.cut_off("dent restarted while the agent was working");
         }
         self.release_held_soon();
     }
@@ -603,6 +688,7 @@ impl Session {
                 wake,
                 self.idle_at,
                 self.release_at,
+                self.carry_on_at,
                 self.stop_at,
                 self.start_by,
                 self.watch.as_ref().map(|w| w.next),
@@ -627,6 +713,17 @@ impl Session {
     }
 
     async fn op(&mut self, op: Op) -> Result<()> {
+        // Anything you start yourself takes the place of carrying on.
+        if matches!(
+            op,
+            Op::Send { .. }
+                | Op::Rewind { .. }
+                | Op::Requeue { .. }
+                | Op::Close
+                | Op::Move(crate::moving::state::Step::Start { .. })
+        ) {
+            self.call_off_carry_on();
+        }
         // A session on its way to another machine starts nothing here, and
         // one that went is a record (decision 0064).
         if fenced_by_moves(&op)
@@ -853,13 +950,8 @@ impl Session {
             Op::HolderLost => {
                 if let Some(p) = self.proc.take() {
                     let _ = self.d.store().clear_proc(&self.id);
-                    self.background_gone();
                     self.controls_gone();
-                    if self.in_turn {
-                        self.end_turn(Outcome::Interrupted {
-                            reason: Some("the process holding the agent stopped".into()),
-                        });
-                    }
+                    self.cut_off("the process holding the agent stopped");
                     drop(p);
                 }
                 if !self.in_turn && self.asked.is_empty() && !self.held.is_empty() {
@@ -1292,9 +1384,10 @@ impl Session {
 
     /// The agent process has gone, and the work it ran in the background
     /// with it.
-    fn background_gone(&mut self) {
+    /// Background work went with the agent: said so, and what it was.
+    fn background_gone(&mut self) -> Vec<String> {
         if self.background.is_empty() {
-            return;
+            return Vec::new();
         }
         let what: Vec<String> = self
             .background
@@ -1313,6 +1406,7 @@ impl Session {
                 )
             },
         });
+        what
     }
 
     async fn ensure_proc(&mut self) -> Result<()> {
@@ -1590,6 +1684,17 @@ impl Session {
     }
 
     async fn timers(&mut self) {
+        if self.carry_on_at.is_some_and(|t| t <= Instant::now()) {
+            self.carry_on_at = None;
+            if let Some((id, text)) = self.carry_on()
+                && !self.in_turn
+                && self.asked.is_empty()
+                && crate::moving::state::fence(self.moving.as_ref()).is_none()
+            {
+                let _ = self.send(id, text, false, Vec::new()).await;
+            }
+            let _ = self.d.store().del(&self.carry_on_key());
+        }
         let now = Instant::now();
         if self.release_at.is_some_and(|t| t <= now) {
             self.release_at = None;

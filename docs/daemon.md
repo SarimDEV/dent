@@ -94,7 +94,7 @@ Pictures in a tool's result (`image` blocks) are written to the session's attach
 1. **Agent processes** keep running while clients disconnect. The session holder holds their stdio, so they survive daemon upgrades and crashes too.
    - Output goes to disk first, and each event records the byte it ended at, so a restarted daemon picks up exactly where it left off ([spike 06](spikes/06-session-holder.md)).
    - The daemon stops an agent's process after 5 minutes with nothing running, and resumes its session from the transcript on the next prompt ([0038](decisions/0038-local-core.md)).
-2. **Daemon restarts** (upgrade or crash) carry on with agents still running in the holder. After a reboot, or if the holder itself dies, each session resumes from the agent's own transcript and the event log; in-flight turns are marked interrupted and can be continued with one click.
+2. **Daemon restarts** (upgrade or crash) carry on with agents still running in the holder. After a reboot, or if the holder itself dies, each session resumes from the agent's own transcript and the event log; in-flight turns are marked interrupted and carry on by themselves a few seconds later, saying what background work was lost. They don't when the turn was waiting on you or being stopped, when you do something first, or after 3 times in 5 minutes. Then Continue is one click.
 3. **UI state** (open sessions, panes, scroll position, markdown tabs, drafts) is shared state, synced like projects (see Sync).
 
 ## Git

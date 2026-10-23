@@ -227,6 +227,8 @@ impl Client {
         }
     }
 
+    /// Takes in what has arrived, waiting up to `wait` for something: for
+    /// loops that poll. To wait a set time, [`Client::pump_for`].
     fn pump(&mut self, wait: Duration) {
         let Ok((req, out)) = self.rx.recv_timeout(wait) else {
             return;
@@ -234,6 +236,18 @@ impl Client {
         self.take(req, out);
         while let Ok((req, out)) = self.rx.try_recv() {
             self.take(req, out);
+        }
+    }
+
+    /// Takes in everything that arrives for all of `wait`: a test that
+    /// then asserts nothing more happened has really waited.
+    fn pump_for(&mut self, wait: Duration) {
+        let until = Instant::now() + wait;
+        while let Some(left) = until.checked_duration_since(Instant::now()) {
+            match self.rx.recv_timeout(left) {
+                Ok((req, out)) => self.take(req, out),
+                Err(_) => return,
+            }
         }
     }
 
@@ -1317,7 +1331,7 @@ fn approvals_allow_deny_and_questions() {
     c.subscribe(0);
     let s = c.create(&w.cwd(), Permission::Ask, "please run it");
     let id = c.asked(&s);
-    c.pump(Duration::from_millis(100));
+    c.pump_for(Duration::from_millis(100));
     assert_eq!(c.status(&s), Some(Status::NeedsYou));
     // A session waiting on you can't be closed.
     assert!(c.call(Request::Close { session: s.clone() }).is_err());
@@ -1400,7 +1414,7 @@ fn messages_sent_while_working_wait_unless_steered() {
     })
     .unwrap();
     c.wait_turns(&s, 2);
-    c.pump(Duration::from_millis(300));
+    c.pump_for(Duration::from_millis(300));
     assert_eq!(c.turns_done(&s), 2, "the unqueued message must not run");
     assert_eq!(
         c.count(&s, |b| matches!(b, Body::Delivered { id } if id == "q1")),
@@ -1416,7 +1430,6 @@ fn messages_sent_while_working_wait_unless_steered() {
     while c.count(&s, |b| matches!(b, Body::TurnStarted)) == started && Instant::now() < until {
         c.pump(Duration::from_millis(20));
     }
-    c.pump(Duration::from_millis(200));
     c.say(&s, "st", "actually do the steer thing", true);
     // Wait for the steered reply itself: on a busy machine the turn count
     // can reach three before it arrives.
@@ -1491,7 +1504,7 @@ fn stop_stops_within_two_seconds_and_returns_held_messages() {
         ),
         1
     );
-    c.pump(Duration::from_millis(500));
+    c.pump_for(Duration::from_millis(500));
     // Nothing left of it: stopped, not a session still starting.
     assert_eq!(c.status(&s), Some(Status::Interrupted));
     assert_eq!(c.turns_done(&s), 0);
@@ -1516,7 +1529,7 @@ fn a_daemon_restart_mid_reply_loses_and_repeats_nothing() {
     let mut c = w.client();
     c.subscribe(0);
     c.wait_turns(&s, 1);
-    c.pump(Duration::from_millis(300));
+    c.pump_for(Duration::from_millis(300));
     assert_eq!(c.count(&s, |b| matches!(b, Body::Assistant { .. })), 1);
     assert_eq!(c.count(&s, |b| matches!(b, Body::TurnStarted)), 1);
     assert_eq!(c.count(&s, |b| matches!(b, Body::TurnEnded { .. })), 1);
@@ -1572,7 +1585,7 @@ fn idle_agents_stop_quietly_and_start_again() {
     let s = c.create(&w.cwd(), Permission::Ask, "hi");
     c.wait_turns(&s, 1);
     std::thread::sleep(Duration::from_millis(900));
-    c.pump(Duration::from_millis(100));
+    c.pump_for(Duration::from_millis(100));
     assert_eq!(
         c.count(&s, |b| matches!(b, Body::Notice { .. })),
         0,
@@ -1603,6 +1616,127 @@ fn a_dead_holder_interrupts_the_turn_and_the_session_carries_on() {
     });
     c.say(&s, "2", "short", false);
     c.wait_turns(&s, 1);
+}
+
+/// Messages a session sent itself to carry on after being cut off.
+fn carry_ons(c: &Client, s: &str) -> usize {
+    c.count(
+        s,
+        |b| matches!(b, Body::User { text, .. } if text.starts_with("You were cut off")),
+    )
+}
+
+fn interruptions(c: &Client, s: &str) -> usize {
+    c.count(s, |b| {
+        matches!(
+            b,
+            Body::TurnEnded {
+                outcome: Outcome::Interrupted { .. }
+            }
+        )
+    })
+}
+
+fn kill_holder(w: &World) {
+    let pid = w.holder_pid().expect("holder running");
+    // SAFETY: kill has no memory preconditions.
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+}
+
+#[test]
+fn a_turn_a_reboot_cut_off_carries_on_by_itself_once() {
+    let mut w = World::new(&[("FAKE_CLAUDE_SPEED", "0.5")]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Full, "a long answer please");
+    c.wait(&s, "the turn to start", |b| matches!(b, Body::TurnStarted));
+    // The machine goes down: the daemon and everything it held.
+    w.kill();
+    kill_holder(&w);
+    drop(c);
+    w.start();
+    let mut c = w.client();
+    c.subscribe(0);
+    c.wait(
+        &s,
+        "carrying on",
+        |b| matches!(b, Body::User { text, .. } if text.starts_with("You were cut off")),
+    );
+    c.wait_turns(&s, 1);
+    // Down again once it's done: nothing more to carry on.
+    w.kill();
+    drop(c);
+    w.start();
+    let mut c = w.client();
+    c.subscribe(0);
+    c.pump_for(Duration::from_secs(7));
+    assert_eq!(carry_ons(&c, &s), 1);
+    assert_eq!(interruptions(&c, &s), 1);
+}
+
+#[test]
+fn a_turn_waiting_on_you_or_answered_first_never_carries_on_by_itself() {
+    let w = World::new(&[("FAKE_CLAUDE_SPEED", "0.5")]);
+    let mut c = w.client();
+    c.subscribe(0);
+    // Waiting on an approval when the holder dies: yours to carry on.
+    let s = c.create(&w.cwd(), Permission::Ask, "write notes.md please");
+    c.asked(&s);
+    kill_holder(&w);
+    c.wait(&s, "the interruption", |b| {
+        matches!(
+            b,
+            Body::TurnEnded {
+                outcome: Outcome::Interrupted { .. }
+            }
+        )
+    });
+    c.pump_for(Duration::from_secs(7));
+    assert_eq!(carry_ons(&c, &s), 0);
+    // Cut off mid-reply, but you write first: yours goes, and only yours.
+    let t = c.create(&w.cwd(), Permission::Full, "a long answer please");
+    c.wait(&t, "the turn to start", |b| matches!(b, Body::TurnStarted));
+    kill_holder(&w);
+    c.wait(&t, "the interruption", |b| {
+        matches!(
+            b,
+            Body::TurnEnded {
+                outcome: Outcome::Interrupted { .. }
+            }
+        )
+    });
+    c.say(&t, "mine", "short", false);
+    c.wait_turns(&t, 1);
+    c.pump_for(Duration::from_secs(6));
+    assert_eq!(carry_ons(&c, &t), 0);
+}
+
+#[test]
+fn cut_off_again_and_again_it_stops_carrying_on_and_waits() {
+    let w = World::new(&[("FAKE_CLAUDE_SPEED", "3")]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Full, "a long answer please");
+    for n in 1..=4 {
+        let started = n;
+        let until = Instant::now() + Duration::from_secs(15);
+        while c.count(&s, |b| matches!(b, Body::TurnStarted)) < started {
+            assert!(Instant::now() < until, "turn {n} never started");
+            c.pump(Duration::from_millis(50));
+        }
+        kill_holder(&w);
+        while interruptions(&c, &s) < n {
+            assert!(Instant::now() < until, "cut {n} never noticed");
+            c.pump(Duration::from_millis(50));
+        }
+    }
+    c.wait(
+        &s,
+        "it giving up",
+        |b| matches!(b, Body::Notice { text } if text.starts_with("Cut off 3 times")),
+    );
+    c.pump_for(Duration::from_secs(7));
+    assert_eq!(carry_ons(&c, &s), 3);
 }
 
 #[test]
@@ -1669,7 +1803,7 @@ fn changes_files_and_settings() {
     c.say(&s, "dup", "short", false);
     c.say(&s, "dup", "short", false);
     c.wait_turns(&s, 2);
-    c.pump(Duration::from_millis(300));
+    c.pump_for(Duration::from_millis(300));
     assert_eq!(
         c.count(&s, |b| matches!(b, Body::User { id, .. } if id == "dup")),
         1
@@ -1705,10 +1839,16 @@ fn background_work_waits_for_the_follow_up_turn() {
     c.subscribe(0);
     let s = c.create(&w.cwd(), Permission::Full, "start the background job");
     c.wait_turns(&s, 1);
-    c.pump(Duration::from_millis(30));
-    assert_eq!(c.status(&s), Some(Status::Background));
+    c.wait(&s, "background work", |b| {
+        matches!(
+            b,
+            Body::Status {
+                status: Status::Background
+            }
+        )
+    });
     c.wait_turns(&s, 2);
-    c.pump(Duration::from_millis(100));
+    c.pump_for(Duration::from_millis(100));
     assert_eq!(c.status(&s), Some(Status::Done));
     assert!(c.text(&s).contains("finished cleanly"));
 }
@@ -2375,7 +2515,7 @@ fn background_work_outlives_a_setting_change_and_ends_with_its_agent() {
     .unwrap();
     c.wait_turns(&s, 2);
     assert!(c.text(&s).contains("finished cleanly"));
-    c.pump(Duration::from_millis(100));
+    c.pump_for(Duration::from_millis(100));
     assert_eq!(c.status(&s), Some(Status::Done));
 
     // When the agent goes (here for a rewind), so does its background work.
@@ -2395,7 +2535,7 @@ fn background_work_outlives_a_setting_change_and_ends_with_its_agent() {
     );
     let until = Instant::now() + Duration::from_secs(10);
     while c.status(&t) == Some(Status::Background) && Instant::now() < until {
-        c.pump(Duration::from_millis(50));
+        c.pump_for(Duration::from_millis(50));
     }
     assert_eq!(c.status(&t), Some(Status::Done), "{:#?}", c.events(&t));
 }
@@ -2555,7 +2695,7 @@ fn resent_creates_forks_and_rewinds_happen_once() {
     c.subscribe(0);
     assert_eq!(made(c.call(create)), s);
     assert_eq!(made(c.call(fork)), f);
-    c.pump(Duration::from_millis(300));
+    c.pump_for(Duration::from_millis(300));
     assert_eq!(c.count(&s, |b| matches!(b, Body::Created { .. })), 1);
     assert_eq!(
         c.count(&s, |b| matches!(b, Body::User { id, .. } if id == "first")),
@@ -2584,7 +2724,7 @@ fn resent_creates_forks_and_rewinds_happen_once() {
         std::fs::read_to_string(w.project.join("README.md")).unwrap(),
         "mine\n"
     );
-    c.pump(Duration::from_millis(100));
+    c.pump_for(Duration::from_millis(100));
     assert_eq!(c.count(&s, |b| matches!(b, Body::Rewound { .. })), 1);
 }
 
@@ -2751,7 +2891,7 @@ fn bb_many_oddly_named_files_arrive_intact_and_a_resend_is_taken_once() {
     }
     // Sent again after a reconnect: one message, the same files.
     send_files(&mut c, &s, "m-many", req);
-    c.pump(Duration::from_millis(800));
+    c.pump_for(Duration::from_millis(800));
     assert_eq!(
         c.count(&s, |b| matches!(b, Body::User { id, .. } if id == "m-many")),
         1
@@ -2841,7 +2981,7 @@ fn bb_many_waiting_messages_are_taken_once_in_order_through_a_resend() {
     while users(&c).len() < ids.len() && Instant::now() < until {
         c.pump(Duration::from_millis(100));
     }
-    c.pump(Duration::from_secs(2));
+    c.pump_for(Duration::from_secs(2));
     assert_eq!(users(&c), ids);
 }
 
@@ -3188,7 +3328,7 @@ fn bb_a_clone_survives_two_restarts_mid_clone() {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(left, ["app"], "half-made clones or second folders left");
-    c.pump(Duration::from_millis(500));
+    c.pump_for(Duration::from_millis(500));
     assert_eq!(
         c.count(&s, |b| matches!(b, Body::User { id, .. } if id == "m-dur")),
         1
@@ -3373,7 +3513,7 @@ fn a_stop_before_any_reply_takes_the_message_out_of_the_conversation() {
         c.events(&s)
     );
     // As it was before: the stop leaves no mark of its own.
-    c.pump(Duration::from_millis(300));
+    c.pump_for(Duration::from_millis(300));
     assert_eq!(c.status(&s), Some(Status::Done));
     // The next agent carries on from the reply before it, in a copy, so
     // the message is gone from the agent's conversation too.
@@ -3403,7 +3543,7 @@ fn a_stop_before_any_reply_takes_the_message_out_of_the_conversation() {
     w.start();
     let mut c = w.client();
     c.subscribe(0);
-    c.pump(Duration::from_millis(300));
+    c.pump_for(Duration::from_millis(300));
     assert_eq!(c.status(&s), Some(Status::Done));
     c.say(&s, "e", "your args again", false);
     c.wait_turns(&s, 3);
@@ -3423,7 +3563,7 @@ fn a_first_message_stopped_before_a_reply_starts_a_new_conversation() {
     c.wait(&s, "its turn", |b| matches!(b, Body::TurnStarted));
     stop(&mut c, &s);
     assert_eq!(c.count(&s, |b| matches!(b, Body::Withdrawn { .. })), 1);
-    c.pump(Duration::from_millis(300));
+    c.pump_for(Duration::from_millis(300));
     assert_eq!(c.status(&s), Some(Status::Interrupted));
     let first = c
         .events(&s)
@@ -3455,7 +3595,7 @@ fn a_stop_after_something_came_back_keeps_the_message() {
     c.wait(&s, "the approval", |b| matches!(b, Body::Asked { .. }));
     stop(&mut c, &s);
     assert_eq!(c.count(&s, |b| matches!(b, Body::Withdrawn { .. })), 0);
-    c.pump(Duration::from_millis(300));
+    c.pump_for(Duration::from_millis(300));
     assert_eq!(c.status(&s), Some(Status::Interrupted));
     // A reply partway written.
     c.say(&s, "b", "a long answer please", false);
@@ -3724,7 +3864,7 @@ fn a_session_moves_with_its_conversation_and_its_uncommitted_work() {
         .unwrap()
         .unwrap();
     // On the machine it left: a record that points there, fenced.
-    a.pump(Duration::from_millis(300));
+    a.pump_for(Duration::from_millis(300));
     assert!(a.events(&s).iter().any(|e| matches!(
         e,
         Body::Move { state: dent_protocol::MoveState::Departed, to_session: Some(t), .. } if *t == to

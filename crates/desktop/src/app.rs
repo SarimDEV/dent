@@ -7668,12 +7668,7 @@ impl Dent {
                     .map(|w| w.trim_end_matches('.').to_string()),
                 _ => None,
             });
-        let mut text = "You were cut off before the turn finished. Carry on from where you stopped, without redoing finished work.".to_string();
-        if let Some(lost) = lost {
-            text.push_str(&format!(
-                " This background work stopped with you and isn't running now: {lost}. Start it again if it's still needed."
-            ));
-        }
+        let text = dent_protocol::carry_on_text(&lost.into_iter().collect::<Vec<_>>());
         self.send_again(id, &text, &[], cx);
     }
 
