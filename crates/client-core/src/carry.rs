@@ -420,6 +420,7 @@ mod tests {
             Box::new(MoveManifest {
                 id: "m1".into(),
                 from_machine: "studio".into(),
+                from_name: String::new(),
                 from_session: "s1".into(),
                 agent: "claude".into(),
                 agent_session: "a".into(),

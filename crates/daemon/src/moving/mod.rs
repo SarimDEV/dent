@@ -125,7 +125,13 @@ impl Daemon {
         let Some(have) = have else {
             let row = self.store().session(session)?.context("no such session")?;
             let remotes = tokio::task::spawn_blocking(move || {
-                git::repo_of(Path::new(&row.cwd))
+                // dent's scratch folder moves as no repository, as packing
+                // treats it, even where it sits inside a checkout.
+                let cwd = Path::new(&row.cwd);
+                if cwd.starts_with(scratch()) {
+                    return Vec::new();
+                }
+                git::repo_of(cwd)
                     .map(|(root, _)| git::remotes(&root))
                     .unwrap_or_default()
             })
@@ -161,12 +167,18 @@ impl Daemon {
         let row = self.store().session(session)?.context("no such session")?;
         let events = self.store().session_events(session)?;
         let driver = crate::agent::named(Some(&row.agent))?;
-        let (state, machine, id2) = (self.paths.state.clone(), self.net.id(), id.to_string());
+        let (state, machine, name, id2) = (
+            self.paths.state.clone(),
+            self.net.id(),
+            self.machine.clone(),
+            id.to_string(),
+        );
         let manifest = tokio::task::spawn_blocking(move || {
             pack::pack(
                 &pack::Session {
                     state: &state,
                     machine: &machine,
+                    machine_name: &name,
                     row: &row,
                     driver,
                     events: &events,
@@ -421,6 +433,10 @@ impl Daemon {
         // The agent's conversation, under a new id of its own.
         let agent_to = derived_uuid(&format!("{}/{}", m.from_machine, m.id));
         let files = state.join("attachments").join(&session);
+        // Without the transcript (it couldn't be found there), there's
+        // nothing to put in place: the first message there finds no
+        // conversation, and starts one given what was said, as text.
+        let carried = m.parts.iter().any(|p| p.name == "transcript.jsonl");
         let placed = {
             let (parts, from, to, cwd, files) = (
                 parts.clone(),
@@ -430,7 +446,7 @@ impl Daemon {
                 files.clone(),
             );
             tokio::task::spawn_blocking(move || -> Result<(), String> {
-                if !from.is_empty() {
+                if !from.is_empty() && carried {
                     driver
                         .place_conversation(&parts, &from, &to, &cwd)
                         .map_err(|e| format!("{e:#}"))?;
@@ -479,7 +495,14 @@ impl Daemon {
         bodies.push((
             now,
             Body::Notice {
-                text: format!("Moved here from {}", m.from_machine),
+                text: format!(
+                    "Moved here from {}",
+                    if m.from_name.is_empty() {
+                        &m.from_machine
+                    } else {
+                        &m.from_name
+                    }
+                ),
             },
         ));
         bodies.push((

@@ -47,6 +47,8 @@ pub struct SessionView {
     /// Its move to another machine, while there is one, or once it moved:
     /// the machine, its id there once it arrived, and where it stands.
     pub moving: Option<(String, Option<String>, dent_protocol::MoveState)>,
+    /// That move's id, so a client can pick it up where it stood.
+    pub move_id: Option<String>,
     pub agent: String,
     pub model: Option<String>,
     pub permission: Permission,
@@ -1123,11 +1125,12 @@ impl SessionView {
                 text: text.clone(),
             }),
             Body::Move {
+                id,
                 to,
                 state,
                 to_session,
-                ..
             } => {
+                self.move_id = Some(id.clone());
                 use dent_protocol::MoveState as M;
                 // What ended the move is said in the chat; while it runs, the
                 // session's own state shows it.

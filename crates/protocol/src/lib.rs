@@ -2244,6 +2244,10 @@ pub struct MoveManifest {
     pub id: String,
     /// The machine and session it leaves.
     pub from_machine: String,
+    /// That machine's name, for saying where it came from; older daemons
+    /// leave it out.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from_name: String,
     pub from_session: SessionId,
     pub agent: String,
     /// The agent's own id for the conversation, on the machine it leaves.

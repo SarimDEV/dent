@@ -169,7 +169,8 @@ pub trait Driver: Send + Sync {
     /// The files a conversation lives in, for moving it to another machine
     /// (decision 0064): each, and its name in the move, the transcript
     /// first as `transcript.jsonl`. `None` when this agent's conversations
-    /// can't move.
+    /// can't move; none at all when its conversation can't be found (it
+    /// moves without, and starts there from what was said, as text).
     fn conversation(&self, _agent_session: &str) -> Option<Vec<(PathBuf, String)>> {
         None
     }

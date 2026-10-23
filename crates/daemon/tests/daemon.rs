@@ -4072,6 +4072,38 @@ fn a_project_gone_there_before_it_arrives_leaves_the_session_working_here() {
     )));
 }
 
+/// The agent's conversation can't be found on the machine it leaves (taken
+/// away, or kept where that machine doesn't look): it moves without it,
+/// and there starts a new one, given what was said, as text.
+#[test]
+fn a_session_whose_conversation_is_gone_moves_and_is_given_it_as_text() {
+    let m = Moves::new("lost", true);
+    let mut a = m.a.client();
+    let mut b = m.b.client();
+    a.subscribe(0);
+    b.subscribe(0);
+    b.call(Request::AddProject {
+        path: m.on_b.display().to_string(),
+        create: false,
+    })
+    .unwrap();
+    let s = a.create(
+        &m.on_a.display().to_string(),
+        Permission::Full,
+        "hello there",
+    );
+    a.wait_turns(&s, 1);
+    std::fs::remove_dir_all(m.root.join("home-a/.claude/projects")).unwrap();
+    let there = carry(&mut a, &mut b, &s, "mv9", 4096, None)
+        .unwrap()
+        .unwrap();
+    b.say(&there, "r", "recall what I said", false);
+    // The turn it brought, then this one.
+    b.wait_turns(&there, 2);
+    let said = b.text(&there);
+    assert!(said.contains("Given back: 1 messages"), "{said}");
+}
+
 #[test]
 fn kept_here_after_it_may_have_gone_the_session_works_again() {
     let m = Moves::new("kept", true);

@@ -62,7 +62,13 @@ pub fn begin(state: &Path, m: &MoveManifest) -> Result<Vec<(String, u64)>, Strin
     match std::fs::read(&file) {
         Ok(had) => {
             let had: MoveManifest = serde_json::from_slice(&had).map_err(|e| e.to_string())?;
-            if had != *m {
+            // The same move, whichever daemon version kept it: an older one
+            // didn't keep the machine's name.
+            let plain = |m: &MoveManifest| MoveManifest {
+                from_name: String::new(),
+                ..m.clone()
+            };
+            if plain(&had) != plain(m) {
                 return Err("another move has this id here".into());
             }
         }
@@ -209,6 +215,7 @@ mod tests {
         let m = MoveManifest {
             id: "m1".into(),
             from_machine: "a".into(),
+            from_name: String::new(),
             from_session: "s1".into(),
             agent: "claude".into(),
             agent_session: "x".into(),
@@ -256,6 +263,16 @@ mod tests {
         );
         write(&state, "m1", "events.jsonl", 9, &data[9..]).unwrap();
         verify(&state, &m).unwrap();
+        // The same move from a daemon that sends the machine's name, after
+        // one kept it without: still the same move.
+        let named = MoveManifest {
+            from_name: "studio".into(),
+            ..m.clone()
+        };
+        assert_eq!(
+            begin(&state, &named).unwrap(),
+            [("events.jsonl".to_string(), data.len() as u64)]
+        );
         // Another move under the same id is refused.
         let other = MoveManifest {
             title: "other".into(),
