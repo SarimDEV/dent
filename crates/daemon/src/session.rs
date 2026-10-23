@@ -149,6 +149,8 @@ struct Proc {
     ooms: Option<u64>,
     /// Said once that it uses a lot of memory.
     warned: bool,
+    /// Measured past the stopping limit once: twice in a row stops it.
+    high: bool,
     /// Stopped by dent for using this much memory.
     over: Option<u64>,
 }
@@ -682,6 +684,7 @@ impl Session {
                 resumed: true,
                 ooms: crate::scopes::oom_kills(),
                 warned: false,
+                high: false,
                 over: None,
             });
             let now = Instant::now();
@@ -991,14 +994,17 @@ impl Session {
                 let Some(p) = self.proc.as_mut().filter(|p| p.id == proc && !p.stopping) else {
                     return Ok(());
                 };
+                // Twice in a row: one reading can count memory its
+                // processes share more than once.
+                let again = std::mem::replace(&mut p.high, bytes >= limits.stop);
                 if bytes >= limits.stop {
-                    if p.over.is_none() {
+                    if again && p.over.is_none() {
                         p.over = Some(bytes);
                         if let Ok(h) = self.d.holder().await {
                             let _ = h.stop(&proc, Duration::from_secs(2)).await;
                         }
                     }
-                } else if !p.warned {
+                } else if bytes >= limits.warn && !p.warned {
                     p.warned = true;
                     self.log(Body::Notice {
                         text: format!(
@@ -1571,6 +1577,7 @@ impl Session {
             resumed,
             ooms,
             warned: false,
+            high: false,
             over: None,
         });
         self.start_by = Some(Instant::now() + start_limit());
@@ -2679,7 +2686,8 @@ impl Session {
         }
         let name = self.agent.name();
         if self.in_turn {
-            let reason = if p.stopping {
+            // Stopped for memory, then by you too: still says why.
+            let reason = if p.stopping && p.over.is_none() {
                 None
             } else if code == Some(127) {
                 Some(format!(

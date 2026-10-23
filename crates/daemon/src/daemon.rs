@@ -604,8 +604,10 @@ impl Daemon {
                 .await
                 .unwrap_or_default();
             for p in live {
+                // Under the warning limit too, while it was high: a
+                // reading back down resets "twice in a row".
                 if let Some(&bytes) = groups.get(&p.pid)
-                    && bytes >= warn
+                    && bytes >= warn / 2
                 {
                     self.route(
                         &p.id,

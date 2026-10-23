@@ -62,7 +62,8 @@ pub fn stop_all(state: &Path) {
     }
     for pid in agent_pids(state) {
         let comm = std::process::Command::new("ps")
-            .args(["-o", "comm=", "-p", &pid.to_string()])
+            // The command line: Linux cuts `comm` to 15 characters.
+            .args(["-o", "args=", "-p", &pid.to_string()])
             .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
             .unwrap_or_default();
