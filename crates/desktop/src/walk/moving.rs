@@ -125,3 +125,55 @@ pub(super) fn move_live() -> Vec<(f32, Act)> {
         (0.8, Shot("move-back")),
     ]
 }
+
+/// How a move that stopped partway looks: why, with Retry and Continue
+/// here. Drawn from a stopped move put in place, so it needs no second
+/// machine.
+pub(super) fn move_stopped() -> Vec<(f32, Act)> {
+    let mut v = new_session("hello there");
+    v.extend([
+        (0.1, Until("it answers", |d, _| answered(d), 20.)),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                let Some(id) = current(d).map(|s| s.id.clone()) else {
+                    return;
+                };
+                d.moves.insert(
+                    id.clone(),
+                    crate::moves::Run {
+                        carrier: dent_client_core::carry::Carrier::new(&id, "m1", "dent-linux"),
+                        from: String::new(),
+                        to: "ab12".into(),
+                        to_name: "dent-linux".into(),
+                        out: None,
+                        stopped: Some(dent_client_core::carry::Ended::Stopped {
+                            side: dent_client_core::carry::Side::To,
+                            why: "dent-linux didn't answer".into(),
+                        }),
+                    },
+                );
+                // Partway: it may be there already, so it's held here.
+                if let Some(v) = d.core.list.get_mut(&id) {
+                    v.moving = Some((
+                        "dent-linux".into(),
+                        None,
+                        dent_protocol::MoveState::Departing { sent: true },
+                    ));
+                }
+                d.rebuild(&id);
+                cx.notify();
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "stopped partway, it says why, with Retry and Continue here",
+                |d, _| drawn(d, "move-banner").is_some() && drawn(d, "move-keep").is_some(),
+                3.,
+            ),
+        ),
+        (0.4, Shot("move-stopped")),
+    ]);
+    v
+}
