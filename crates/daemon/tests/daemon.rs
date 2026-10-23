@@ -4462,7 +4462,7 @@ fn many_agents_at_once_all_finish_seen_once_and_memory_stays_bounded() {
     assert!(holder < 200 * 1024, "holder at {holder} KiB");
 }
 
-/// T3's worst worktree reports: new threads landing in the main checkout,
+/// The worst worktree failures: new sessions landing in the main checkout,
 /// and stops breaking it. Many sessions asked for at once, each in a new
 /// worktree, some stopped while setting up: every one works in a folder of
 /// its own, and the main checkout (its branch, HEAD and uncommitted

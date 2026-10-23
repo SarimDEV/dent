@@ -3,7 +3,7 @@ use super::*;
 /// How many sessions stream at once.
 const MANY: usize = 20;
 
-/// Many agents at once, the rough edge T3 Code's users report: twenty
+/// Many agents at once, where agent apps most often struggle: twenty
 /// sessions each streaming a long mixed reply together, switched between
 /// while they stream. Run with DENT_WALK_RELEASE=1 DENT_FRAME_TIMES=1 to
 /// time drawing; the app's memory is said before and after.

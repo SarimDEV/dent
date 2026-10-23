@@ -28,6 +28,24 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 
 ## Open
 
+### Daemon test suites take over 2 minutes, run whole for one-file changes
+- Seen: 2026-10-23, `cargo test -p dent-daemon` takes ~2.5 min (`remote_break` 61 s, `daemon` 42-48 s, `cli_break` 26 s), and was run whole about 15 times in one session, mostly for changes to one module.
+- Cost: ~35 min that session; it also loads the machine so walks and timing-sensitive tests flake.
+- Fix: run the one test binary a change touches while working, and the whole suite once before the PR (as `just verify` does for the changed crates).
+- Check: whole-suite runs per PR ≤ 2.
+
+### A stale build cache pointed the desktop's release link at a deleted worktree
+- Seen: 2026-10-23, `cargo build --release -p dent-desktop` failed to link: the cached `Info.plist` path was `~/dent/wt-inline/...`, a worktree since removed. `cargo clean -p dent-desktop --release` fixed it (348 MB removed, 2 min rebuild).
+- Cost: ~5 min once; it'll recur whenever a worktree that built release goes away.
+- Fix: have the desktop's build script emit `rerun-if-changed` for the plist it uses, so a moved plist is noticed.
+- Check: building release after removing a worktree links first time.
+
+### Edits chained with commit and merge in one command shipped a fix that never applied
+- Seen: 2026-10-23, a scripted edit's anchor didn't match after `cargo fmt`, the command went on to commit, open and merge #34 with a description naming that fix; #35 carried it.
+- Cost: one extra PR, and a description that overstated what merged.
+- Fix: never chain an edit and a commit, PR or merge in one command; check `git diff --stat` before committing.
+- Check: no PR description names a change its diff doesn't have.
+
 ### A fresh review worktree verifies from cold
 - Seen: 2026-10-20, review of PR #12. The first `just verify` in a new worktree took 3 min 38 s (its own empty `target/`, and a Cargo.lock change selects every crate); the next run took about 15 s.
 - Cost: ~3.5 min per review or batch started in a new worktree.
