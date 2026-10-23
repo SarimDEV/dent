@@ -28,6 +28,7 @@ Run 2026-10-20 with the real `dent-daemon` on dent-linux and the real `dent` CLI
   - Slow at 2.7 s; torn down at 15 s; reconnected 0.26 s after the network returned, catching up from event 47.
   - **85 events received, 85 logged by the daemon, 0 gaps, 0 repeats.**
   - It came home to the IPv4 route later.
+- **R-B9, with a stand-in for Tailscale (2026-10-23):** the daemon follows Tailscale's change notices (`watch-ipn-bus`, peer changes), and each burst of them re-checks every device trusted through the account. In `a_device_that_leaves_the_account_is_dropped_when_tailscale_says_so`, a device whose account changed was refused 2–12 s after the notice, not at the 5-minute check. A notice while Tailscale can't answer drops no one. Against the real tailscaled 1.104 on dent-linux, the notices arrive one line each.
 - **R-A5, for real:** a SIGTERM showed as "away (quit)" at once, and the link was back 4 s after the daemon restarted.
 - **R-C4, mostly (2026-10-20):** `dent ask lima-dent-linux "say hi" --bring <checkout>` from studio, its origin an SSH address the VM has no key for.
   - The VM fell back to HTTPS and cloned on the right branch.

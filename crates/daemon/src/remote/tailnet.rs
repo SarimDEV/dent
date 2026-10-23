@@ -43,6 +43,9 @@ pub struct SelfNode {
     /// The MagicDNS name, without the trailing dot.
     pub name: String,
     pub tagged: bool,
+    /// Logged in and connected. Starting up or logging in, Tailscale can
+    /// briefly know no peers at all.
+    pub running: bool,
 }
 
 /// What Tailscale says about a peer address.
@@ -57,6 +60,8 @@ pub struct Peer {
 struct StatusJson {
     #[serde(rename = "Self")]
     me: Option<NodeJson>,
+    #[serde(rename = "BackendState", default)]
+    state: String,
 }
 
 #[derive(Deserialize)]
@@ -98,6 +103,7 @@ pub async fn status() -> Result<SelfNode> {
         addresses: me.ips.iter().filter_map(|a| a.parse().ok()).collect(),
         name: me.dns.trim_end_matches('.').to_string(),
         tagged: me.tags.is_some_and(|t| !t.is_empty()),
+        running: s.state == "Running",
     })
 }
 
@@ -135,6 +141,50 @@ async fn get(path: &str) -> Result<Vec<u8>> {
 }
 
 async fn get_inner(path: &str) -> Result<Vec<u8>> {
+    let (stream, mut body) = request(path).await?;
+    // HTTP/1.0: the answer ends when tailscaled closes the connection.
+    let left = MAX_BODY.saturating_sub(body.len() as u64);
+    stream.take(left).read_to_end(&mut body).await?;
+    Ok(body)
+}
+
+/// Bit 12, `NotifyPeerChanges`: peers added, changed (online or not
+/// included) or removed. Changes to this node and its login come to every
+/// watcher. Versions before it ignore the bit and send the whole network
+/// map on each change instead.
+const WATCH_PEERS: u64 = 1 << 12;
+
+/// Calls `changed` once for each notice from Tailscale that something
+/// changed: a peer, this node, its login. Notices aren't read, only
+/// counted: their shape changes between versions, and one can be a large
+/// network map. Called once as it starts, too, for whatever changed while
+/// nobody watched. Returns when the stream ends; `Err` when it never
+/// started.
+pub async fn watch(mut changed: impl FnMut()) -> Result<()> {
+    let path = format!("/localapi/v0/watch-ipn-bus?mask={WATCH_PEERS}");
+    let (mut stream, first) = tokio::time::timeout(LIMIT, request(&path))
+        .await
+        .context("tailscale didn't answer")??;
+    changed();
+    // Each notice is one line of JSON.
+    let mut notices = |b: &[u8]| {
+        for _ in b.iter().filter(|c| **c == b'\n') {
+            changed();
+        }
+    };
+    notices(&first);
+    let mut buf = vec![0u8; 64 << 10];
+    loop {
+        match stream.read(&mut buf).await {
+            Ok(0) | Err(_) => return Ok(()),
+            Ok(n) => notices(&buf[..n]),
+        }
+    }
+}
+
+/// A LocalAPI request with its answer's headers read: the stream, and any
+/// of the body read with them. An answer other than 200 is an error.
+async fn request(path: &str) -> Result<(Box<dyn Stream>, Vec<u8>)> {
     let (mut stream, auth): (Box<dyn Stream>, Option<String>) = open().await?;
     let mut req = format!(
         "GET {path} HTTP/1.0\r\nHost: local-tailscaled.sock\r\nSec-Tailscale: localapi\r\n"
@@ -148,18 +198,27 @@ async fn get_inner(path: &str) -> Result<Vec<u8>> {
     req.push_str("\r\n");
     stream.write_all(req.as_bytes()).await?;
     let mut raw = Vec::new();
-    // HTTP/1.0: the answer ends when tailscaled closes the connection.
-    (&mut stream).take(MAX_BODY).read_to_end(&mut raw).await?;
-    let split = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .context("no end of headers")?;
+    let mut buf = [0u8; 4096];
+    let split = loop {
+        if let Some(i) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i;
+        }
+        if raw.len() > 64 << 10 {
+            bail!("tailscale's headers never ended");
+        }
+        let n = stream.read(&mut buf).await?;
+        if n == 0 {
+            bail!("no end of headers");
+        }
+        raw.extend_from_slice(&buf[..n]);
+    };
     let head = String::from_utf8_lossy(&raw[..split]);
     let status = head.split_whitespace().nth(1).unwrap_or("");
     if status != "200" {
         return Err(Status(status.to_string()).into());
     }
-    Ok(raw[split + 4..].to_vec())
+    let body = raw.split_off(split + 4);
+    Ok((stream, body))
 }
 
 trait Stream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
@@ -205,6 +264,7 @@ mod tests {
             addresses: vec![],
             name: "studio".into(),
             tagged,
+            running: true,
         }
     }
 
@@ -237,9 +297,10 @@ mod tests {
     #[test]
     fn parses_tailscale_shapes() {
         let s: StatusJson = serde_json::from_str(
-            r#"{"Self":{"UserID":4132,"TailscaleIPs":["100.70.46.115","fd7a:115c:a1e0::1"],"DNSName":"dent-linux.tail1.ts.net.","Tags":null}}"#,
+            r#"{"BackendState":"Running","Self":{"UserID":4132,"TailscaleIPs":["100.70.46.115","fd7a:115c:a1e0::1"],"DNSName":"dent-linux.tail1.ts.net.","Tags":null}}"#,
         )
         .unwrap();
+        assert_eq!(s.state, "Running");
         let n = s.me.unwrap();
         assert_eq!(n.user_id, 4132);
         assert_eq!(n.ips.len(), 2);

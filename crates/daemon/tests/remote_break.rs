@@ -2,7 +2,9 @@
 //! guess, lie, flood, stall or come back after being removed. Each test
 //! asserts what a user or an honest peer would see go wrong, not how the
 //! daemon is built. Harness as in `remote.rs`: connections come in over
-//! loopback, so account trust and the LAN switch never apply.
+//! loopback, so account trust and the LAN switch never apply, except where
+//! a test comes in by this machine's own network address with a stand-in
+//! for Tailscale.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -321,10 +323,15 @@ async fn recv_bin(ws: &mut Ws) -> Option<Vec<u8>> {
 
 /// Connects and returns the first thing the daemon says after the
 /// handshake; `None` when the daemon drops the connection first.
-async fn try_connect(port: u16, keys: &Keys, h: &Hello) -> Option<(Ws, Transport, Control)> {
+async fn try_connect(
+    host: &str,
+    port: u16,
+    keys: &Keys,
+    h: &Hello,
+) -> Option<(Ws, Transport, Control)> {
     let (mut ws, _) = tokio::time::timeout(
         Duration::from_secs(5),
-        tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/")),
+        tokio_tungstenite::connect_async(format!("ws://{host}:{port}/")),
     )
     .await
     .ok()?
@@ -350,11 +357,15 @@ impl Device {
     }
 
     async fn connect_as(port: u16, keys: &Keys, h: &Hello) -> Self {
+        Self::connect_at("127.0.0.1", port, keys, h).await
+    }
+
+    async fn connect_at(host: &str, port: u16, keys: &Keys, h: &Hello) -> Self {
         // As a real client does: a connection the daemon sheds under load
         // is dialled again.
         let until = Instant::now() + Duration::from_secs(20);
         loop {
-            if let Some((ws, t, first)) = try_connect(port, keys, h).await {
+            if let Some((ws, t, first)) = try_connect(host, port, keys, h).await {
                 let Control::Trust(trust) = first else {
                     panic!("expected a trust verdict, got {first:?}")
                 };
@@ -1111,4 +1122,144 @@ async fn a_request_cut_off_by_a_crash_is_resent_once_with_its_file() {
     assert_eq!(got.len(), 1, "{got:?}");
     assert_eq!(std::fs::read(&got[0]).unwrap(), b"the plan");
     r.stop();
+}
+
+/// A stand-in for Tailscale's LocalAPI: this machine is user 7's node, and
+/// `owner` says who owns every peer. Notices go to whoever is watching.
+struct FakeTailscale {
+    addr: String,
+    owner: std::sync::Arc<std::sync::Mutex<Owner>>,
+    /// Peer lookups asked of it so far.
+    lookups: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    watchers: std::sync::Arc<std::sync::Mutex<Vec<std::net::TcpStream>>>,
+}
+
+#[derive(Clone, Copy)]
+enum Owner {
+    User(u64),
+    /// Tailscale fails to answer.
+    Failing,
+    /// Just restarted: not running yet, and it knows no peers.
+    Restarting,
+}
+
+impl FakeTailscale {
+    fn start() -> Self {
+        use std::sync::atomic::Ordering;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        let owner = std::sync::Arc::new(std::sync::Mutex::new(Owner::User(7)));
+        let lookups = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let watchers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (o, n, w) = (owner.clone(), lookups.clone(), watchers.clone());
+        std::thread::spawn(move || {
+            for mut s in l.incoming().flatten() {
+                let mut line = String::new();
+                let mut r = BufReader::new(s.try_clone().unwrap());
+                if r.read_line(&mut line).is_err() {
+                    continue;
+                }
+                let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
+                let ok = |body: &str| format!("HTTP/1.0 200 OK\r\n\r\n{body}");
+                let owner = *o.lock().unwrap();
+                let answer = if path.starts_with("/localapi/v0/status") {
+                    let state = match owner {
+                        Owner::Restarting => "Starting",
+                        _ => "Running",
+                    };
+                    ok(&format!(
+                        r#"{{"BackendState":"{state}","Self":{{"UserID":7,"TailscaleIPs":["100.64.0.1"],"DNSName":"studio.ts.net.","Tags":null}}}}"#
+                    ))
+                } else if path.starts_with("/localapi/v0/whois") {
+                    n.fetch_add(1, Ordering::SeqCst);
+                    match owner {
+                        Owner::User(u) => ok(&format!(
+                            r#"{{"Node":{{"User":{u},"Name":"phone.ts.net.","Tags":null}}}}"#
+                        )),
+                        Owner::Failing => "HTTP/1.0 500 Internal Server Error\r\n\r\n".into(),
+                        Owner::Restarting => "HTTP/1.0 404 Not Found\r\n\r\n".into(),
+                    }
+                } else if path.starts_with("/localapi/v0/watch-ipn-bus") {
+                    let _ =
+                        s.write_all(b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n");
+                    w.lock().unwrap().push(s);
+                    continue;
+                } else {
+                    "HTTP/1.0 404 Not Found\r\n\r\n".into()
+                };
+                let _ = s.write_all(answer.as_bytes());
+            }
+        });
+        Self {
+            addr,
+            owner,
+            lookups,
+            watchers,
+        }
+    }
+
+    /// Tailscale's answers become `o`, and it tells its watchers something
+    /// changed. Returns once the daemon has looked the peer up again.
+    async fn change(&self, o: Owner) {
+        use std::sync::atomic::Ordering;
+        *self.owner.lock().unwrap() = o;
+        let before = self.lookups.load(Ordering::SeqCst);
+        for s in self.watchers.lock().unwrap().iter_mut() {
+            let _ = s.write_all(b"{\"PeersChanged\":[{}]}\n");
+        }
+        let until = Instant::now() + Duration::from_secs(25);
+        while self.lookups.load(Ordering::SeqCst) == before {
+            assert!(Instant::now() < until, "no check 25 s after the notice");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+/// This machine's address on its network: not loopback, so a connection
+/// from it is a route the daemon asks Tailscale about.
+fn own_address() -> Option<String> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    // No packet is sent: connecting picks the route and its address.
+    s.connect("192.0.2.1:9").ok()?;
+    let ip = s.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then(|| ip.to_string())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_that_leaves_the_account_is_dropped_when_tailscale_says_so() {
+    let Some(host) = own_address() else {
+        eprintln!("skipped: no network address but loopback");
+        return;
+    };
+    let ts = FakeTailscale::start();
+    let d = Daemon::start(&[("DENT_TAILSCALE_LOCALAPI", ts.addr.as_str())]);
+    let keys = Keys::generate().unwrap();
+    let mut dev = Device::connect_at(
+        &host,
+        d.port,
+        &keys,
+        &hello("phone", PROTOCOL_MIN, PROTOCOL),
+    )
+    .await;
+    assert!(
+        matches!(dev.trust, Trust::Tailscale { .. }),
+        "{:?}",
+        dev.trust
+    );
+    dev.hello().await;
+    // Uncertainty never drops anyone: Tailscale failing to answer, or just
+    // restarted and knowing no peers yet. Each is checked, and the device
+    // stays.
+    for o in [Owner::Failing, Owner::Restarting] {
+        ts.change(o).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        dev.ping(1).await;
+    }
+    // The phone moves to another account: gone well before the 5-minute
+    // check, told why.
+    ts.change(Owner::User(8)).await;
+    let c = tokio::time::timeout(Duration::from_secs(5), dev.next_control())
+        .await
+        .expect("still connected after the check");
+    assert_eq!(c, Control::Refuse(Refusal::NotTrusted));
 }

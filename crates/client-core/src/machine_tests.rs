@@ -41,6 +41,9 @@ struct Sim {
     code: Option<String>,
     /// Refuse every connection with this instead of a verdict.
     refuse: Option<Refusal>,
+    /// The daemon trusts the device once it proves the code, but its
+    /// answer is lost on the way.
+    lose_pair_answer: bool,
     /// Refuse connections to this one address with this.
     refuse_on: Option<(String, Refusal)>,
     conns: HashMap<u64, (String, Peer)>,
@@ -75,6 +78,7 @@ impl Sim {
             trusted: Vec::new(),
             code: None,
             refuse: None,
+            lose_pair_answer: false,
             refuse_on: None,
             conns: HashMap::new(),
             responsive: true,
@@ -229,6 +233,9 @@ impl Sim {
         }
         self.trusted.push(t.remote.clone());
         self.code = None;
+        if self.lose_pair_answer {
+            return vec![];
+        }
         let mine = dent_link::pair::confirm(&key, &t.hash, dent_link::pair::Role::Daemon);
         vec![
             Control::PairConfirm {
@@ -751,6 +758,32 @@ fn a_dropped_connection_resumes_the_same_pairing() {
     s.run_for(2_000);
     assert_eq!(s.m.state(), &State::Online);
     assert_eq!(s.m.known_key(), Some(s.daemon.public.as_slice()));
+}
+
+#[test]
+fn a_pairing_whose_answer_was_lost_is_paired_on_the_next_connection() {
+    let mut s = unpaired(&[("lan:7480", Addr::Up)]);
+    s.code = Some("424242".into());
+    s.lose_pair_answer = true;
+    s.m.connect(0);
+    s.pump();
+    s.run_for(500);
+    s.m.pair("424242", s.now);
+    s.pump();
+    // The machine paired it and spent the code; the answer never came.
+    assert!(s.code.is_none());
+    s.run_for(30_000);
+    assert!(s.dials.len() >= 2, "never dialled again");
+    // The next connection finds it trusted: no second code needed, and
+    // the key to keep comes with it.
+    assert_eq!(s.m.state(), &State::Online);
+    assert_eq!(s.m.known_key(), Some(s.daemon.public.as_slice()));
+    assert!(
+        s.notes
+            .iter()
+            .any(|n| matches!(n, Note::Up { key, .. } if *key == s.daemon.public))
+    );
+    assert!(!s.notes.iter().any(|n| matches!(n, Note::PairFailed(_))));
 }
 
 #[test]
