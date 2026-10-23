@@ -1342,7 +1342,8 @@ impl Session {
         // What was said, from dent's own record, goes in first: the new
         // conversation starts knowing it, as text.
         let events = self.d.store().session_events(&self.id).unwrap_or_default();
-        let said = recap(&events, RECAP_MAX);
+        let now = self.last.as_ref().map(|(id, ..)| id.clone());
+        let said = recap(&events, RECAP_MAX, now.as_deref());
         self.log(Body::Notice {
             text: if said.is_empty() {
                 format!(
@@ -2891,13 +2892,60 @@ const RECAP_MAX: usize = 24 * 1024;
 
 /// What was said in a session, as text, newest kept within `max` bytes:
 /// for an agent that lost the conversation (a transcript gone, one that
-/// didn't move). The message being sent now (the last) isn't in it.
-fn recap(events: &[dent_protocol::Event], max: usize) -> String {
-    let mut turns: Vec<String> = Vec::new();
-    for e in events {
+/// didn't move). As the agent had it: turns taken back or rewound away
+/// aren't in it, a held message is where it was delivered, and what dent
+/// sent by itself (carrying on) isn't the person's. `now` (the message
+/// being sent with it) isn't in it either.
+fn recap(events: &[dent_protocol::Event], max: usize, now: Option<&str>) -> String {
+    let gone = withdrawn_ids(events);
+    let taken_back = withdrawn_turns(events);
+    let by_dent =
+        |t: &str| t == RESUME_TEXT || t.starts_with("You were cut off before the turn finished.");
+    // (message id, for rewinds; what was said)
+    let mut turns: Vec<(Option<String>, String)> = Vec::new();
+    let mut held: HashMap<String, String> = HashMap::new();
+    for (i, e) in events.iter().enumerate() {
+        if taken_back.iter().any(|r| r.contains(&i)) {
+            continue;
+        }
         match &e.body {
-            Body::User { text, .. } if !text.trim().is_empty() => {
-                turns.push(format!("The person said:\n{}", text.trim()));
+            Body::User {
+                id, text, queued, ..
+            } => {
+                if gone.contains(id)
+                    || Some(id.as_str()) == now
+                    || by_dent(text)
+                    || text.trim().is_empty()
+                {
+                    continue;
+                }
+                if *queued {
+                    held.insert(id.clone(), text.clone());
+                } else {
+                    turns.push((
+                        Some(id.clone()),
+                        format!("The person said:\n{}", text.trim()),
+                    ));
+                }
+            }
+            Body::Delivered { id } => {
+                if let Some(text) = held.remove(id)
+                    && Some(id.as_str()) != now
+                {
+                    turns.push((
+                        Some(id.clone()),
+                        format!("The person said:\n{}", text.trim()),
+                    ));
+                }
+            }
+            Body::Unqueued { id, .. } => {
+                held.remove(id);
+            }
+            // Back to just before message `to`: what came after is gone.
+            Body::Rewound { to, .. } => {
+                if let Some(at) = turns.iter().position(|(id, _)| id.as_deref() == Some(to)) {
+                    turns.truncate(at);
+                }
             }
             Body::Assistant {
                 parent: None,
@@ -2913,27 +2961,29 @@ fn recap(events: &[dent_protocol::Event], max: usize) -> String {
                     .collect::<Vec<_>>()
                     .join("\n");
                 if !words.trim().is_empty() {
-                    turns.push(format!("You replied:\n{}", words.trim()));
+                    turns.push((None, format!("You replied:\n{}", words.trim())));
                 }
             }
             _ => {}
         }
     }
-    // The newest message is sent on its own, after the recap.
-    if turns
-        .last()
-        .is_some_and(|t| t.starts_with("The person said:"))
-    {
-        turns.pop();
-    }
-    let mut kept: Vec<&str> = Vec::new();
+    let mut kept: Vec<String> = Vec::new();
     let mut size = 0;
-    for t in turns.iter().rev() {
+    for (_, t) in turns.iter().rev() {
         if size + t.len() > max {
+            // The newest alone is too long: its start, cut where a
+            // character ends, rather than nothing at all.
+            if kept.is_empty() {
+                let mut end = max.saturating_sub(16);
+                while !t.is_char_boundary(end) {
+                    end -= 1;
+                }
+                kept.push(format!("{} (cut short)", &t[..end]));
+            }
             break;
         }
         size += t.len() + 2;
-        kept.push(t);
+        kept.push(t.clone());
     }
     let left_out = kept.len() < turns.len();
     kept.reverse();
@@ -3101,7 +3151,7 @@ mod withdraw_tests {
             reply("Added 4 tests."),
             user("3", "what next?"),
         ]);
-        let all = recap(&events, 10_000);
+        let all = recap(&events, 10_000, Some("3"));
         assert!(
             all.starts_with("The person said:\nadd a login page"),
             "{all}"
@@ -3112,13 +3162,63 @@ mod withdraw_tests {
             "the message now goes on its own"
         );
         // Too much: the newest kept, and said that some was left out.
-        let some = recap(&events, 60);
+        let some = recap(&events, 60, Some("3"));
         assert!(some.starts_with("(Earlier parts left out.)"), "{some}");
         assert!(
             some.contains("Added 4 tests.") && !some.contains("login page"),
             "{some}"
         );
-        assert_eq!(recap(&log(vec![user("1", "hi")]), 100), "");
+        assert_eq!(recap(&log(vec![user("1", "hi")]), 100, Some("1")), "");
+        // One turn alone too long: its start, not nothing.
+        let long = log(vec![user("1", &"é".repeat(100)), user("2", "now")]);
+        let cut = recap(&long, 50, Some("2"));
+        assert!(cut.ends_with("(cut short)") && cut.contains('é'), "{cut}");
+        // Taken back, rewound away, sent by dent, or never delivered: not
+        // what the agent had.
+        let mut e = vec![
+            user("1", "keep this"),
+            reply("kept reply"),
+            Body::TurnEnded {
+                outcome: Outcome::Done,
+            },
+            user("2", "taken back"),
+            Body::Withdrawn {
+                ids: vec!["2".into()],
+            },
+            Body::TurnEnded {
+                outcome: Outcome::Interrupted { reason: None },
+            },
+            user("3", "rewound away"),
+            reply("gone reply"),
+            Body::Rewound {
+                to: "3".into(),
+                files: false,
+            },
+            user("4", RESUME_TEXT),
+            reply("carried on"),
+        ];
+        e.push(Body::User {
+            id: "5".into(),
+            text: "still waiting".into(),
+            queued: true,
+            steer: false,
+            attachments: Vec::new(),
+        });
+        e.push(user("6", "now"));
+        let r = recap(&log(e), 10_000, Some("6"));
+        for missing in [
+            "taken back",
+            "rewound away",
+            "gone reply",
+            "usage limit",
+            "still waiting",
+            "now",
+        ] {
+            assert!(!r.contains(missing), "{missing} in {r}");
+        }
+        for kept in ["keep this", "kept reply", "carried on"] {
+            assert!(r.contains(kept), "{kept} not in {r}");
+        }
     }
 
     fn log(bodies: Vec<Body>) -> Vec<Event> {
