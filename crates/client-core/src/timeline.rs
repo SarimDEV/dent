@@ -49,6 +49,8 @@ pub struct SessionView {
     pub moving: Option<(String, Option<String>, dent_protocol::MoveState)>,
     /// That move's id, so a client can pick it up where it stood.
     pub move_id: Option<String>,
+    /// The machine it goes to, by id, when its daemon said.
+    pub move_to: Option<String>,
     pub agent: String,
     pub model: Option<String>,
     pub permission: Permission,
@@ -1127,10 +1129,12 @@ impl SessionView {
             Body::Move {
                 id,
                 to,
+                to_machine,
                 state,
                 to_session,
             } => {
                 self.move_id = Some(id.clone());
+                self.move_to = Some(to_machine.clone()).filter(|m| !m.is_empty());
                 use dent_protocol::MoveState as M;
                 // What ended the move is said in the chat; while it runs, the
                 // session's own state shows it.
@@ -1138,7 +1142,8 @@ impl SessionView {
                     M::Departed => Some(format!("Moved to {to}")),
                     M::Failed { why } => Some(format!("Didn't move to {to}: {why}")),
                     M::ContinuedHere => Some(format!("Kept here. {to} may have a copy of it too")),
-                    M::Pending | M::Departing { .. } | M::Cancelled => None,
+                    M::Cancelled => Some(format!("Didn't move to {to}: called off")),
+                    M::Pending | M::Departing { .. } => None,
                 };
                 if let Some(text) = said {
                     self.push(Entry::Note {
@@ -1710,6 +1715,32 @@ mod tests {
             panic!()
         };
         assert!(calls[0].result.is_some());
+    }
+
+    /// A move that ended says so in the chat, called off too (a message
+    /// sent while it waited does that), and leaves the session working
+    /// here; the machine it goes to is kept by id as well as name.
+    #[test]
+    fn a_move_says_how_it_ended() {
+        use dent_protocol::MoveState as M;
+        let mv = |state: M| Body::Move {
+            id: "m1".into(),
+            to: "vm".into(),
+            to_machine: "ab12".into(),
+            state,
+            to_session: None,
+        };
+        let s = feed(vec![mv(M::Pending)]);
+        let v = &s.list["s"];
+        assert!(matches!(&v.moving, Some((to, None, M::Pending)) if to == "vm"));
+        assert_eq!(v.move_to.as_deref(), Some("ab12"));
+        assert_eq!(v.move_id.as_deref(), Some("m1"));
+        let s = feed(vec![mv(M::Pending), mv(M::Cancelled)]);
+        let v = &s.list["s"];
+        assert!(v.moving.is_none());
+        assert!(v.entries.iter().any(
+            |e| matches!(e, Entry::Note { text, .. } if text == "Didn't move to vm: called off")
+        ));
     }
 
     /// A visual shown with dent's tool is a page it made, a version per

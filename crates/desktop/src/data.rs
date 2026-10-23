@@ -477,6 +477,7 @@ pub struct Session {
     /// the machine, its id there once it arrived, and where it stands.
     pub moving: Option<(String, Option<String>, dent_protocol::MoveState)>,
     pub move_id: Option<String>,
+    pub move_to: Option<String>,
     /// Working on a machine that's away: it carries on when that machine
     /// is back, and waits in the sidebar's Paused meanwhile.
     pub paused: bool,
@@ -578,6 +579,7 @@ impl Session {
             machine: String::new(),
             moving: None,
             move_id: None,
+            move_to: None,
             paused: false,
             agent: String::new(),
             agent_id: dent_protocol::DEFAULT_AGENT.into(),

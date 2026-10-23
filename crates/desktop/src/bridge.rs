@@ -585,6 +585,7 @@ pub fn session(
         machine: cx.machine.to_string(),
         moving: v.moving.clone(),
         move_id: v.move_id.clone(),
+        move_to: v.move_to.clone(),
         paused: false,
         agent: format!(
             "{} · {}",

@@ -1391,8 +1391,8 @@ impl Dent {
         use dent_protocol::MoveState as M;
         let t = self.t;
         let run = self.moves.get(&s.id);
-        // Stopped, and working here again (the machine it was leaving said
-        // no): the chat says why, and choosing a machine starts afresh.
+        // Stopped, and working here again (it ended there, and the chat
+        // says why): choosing a machine starts afresh.
         if run.is_some_and(|r| r.stopped.is_some()) && s.moving.is_none() {
             return None;
         }
@@ -1456,7 +1456,7 @@ impl Dent {
             .moves
             .get(&s.id)
             .map(|r| r.to.clone())
-            .or_else(|| self.machine_by_name(&to));
+            .or_else(|| self.move_target(s));
         // Before anything went, it can be called off; after, only kept here.
         let early =
             !sent && run.is_some_and(|r| matches!(r.phase(), Phase::Asking | Phase::Waiting));
@@ -1481,27 +1481,25 @@ impl Dent {
                             14.,
                             if stopped { t.waiting.0 } else { t.quiet },
                         ))
+                        // What, over how far it's got or why it stopped:
+                        // a long why wraps, whole, rather than losing its
+                        // end.
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .flex()
-                                .gap(px(space::S1H))
+                                .flex_col()
                                 .child(
                                     div()
-                                        .flex_none()
+                                        .truncate()
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(t.ink)
                                         .child(what),
                                 )
-                                .child(
-                                    div()
-                                        .flex_shrink(10.)
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_color(t.quiet)
-                                        .child(rest),
-                                ),
+                                .when(!rest.is_empty(), |d| {
+                                    d.child(div().text_color(t.quiet).child(rest))
+                                }),
                         )
                         .when(stopped && to_id.is_some(), |d| {
                             let to_id = to_id.clone().unwrap_or_default();
@@ -1565,10 +1563,20 @@ impl Dent {
         let Some((to, Some(there), dent_protocol::MoveState::Departed)) = &s.moving else {
             return None;
         };
-        let key = self.moved_to(to, there);
-        let short = crate::data::machine_short(to);
+        let key = self.moved_to(s, to, there);
+        // Called here what it's called now, renamed since or not.
+        let name = key.as_deref().map_or(to.clone(), |k| {
+            self.machine_name(dent_client_core::fleet::split(k).0)
+        });
+        // The button names it when the name is short; the line above says
+        // it whole.
+        let label = if name.chars().count() <= 18 {
+            format!("Open on {name}")
+        } else {
+            "Open it there".to_string()
+        };
         let open = key.map(|key| {
-            button("open-moved", format!("Open on {short}"), true, &t)
+            button("open-moved", label, true, &t)
                 .relative()
                 .child(probe(&self.probes, "open-moved"))
                 .on_press(cx.listener(move |this, _, window, cx| {
@@ -1601,7 +1609,7 @@ impl Dent {
                             div()
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(t.ink)
-                                .child(format!("This session carries on on {short}")),
+                                .child(format!("This session moved to {name}")),
                         )
                         .child(div().text_color(t.quiet).child(
                             "This is how it was when it left. Its folder here stays until you remove it.",
@@ -6075,7 +6083,7 @@ impl Dent {
                 .map(|(i, e)| {
                     let lit = hi == Some(i);
                     match &e.kind {
-                        EntryKind::Note => menu_note_owned(e.name.clone(), &t),
+                        EntryKind::Note => menu_note_owned(e.name.clone(), ticks, &t),
                         EntryKind::Separator => div()
                             .flex_none()
                             .my(px(space::S1))
@@ -6460,10 +6468,12 @@ impl Entry {
     }
 }
 
-fn menu_note_owned(text: String, t: &theme::Theme) -> AnyElement {
+fn menu_note_owned(text: String, ticks: bool, t: &theme::Theme) -> AnyElement {
+    let tick = if ticks { 14. + space::S2 } else { 0. };
     div()
-        // In line with the rows' names, past their check column.
-        .pl(px(space::S1 + space::S2 + 14. + space::S2))
+        // In line with the rows' names, past their tick column when the
+        // menu keeps one.
+        .pl(px(space::S1 + space::S2 + tick))
         .pr(px(space::S3))
         .py(px(space::S2))
         .ty(UI)

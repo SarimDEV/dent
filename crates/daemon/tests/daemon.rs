@@ -3819,7 +3819,9 @@ fn carry_then(
     mut before_accept: impl FnMut(),
 ) -> Result<Result<String, String>, String> {
     use dent_client_core::carry::{Carrier, Ended, Side, Step};
-    let mut c = Carrier::new(session, id, "b").with_chunk(chunk);
+    let mut c = Carrier::new(session, id, "b")
+        .to_machine("b-key")
+        .with_chunk(chunk);
     let mut step = c.start();
     let mut reads = 0;
     loop {
@@ -3882,7 +3884,8 @@ fn a_session_moves_with_its_conversation_and_its_uncommitted_work() {
     a.pump_for(Duration::from_millis(300));
     assert!(a.events(&s).iter().any(|e| matches!(
         e,
-        Body::Move { state: dent_protocol::MoveState::Departed, to_session: Some(t), .. } if *t == to
+        Body::Move { state: dent_protocol::MoveState::Departed, to_session: Some(t), to_machine, .. }
+            if *t == to && to_machine == "b-key"
     )));
     let refused = a.call(Request::Send {
         session: s.clone(),
@@ -4147,6 +4150,7 @@ fn a_move_waits_for_the_turn_and_a_message_meanwhile_calls_it_off() {
         session: s.into(),
         id: id.into(),
         to: "b".into(),
+        to_machine: String::new(),
         have: Some(Vec::new()),
     };
     // Asked while it works: it waits, then packs once the turn is over.
@@ -4312,6 +4316,7 @@ fn a_source_that_dies_while_packing_packs_again_and_the_move_finishes() {
         session: s.clone(),
         id: "mv8".into(),
         to: "b".into(),
+        to_machine: String::new(),
         have: Some(Vec::new()),
     });
     let until = Instant::now() + Duration::from_secs(10);
@@ -4365,6 +4370,7 @@ fn a_move_called_off_after_packing_sends_nothing_and_its_id_is_spent() {
         session: s.clone(),
         id: "mv9".into(),
         to: "b".into(),
+        to_machine: String::new(),
         have: Some(Vec::new()),
     }))
     .unwrap();
@@ -4757,4 +4763,75 @@ fn a_login_shell_a_dead_daemon_left_asking_is_stopped_by_the_next() {
     assert!(other.try_wait().unwrap().is_none(), "stopped a stranger");
     let _ = other.kill();
     let _ = other.wait();
+}
+
+/// Many sessions moved to one machine at once, each by its own carrier,
+/// with ids begun the same millisecond: each arrives whole, as its own
+/// session in its own folder, and knows only its own conversation.
+#[test]
+fn sessions_moved_at_once_each_arrive_whole_and_apart() {
+    const N: usize = 4;
+    let m = Moves::new("many", true);
+    let mut a = m.a.client();
+    let mut b = m.b.client();
+    a.subscribe(0);
+    b.subscribe(0);
+    b.call(Request::AddProject {
+        path: m.on_b.display().to_string(),
+        create: false,
+    })
+    .unwrap();
+    let words = ["apricot", "basil", "cumin", "dill"];
+    let sessions: Vec<String> = words
+        .iter()
+        .map(|w| {
+            let s = a.create(
+                &m.on_a.display().to_string(),
+                Permission::Full,
+                &format!("remember the word {w}"),
+            );
+            a.wait_turns(&s, 1);
+            s
+        })
+        .collect();
+    let now = 1_761_200_000_000;
+    let ids: Vec<String> = (0..N)
+        .map(|i| dent_client_core::carry::new_id(now, 0x1000_0000_0000 + i as u64 * 0x1111))
+        .collect();
+    let handles: Vec<_> = sessions
+        .iter()
+        .zip(&ids)
+        .map(|(s, id)| {
+            let (mut a, mut b) = (m.a.client(), m.b.client());
+            let (s, id) = (s.clone(), id.clone());
+            std::thread::spawn(move || carry(&mut a, &mut b, &s, &id, 4096, None))
+        })
+        .collect();
+    let arrived: Vec<String> = handles
+        .into_iter()
+        .map(|h| h.join().unwrap().unwrap().unwrap())
+        .collect();
+    let distinct: std::collections::HashSet<_> = arrived.iter().collect();
+    assert_eq!(distinct.len(), N, "{arrived:?}");
+    b.pump_for(Duration::from_millis(300));
+    let mut folders = std::collections::HashSet::new();
+    for (to, w) in arrived.iter().zip(words) {
+        let before = b.turns_done(to);
+        b.say(to, "r", "recall", false);
+        b.wait_turns(to, before + 1);
+        let text = b.text(to);
+        assert!(text.contains(&format!("remember the word {w}")), "{text}");
+        for other in words.iter().filter(|o| **o != w) {
+            assert!(!text.contains(&format!("the word {other}")), "{w}: {text}");
+        }
+        let cwd = b
+            .events(to)
+            .into_iter()
+            .find_map(|e| match e {
+                Body::Created { cwd, .. } => Some(cwd),
+                _ => None,
+            })
+            .unwrap();
+        assert!(folders.insert(cwd.clone()), "two landed in {cwd}");
+    }
 }

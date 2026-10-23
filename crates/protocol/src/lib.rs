@@ -245,8 +245,12 @@ pub enum Body {
     /// more ([decision 0064](../../docs/decisions/0064-moving-sessions.md)).
     Move {
         id: String,
-        /// The machine it goes to.
+        /// The machine it goes to, by name.
         to: String,
+        /// And by id, as clients keep it, so one finds it whatever it's
+        /// called there; older daemons leave it out.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        to_machine: String,
         state: MoveState,
         /// Its id there, once it's arrived.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1615,6 +1619,9 @@ pub enum Request {
         session: SessionId,
         id: String,
         to: String,
+        /// The machine it goes to by id; see `Body::Move`.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        to_machine: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         have: Option<Vec<String>>,
     },

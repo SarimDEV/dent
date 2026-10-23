@@ -311,8 +311,9 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             session,
             id,
             to,
+            to_machine,
             have,
-        } => d.move_pack(&session, &id, &to, have).await?,
+        } => d.move_pack(&session, &id, &to, &to_machine, have).await?,
         Request::MoveRead {
             id,
             part,

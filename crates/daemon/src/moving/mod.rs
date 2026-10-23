@@ -117,6 +117,7 @@ impl Daemon {
         session: &str,
         id: &str,
         to: &str,
+        to_machine: &str,
         have: Option<Vec<String>>,
     ) -> Result<Reply> {
         if !pack::valid_id(id) {
@@ -143,6 +144,7 @@ impl Daemon {
             Op::Move(Step::Start {
                 id: id.into(),
                 to: to.into(),
+                to_machine: to_machine.into(),
                 busy: false,
             }),
         )
@@ -378,20 +380,27 @@ impl Daemon {
                 };
                 let new = crate::workspace::worktrees_root()
                     .join(&name)
-                    .join(format!("{leaf}-{}", &id[..id.len().min(8)]));
-                // One an accept cut short made is this move's: made again.
+                    .join(landing_name(&leaf, id));
+                // One an accept cut short made is this move's, wherever it
+                // was put (an older daemon named it otherwise): made again.
                 let landing = accept::inbox(&state, id).join("landing");
-                if std::fs::read_to_string(&landing).ok().as_deref()
-                    == Some(&new.display().to_string())
-                    && new.exists()
+                if let Some(made) = std::fs::read_to_string(&landing)
+                    .ok()
+                    .map(PathBuf::from)
+                    // Only ever one of dent's own folders.
+                    .filter(|p| p.starts_with(crate::workspace::worktrees_root()) && p.exists())
                 {
-                    let _ = crate::workspace::one_at_a_time(&root, || {
-                        crate::workspace::run(
-                            &root,
-                            &["worktree", "remove", "--force", &new.display().to_string()],
-                        )
-                    });
-                    let _ = std::fs::remove_dir_all(&new);
+                    let root2 = root.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let _ = crate::workspace::one_at_a_time(&root2, || {
+                            crate::workspace::run(
+                                &root2,
+                                &["worktree", "remove", "--force", &made.display().to_string()],
+                            )
+                        });
+                        let _ = std::fs::remove_dir_all(&made);
+                    })
+                    .await?;
                 }
                 if let Some(p) = new.parent() {
                     std::fs::create_dir_all(p)?;
@@ -569,6 +578,15 @@ pub fn sweep(state: &Path, store: &crate::store::Store) {
     }
 }
 
+/// The folder a move of branch `leaf` lands in: the same for every try
+/// of one move, and told apart by the id's end, its random part (moves
+/// begun within a minute or so share their start).
+fn landing_name(leaf: &str, id: &str) -> String {
+    let c: Vec<char> = id.chars().collect();
+    let tail: String = c[c.len().saturating_sub(8)..].iter().collect();
+    format!("{leaf}-{tail}")
+}
+
 /// The moved session's id here, the same for every try of one move.
 fn derived_session(m: &MoveManifest) -> String {
     let h = fnv(&format!("{}/{}/{}", m.from_machine, m.from_session, m.id));
@@ -672,6 +690,28 @@ fn rebase(v: &mut serde_json::Value, from: &str, to: &str) {
 
 #[cfg(test)]
 mod tests {
+    /// Two moves begun the same minute, of the same branch, land apart;
+    /// one move tried again lands where it did.
+    #[test]
+    fn moves_begun_together_land_apart() {
+        use dent_client_core::carry::new_id;
+        let now = 1_761_200_000_000;
+        let (a, b) = (
+            new_id(now, 0x1111_2222_3333),
+            new_id(now + 900, 0x4444_5555_6666),
+        );
+        assert_eq!(a[..8], b[..8]);
+        assert_ne!(
+            super::landing_name("main", &a),
+            super::landing_name("main", &b)
+        );
+        assert_eq!(
+            super::landing_name("main", &a),
+            super::landing_name("main", &a)
+        );
+        assert_eq!(super::landing_name("moved", "mv1"), "moved-mv1");
+    }
+
     #[test]
     fn saved_files_are_found_where_they_are_now_and_only_those() {
         let mut v = serde_json::json!({"at": 1, "body": {"kind": "user", "attachments":

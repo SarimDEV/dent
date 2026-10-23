@@ -3483,6 +3483,8 @@ impl Dent {
                 };
                 self.move_answer(&id, side, req, answer, cx);
             }
+            // Nothing there to call off: it hadn't begun there yet.
+            (Waiting::MoveStopped, Out::Error { message }) if message.contains("no such move") => {}
             (Waiting::MoveStopped, Out::Error { message }) => {
                 self.toast(ToastAction::Info, message);
             }
@@ -3499,7 +3501,8 @@ impl Dent {
                     reply: Reply::MoveHave { found, .. },
                 },
             ) => self.probe_has(&id, machine, found),
-            (Waiting::MoveRemotes(_) | Waiting::MoveHas(..), _) => {}
+            (Waiting::MoveRemotes(id), _) => self.probe_unsure(&id, String::new()),
+            (Waiting::MoveHas(id, machine), _) => self.probe_unsure(&id, machine),
             (
                 Waiting::Models(agent),
                 Out::Reply {
@@ -5915,7 +5918,7 @@ impl Dent {
             Menu::Project => self.open_project_picker(window, cx),
             Menu::SessionMachine => {
                 if let Some(id) = self.selected.clone() {
-                    self.probe_machines(&id);
+                    self.probe_machines_then(&id, cx);
                 }
             }
             Menu::Base => self.branch_query.update(cx, |f, cx| {

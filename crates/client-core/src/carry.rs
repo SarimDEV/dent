@@ -86,6 +86,7 @@ pub struct Carrier {
     session: SessionId,
     id: String,
     to_name: String,
+    to_machine: String,
     at: At,
     in_repo: bool,
     tips: Vec<String>,
@@ -108,6 +109,7 @@ impl Carrier {
             session: session.to_string(),
             id: id.to_string(),
             to_name: to_name.to_string(),
+            to_machine: String::new(),
             at: At::Remotes,
             in_repo: false,
             tips: Vec::new(),
@@ -123,6 +125,13 @@ impl Carrier {
     /// Reads and writes `bytes` at a time (tests use small ones).
     pub fn with_chunk(mut self, bytes: u32) -> Self {
         self.chunk = bytes.max(1);
+        self
+    }
+
+    /// The machine it goes to by id too, so every device finds it
+    /// whatever it calls it.
+    pub fn to_machine(mut self, id: &str) -> Self {
+        self.to_machine = id.to_string();
         self
     }
 
@@ -145,6 +154,7 @@ impl Carrier {
             session: self.session.clone(),
             id: self.id.clone(),
             to: self.to_name.clone(),
+            to_machine: self.to_machine.clone(),
             have,
         }
     }

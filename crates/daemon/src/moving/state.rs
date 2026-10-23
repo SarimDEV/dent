@@ -14,8 +14,10 @@ use dent_protocol::MoveState;
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Move {
     pub id: String,
-    /// The machine it goes to.
+    /// The machine it goes to, by name and by id.
     pub to: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub to_machine: String,
     pub state: MoveState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to_session: Option<String>,
@@ -25,7 +27,12 @@ pub struct Move {
 #[derive(Debug)]
 pub enum Step {
     /// Asked to move: `busy` while a turn (or work it left running) goes on.
-    Start { id: String, to: String, busy: bool },
+    Start {
+        id: String,
+        to: String,
+        to_machine: String,
+        busy: bool,
+    },
     /// The turn it waited for ended.
     Quiet,
     /// Something may now have been sent to the other machine.
@@ -51,13 +58,19 @@ pub fn next(now: Option<&Move>, step: Step) -> Result<Option<Move>, String> {
     let same = |id: &str| live.is_some_and(|m| m.id == id);
     let with = |state: S| live.map(|m| Move { state, ..m.clone() });
     match step {
-        Step::Start { id, to, busy } => match live {
+        Step::Start {
+            id,
+            to,
+            to_machine,
+            busy,
+        } => match live {
             Some(m) if m.id == id => Ok(Some(m.clone())),
             Some(m) if m.state == S::Departed => Err(format!("it moved to {} already", m.to)),
             Some(m) => Err(format!("it's moving to {} already", m.to)),
             None => Ok(Some(Move {
                 id,
                 to,
+                to_machine,
                 state: if busy { S::Pending } else { S::Departing { sent: false } },
                 to_session: None,
             })),
@@ -130,6 +143,7 @@ mod tests {
         Move {
             id: "m1".into(),
             to: "vm".into(),
+            to_machine: String::new(),
             state,
             to_session: None,
         }
@@ -142,6 +156,7 @@ mod tests {
             Step::Start {
                 id: "m1".into(),
                 to: "vm".into(),
+                to_machine: String::new(),
                 busy: true,
             },
         )
@@ -171,6 +186,7 @@ mod tests {
             Step::Start {
                 id: "m2".into(),
                 to: "vm".into(),
+                to_machine: String::new(),
                 busy: false,
             },
         )
@@ -188,6 +204,7 @@ mod tests {
                 Step::Start {
                     id: "m1".into(),
                     to: "vm".into(),
+                    to_machine: String::new(),
                     busy: false
                 }
             )
@@ -215,6 +232,7 @@ mod tests {
                 Step::Start {
                     id: "m2".into(),
                     to: "vm".into(),
+                    to_machine: String::new(),
                     busy: false
                 }
             )
@@ -226,6 +244,7 @@ mod tests {
                 Step::Start {
                     id: "m2".into(),
                     to: "vm".into(),
+                    to_machine: String::new(),
                     busy: false
                 }
             )
