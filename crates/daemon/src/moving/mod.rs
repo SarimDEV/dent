@@ -40,6 +40,27 @@ pub fn move_key(session: &str) -> String {
     format!("move/{session}")
 }
 
+/// A move that ended (called off, failed, kept here): its id isn't used
+/// again, as its package is gone and the session has moved on since.
+pub fn ended_key(id: &str) -> String {
+    format!("move-ended/{id}")
+}
+
+/// One move's work at a time, whichever carrier asks: packing, writing and
+/// accepting the same id never overlap.
+async fn lock_move(id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    type Locks = std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>;
+    static LOCKS: std::sync::LazyLock<std::sync::Mutex<Locks>> =
+        std::sync::LazyLock::new(Default::default);
+    let m = LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(id.to_string())
+        .or_default()
+        .clone();
+    m.lock_owned().await
+}
+
 /// What a session that arrived here tells its agent first: where it came
 /// from. Kept until said.
 pub fn arrived_key(session: &str) -> String {
@@ -136,6 +157,7 @@ impl Daemon {
             }
             bail!("it moved to {} already", m.to);
         }
+        let _one = lock_move(id).await;
         let row = self.store().session(session)?.context("no such session")?;
         let events = self.store().session_events(session)?;
         let driver = crate::agent::named(Some(&row.agent))?;
@@ -184,10 +206,21 @@ impl Daemon {
         offset: u64,
         len: u32,
     ) -> Result<Reply> {
+        if !pack::valid_id(id) {
+            bail!("{id:?} isn't a move id");
+        }
         let dir = pack::dir(&self.paths.state, id);
         let m = pack::read_manifest(&dir).context("no packed move by that id")?;
         if !m.parts.iter().any(|p| p.name == part) {
             bail!("{part:?} isn't part of this move");
+        }
+        // Only while it's going ahead: called off, or kept here, nothing of
+        // it leaves (or the other machine would hold a second live copy).
+        let going = current(&self.store(), &m.from_session).is_some_and(|c| {
+            c.id == id && matches!(c.state, dent_protocol::MoveState::Departing { .. })
+        });
+        if !going {
+            bail!("this move isn't going ahead any more");
         }
         if current(&self.store(), &m.from_session)
             .is_some_and(|c| c.state == dent_protocol::MoveState::Departing { sent: false })
@@ -224,10 +257,23 @@ impl Daemon {
         Ok(Reply::MoveParts { have })
     }
 
-    pub fn move_write(&self, id: &str, part: &str, offset: u64, bytes_b64: &str) -> Result<Reply> {
+    pub async fn move_write(
+        &self,
+        id: &str,
+        part: &str,
+        offset: u64,
+        bytes_b64: &str,
+    ) -> Result<Reply> {
+        if !pack::valid_id(id) {
+            bail!("{id:?} isn't a move id");
+        }
         let data = b64::decode(bytes_b64).context("not base64")?;
-        let have = accept::write(&self.paths.state, id, part, offset, &data)
-            .map_err(anyhow::Error::msg)?;
+        let _one = lock_move(id).await;
+        let (state, id, part) = (self.paths.state.clone(), id.to_string(), part.to_string());
+        let have =
+            tokio::task::spawn_blocking(move || accept::write(&state, &id, &part, offset, &data))
+                .await?
+                .map_err(anyhow::Error::msg)?;
         Ok(Reply::MoveWrote { have })
     }
 
@@ -267,9 +313,18 @@ impl Daemon {
 
     /// `MoveAccept`: make the session here from what arrived.
     pub async fn move_accept(self: &Arc<Self>, id: &str) -> Result<Reply> {
+        if !pack::valid_id(id) {
+            bail!("{id:?} isn't a move id");
+        }
+        let _one = lock_move(id).await;
         let state = self.paths.state.clone();
         if let Some(session) = accept::accepted(&state, id) {
             return Ok(Reply::Created { session });
+        }
+        // Said not accepted once (and so working again where it was): the
+        // same every time it's asked.
+        if let Ok(why) = std::fs::read_to_string(accept::inbox(&state, id).join("refused")) {
+            return Ok(Reply::MoveNotAccepted { why });
         }
         let m = accept::manifest(&state, id).map_err(anyhow::Error::msg)?;
         let session = derived_session(&m);
@@ -279,9 +334,15 @@ impl Daemon {
             mark_accepted(&state, id, &session)?;
             return Ok(Reply::Created { session });
         }
-        let not = |why: String| Ok(Reply::MoveNotAccepted { why });
-        if let Err(why) = accept::verify(&state, &m) {
-            return not(why);
+        let not = |why: String| -> Result<Reply> {
+            let _ = std::fs::write(accept::inbox(&state, id).join("refused"), &why);
+            Ok(Reply::MoveNotAccepted { why })
+        };
+        // A part still to come, or one damaged on the way (sent again): not
+        // a refusal; the carrier carries on.
+        let (s2, m2) = (state.clone(), m.clone());
+        if let Err(why) = tokio::task::spawn_blocking(move || accept::verify(&s2, &m2)).await? {
+            bail!("{why}");
         }
         let Ok(driver) = crate::agent::named(Some(&m.agent)) else {
             return not(format!("{} isn't an agent this machine has", m.agent));
@@ -357,21 +418,37 @@ impl Daemon {
         }
         // The agent's conversation, under a new id of its own.
         let agent_to = derived_uuid(&format!("{}/{}", m.from_machine, m.id));
-        if !m.agent_session.is_empty()
-            && let Err(e) = driver.place_conversation(&parts, &m.agent_session, &agent_to, &cwd_s)
-        {
-            return not(format!("{e:#}"));
-        }
-        // What dent saved for it.
         let files = state.join("attachments").join(&session);
-        let from_files = parts.join("files");
-        for f in pack::files_under(&from_files) {
-            let rel = f.strip_prefix(&from_files)?;
-            let to = files.join(rel);
-            if let Some(p) = to.parent() {
-                std::fs::create_dir_all(p)?;
-            }
-            std::fs::copy(&f, &to)?;
+        let placed = {
+            let (parts, from, to, cwd, files) = (
+                parts.clone(),
+                m.agent_session.clone(),
+                agent_to.clone(),
+                cwd_s.clone(),
+                files.clone(),
+            );
+            tokio::task::spawn_blocking(move || -> Result<(), String> {
+                if !from.is_empty() {
+                    driver
+                        .place_conversation(&parts, &from, &to, &cwd)
+                        .map_err(|e| format!("{e:#}"))?;
+                }
+                // What dent saved for it.
+                let from_files = parts.join("files");
+                for f in pack::files_under(&from_files) {
+                    let rel = f.strip_prefix(&from_files).map_err(|e| e.to_string())?;
+                    let to = files.join(rel);
+                    if let Some(p) = to.parent() {
+                        std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
+                    }
+                    std::fs::copy(&f, &to).map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            })
+            .await?
+        };
+        if let Err(why) = placed {
+            return not(why);
         }
         // dent's record of it, as this machine's.
         let events = match history(&parts, &m, &files) {
@@ -420,10 +497,11 @@ impl Daemon {
             (crate::daemon::titled_key(&session), "1".to_string()),
         ];
         self.import(&session, &bodies, &kv)?;
-        mark_accepted(&state, id, &session)?;
+        // In: the worktree is the session's now, whatever happens next.
         if let Some(a) = applied {
             a.keep();
         }
+        mark_accepted(&state, id, &session)?;
         // Taken: what arrived is in place now, only its record is kept.
         let _ = std::fs::remove_dir_all(&parts);
         let row = self
@@ -510,29 +588,75 @@ fn mark_accepted(state: &Path, id: &str, session: &str) -> Result<()> {
 fn history(parts: &Path, m: &MoveManifest, files: &Path) -> Result<Vec<(u64, Body)>, String> {
     let text = std::fs::read_to_string(parts.join("events.jsonl")).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
+    let to = files.display().to_string();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        let line = if m.files_from.is_empty() {
-            line.to_string()
-        } else {
-            line.replace(&m.files_from, &files.display().to_string())
+        let Ok(mut v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
         };
+        // The files dent saved for it are here now: each string naming one,
+        // and only those (a whole folder name, not a prefix of another).
+        if !m.files_from.is_empty() {
+            rebase(&mut v, &m.files_from, &to);
+        }
         #[derive(serde::Deserialize)]
         struct Line {
             at: u64,
             body: Body,
         }
-        let Ok(l) = serde_json::from_str::<Line>(&line) else {
+        let Ok(l) = serde_json::from_value::<Line>(v) else {
             // A kind of event this daemon doesn't know (from a newer one):
             // left out rather than refused.
             continue;
         };
+        // What's this machine's to say anew: what it was made with, the
+        // agent's conversation, how it stands, its move, where it works in
+        // git and its pull request; and no "carry on at" from there.
         if matches!(
             l.body,
-            Body::Created { .. } | Body::Agent { .. } | Body::Status { .. } | Body::Move { .. }
+            Body::Created { .. }
+                | Body::Agent { .. }
+                | Body::Status { .. }
+                | Body::Move { .. }
+                | Body::Resume { .. }
+                | Body::Workspace { .. }
+                | Body::PullRequest { .. }
         ) {
             continue;
         }
         out.push((l.at, l.body));
     }
     Ok(out)
+}
+
+/// Every string in `v` that is `from` or under it (`from/…`) made to start
+/// with `to` instead.
+fn rebase(v: &mut serde_json::Value, from: &str, to: &str) {
+    match v {
+        serde_json::Value::String(s) => {
+            if s == from {
+                *s = to.to_string();
+            } else if let Some(rest) = s.strip_prefix(from).filter(|r| r.starts_with('/')) {
+                *s = format!("{to}{rest}");
+            }
+        }
+        serde_json::Value::Array(a) => a.iter_mut().for_each(|x| rebase(x, from, to)),
+        serde_json::Value::Object(o) => o.values_mut().for_each(|x| rebase(x, from, to)),
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn saved_files_are_found_where_they_are_now_and_only_those() {
+        let mut v = serde_json::json!({"at": 1, "body": {"kind": "user", "attachments":
+            ["/s/attachments/s1/a.png", "/s/attachments/s12/b.png", "/s/attachments/s1"],
+            "text": "see /s/attachments/s1/a.png"}});
+        super::rebase(&mut v, "/s/attachments/s1", "/t/att/x\"q");
+        assert_eq!(v["body"]["attachments"][0], "/t/att/x\"q/a.png");
+        assert_eq!(v["body"]["attachments"][1], "/s/attachments/s12/b.png");
+        assert_eq!(v["body"]["attachments"][2], "/t/att/x\"q");
+        // Words that mention a path aren't paths.
+        assert_eq!(v["body"]["text"], "see /s/attachments/s1/a.png");
+    }
 }

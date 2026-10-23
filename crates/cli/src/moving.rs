@@ -98,15 +98,13 @@ pub async fn run(args: &[String]) -> Result<()> {
     let Reply::MoveRemotes { remotes } = from.ask(pack(None), 30).await? else {
         bail!("{from_name} didn't say the session's remotes");
     };
+    let in_repo = !remotes.is_empty();
     let have = match to.ask(Request::MoveHave { remotes }, 60).await? {
-        Reply::MoveHave { found, tips } => {
-            if !found {
-                eprintln!(
-                    "  {to_name} doesn't have this repository; the move needs it there (bring the project first)"
-                );
-            }
-            tips
-        }
+        // Said before anything's packed or fenced: nothing to undo.
+        Reply::MoveHave { found: false, .. } if in_repo => bail!(
+            "{to_name} doesn't have this project; bring it there first, then move the session"
+        ),
+        Reply::MoveHave { tips, .. } => tips,
         other => bail!("{to_name}: unexpected answer {other:?}"),
     };
     // Packed once the turn (and work left running) ends.

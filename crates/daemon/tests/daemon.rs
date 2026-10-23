@@ -4096,3 +4096,94 @@ fn a_source_that_dies_while_packing_packs_again_and_the_move_finishes() {
         b.text(&to)
     );
 }
+
+#[test]
+fn a_move_called_off_after_packing_sends_nothing_and_its_id_is_spent() {
+    let m = Moves::new("calledoff", true);
+    let mut a = m.a.client();
+    let mut b = m.b.client();
+    b.call(Request::AddProject {
+        path: m.on_b.display().to_string(),
+        create: false,
+    })
+    .unwrap();
+    a.subscribe(0);
+    let s = a.create(
+        &m.on_a.display().to_string(),
+        Permission::Full,
+        "remember the word pear",
+    );
+    a.wait_turns(&s, 1);
+    // Packed, then called off before anything was read.
+    let packed = reply(a.call(Request::MovePack {
+        session: s.clone(),
+        id: "mv9".into(),
+        to: "b".into(),
+        have: Some(Vec::new()),
+    }))
+    .unwrap();
+    assert!(matches!(packed, dent_protocol::Reply::MovePacked { .. }));
+    reply(a.call(Request::MoveStop {
+        session: s.clone(),
+        id: "mv9".into(),
+        continue_here: false,
+    }))
+    .unwrap();
+    // A carrier that carries on gets nothing.
+    let read = reply(a.call(Request::MoveRead {
+        id: "mv9".into(),
+        part: "events.jsonl".into(),
+        offset: 0,
+        len: 100,
+    }));
+    assert!(read.is_err(), "{read:?}");
+    // And the same id doesn't start again: the session has moved on since.
+    let again = carry(&mut a, &mut b, &s, "mv9", 4096, None);
+    assert!(again.unwrap_err().contains("that move ended"));
+    // It works here.
+    a.say(&s, "x", "still here", false);
+    a.wait_turns(&s, 2);
+}
+
+#[test]
+fn going_back_to_before_a_turn_works_after_the_move() {
+    let m = Moves::new("rewind", true);
+    let mut a = m.a.client();
+    let mut b = m.b.client();
+    b.call(Request::AddProject {
+        path: m.on_b.display().to_string(),
+        create: false,
+    })
+    .unwrap();
+    a.subscribe(0);
+    let s = a.create(
+        &m.on_a.display().to_string(),
+        Permission::Full,
+        "remember the word grape",
+    );
+    a.wait_turns(&s, 1);
+    // Made after the first message's checkpoint.
+    std::fs::write(m.on_a.join("later.txt"), "later\n").unwrap();
+    let to = carry(&mut a, &mut b, &s, "mv10", 4096, None)
+        .unwrap()
+        .unwrap();
+    b.subscribe(0);
+    b.pump(Duration::from_millis(300));
+    let cwd = b
+        .events(&to)
+        .iter()
+        .find_map(|e| match e {
+            Body::Created { cwd, .. } => Some(cwd.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(Path::new(&cwd).join("later.txt").exists());
+    // The checkpoint came with it: files go back to before that turn.
+    b.call(Request::Rewind {
+        session: to.clone(),
+        to: "m-remember the word grape".into(),
+        files: true,
+    })
+    .unwrap();
+    assert!(!Path::new(&cwd).join("later.txt").exists());
+}

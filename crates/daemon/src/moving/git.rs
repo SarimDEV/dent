@@ -61,9 +61,16 @@ pub fn repo_of(dir: &Path) -> Option<(PathBuf, String)> {
 }
 
 /// Pack the worktree at `root` for move `id` into `bundle`, leaving out
-/// commits in `have` (tips the other machine has). Returns what the other
-/// side needs to apply it.
-pub fn pack(root: &Path, id: &str, have: &[String], bundle: &Path) -> Result<MoveRepo, String> {
+/// commits in `have` (tips the other machine has), and with the session's
+/// `checkpoints` (the snapshots its turns were taken at), so going back to
+/// one still works there. Returns what the other side needs to apply it.
+pub fn pack(
+    root: &Path,
+    id: &str,
+    have: &[String],
+    checkpoints: &[String],
+    bundle: &Path,
+) -> Result<MoveRepo, String> {
     let tip = git(root, &["rev-parse", "--verify", "HEAD"], &[])
         .map_err(|_| "the repository has no commits yet; commit once, then move".to_string())?;
     let branch = git(root, &["symbolic-ref", "-q", "HEAD"], &[])
@@ -92,11 +99,13 @@ pub fn pack(root: &Path, id: &str, have: &[String], bundle: &Path) -> Result<Mov
     let snap_ref = format!("refs/dent/move/{id}/snapshot");
     let index_ref = format!("refs/dent/move/{id}/index");
     // Nothing left behind in the person's repository, however this ends.
-    let cleanup = Cleanup {
+    let mut cleanup = Cleanup {
         root: root.to_path_buf(),
         refs: vec![snap_ref.clone(), index_ref.clone()],
+        dir: None,
     };
     let tmp = tempdir(root)?;
+    cleanup.dir = Some(tmp.clone());
     let idx = tmp.join("index");
     let real = PathBuf::from(git(root, &["rev-parse", "--git-path", "index"], &[])?);
     let real = if real.is_absolute() {
@@ -157,6 +166,17 @@ pub fn pack(root: &Path, id: &str, have: &[String], bundle: &Path) -> Result<Mov
     let index = commit(&idx_tree, "index")?;
     git(root, &["update-ref", &snap_ref, &snapshot], &[])?;
     git(root, &["update-ref", &index_ref, &index], &[])?;
+    // Each checkpoint this repository still has, under a ref the bundle
+    // can name.
+    let mut extra = Vec::new();
+    for (n, c) in checkpoints.iter().enumerate() {
+        if git(root, &["cat-file", "-e", &format!("{c}^{{commit}}")], &[]).is_ok() {
+            let r = format!("refs/dent/move/{id}/cp/{n}");
+            git(root, &["update-ref", &r, c], &[])?;
+            cleanup.refs.push(r.clone());
+            extra.push(r);
+        }
+    }
     // Only what the other machine lacks.
     let mut args: Vec<String> = vec![
         "bundle".into(),
@@ -169,6 +189,7 @@ pub fn pack(root: &Path, id: &str, have: &[String], bundle: &Path) -> Result<Mov
     if !branch.is_empty() {
         args.push(format!("refs/heads/{branch}"));
     }
+    args.extend(extra);
     for h in have {
         if git(root, &["cat-file", "-e", &format!("{h}^{{commit}}")], &[]).is_ok() {
             args.push(format!("^{h}"));
@@ -192,16 +213,20 @@ pub fn pack(root: &Path, id: &str, have: &[String], bundle: &Path) -> Result<Mov
     })
 }
 
-/// Refs made for a move, deleted when it's done with them.
+/// Refs and a folder made for a move, gone when it's done with them.
 struct Cleanup {
     root: PathBuf,
     refs: Vec<String>,
+    dir: Option<PathBuf>,
 }
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
         for r in &self.refs {
             let _ = git(&self.root, &["update-ref", "-d", r], &[]);
+        }
+        if let Some(d) = &self.dir {
+            let _ = std::fs::remove_dir_all(d);
         }
     }
 }
@@ -318,6 +343,8 @@ pub fn apply(
             &bundle.display().to_string(),
             &format!("+{snap_ref}:{snap_ref}"),
             &format!("+{index_ref}:{index_ref}"),
+            // The session's checkpoints, kept here under the move.
+            &format!("+refs/dent/move/{id}/cp/*:refs/dent/moved/{id}/cp/*"),
         ],
         &[],
     )?;
@@ -548,7 +575,7 @@ mod tests {
     fn a_worktree_arrives_exactly_as_it_was() {
         let (base, src, dst) = rig("exact");
         let bundle = base.join("m1.bundle");
-        let m = pack(&src, "m1", &tips(&dst), &bundle).unwrap();
+        let m = pack(&src, "m1", &tips(&dst), &[], &bundle).unwrap();
         assert_eq!(m.branch, "work");
         // Only what the other side lacks: tiny next to the repository.
         assert!(std::fs::metadata(&bundle).unwrap().len() < 20_000);
@@ -568,7 +595,7 @@ mod tests {
     fn what_would_lose_work_is_refused_and_leaves_nothing_behind() {
         let (base, src, dst) = rig("refuse");
         let bundle = base.join("m2.bundle");
-        let m = pack(&src, "m2", &tips(&dst), &bundle).unwrap();
+        let m = pack(&src, "m2", &tips(&dst), &[], &bundle).unwrap();
         // The branch moved on here: refused, branch untouched, no worktree.
         sh(
             &dst,
@@ -592,7 +619,7 @@ mod tests {
         // taken out again, so a clean retry works.
         let (base2, src2, dst2) = rig("exists");
         let b2 = base2.join("m3.bundle");
-        let m2 = pack(&src2, "m3", &tips(&dst2), &b2).unwrap();
+        let m2 = pack(&src2, "m3", &tips(&dst2), &[], &b2).unwrap();
         sh(&dst2, "git branch -q -D work 2>/dev/null; true");
         let taken = base2.join("taken");
         std::fs::create_dir_all(&taken).unwrap();
@@ -614,7 +641,7 @@ mod tests {
             "mkdir -p inner && cd inner && git init -q && printf 'z' > z && git add z && git -c user.name=t -c user.email=t@t commit -qm z",
         );
         assert!(
-            pack(&src, "m4", &[], &base.join("m4.bundle"))
+            pack(&src, "m4", &[], &[], &base.join("m4.bundle"))
                 .unwrap_err()
                 .contains("separate git checkout")
         );

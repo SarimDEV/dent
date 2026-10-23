@@ -75,7 +75,15 @@ fn fill(s: &Session<'_>, id: &str, have: &[String], out: &Path) -> Result<MoveMa
                     .into(),
             );
         };
-        let mut r = super::git::pack(&root, id, have, &out.join("git.bundle"))?;
+        let checkpoints: Vec<String> = s
+            .events
+            .iter()
+            .filter_map(|e| match &e.body {
+                dent_protocol::Body::Checkpoint { commit, .. } => Some(commit.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut r = super::git::pack(&root, id, have, &checkpoints, &out.join("git.bundle"))?;
         r.remotes = super::git::remotes(&root);
         r.subdir = subdir;
         Some(r)

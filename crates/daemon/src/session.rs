@@ -957,6 +957,19 @@ impl Session {
                 to_session: m.to_session.clone(),
             });
         }
+        // Over (called off, failed, kept here): its package goes, and its
+        // id is spent.
+        if let Some(m) = now.as_ref().filter(|m| {
+            !matches!(
+                m.state,
+                dent_protocol::MoveState::Pending
+                    | dent_protocol::MoveState::Departing { .. }
+                    | dent_protocol::MoveState::Departed
+            )
+        }) {
+            let _ = self.d.store().put(&crate::moving::ended_key(&m.id), "1");
+            let _ = std::fs::remove_dir_all(crate::moving::pack::dir(&self.d.paths.state, &m.id));
+        }
         // Over (called off, failed, kept here): nothing is kept of it.
         self.moving = now.filter(|m| {
             matches!(
@@ -976,9 +989,26 @@ impl Session {
         use crate::moving::state::Step;
         let step = match step {
             Step::Start { id, to, .. } => {
+                // A move that ended doesn't start again under its id: its
+                // package is gone, and the session has moved on since.
+                let ended = self
+                    .d
+                    .store()
+                    .get(&crate::moving::ended_key(&id))
+                    .ok()
+                    .flatten()
+                    .is_some();
+                if ended && self.moving.as_ref().is_none_or(|m| m.id != id) {
+                    anyhow::bail!("that move ended; move it again (a new move, without its id)");
+                }
                 // Messages waiting would start a turn here once it's fenced.
                 if !self.held.is_empty() {
                     anyhow::bail!("send or take back the messages waiting first, then move it");
+                }
+                // Carrying on when a limit resets would start work after
+                // it's fenced, here or on the other machine.
+                if self.moving.is_none() && self.wake.take().is_some() {
+                    self.log(Body::Resume { at: None });
                 }
                 // Busy: it waits for the turn, and work left running, to end.
                 let busy = self.in_turn || !self.background.is_empty();
@@ -1619,10 +1649,12 @@ impl Session {
                 let _ = self.control(Ctl::Refresh { command }).await;
             }
         }
-        // A used-up limit has reset: carry on where the turn stopped.
+        // A used-up limit has reset: carry on where the turn stopped. Not
+        // while it's moving or moved: that would run it here too.
         if self
             .wake
             .is_some_and(|at| at <= crate::daemon::now_ms() / 1000)
+            && crate::moving::state::fence(self.moving.as_ref()).is_none()
         {
             self.wake = None;
             self.log(Body::Resume { at: None });

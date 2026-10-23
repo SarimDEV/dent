@@ -325,7 +325,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             part,
             offset,
             bytes_b64,
-        } => d.move_write(&id, &part, offset, &bytes_b64)?,
+        } => d.move_write(&id, &part, offset, &bytes_b64).await?,
         Request::MoveAccept { id } => d.move_accept(&id).await?,
         Request::MoveEnded {
             session,
@@ -431,7 +431,10 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             Reply::Ok
         }
         Request::PromoteAside { session, id } => Reply::Created {
-            session: d.promote_aside(&session, &id).await?,
+            session: {
+                crate::moving::check(&d.store(), &session)?;
+                d.promote_aside(&session, &id).await?
+            },
         },
         Request::Unqueue { session, id } => {
             d.command(&session, Op::Unqueue { id }).await?;
@@ -516,6 +519,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             Reply::Ok
         }
         Request::RemoveWorktree { session, force } => {
+            crate::moving::check(&d.store(), &session)?;
             let cwd = cwd_of(d, &session)?;
             // Only ever a linked worktree: never a project's main checkout.
             let root = crate::workspace::main_checkout(Path::new(&cwd))
@@ -558,6 +562,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             action,
             message,
         } => {
+            crate::moving::check(&d.store(), &session)?;
             let cwd = cwd_of(d, &session)?;
             let (summary, url) = d.git(d.agent_of(&session), &cwd, action, message).await?;
             d.note_workspace(&session, &cwd).await;
@@ -742,6 +747,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             hunk,
             turn,
         } => {
+            crate::moving::check(&d.store(), &session)?;
             let cwd = cwd_of(d, &session)?;
             let base = match &turn {
                 Some(msg) => match turn_span(d, &session, msg)? {

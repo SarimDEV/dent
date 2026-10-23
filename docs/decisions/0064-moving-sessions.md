@@ -126,6 +126,15 @@ How the code is laid out, so each part can be built and tested on its own:
   - A session in dent's scratch folder lands in the target's.
   - A folder that isn't a repository and isn't the scratch folder can't move yet. That's said when it's packed, and the session works again.
 - **Ids that come out the same every time.** The target's session id and the agent's new conversation id come from (source machine, source session, move id). An accept cut short after its import finishes as the same session. A worktree an earlier try left, which the move's folder records, is made again.
+- **One live copy, kept so:**
+  - A part is read only while its move is going ahead. Called off or kept here, nothing more of it leaves.
+  - A move that ended keeps its id spent: it's never packed again under it, since the session has moved on since. A new move takes a new id.
+  - Each id's packing, writing and accepting run one at a time, whoever carries them.
+  - A "carry on when the limit resets" is dropped as a move starts, rather than run on either machine.
+  - A target that said not accepted says so every time it's asked again.
+  - Parts still to come, or damaged on the way, aren't a refusal: the carrier carries on.
+- **What's said anew on the target:** besides what the session was made with and its agent's conversation, how it stands, where it works in git and its pull request are said by the target, not imported. The snapshots its turns were taken at travel in the bundle (kept there under `refs/dent/moved/<id>/`), so going back to before a turn works after a move.
+- **Also fenced:** commits and pushes from the header, discarding a change, removing the worktree and making a side question into a session.
 - **The agent hears it moved** with its first message on the target: where it was, where it is, and that the old folder isn't on this machine. It's kept until said; you never see it.
 - **Transcripts are placed readable by you alone,** as Claude Code keeps its own, under the folder of the target's real path (Claude Code resolves links).
 - **Tidying:** the target removes what arrived once it's taken. The source keeps a package a week after its move ends, so a carrier asking again gets its answer.
