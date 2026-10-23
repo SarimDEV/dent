@@ -373,10 +373,12 @@ impl Daemon {
                     == Some(&new.display().to_string())
                     && new.exists()
                 {
-                    let _ = crate::workspace::run(
-                        &root,
-                        &["worktree", "remove", "--force", &new.display().to_string()],
-                    );
+                    let _ = crate::workspace::one_at_a_time(&root, || {
+                        crate::workspace::run(
+                            &root,
+                            &["worktree", "remove", "--force", &new.display().to_string()],
+                        )
+                    });
                     let _ = std::fs::remove_dir_all(&new);
                 }
                 if let Some(p) = new.parent() {

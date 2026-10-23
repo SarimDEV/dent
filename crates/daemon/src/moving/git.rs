@@ -403,15 +403,17 @@ pub fn apply(
     }
     undo.made = Some(new.to_path_buf());
     let new_s = new.display().to_string();
-    if checkout.is_empty() {
-        git(
-            repo,
-            &["worktree", "add", "-q", "--detach", &new_s, &m.tip],
-            &[],
-        )?;
-    } else {
-        git(repo, &["worktree", "add", "-q", &new_s, &checkout], &[])?;
-    }
+    crate::workspace::one_at_a_time(repo, || {
+        if checkout.is_empty() {
+            git(
+                repo,
+                &["worktree", "add", "-q", "--detach", &new_s, &m.tip],
+                &[],
+            )
+        } else {
+            git(repo, &["worktree", "add", "-q", &new_s, &checkout], &[])
+        }
+    })?;
     git(
         new,
         &["checkout", "-q", "--no-overlay", &m.snapshot, "--", "."],
@@ -462,13 +464,15 @@ impl Drop for Undo {
             return;
         }
         if let Some(new) = &self.made {
-            let _ = git(
-                &self.repo,
-                &["worktree", "remove", "--force", &new.display().to_string()],
-                &[],
-            );
-            let _ = std::fs::remove_dir_all(new);
-            let _ = git(&self.repo, &["worktree", "prune"], &[]);
+            crate::workspace::one_at_a_time(&self.repo, || {
+                let _ = git(
+                    &self.repo,
+                    &["worktree", "remove", "--force", &new.display().to_string()],
+                    &[],
+                );
+                let _ = std::fs::remove_dir_all(new);
+                let _ = git(&self.repo, &["worktree", "prune"], &[]);
+            });
         }
         for step in self.steps.iter().rev() {
             let args: Vec<&str> = step.iter().map(String::as_str).collect();
