@@ -7,7 +7,7 @@
 //!
 //! [decision 0064]: ../../../docs/decisions/0064-moving-sessions.md
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use dent_client_core::carry::{Carrier, CloneThere, Ended, Phase, Side, Step};
@@ -46,7 +46,7 @@ pub struct CloneDraft {
     /// The checkout it's cloned from, on the session's machine.
     pub dir: String,
     pub pack: Option<Result<Pack, String>>,
-    pub ticked: BTreeSet<String>,
+    pub files: crate::bring::FileChoice,
 }
 
 /// Counts runs.
@@ -677,7 +677,7 @@ impl Dent {
             to: to.to_string(),
             dir,
             pack: None,
-            ticked: BTreeSet::new(),
+            files: Default::default(),
         });
         self.menu_ix = None;
         cx.notify();
@@ -715,12 +715,7 @@ impl Dent {
                 "{name} has no remote {there} can clone from: push it somewhere first"
             )),
             Ok(Some(p)) => {
-                c.ticked = p
-                    .ignored
-                    .iter()
-                    .filter(|i| i.carry)
-                    .map(|i| i.path.clone())
-                    .collect();
+                c.files = crate::bring::FileChoice::of(&p);
                 Ok(p)
             }
         });
@@ -771,15 +766,13 @@ impl Dent {
             }
             Some(Ok(p)) => p,
         };
-        let files = match c.ticked.len() {
-            0 => String::new(),
-            1 => " and 1 file".into(),
-            n => format!(" and {n} files"),
-        };
+        let files = c.files.and_files();
+        let bytes = c.files.bytes(p);
+        let too_much = c.files.too_much(p);
         let (id, to) = (c.session.clone(), c.to.clone());
         let clone = CloneThere {
             dir: c.dir.clone(),
-            paths: c.ticked.iter().cloned().collect(),
+            paths: c.files.ticked.iter().cloned().collect(),
             // The session's branch: the clone there lets go of it if it
             // checks it out, so the session lands on it.
             bring: Bring {
@@ -789,7 +782,7 @@ impl Dent {
                 files: Vec::new(),
             },
         };
-        v.push(Entry::row(
+        let mut go = Entry::row(
             "move-clone-go".into(),
             &format!(
                 "Clone {} to {} and move",
@@ -808,36 +801,24 @@ impl Dent {
                     this.start_move_with(&id, &to, Some(clone.clone()), cx);
                 },
             )),
-        ));
-        if p.ignored.is_empty() {
-            return v;
+        );
+        if too_much {
+            go.note = Some(format!(
+                "The ticked files come to {}; at most {} go along",
+                crate::bring::size(bytes),
+                crate::bring::size(dent_protocol::CARRIED_MAX as u64)
+            ));
+            go.off = Some("Untick some files first");
+            go.act = None;
         }
-        v.push(Entry::separator());
-        v.push(Entry::note(
-            "Files Git ignores, which a clone won't have. Folders like node_modules and build output aren't copied.",
-        ));
-        for i in &p.ignored {
-            let path = i.path.clone();
-            v.push(
-                Entry::row(
-                    format!("move-f-{}", i.path),
-                    &i.path,
-                    Some(crate::bring::size(i.size)),
-                    c.ticked.contains(&i.path),
-                    Some(std::rc::Rc::new(
-                        move |this: &mut Dent, _: &mut gpui_kit::Window, cx: &mut Context<Dent>| {
-                            if let Some(c) = this.move_clone.as_mut()
-                                && !c.ticked.remove(&path)
-                            {
-                                c.ticked.insert(path.clone());
-                            }
-                            cx.notify();
-                        },
-                    )),
-                )
-                .keeps_open(),
-            );
-        }
+        v.push(go);
+        crate::bring::file_entries(
+            "move",
+            p,
+            &c.files,
+            |this| this.move_clone.as_mut().map(|c| &mut c.files),
+            &mut v,
+        );
         v
     }
 }

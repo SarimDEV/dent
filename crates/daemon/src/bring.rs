@@ -12,9 +12,76 @@ use dent_protocol::{Bring, CARRIED_MAX, Carried, GitRemote, Ignored, Pack, b64};
 
 use crate::workspace::run;
 
-/// More ignored files than this aren't listed: a checkout full of build
-/// output is offered its first ones.
+/// More ignored files than this aren't listed (they're counted): a
+/// checkout full of build output is offered its environment files and the
+/// first of the rest.
 const MAX_IGNORED: usize = 500;
+
+/// A folder of only ignored files with more than this many in it is
+/// output or data: only its environment files are offered.
+const FOLDER_MAX: usize = 100;
+
+/// An environment file larger than this is listed but not ticked: it's
+/// data, not settings.
+const ENV_TICKED_MAX: u64 = 1 << 20;
+
+/// Folders of what's installed or built, never looked in, wherever they
+/// sit: a package's own `.env` inside them isn't the project's.
+const NOT_IN: &[&str] = &[
+    "node_modules",
+    "bower_components",
+    "jspm_packages",
+    ".pnpm-store",
+    ".yarn",
+    ".venv",
+    "venv",
+    ".tox",
+    "site-packages",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    "vendor",
+    "Pods",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".turbo",
+    ".parcel-cache",
+    ".cache",
+    "coverage",
+    ".gradle",
+    ".terraform",
+    ".serverless",
+    ".git",
+];
+
+/// Files no one wants on another machine: the system's and editors' own.
+fn junk(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    matches!(name, ".DS_Store" | "Thumbs.db" | "desktop.ini")
+        || [".swp", ".swo", ".pyc", ".log", "~"]
+            .iter()
+            .any(|e| name.ends_with(e))
+}
+
+/// Inside a folder of what's installed or built: one named so that Git
+/// ignores (inside one of the `ignored` folders git reports whole). A
+/// tracked `build/` of Dockerfiles is the project's own.
+fn in_deps(path: &str, ignored: &[&str]) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    let mut at = String::new();
+    for p in &parts[..parts.len().saturating_sub(1)] {
+        at.push_str(p);
+        at.push('/');
+        if NOT_IN.contains(p) && ignored.iter().any(|f| at.starts_with(f)) {
+            return true;
+        }
+    }
+    false
+}
 
 /// What another machine needs to bring the checkout at `dir` there; `None`
 /// when it isn't in a Git repository.
@@ -34,9 +101,8 @@ pub fn pack(dir: &Path) -> Option<Pack> {
         .collect();
     remotes.sort_by_key(|r| r.name != "origin");
     const IGNORED: [&str; 4] = ["ls-files", "-z", "--others", "--ignored"];
-    // A folder of ignored files (`node_modules/`) comes as one entry
-    // ending in a slash, and isn't offered; but an environment file inside
-    // one (`web/.env` with nothing else in `web/`) still is.
+    // A folder of ignored files (`node_modules/`, `certs/`) comes as one
+    // entry ending in a slash.
     let top = run(
         &root,
         &[
@@ -46,24 +112,36 @@ pub fn pack(dir: &Path) -> Option<Pack> {
         .concat(),
     )
     .unwrap_or_default();
-    let env = run(
-        &root,
-        &[
-            &IGNORED[..],
-            &[
-                "--exclude-standard",
-                "--",
-                ":(glob)**/.env",
-                ":(glob)**/.env.*",
-            ],
-        ]
-        .concat(),
-    )
-    .unwrap_or_default();
-    let mut paths: Vec<&str> = top
+    let folders: Vec<&str> = top.split('\0').filter(|p| p.ends_with('/')).collect();
+    // Every ignored file, what's surely installed left out as git walks
+    // (it still looks, but says less).
+    let excludes: Vec<String> = ["node_modules", ".venv", "site-packages", ".pnpm-store"]
+        .iter()
+        .map(|d| format!(":(exclude,glob)**/{d}/**"))
+        .collect();
+    let mut args: Vec<&str> = IGNORED.to_vec();
+    args.extend(["--exclude-standard", "--", "."]);
+    args.extend(excludes.iter().map(String::as_str));
+    let every = run(&root, &args).unwrap_or_default();
+    let all: Vec<&str> = every
         .split('\0')
-        .chain(env.split('\0'))
-        .filter(|p| !p.is_empty() && !p.ends_with('/'))
+        .filter(|p| !p.is_empty() && !in_deps(p, &folders) && !junk(p))
+        .collect();
+    // A folder of only ignored files that's small is the project's own
+    // (`certs/`, `secrets/`): its files are offered. A big one is output
+    // or data, offered only its environment files.
+    let under = |p: &str| folders.iter().find(|f| p.starts_with(**f)).copied();
+    let mut in_folder: std::collections::HashMap<&str, usize> = Default::default();
+    for p in &all {
+        if let Some(f) = under(p) {
+            *in_folder.entry(f).or_default() += 1;
+        }
+    }
+    let mut paths: Vec<&str> = all
+        .into_iter()
+        .filter(|p| {
+            under(p).is_none_or(|f| is_env(p) || in_folder.get(f).is_some_and(|n| *n <= FOLDER_MAX))
+        })
         .collect();
     paths.sort_unstable();
     paths.dedup();
@@ -74,11 +152,16 @@ pub fn pack(dir: &Path) -> Option<Pack> {
             (meta.is_file() && meta.len() as usize <= CARRIED_MAX).then(|| Ignored {
                 path: p.to_string(),
                 size: meta.len(),
-                carry: is_env(p),
+                carry: is_env(p) && meta.len() <= ENV_TICKED_MAX,
+                env: is_env(p),
             })
         })
         .collect();
-    ignored.sort_by(|a, b| b.carry.cmp(&a.carry).then_with(|| a.path.cmp(&b.path)));
+    // What goes first (environment files, nearest the top first), then
+    // environment files too big to tick, then the rest.
+    let rank = |i: &Ignored| (!i.carry, !is_env(&i.path), i.path.matches('/').count());
+    ignored.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.path.cmp(&b.path)));
+    let more = ignored.len().saturating_sub(MAX_IGNORED) as u32;
     ignored.truncate(MAX_IGNORED);
     // What a clone of the remote wouldn't have: commits on no remote, and
     // tracked files changed and not committed.
@@ -101,6 +184,7 @@ pub fn pack(dir: &Path) -> Option<Pack> {
         remotes,
         branch: crate::workspace::branch(&root),
         ignored,
+        more,
         unpushed,
         changed,
     })
@@ -143,10 +227,18 @@ fn https_of(url: &str) -> Option<String> {
     (host.contains('.') && !path.is_empty()).then(|| format!("https://{host}/{path}"))
 }
 
-/// An environment file: `.env`, `.env.local`, `apps/web/.env.production`.
+/// An environment file: `.env`, `.env.local`, `apps/web/.env.production`,
+/// direnv's `.envrc`, Wrangler's `.dev.vars`; not a template of one
+/// (`.env.example`, `.env.sample`, `.env.template`, `.env.dist`).
 fn is_env(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
-    name == ".env" || (name.starts_with(".env.") && !name.ends_with(".example"))
+    let template = [".example", ".sample", ".template", ".dist"]
+        .iter()
+        .any(|t| name.ends_with(t));
+    name == ".env"
+        || name == ".envrc"
+        || name == ".dev.vars"
+        || (name.starts_with(".env.") && !template)
 }
 
 /// A path relative to a checkout that stays inside it, and out of its
@@ -209,6 +301,7 @@ pub fn read_files(dir: &Path, paths: &[String]) -> Result<Vec<Carried>, String> 
             .trim(),
     );
     let real = root.canonicalize().map_err(|e| e.to_string())?;
+    let ignored = ignored_of(&root, paths)?;
     let mut total = 0;
     let mut files = Vec::new();
     for rel in paths {
@@ -222,7 +315,7 @@ pub fn read_files(dir: &Path, paths: &[String]) -> Result<Vec<Carried>, String> 
         }
         // Only what Git ignores, as `pack` offered: the rest comes with
         // the clone.
-        if run(&root, &["check-ignore", "-q", "--", rel]).is_err() {
+        if !ignored.contains(rel.as_str()) {
             return Err(format!("{rel} isn't a file Git ignores"));
         }
         let meta = std::fs::metadata(&full).map_err(|e| format!("{rel}: {e}"))?;
@@ -240,6 +333,44 @@ pub fn read_files(dir: &Path, paths: &[String]) -> Result<Vec<Carried>, String> 
         });
     }
     Ok(files)
+}
+
+/// Which of `paths` Git ignores at `root`, asked once for all of them (a
+/// monorepo's hundreds of `.env` files were a process each).
+fn ignored_of(root: &Path, paths: &[String]) -> Result<std::collections::HashSet<String>, String> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("git")
+        .args(["check-ignore", "-z", "--stdin"])
+        .current_dir(root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("git: {e}"))?;
+    let mut input = Vec::new();
+    for p in paths {
+        input.extend_from_slice(p.as_bytes());
+        input.push(0);
+    }
+    let mut stdin = child.stdin.take().ok_or("git: no input")?;
+    // Written from its own thread, so a long answer can't stall the
+    // question.
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let out = child.wait_with_output().map_err(|e| format!("git: {e}"))?;
+    let _ = writer.join();
+    // 0: some are ignored; 1: none are. Anything else went wrong, and
+    // says so, rather than every file reading as not ignored.
+    if !matches!(out.status.code(), Some(0 | 1)) {
+        return Err(format!(
+            "git couldn't say which files it ignores: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 /// Where a brought project's files wait until its clone is done: under the
@@ -530,13 +661,108 @@ fn walk(dir: &Path) -> Vec<(PathBuf, PathBuf)> {
 mod tests {
     use super::*;
 
+    /// A monorepo as people have them: what's listed, what's ticked, in
+    /// what order, and what never is.
+    #[test]
+    fn a_monorepo_lists_its_own_env_files_first_and_nothing_installed() {
+        let root = std::env::temp_dir().join(format!("dent-pack-mono-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let w = |rel: &str, body: &[u8]| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        w(
+            ".gitignore",
+            b"node_modules/\n.venv/\ndist/\n.env\n.env.*\n*.log\n.DS_Store\nlocal.db\ncerts/\n",
+        );
+        w("README.md", b"x");
+        w(".env", b"A=1");
+        w("apps/web/.env.local", b"B=1");
+        w("apps/my app/conf/.env.production.local", b"C=1");
+        w("packages/a/node_modules/dep/.env", b"no");
+        w("node_modules/x/.env", b"no");
+        w(".venv/lib/site-packages/m/.env.local", b"no");
+        w("packages/a/dist/.env", b"no");
+        w(".env.sample", b"S=1");
+        w(".env.big", &vec![b'x'; (ENV_TICKED_MAX + 1) as usize]);
+        w("debug.log", b"l");
+        w("apps/web/.DS_Store", b"j");
+        w("local.db", b"d");
+        // A tracked build/ is the project's own, its ignored .env too.
+        w("build/Dockerfile", b"FROM x");
+        w("build/docker/.env", b"D=1");
+        // A small folder of only ignored files: offered, file by file.
+        w("certs/dev.pem", b"k");
+        let git = |args: &[&str]| run(&root, args).unwrap();
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "i",
+        ]);
+        let p = pack(&root).unwrap();
+        let paths: Vec<&str> = p.ignored.iter().map(|i| i.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                ".env",
+                "apps/web/.env.local",
+                "build/docker/.env",
+                "apps/my app/conf/.env.production.local",
+                ".env.big",
+                ".env.sample",
+                "local.db",
+                "certs/dev.pem",
+            ]
+        );
+        let ticked: Vec<&str> = p
+            .ignored
+            .iter()
+            .filter(|i| i.carry)
+            .map(|i| i.path.as_str())
+            .collect();
+        assert_eq!(ticked, &paths[..4]);
+        assert!(
+            p.ignored
+                .iter()
+                .find(|i| i.path == ".env.big")
+                .is_some_and(|i| i.env && !i.carry)
+        );
+        assert!(
+            p.ignored
+                .iter()
+                .find(|i| i.path == ".env.sample")
+                .is_some_and(|i| !i.env)
+        );
+        assert_eq!(p.more, 0);
+        // Read back in one go, a path with a space among them.
+        let got = read_files(
+            &root,
+            &ticked.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(got.len(), 4);
+        // A tracked file isn't one to carry.
+        assert!(read_files(&root, &["README.md".into()]).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn env_files_are_ticked() {
         assert!(is_env(".env"));
         assert!(is_env("apps/web/.env.local"));
         assert!(!is_env(".env.example"));
         assert!(!is_env("notes.env"));
-        assert!(!is_env(".envrc"));
+        assert!(is_env(".envrc"));
+        assert!(is_env(".dev.vars"));
+        assert!(!is_env(".env.sample"));
+        assert!(!is_env("config/.env.template"));
     }
 
     #[test]

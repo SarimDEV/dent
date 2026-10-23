@@ -127,8 +127,8 @@ A project can also be brought from another machine; the client both machines tru
 - `Pack` asks the machine that has it for:
   - its remotes, leaving out paths on that machine;
   - its branch;
-  - the files Git ignores there, with the ignored folders (`node_modules/`) left out but environment files inside them kept, and `.env*` marked.
-- `ReadFiles` reads the chosen files, only from inside the checkout and up to 40 MB.
+  - the files Git ignores there, with the ignored folders (`node_modules/`) left out but environment files inside them kept, never those inside what's installed or built (`node_modules`, `.venv`, `vendor`, `target`, `dist`, `build`, `.next` and the like, wherever they sit: a package's own `.env` isn't the project's), and no system or editor junk (`.DS_Store`, logs, swap files). Environment files (`.env`, `.env.*`, `.envrc`, `.dev.vars`) are marked to carry, not templates of them (`.example`, `.sample`, `.template`, `.dist`) nor one over 1 MB. Marked ones come first, nearest the top first; past 500 the rest are counted (`more`), not listed.
+- `ReadFiles` reads the chosen files, only from inside the checkout and up to 40 MB, asking Git once whether all of them are ignored.
 - `Create` with `bring` on the target machine does the rest:
   - It makes `~/dent/projects/<name>`, keeps the files under `<state>/bring/<session>/`, and notes the job in `kv`.
   - It starts the session at once, with its first message held.
