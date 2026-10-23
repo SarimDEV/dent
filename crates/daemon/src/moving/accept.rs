@@ -209,6 +209,7 @@ mod tests {
         let m = MoveManifest {
             id: "m1".into(),
             from_machine: "a".into(),
+            from_name: String::new(),
             from_session: "s1".into(),
             agent: "claude".into(),
             agent_session: "x".into(),

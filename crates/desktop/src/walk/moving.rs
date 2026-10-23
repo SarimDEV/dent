@@ -72,5 +72,56 @@ pub(super) fn move_live() -> Vec<(f32, Act)> {
             ),
         ),
         (0.5, Shot("move-left")),
+        // And back again: from the other machine to this one.
+        (
+            0.1,
+            Call(|d, w, cx| {
+                let there = d
+                    .sessions
+                    .iter()
+                    .find(|s| {
+                        s.id.contains('/')
+                            && s.title.contains("ready to move")
+                            && s.moving.is_none()
+                    })
+                    .map(|s| s.id.clone());
+                d.select(there, w, cx);
+            }),
+        ),
+        (0.3, Click("chip-sessionmachine")),
+        (
+            0.1,
+            Until(
+                "from there, this Mac is offered",
+                |d, cx| {
+                    d.menu_entries(crate::app::Menu::SessionMachine, cx)
+                        .iter()
+                        .any(|e| e.key == "move-this" && e.choosable())
+                },
+                10.,
+            ),
+        ),
+        (0.6, Shot("move-menu-back")),
+        (0.1, Click("move-this")),
+        (
+            0.1,
+            Until(
+                "it comes back here, and the window follows",
+                |d, _| {
+                    current(d).is_some_and(|s| {
+                        !s.id.contains('/')
+                            && s.title.contains("ready to move")
+                            && s.moving.is_none()
+                    }) && d
+                        .sessions
+                        .iter()
+                        .filter(|s| s.title.contains("ready to move"))
+                        .count()
+                        >= 3
+                },
+                90.,
+            ),
+        ),
+        (0.8, Shot("move-back")),
     ]
 }

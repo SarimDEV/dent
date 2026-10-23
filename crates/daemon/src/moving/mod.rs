@@ -161,12 +161,18 @@ impl Daemon {
         let row = self.store().session(session)?.context("no such session")?;
         let events = self.store().session_events(session)?;
         let driver = crate::agent::named(Some(&row.agent))?;
-        let (state, machine, id2) = (self.paths.state.clone(), self.net.id(), id.to_string());
+        let (state, machine, name, id2) = (
+            self.paths.state.clone(),
+            self.net.id(),
+            self.machine.clone(),
+            id.to_string(),
+        );
         let manifest = tokio::task::spawn_blocking(move || {
             pack::pack(
                 &pack::Session {
                     state: &state,
                     machine: &machine,
+                    machine_name: &name,
                     row: &row,
                     driver,
                     events: &events,
@@ -483,7 +489,14 @@ impl Daemon {
         bodies.push((
             now,
             Body::Notice {
-                text: format!("Moved here from {}", m.from_machine),
+                text: format!(
+                    "Moved here from {}",
+                    if m.from_name.is_empty() {
+                        &m.from_machine
+                    } else {
+                        &m.from_name
+                    }
+                ),
             },
         ));
         bodies.push((

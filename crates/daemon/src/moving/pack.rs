@@ -28,6 +28,7 @@ pub fn valid_id(id: &str) -> bool {
 pub struct Session<'a> {
     pub state: &'a Path,
     pub machine: &'a str,
+    pub machine_name: &'a str,
     pub row: &'a Row,
     pub driver: &'static dyn Driver,
     pub events: &'a [Event],
@@ -155,6 +156,7 @@ fn fill(s: &Session<'_>, id: &str, have: &[String], out: &Path) -> Result<MoveMa
     let m = MoveManifest {
         id: id.to_string(),
         from_machine: s.machine.to_string(),
+        from_name: s.machine_name.to_string(),
         from_session: row.id.clone(),
         agent: row.agent.clone(),
         agent_session,

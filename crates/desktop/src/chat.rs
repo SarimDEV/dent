@@ -4319,7 +4319,16 @@ impl Dent {
             - space::S2
             // The attach button.
             - size::CONTROL
-            - space::S1;
+            - space::S1
+            // The machine chip, with more than one machine: its glyph,
+            // name, chevron and padding.
+            - if self.has_machines() {
+                let at = dent_client_core::fleet::split(&s.id).0;
+                let name = crate::data::machine_short(&self.machine_name(at));
+                52. + name.chars().count() as f32 * 7.2 + space::S1
+            } else {
+                0.
+            };
         let effort_now = if self.selected.as_deref() == Some(s.id.as_str()) {
             self.effort_shown(s)
         } else {
