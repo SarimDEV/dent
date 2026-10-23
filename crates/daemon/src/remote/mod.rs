@@ -780,7 +780,9 @@ async fn pairing(
 }
 
 /// Whether a device trusted through the Tailscale account still is: `false`
-/// only when Tailscale says so, never when it can't be asked.
+/// only when Tailscale says so, never when it can't be asked. A peer it
+/// doesn't know is gone only while it's running: just restarted, or
+/// logging in, it can briefly know no peers at all.
 async fn still_same_account(net: &Net, ip: IpAddr) -> bool {
     let Ok(peer) = tailnet::whois(ip).await else {
         return true;
@@ -788,7 +790,10 @@ async fn still_same_account(net: &Net, ip: IpAddr) -> bool {
     let Some(me) = net.tailscale().await else {
         return true;
     };
-    peer.is_some_and(|p| tailnet::same_account(&me, &p))
+    match peer {
+        Some(p) => tailnet::same_account(&me, &p),
+        None => !me.running,
+    }
 }
 
 /// A trusted connection: the same session as the local socket, framed.

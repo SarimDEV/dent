@@ -43,6 +43,9 @@ pub struct SelfNode {
     /// The MagicDNS name, without the trailing dot.
     pub name: String,
     pub tagged: bool,
+    /// Logged in and connected. Starting up or logging in, Tailscale can
+    /// briefly know no peers at all.
+    pub running: bool,
 }
 
 /// What Tailscale says about a peer address.
@@ -57,6 +60,8 @@ pub struct Peer {
 struct StatusJson {
     #[serde(rename = "Self")]
     me: Option<NodeJson>,
+    #[serde(rename = "BackendState", default)]
+    state: String,
 }
 
 #[derive(Deserialize)]
@@ -98,6 +103,7 @@ pub async fn status() -> Result<SelfNode> {
         addresses: me.ips.iter().filter_map(|a| a.parse().ok()).collect(),
         name: me.dns.trim_end_matches('.').to_string(),
         tagged: me.tags.is_some_and(|t| !t.is_empty()),
+        running: s.state == "Running",
     })
 }
 
@@ -258,6 +264,7 @@ mod tests {
             addresses: vec![],
             name: "studio".into(),
             tagged,
+            running: true,
         }
     }
 
@@ -290,9 +297,10 @@ mod tests {
     #[test]
     fn parses_tailscale_shapes() {
         let s: StatusJson = serde_json::from_str(
-            r#"{"Self":{"UserID":4132,"TailscaleIPs":["100.70.46.115","fd7a:115c:a1e0::1"],"DNSName":"dent-linux.tail1.ts.net.","Tags":null}}"#,
+            r#"{"BackendState":"Running","Self":{"UserID":4132,"TailscaleIPs":["100.70.46.115","fd7a:115c:a1e0::1"],"DNSName":"dent-linux.tail1.ts.net.","Tags":null}}"#,
         )
         .unwrap();
+        assert_eq!(s.state, "Running");
         let n = s.me.unwrap();
         assert_eq!(n.user_id, 4132);
         assert_eq!(n.ips.len(), 2);

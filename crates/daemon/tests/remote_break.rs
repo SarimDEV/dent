@@ -1125,12 +1125,22 @@ async fn a_request_cut_off_by_a_crash_is_resent_once_with_its_file() {
 }
 
 /// A stand-in for Tailscale's LocalAPI: this machine is user 7's node, and
-/// `owner` says who owns every peer (0: Tailscale fails to answer). Notices
-/// go to whoever is watching.
+/// `owner` says who owns every peer. Notices go to whoever is watching.
 struct FakeTailscale {
     addr: String,
-    owner: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    owner: std::sync::Arc<std::sync::Mutex<Owner>>,
+    /// Peer lookups asked of it so far.
+    lookups: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     watchers: std::sync::Arc<std::sync::Mutex<Vec<std::net::TcpStream>>>,
+}
+
+#[derive(Clone, Copy)]
+enum Owner {
+    User(u64),
+    /// Tailscale fails to answer.
+    Failing,
+    /// Just restarted: not running yet, and it knows no peers.
+    Restarting,
 }
 
 impl FakeTailscale {
@@ -1138,9 +1148,10 @@ impl FakeTailscale {
         use std::sync::atomic::Ordering;
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap().to_string();
-        let owner = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(7));
+        let owner = std::sync::Arc::new(std::sync::Mutex::new(Owner::User(7)));
+        let lookups = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let watchers = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (o, w) = (owner.clone(), watchers.clone());
+        let (o, n, w) = (owner.clone(), lookups.clone(), watchers.clone());
         std::thread::spawn(move || {
             for mut s in l.incoming().flatten() {
                 let mut line = String::new();
@@ -1150,16 +1161,23 @@ impl FakeTailscale {
                 }
                 let path = line.split_whitespace().nth(1).unwrap_or("").to_string();
                 let ok = |body: &str| format!("HTTP/1.0 200 OK\r\n\r\n{body}");
+                let owner = *o.lock().unwrap();
                 let answer = if path.starts_with("/localapi/v0/status") {
-                    ok(
-                        r#"{"Self":{"UserID":7,"TailscaleIPs":["100.64.0.1"],"DNSName":"studio.ts.net.","Tags":null}}"#,
-                    )
+                    let state = match owner {
+                        Owner::Restarting => "Starting",
+                        _ => "Running",
+                    };
+                    ok(&format!(
+                        r#"{{"BackendState":"{state}","Self":{{"UserID":7,"TailscaleIPs":["100.64.0.1"],"DNSName":"studio.ts.net.","Tags":null}}}}"#
+                    ))
                 } else if path.starts_with("/localapi/v0/whois") {
-                    match o.load(Ordering::SeqCst) {
-                        0 => "HTTP/1.0 500 Internal Server Error\r\n\r\n".into(),
-                        u => ok(&format!(
+                    n.fetch_add(1, Ordering::SeqCst);
+                    match owner {
+                        Owner::User(u) => ok(&format!(
                             r#"{{"Node":{{"User":{u},"Name":"phone.ts.net.","Tags":null}}}}"#
                         )),
+                        Owner::Failing => "HTTP/1.0 500 Internal Server Error\r\n\r\n".into(),
+                        Owner::Restarting => "HTTP/1.0 404 Not Found\r\n\r\n".into(),
                     }
                 } else if path.starts_with("/localapi/v0/watch-ipn-bus") {
                     let _ =
@@ -1175,14 +1193,24 @@ impl FakeTailscale {
         Self {
             addr,
             owner,
+            lookups,
             watchers,
         }
     }
 
-    /// Tailscale tells its watchers that something changed.
-    fn notice(&self) {
+    /// Tailscale's answers become `o`, and it tells its watchers something
+    /// changed. Returns once the daemon has looked the peer up again.
+    async fn change(&self, o: Owner) {
+        use std::sync::atomic::Ordering;
+        *self.owner.lock().unwrap() = o;
+        let before = self.lookups.load(Ordering::SeqCst);
         for s in self.watchers.lock().unwrap().iter_mut() {
             let _ = s.write_all(b"{\"PeersChanged\":[{}]}\n");
+        }
+        let until = Instant::now() + Duration::from_secs(25);
+        while self.lookups.load(Ordering::SeqCst) == before {
+            assert!(Instant::now() < until, "no check 25 s after the notice");
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 }
@@ -1219,29 +1247,19 @@ async fn a_device_that_leaves_the_account_is_dropped_when_tailscale_says_so() {
         dev.trust
     );
     dev.hello().await;
-    // Tailscale can't be asked: uncertainty never drops anyone.
-    ts.owner.store(0, std::sync::atomic::Ordering::SeqCst);
-    ts.notice();
-    tokio::time::sleep(Duration::from_secs(14)).await;
-    dev.ping(1).await;
+    // Uncertainty never drops anyone: Tailscale failing to answer, or just
+    // restarted and knowing no peers yet. Each is checked, and the device
+    // stays.
+    for o in [Owner::Failing, Owner::Restarting] {
+        ts.change(o).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        dev.ping(1).await;
+    }
     // The phone moves to another account: gone well before the 5-minute
     // check, told why.
-    ts.owner.store(8, std::sync::atomic::Ordering::SeqCst);
-    ts.notice();
-    let started = Instant::now();
-    let mut n = 2;
-    let c = loop {
-        assert!(
-            started.elapsed() < Duration::from_secs(25),
-            "still connected 25 s after leaving the account"
-        );
-        dev.control(&Control::Ping { t: n }).await;
-        match dev.next_control().await {
-            Control::Pong { .. } => tokio::time::sleep(Duration::from_secs(1)).await,
-            other => break other,
-        }
-        n += 1;
-    };
+    ts.change(Owner::User(8)).await;
+    let c = tokio::time::timeout(Duration::from_secs(5), dev.next_control())
+        .await
+        .expect("still connected after the check");
     assert_eq!(c, Control::Refuse(Refusal::NotTrusted));
-    eprintln!("dropped {:?} after the notice", started.elapsed());
 }
