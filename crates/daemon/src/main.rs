@@ -16,10 +16,12 @@ mod agent;
 mod bring;
 mod claude;
 mod daemon;
+mod doctor;
 mod env;
 mod escapes;
 mod git;
 mod holder;
+mod launcher;
 mod login;
 mod machine;
 mod paths;
@@ -27,8 +29,10 @@ mod plan_tool;
 mod power;
 mod projects;
 mod remote;
+mod scopes;
 mod secrets;
 mod server;
+mod service;
 mod session;
 mod ship;
 mod store;
@@ -44,9 +48,18 @@ const USAGE: &str = "usage: dent-daemon [--state DIR]   run the daemon
        dent-daemon pair                 show a pairing code for a new device
        dent-daemon devices [remove ID]  list paired devices, or remove one
        dent-daemon reidentify           take a new identity (devices pair again)
-       dent-daemon login-item on|off    start at login, or stop doing so";
+       dent-daemon login-item on|off    start at login, or stop doing so
+       dent-daemon install [--allow-downgrade]   run this build as the machine's service
+       dent-daemon uninstall            stop the service and remove it (sessions stay)
+       dent-daemon status               how the service stands
+       dent-daemon doctor               check what dent needs here, and say how to fix what isn't right
+       dent-daemon update DIR [--allow-downgrade]   update the service to the build in DIR";
 
 fn main() -> Result<()> {
+    // Before any thread: what the launcher and systemd gave this process is
+    // taken, and taken out of what its children inherit.
+    launcher::init();
+    scopes::init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let state = args
         .iter()
@@ -82,6 +95,26 @@ fn main() -> Result<()> {
         return login::set(on, &paths.state);
     }
     match args.first().map(String::as_str) {
+        Some("manifest") => {
+            print!("{}", service::manifest());
+            return Ok(());
+        }
+        Some("install") => {
+            return service::install(&paths, args.iter().any(|a| a == "--allow-downgrade"));
+        }
+        Some("uninstall") => return service::uninstall(&paths),
+        Some("status") => return service::status(&paths),
+        Some("doctor") => return doctor::run(&paths),
+        Some("update") => {
+            let dir = args
+                .get(1)
+                .context("dent-daemon update DIR (a folder holding the new build)")?;
+            return service::update(
+                &paths,
+                std::path::Path::new(dir),
+                args.iter().any(|a| a == "--allow-downgrade"),
+            );
+        }
         Some("pair") => return admin::pair(&paths),
         Some("devices") => return admin::devices(&paths, &args[1..]),
         Some("reidentify") => {
@@ -125,6 +158,10 @@ fn main() -> Result<()> {
     } == 0;
     if !locked {
         eprintln!("dent-daemon: already running for {}", paths.state.display());
+        // The launcher waits on this rather than starting it again and again.
+        if launcher::get().is_some() {
+            std::process::exit(launcher::LOCKED);
+        }
         return Ok(());
     }
 
@@ -138,10 +175,30 @@ fn main() -> Result<()> {
         let d = daemon::Daemon::new(paths, env, store);
         eprintln!(
             "dent-daemon {} on {} ({})",
-            d.version,
+            launcher::version().unwrap_or_else(|| d.version.clone()),
             d.machine,
             d.paths.state.display()
         );
+        // Bound before anything else, so a new version on trial that can't
+        // take its sockets fails its trial and is rolled back. A port
+        // that's taken leaves remote access off otherwise.
+        let local = server::bind(&d.paths)?;
+        let far = match remote::bind(&d) {
+            Ok(l) => l,
+            Err(e) if launcher::on_trial() => return Err(e),
+            Err(e) => {
+                eprintln!("dent-daemon: remote access off: {e:#}");
+                None
+            }
+        };
+        // On trial: migrated (the store opened) and bound; nothing touches
+        // an agent until the launcher commits this version.
+        if launcher::on_trial()
+            && let Some(l) = launcher::get()
+        {
+            tokio::task::spawn_blocking(|| l.prepared_then_wait()).await??;
+            eprintln!("dent-daemon: committed");
+        }
         d.restore().await?;
         d.watch_prs();
         {
@@ -161,7 +218,7 @@ fn main() -> Result<()> {
         {
             let d = d.clone();
             tokio::spawn(async move {
-                if let Err(e) = remote::serve(d).await {
+                if let Err(e) = remote::serve(d, far).await {
                     eprintln!("dent-daemon: remote access off: {e:#}");
                 }
             });
@@ -187,7 +244,7 @@ fn main() -> Result<()> {
         }
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         tokio::select! {
-            r = server::serve(d.clone()) => r?,
+            r = server::serve(d.clone(), local) => r?,
             _ = term.recv() => {}
             _ = tokio::signal::ctrl_c() => {}
         }
@@ -236,7 +293,39 @@ mod admin {
 
     use crate::paths::Paths;
 
-    fn ask(paths: &Paths, req: Request) -> Result<Reply> {
+    /// The running daemon's welcome: who it is, and how it runs.
+    pub fn welcome(paths: &Paths) -> Result<Reply> {
+        let sock = paths.socket();
+        let mut w = UnixStream::connect(&sock)
+            .with_context(|| format!("the daemon isn't running ({})", sock.display()))?;
+        w.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+        let mut r = BufReader::new(w.try_clone()?);
+        w.write_all(&encode(
+            1,
+            &Request::Hello {
+                proto: PROTOCOL,
+                client: "dent-daemon".into(),
+            },
+        ))?;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if r.read_line(&mut line)? == 0 {
+                bail!("the daemon closed the connection");
+            }
+            if let Some(env) = dent_protocol::read_out(line.as_bytes())
+                && env.req == 1
+            {
+                return match env.body {
+                    Out::Reply { reply } => Ok(reply),
+                    Out::Error { message } => bail!("{message}"),
+                    _ => continue,
+                };
+            }
+        }
+    }
+
+    pub fn ask(paths: &Paths, req: Request) -> Result<Reply> {
         let sock = paths.socket();
         let mut w = UnixStream::connect(&sock)
             .with_context(|| format!("the daemon isn't running ({})", sock.display()))?;

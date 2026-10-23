@@ -232,6 +232,7 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("visuals", &[visuals]),
     ("bench", &[bench]),
     ("rows", &[rows]),
+    ("crash-mid-reply", &[crash_mid_reply]),
     ("fold", &[fold]),
     ("pages", &[pages]),
     ("look-hidden", &[look_hidden]),

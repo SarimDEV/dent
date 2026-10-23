@@ -497,14 +497,27 @@ impl Daemon {
         }
         let bin = sibling("dent-session-holder")?;
         let dir = self.paths.holder();
-        let start = holder::Start {
-            argv: vec![
-                bin.display().to_string(),
-                "--dir".into(),
-                dir.display().to_string(),
-            ],
+        let mut argv = vec![
+            bin.display().to_string(),
+            "--dir".into(),
+            dir.display().to_string(),
+        ];
+        // Run by systemd, the holder goes in a scope of its own: stopping or
+        // restarting the service stops everything in the service's cgroup,
+        // and the holder, with every agent, must outlive that.
+        argv = crate::scopes::holder(argv);
+        let start = holder::Start { argv };
+        // One an older daemon started in /tmp is still the one holding the
+        // agents: it's used until it goes, rather than a second beside it.
+        let before = self.paths.holder_in_tmp();
+        let found = match before != dir {
+            true => holder::connect(&before, None).await.ok(),
+            false => None,
         };
-        let (conn, mut rx) = holder::connect(&dir, Some(&start)).await?;
+        let (conn, mut rx) = match found {
+            Some(c) => c,
+            None => holder::connect(&dir, Some(&start)).await?,
+        };
         let conn = Arc::new(conn);
         *h = Some(conn.clone());
         let me = self.clone();
@@ -1188,11 +1201,12 @@ impl Daemon {
         agent: &'static dyn crate::agent::Driver,
         prompt: &str,
     ) -> Result<String> {
-        let argv = agent.ask(&self.env(), prompt);
+        let env = self.env();
+        let argv = agent.ask(&env, prompt);
         let dir = self.paths.state.join("titles");
         std::fs::create_dir_all(&dir)?;
         let dir = dir.display().to_string();
-        let got = tokio::task::spawn_blocking(move || run_aside(agent, &argv, &dir))
+        let got = tokio::task::spawn_blocking(move || run_aside(agent, &argv, &env.vars, &dir))
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?
             .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1579,12 +1593,14 @@ impl Daemon {
         if !driver.caps().aside {
             bail!("{} can't answer side questions", driver.name());
         }
-        let argv = driver.aside(&self.env(), row.model.as_deref(), &agent, question);
+        let env = self.env();
+        let argv = driver.aside(&env, row.model.as_deref(), &agent, question);
         let (me, session, id, cwd) = (self.clone(), session.to_string(), id.to_string(), row.cwd);
         tokio::spawn(async move {
-            let got = tokio::task::spawn_blocking(move || run_aside(driver, &argv, &cwd))
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()));
+            let got =
+                tokio::task::spawn_blocking(move || run_aside(driver, &argv, &env.vars, &cwd))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
             let body = match got {
                 Ok((text, agent_session)) => Body::AsideReply {
                     id,
@@ -1988,9 +2004,12 @@ pub fn title(text: &str) -> String {
 /// names append `-n`).
 /// Run a side question to the end: its answer and the agent conversation
 /// that holds it. Gives up after three minutes.
+/// Run a one-off agent command (a title, a side question), with what the
+/// agent needs from the login shell (`env`, as agents in the holder get it).
 fn run_aside(
     agent: &dyn crate::agent::Driver,
     argv: &[String],
+    env: &[(String, String)],
     cwd: &str,
 ) -> std::result::Result<(String, Option<String>), String> {
     use crate::agent::OneOff;
@@ -2001,6 +2020,7 @@ fn run_aside(
     let name = agent.name();
     let mut child = std::process::Command::new(&argv[0])
         .args(&argv[1..])
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

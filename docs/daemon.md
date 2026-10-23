@@ -176,6 +176,10 @@ A goal is a session told to keep working until a stated outcome is met, using ea
 - An optional budget stops the run at a share of the 5-hour or weekly limit.
 - A run that hits a usage limit pauses with "waiting for reset at 3:40" and resumes on its own when the window resets.
 
+## Running as a service
+
+`dent-daemon install` runs this build as the machine's service: a systemd user unit on Linux (with linger, so it outlives your last login), a LaunchAgent on macOS. The service manager runs `dent-launcher`, which runs the daemon from `versions/<v>/` in the state folder and owns updates: `dent-daemon update DIR` stages a build, the launcher trials it (it migrates and binds, then waits) and commits it, or puts the database back and runs the old one again ([0065](decisions/0065-launcher-and-updates.md)). The holder runs outside the service, so neither an update nor a restart of the service reaches agents. `dent-daemon status` says what runs and how the last update went; `doctor` checks what dent needs here (the service, linger, the addresses devices reach, what agents get from the login shell and whether they're signed in as the service sees it, room for updates, the database) and says how to fix what isn't right; `uninstall` removes the service and keeps sessions. Under systemd each agent runs in a scope of its own under `dentagents.slice`: running out of memory kills only that agent, and the session says it ran out of memory rather than that it was killed. `service.env` in the state folder holds what the service runs with (PATH from install), kept across reinstalls.
+
 ## Remote devices
 
 Devices on other machines reach the daemon over the network ([remote-plan.md](remote-plan.md), stage 1). The code is in `crates/daemon/src/remote` and [`crates/link`](../crates/link).
@@ -271,7 +275,7 @@ Other harnesses that drive Claude Code this way have hit the same failures again
 - **Requests a client sends again happen once.** Clients resend requests that got no reply after a reconnect. Create is recognised by its first message's id, Fork by its own id, a side question is promoted to one session only, and a rewind to where the session already is (nothing said since) does nothing, so files edited by hand since aren't put back. This holds across daemon restarts.
 - **"Always allow" never allows more than the agent offered.** The rules Claude Code suggests are logged with the question, so an answer after a restart saves the same rule at the same scope; for a question from an older log, where they weren't kept, "always" allows once.
 - **A session whose folder was deleted says so** instead of failing to start the agent with a spawn error.
-- **The PATH agents get is re-read from the login shell** in the background each time an agent starts, so tools installed after dent started are found. A missing `claude` is reported as such.
+- **The environment agents get is re-read from the login shell** in the background each time an agent starts, so tools installed after dent started are found: PATH, locale, certificates and proxies always, and, run as a service, each agent's credentials too ([0074](decisions/0074-what-agents-get-from-the-login-shell.md)). A missing `claude` is reported as such.
 - **"Done" is notified once**, when the turn and any background work it started have both finished.
 
 ## Decision model

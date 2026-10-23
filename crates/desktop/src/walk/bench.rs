@@ -280,3 +280,31 @@ fn narration_rows(d: &Dent) -> Option<(usize, bool)> {
         ),
     ))
 }
+
+/// The daemon killed while a reply streams: the app starts another, and
+/// the reply finishes (as in `checks`, alone, for changes to how the
+/// daemon starts).
+pub(super) fn crash_mid_reply() -> Vec<(f32, Act)> {
+    let mut v = new_session("a long answer please");
+    v.extend([
+        (
+            0.1,
+            Until("streams before the crash", |d, _| streaming(d), 10.),
+        ),
+        (0.1, Call(|d, _, _| d.drops = 0)),
+        (0.1, Call(kill_daemon)),
+        (
+            0.1,
+            Until("the app notices the daemon went", |d, _| d.drops > 0, 5.),
+        ),
+        (
+            0.1,
+            Until(
+                "it starts a new one and the reply still finishes",
+                |d, _| d.connection.is_ok() && done_saying(d, "That's the plan"),
+                20.,
+            ),
+        ),
+    ]);
+    v
+}

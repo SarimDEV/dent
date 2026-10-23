@@ -247,7 +247,20 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// Listens for remote devices until the daemon stops. Without a usable
 /// identity it says why and leaves remote access off; local clients are
 /// unaffected.
-pub async fn serve(d: Arc<Daemon>) -> Result<()> {
+/// The port remote devices dial, bound; `None` when remote access is off
+/// (no usable identity, or port 0).
+pub fn bind(d: &Daemon) -> Result<Option<TcpListener>> {
+    if d.net.identity.is_none() || d.net.port == 0 {
+        return Ok(None);
+    }
+    // Every address, then filtered by route ([remote-plan.md]): binding an
+    // interface address at startup fails when that interface (Tailscale)
+    // comes up later ([spike 14]).
+    let listener = listen(d.net.port).with_context(|| format!("listen on port {}", d.net.port))?;
+    Ok(Some(listener))
+}
+
+pub async fn serve(d: Arc<Daemon>, listener: Option<TcpListener>) -> Result<()> {
     let Some(identity) = d.net.identity.as_ref() else {
         eprintln!(
             "dent-daemon: remote access off: {}",
@@ -255,14 +268,10 @@ pub async fn serve(d: Arc<Daemon>) -> Result<()> {
         );
         return Ok(());
     };
-    if d.net.port == 0 {
+    let Some(listener) = listener else {
         return Ok(());
-    }
+    };
     let keys = Arc::new(identity.keys.clone());
-    // Every address, then filtered by route ([remote-plan.md]): binding an
-    // interface address at startup fails when that interface (Tailscale)
-    // comes up later ([spike 14]).
-    let listener = listen(d.net.port).with_context(|| format!("listen on port {}", d.net.port))?;
     eprintln!(
         "dent-daemon: remote access on port {} as {}",
         d.net.port,

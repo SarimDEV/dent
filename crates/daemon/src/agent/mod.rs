@@ -80,6 +80,12 @@ pub trait Driver: Send + Sync {
     /// The command that runs it: an override from the environment
     /// (`DENT_CLAUDE`), or its usual name on the PATH.
     fn command(&self) -> String;
+    /// What it needs from the login shell to be signed in on a machine
+    /// with no keychain (a service; see `crate::env`): its credential
+    /// variables.
+    fn env_names(&self) -> &'static [&'static str] {
+        &[]
+    }
     /// Its version and account, from its CLI. Blocking, and bounded: a CLI
     /// that doesn't answer in a few seconds counts as not there.
     fn status(&self, env: &AgentEnv) -> (Option<String>, Account);
@@ -529,10 +535,16 @@ pub fn info(d: &dyn Driver, env: &AgentEnv) -> AgentInfo {
 /// Run `argv` with stdin closed and give its stdout, or `None` if it
 /// failed or took longer than `secs`.
 pub fn run_briefly(argv: &[String], secs: u64) -> Option<String> {
+    run_briefly_with(argv, &[], secs)
+}
+
+/// As [`run_briefly`], with `env` added to its environment.
+pub fn run_briefly_with(argv: &[String], env: &[(String, String)], secs: u64) -> Option<String> {
     use std::io::Read;
     let (bin, args) = argv.split_first()?;
     let mut child = std::process::Command::new(bin)
         .args(args)
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .current_dir(std::env::temp_dir())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

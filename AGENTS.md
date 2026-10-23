@@ -10,7 +10,7 @@ The name is always lowercase: **dent**.
 clients (desktop · iphone · web · cli)
    │  one versioned protocol over a direct WebSocket (Tailscale or LAN); hub on hold
    ▼
-daemon (one per machine) ── session-holder (owns agent processes + PTYs, survives daemon upgrades)
+launcher (under the service manager; picks the daemon version, trials updates) ── daemon (one per machine) ── session-holder (owns agent processes + PTYs, survives daemon upgrades)
    │  SQLite event log per daemon, monotonic seq; clients subscribe "everything after N"
    ▼
 agents (claude -p stream-json · codex app-server · ACP)
@@ -34,6 +34,7 @@ All under `crates/`. Package names are prefixed `dent-`.
 | `client-core` | Connections, sync, cache, search, Markdown → block tree. **No I/O and no runtime:** the host feeds it bytes and the time and does the I/O it asks for ([spike 07](docs/spikes/07-client-core.md)), so it binds to iOS (UniFFI) and wasm | `protocol`, `link` |
 | `daemon` | Drivers, event log, git, files, checkpoints, providers, remote devices | `protocol`, `link` |
 | `session-holder` | Owns agent processes and PTYs. Tiny, rarely changed | std + minimal |
+| `launcher` | What the service manager runs: which daemon version runs, update trials, snapshots and rollback ([0065](docs/decisions/0065-launcher-and-updates.md)). Tiny, rarely changed | std + libc |
 | `files` | Files a session names, resolved and read the same way on the daemon and in a client: `~` and relative paths, a safe open, a stamp per version, ranged reads ([0068](docs/decisions/0068-files-across-machines.md)) | `protocol`, libc |
 | `remote` | Remote machines on tokio for the CLI and desktop: the socket host for `client-core`'s connection actor, the daemon session over it (hello, subscribe, resend, waiting while away), saved machines and this device's key | `client-core`, `protocol`, `link`, tokio, rusqlite (the kept history) |
 | `desktop` | GPUI app. The only crate allowed to use GPUI | `client-core`, `protocol`, `ambient`, `remote` |

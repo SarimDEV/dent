@@ -64,6 +64,7 @@ struct Answers {
 /// don't run for it.
 fn ask(env: &AgentEnv, claude: &str) -> Option<Answers> {
     let mut child = Command::new("/usr/bin/env")
+        .envs(env.vars.iter().map(|(k, v)| (k, v)))
         .args(["-u", "CLAUDECODE", "-u", "CLAUDE_CODE_ENTRYPOINT"])
         .arg(format!("PATH={}", env.path))
         .arg(claude)
