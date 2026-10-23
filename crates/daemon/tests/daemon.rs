@@ -4037,11 +4037,17 @@ fn a_project_gone_there_before_it_arrives_leaves_the_session_working_here() {
         .status()
         .unwrap();
     std::fs::remove_dir_all(&m.on_b).unwrap();
-    // Picked up again, the carrier finds it gone there and says so here.
-    assert_eq!(
-        carry(&mut a, &mut b, &s, "mv3", 4096, None).unwrap_err(),
-        "NoProject"
-    );
+    // Picked up again, the carrier finds it gone there. Everything was
+    // sent, so it isn't called off behind your back: you're told to keep
+    // it here or retry, and Continue here brings it back.
+    let why = carry(&mut a, &mut b, &s, "mv3", 4096, None).unwrap_err();
+    assert!(why.contains("Continue here"), "{why}");
+    a.call(Request::MoveStop {
+        session: s.clone(),
+        id: "mv3".into(),
+        continue_here: true,
+    })
+    .unwrap();
     a.say(&s, "again", "and again", false);
     a.wait_turns(&s, 2);
     // Gone in the moment between everything arriving and taking it: the

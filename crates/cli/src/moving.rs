@@ -100,9 +100,10 @@ pub async fn run(args: &[String]) -> Result<()> {
                 (side, req)
             }
         };
-        let (asker, secs) = match side {
-            Side::From => (&mut from, 600),
-            Side::To => (&mut to, 600),
+        let secs = patience(&req);
+        let asker = match side {
+            Side::From => &mut from,
+            Side::To => &mut to,
         };
         let answer = asker.ask(req, secs).await.map_err(|e| format!("{e:#}"));
         step = carrier.answer(side, answer);
@@ -136,8 +137,22 @@ pub async fn run(args: &[String]) -> Result<()> {
                 Side::From => from_name.as_str(),
                 Side::To => to_name.as_str(),
             };
+            // A move that ended can't be picked up: it's moved again anew.
+            if why.contains("that move ended") {
+                bail!("{name}: {why}")
+            }
             bail!("{name}: {why} (run again with --id {id} to pick up)")
         }
+    }
+}
+
+/// How long an answer may take: packing a big repository, or making the
+/// session there, takes a while; a chunk or a question doesn't.
+fn patience(req: &Request) -> u64 {
+    match req {
+        Request::MovePack { have: Some(_), .. } | Request::MoveAccept { .. } => 600,
+        Request::MoveRead { .. } | Request::MoveWrite { .. } => 120,
+        _ => 60,
     }
 }
 

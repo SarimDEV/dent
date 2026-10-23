@@ -76,7 +76,8 @@ enum At {
     Write,
     Accept,
     Ended(Result<SessionId, String>),
-    /// Telling the machine it leaves that the other has no project.
+    /// Calling the move off on the machine it leaves: the other has no
+    /// project.
     NoProject,
     Done,
 }
@@ -160,11 +161,19 @@ impl Carrier {
     /// The answer from `side` to the last step: a reply, or what went
     /// wrong (an error it said, no answer, the link gone).
     pub fn answer(&mut self, side: Side, answer: Result<Reply, String>) -> Step {
-        // Told or not ("no such move here": nothing was packed), it's over.
+        // Called off, or there was nothing to call off: no project there.
+        // Refused, it may be there already (an earlier carrier sent it),
+        // and the machine it leaves says what to do instead.
         if matches!(self.at, At::NoProject) {
             self.at = At::Done;
             self.phase = Phase::Done;
-            return Step::Done(Err(Ended::NoProject));
+            return match answer {
+                Err(why) if !why.contains("no such move") => Step::Done(Err(Ended::Stopped {
+                    side: Side::From,
+                    why: format!("{} doesn't have the project now, and {why}", self.to_name),
+                })),
+                _ => Step::Done(Err(Ended::NoProject)),
+            };
         }
         let reply = match answer {
             Ok(r) => r,
@@ -178,19 +187,16 @@ impl Carrier {
             }
             (At::Have, Reply::MoveHave { found, tips }) => {
                 // Gone there since an earlier carrier began, the session may
-                // be packed and waiting: it works where it was again.
+                // be packed and waiting: it's called off, which the machine
+                // it leaves refuses once anything may have been sent.
                 if self.in_repo && !found {
                     self.at = At::NoProject;
                     return Step::Ask(
                         Side::From,
-                        Request::MoveEnded {
+                        Request::MoveStop {
                             session: self.session.clone(),
                             id: self.id.clone(),
-                            to_session: None,
-                            not_accepted: Some(format!(
-                                "{} doesn't have the project",
-                                self.to_name
-                            )),
+                            continue_here: false,
                         },
                     );
                 }
@@ -542,6 +548,16 @@ mod tests {
                     }
                     Ok(Reply::Ok)
                 }
+                (Side::From, Request::MoveStop { .. }) => {
+                    self.told = Some((None, Some("called off".into())));
+                    if self.packs_with_have == 0 {
+                        return Err("no such move here".into());
+                    }
+                    if self.reads > 0 {
+                        return Err("the other machine may have it already; keep it here with Continue here, or retry the move".into());
+                    }
+                    Ok(Reply::Ok)
+                }
                 (side, other) => panic!("{side:?} asked {other:?}"),
             }
         }
@@ -606,8 +622,8 @@ mod tests {
         let (r, _) = p.run(&mut Carrier::new("s1", "m1", "dent-linux"));
         assert_eq!(r, Err(Ended::NoProject));
         assert_eq!(p.packs_with_have, 0, "nothing packed or fenced");
-        // Gone there after an earlier carrier packed it: the machine it
-        // leaves is told, so it works there again.
+        // Gone there after an earlier carrier packed it: called off, so it
+        // works where it was again.
         let mut p = Pair::new(&[("events.jsonl", 10)]);
         p.packs_with_have = 1;
         p.found = false;
@@ -615,10 +631,18 @@ mod tests {
             p.run(&mut Carrier::new("s1", "m1", "dent-linux")).0,
             Err(Ended::NoProject)
         );
-        assert_eq!(
-            p.told,
-            Some((None, Some("dent-linux doesn't have the project".into())))
-        );
+        assert_eq!(p.told, Some((None, Some("called off".into()))));
+        // Gone after some was sent: it may be there already, so it isn't
+        // called off; the machine it leaves says what to do.
+        p.reads = 1;
+        let Err(Ended::Stopped {
+            side: Side::From,
+            why,
+        }) = p.run(&mut Carrier::new("s1", "m1", "dent-linux")).0
+        else {
+            panic!("called off a move that may have arrived")
+        };
+        assert!(why.contains("Continue here"), "{why}");
         // Dent's scratch folder has no repository: it moves anywhere.
         let mut p = Pair::new(&[("events.jsonl", 10)]);
         p.found = false;
