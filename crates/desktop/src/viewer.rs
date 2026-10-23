@@ -1248,9 +1248,17 @@ impl Dent {
                             .ty(UI)
                             .text_color(t.quiet)
                             .text_center()
-                            .child(format!(
-                                "Nothing answers at {shown}. The page comes back when it does."
-                            )),
+                            .child(match shown.split_once(" on ") {
+                                // On another machine, a server listening only
+                                // on that machine's own localhost can't be
+                                // reached from here.
+                                Some((at, machine)) => format!(
+                                    "Nothing answers at {at} on {machine}. A server that listens only on {machine}'s own localhost can't be opened from here: start it with --host 0.0.0.0. The page comes back when it answers."
+                                ),
+                                None => format!(
+                                    "Nothing answers at {shown}. The page comes back when it does."
+                                ),
+                            }),
                     ),
             )
             .child(

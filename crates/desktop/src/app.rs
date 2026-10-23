@@ -598,6 +598,33 @@ pub fn server_answers(url: &str) -> bool {
     })
 }
 
+/// A dev server a session's agent started, as this device can open it:
+/// on this machine, at whichever loopback address answers; on another
+/// (`host`, as dent reaches it), at that machine, the way T3 Code does on
+/// a private network. A server listening only on that machine's own
+/// localhost can't be reached that way, which its page says.
+pub fn dev_server_url(url: &str, host: Option<&str>) -> String {
+    let Some(host) = host else {
+        return reachable(url);
+    };
+    let rest = ["http://localhost:", "http://127.0.0.1:", "http://0.0.0.0:"]
+        .iter()
+        .find_map(|p| url.strip_prefix(p));
+    match rest {
+        Some(rest) if host.contains(':') => format!("http://[{host}]:{rest}"),
+        Some(rest) => format!("http://{host}:{rest}"),
+        None => url.to_string(),
+    }
+}
+
+/// The host part of a route (`host:port`, `[v6]:port`).
+pub fn route_host(route: &str) -> &str {
+    if let Some(v6) = route.strip_prefix('[') {
+        return v6.split(']').next().unwrap_or(v6);
+    }
+    route.rsplit_once(':').map_or(route, |(h, _)| h)
+}
+
 fn reachable(url: &str) -> String {
     let Some(rest) = url.strip_prefix("http://localhost:") else {
         return url.to_string();
@@ -5985,18 +6012,27 @@ impl Dent {
         } else {
             Vec::new()
         };
-        // Its dev servers are pages too: live, with no versions.
+        // Its dev servers are pages too: live, with no versions. Another
+        // machine's open at that machine.
+        let far = (!owner.is_empty())
+            .then(|| self.machines.iter().find(|m| m.id == owner))
+            .flatten();
+        let far_host = far
+            .and_then(|m| m.saved.routes.first())
+            .map(|r| route_host(r).to_string());
         for url in &s.servers {
             let id = crate::bridge::art_id(&s.id, url);
             if !self.arts.iter().any(|a| a.id == id) {
+                let shown = url.trim_start_matches("http://").trim_end_matches('/');
+                let title = match far {
+                    Some(m) => format!("Dev server · {shown} on {}", m.name()),
+                    None => format!("Dev server · {shown}"),
+                };
                 self.arts.push(Artifact {
                     id,
                     kind: crate::data::Kind::Server,
-                    title: crate::data::intern(&format!(
-                        "Dev server · {}",
-                        url.trim_start_matches("http://").trim_end_matches('/')
-                    )),
-                    path: crate::data::intern(&reachable(url)),
+                    title: crate::data::intern(&title),
+                    path: crate::data::intern(&dev_server_url(url, far_host.as_deref())),
                     dir: None,
                     versions: Vec::new(),
                 });
@@ -9831,6 +9867,33 @@ pub enum ChatScroll {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn another_machines_dev_server_opens_at_that_machine() {
+        use super::{dev_server_url, route_host};
+        assert_eq!(
+            route_host("dent-linux.tail1.ts.net:7480"),
+            "dent-linux.tail1.ts.net"
+        );
+        assert_eq!(route_host("[fd7a::1]:7480"), "fd7a::1");
+        assert_eq!(
+            dev_server_url("http://localhost:5173/app", Some("dent-linux.tail1.ts.net")),
+            "http://dent-linux.tail1.ts.net:5173/app"
+        );
+        assert_eq!(
+            dev_server_url("http://0.0.0.0:3000/", Some("100.70.1.2")),
+            "http://100.70.1.2:3000/"
+        );
+        assert_eq!(
+            dev_server_url("http://127.0.0.1:8080/", Some("fd7a::1")),
+            "http://[fd7a::1]:8080/"
+        );
+        // Anything not on loopback is left as it is.
+        assert_eq!(
+            dev_server_url("http://example.com:80/", Some("h")),
+            "http://example.com:80/"
+        );
+    }
+
     #[test]
     fn the_working_line_keeps_up_with_the_plan() {
         // A step gives way to the plan's next step at the usual pace...
