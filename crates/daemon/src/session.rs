@@ -1261,7 +1261,7 @@ impl Session {
                 asks: &asks,
             },
         );
-        h.spawn(&proc, argv, Some(self.cwd.clone().into()), Vec::new())
+        h.spawn(&proc, argv, Some(self.cwd.clone().into()), env.vars.clone())
             .await?;
         self.resume_at = None;
         h.attach(&proc, 0, 0).await?;

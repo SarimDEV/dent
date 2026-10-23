@@ -534,6 +534,25 @@ impl Driver for Claude {
         std::env::var("DENT_CLAUDE").unwrap_or_else(|_| "claude".into())
     }
 
+    fn env_names(&self) -> &'static [&'static str] {
+        // Claude Code's sign-ins and where it sends requests:
+        // `claude setup-token`'s token, an API key, a gateway, or Bedrock
+        // and Vertex.
+        &[
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "CLAUDE_CONFIG_DIR",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "AWS_PROFILE",
+            "AWS_REGION",
+            "CLOUD_ML_REGION",
+            "ANTHROPIC_VERTEX_PROJECT_ID",
+        ]
+    }
+
     fn status(&self, env: &AgentEnv) -> (Option<String>, Account) {
         let run = |args: &[&str]| {
             let mut argv = vec![
@@ -542,7 +561,7 @@ impl Driver for Claude {
                 self.command(),
             ];
             argv.extend(args.iter().map(|a| a.to_string()));
-            crate::agent::run_briefly(&argv, 10)
+            crate::agent::run_briefly_with(&argv, &env.vars, 10)
         };
         let Some(version) = run(&["--version"])
             .map(|v| v.trim().to_string())

@@ -9,24 +9,88 @@ use std::time::Duration;
 /// ([`crate::agent::Driver::command`]).
 pub struct AgentEnv {
     pub path: String,
+    /// Everything else agents get from the login shell (see [`passed`]),
+    /// given to them through the holder, never on a command line, where
+    /// `ps` would show it.
+    pub vars: Vec<(String, String)>,
     /// Where `path` came from, for `dent-daemon doctor`.
     pub source: String,
+}
+
+/// What the login shell gives agents beside PATH: locale, certificates and
+/// proxies, as T3 Code passes them, always. A service (no keychain, nothing
+/// signed in but what the shell sets) also passes each agent's own
+/// credentials (`Driver::env_names`), as running it over SSH would; the
+/// app doesn't, so an API key in your shell profile never quietly moves its
+/// sessions off your subscription.
+fn passed(service: bool) -> Vec<&'static str> {
+    let mut names = vec![
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "SSH_AUTH_SOCK",
+        "HOMEBREW_PREFIX",
+        "HOMEBREW_CELLAR",
+        "HOMEBREW_REPOSITORY",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "NODE_EXTRA_CA_CERTS",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    ];
+    if service {
+        for d in crate::agent::DRIVERS {
+            names.extend(d.env_names());
+        }
+    }
+    names
 }
 
 impl AgentEnv {
     pub fn detect() -> Self {
         let shell = login_shell();
-        match login_path(&shell) {
-            Some(path) => Self {
-                path,
-                source: format!("your login shell ({shell})"),
-            },
+        let service = crate::launcher::get().is_some();
+        match login_env(&shell) {
+            Some(env) => {
+                let path = env
+                    .iter()
+                    .find(|(k, _)| k == "PATH")
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_else(fallback_path);
+                Self {
+                    path: dedupe(&path),
+                    vars: pick(&env, &passed(service)),
+                    source: format!("your login shell ({shell})"),
+                }
+            }
             None => Self {
-                path: fallback_path(),
+                path: dedupe(&fallback_path()),
+                vars: Vec::new(),
                 source: format!("the usual folders ({shell} didn't say in 5 s)"),
             },
         }
     }
+}
+
+/// The named variables, in the order named, empty ones left out.
+fn pick(env: &[(String, String)], names: &[&str]) -> Vec<(String, String)> {
+    names
+        .iter()
+        .filter_map(|n| env.iter().find(|(k, v)| k == n && !v.is_empty()).cloned())
+        .collect()
+}
+
+/// A PATH with each folder once, first place kept.
+fn dedupe(path: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    path.split(':')
+        .filter(|d| !d.is_empty() && seen.insert(*d))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 /// The account's login shell, from the user database: a service starts
@@ -51,11 +115,11 @@ pub fn login_shell() -> String {
 const BEGIN: &str = "__DENT_ENV_BEGIN__";
 const END: &str = "__DENT_ENV_END__";
 
-/// PATH as a terminal would have it: an interactive login shell (PATH set
-/// in `.bashrc` or `.zshrc` counts, as it does when you type `claude`), read
-/// from `env` between markers, so whatever a profile prints around it, and
-/// a shell like fish that keeps PATH as a list, don't get in.
-fn login_path(shell: &str) -> Option<String> {
+/// The environment as a terminal would have it: an interactive login shell
+/// (what `.bashrc` or `.zshrc` sets counts, as it does when you type
+/// `claude`), read from `env` between markers, so whatever a profile prints
+/// around it, and a shell like fish that keeps PATH as a list, don't get in.
+fn login_env(shell: &str) -> Option<Vec<(String, String)>> {
     let mut child = Command::new(shell)
         .args([
             "-i",
@@ -79,17 +143,23 @@ fn login_path(shell: &str) -> Option<String> {
     let got = rx.recv_timeout(Duration::from_secs(5)).ok();
     let _ = child.kill();
     let _ = child.wait();
-    path_from(&got?)
+    env_from(&got?)
 }
 
-/// PATH from `env` output between the markers.
-fn path_from(out: &str) -> Option<String> {
+/// `env` output between the markers, as pairs; `None` without a PATH.
+/// (A value with a newline in it is cut there: none of the names passed
+/// has one.)
+fn env_from(out: &str) -> Option<Vec<(String, String)>> {
     let inside = out.split_once(BEGIN)?.1.split_once(END)?.0;
-    inside
+    let env: Vec<(String, String)> = inside
         .lines()
-        .find_map(|l| l.strip_prefix("PATH="))
-        .map(str::to_string)
-        .filter(|p| p.contains('/'))
+        .filter_map(|l| l.split_once('='))
+        .filter(|(k, _)| !k.is_empty() && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    env.iter()
+        .any(|(k, v)| k == "PATH" && v.contains('/'))
+        .then_some(env)
 }
 
 fn fallback_path() -> String {
@@ -118,13 +188,23 @@ fn fallback_path() -> String {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn path_is_read_between_the_markers_whatever_a_profile_prints() {
-        let out = "Welcome to Ubuntu\nPATH=/wrong\n__DENT_ENV_BEGIN__\nHOME=/home/a\nPATH=/home/a/.local/bin:/usr/bin\n__DENT_ENV_END__\nlogout\n";
-        assert_eq!(
-            super::path_from(out).as_deref(),
-            Some("/home/a/.local/bin:/usr/bin")
-        );
-        assert_eq!(super::path_from("PATH=/usr/bin\n"), None);
+    fn the_environment_is_read_between_the_markers_whatever_a_profile_prints() {
+        let out = "Welcome to Ubuntu\nPATH=/wrong\n__DENT_ENV_BEGIN__\nHOME=/home/a\nPATH=/home/a/.local/bin:/usr/bin\nCLAUDE_CODE_OAUTH_TOKEN=sk-x=y\nLANG=\n__DENT_ENV_END__\nlogout\n";
+        let env = super::env_from(out).unwrap();
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("PATH"), Some("/home/a/.local/bin:/usr/bin"));
+        // A value may hold `=`.
+        assert_eq!(get("CLAUDE_CODE_OAUTH_TOKEN"), Some("sk-x=y"));
+        assert_eq!(super::env_from("PATH=/usr/bin\n"), None);
+        // Only what's named, and nothing empty.
+        let picked = super::pick(&env, &["LANG", "CLAUDE_CODE_OAUTH_TOKEN", "HOME"]);
+        assert_eq!(picked.len(), 2);
+        assert_eq!(picked[0].0, "CLAUDE_CODE_OAUTH_TOKEN");
+    }
+
+    #[test]
+    fn a_path_keeps_each_folder_once_in_its_first_place() {
+        assert_eq!(super::dedupe("/a:/b:/a::/c:/b"), "/a:/b:/c");
     }
 
     #[test]
