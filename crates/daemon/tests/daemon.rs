@@ -4361,10 +4361,13 @@ fn rss_kib(pid: u32) -> u64 {
         .args(["-o", "rss=", "-p", &pid.to_string()])
         .output()
         .unwrap();
-    String::from_utf8_lossy(&out.stdout)
+    let kib = String::from_utf8_lossy(&out.stdout)
         .trim()
         .parse()
-        .unwrap_or(0)
+        .unwrap_or(0);
+    // Unread, the bounds would pass without measuring anything.
+    assert!(kib > 0, "couldn't read the memory of {pid}");
+    kib
 }
 
 /// Many agents at once, each streaming a lot: every turn finishes, one
