@@ -1079,7 +1079,11 @@ impl Agent {
                 })
                 .unwrap_or_default();
             let told = text.contains("[dent: this session moved");
-            let reply = format!("You first said: {first}. Told it moved: {told}.");
+            // What it was handed of a conversation it lost, as text.
+            let given = text.matches("The person said:").count();
+            let reply = format!(
+                "You first said: {first}. Told it moved: {told}. Given back: {given} messages."
+            );
             self.say(&reply, None)?;
             self.end(&reply, false);
             return Ok(());

@@ -2260,6 +2260,27 @@ fn a_conversation_the_agent_forgot_carries_on_in_a_new_one() {
     assert_eq!(c.count(&s, is_done), 2);
 }
 
+/// The conversation the agent lost goes into its new one as text, from
+/// dent's own record: it starts knowing what was said.
+#[test]
+fn a_lost_conversation_is_given_back_as_text() {
+    let w = World::new(&[("DENT_IDLE_MS", "300"), ("FAKE_CLAUDE_FORGET", "1")]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Ask, "say: the plan is ready");
+    c.wait_turns(&s, 1);
+    std::thread::sleep(Duration::from_millis(900));
+    c.say(&s, "2", "recall what I said", false);
+    c.wait_turns(&s, 2);
+    let text = c.text(&s);
+    let last = text.lines().last().unwrap_or_default();
+    // The first message and its reply, not the message being asked now.
+    assert!(last.contains("Given back: 1 messages."), "{last}");
+    assert!(c.events(&s).iter().any(
+        |b| matches!(b, Body::Notice { text } if text.contains("given what was said so far as text"))
+    ));
+}
+
 #[test]
 fn an_agent_stuck_starting_ends_the_turn_with_why() {
     let w = World::new(&[("DENT_START_MS", "500"), ("FAKE_CLAUDE_HANG", "1")]);
