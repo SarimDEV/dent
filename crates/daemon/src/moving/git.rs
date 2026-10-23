@@ -382,27 +382,43 @@ pub fn apply(
             && cur != m.tip
             && git(repo, &["merge-base", "--is-ancestor", &cur, &m.tip], &[]).is_err();
         let why = match out_at {
-            Some(p) => Some(format!("{} is checked out in {p}", m.branch)),
+            Some(p) => {
+                // As the chat says paths: home as ~.
+                let home = crate::paths::home().display().to_string();
+                let p = match p.strip_prefix(&home) {
+                    Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{rest}"),
+                    _ => p,
+                };
+                Some(format!("{} is checked out in {p}", m.branch))
+            }
             None if behind => Some(format!("{} here has commits it hasn't", m.branch)),
             None => None,
         };
         if let Some(why) = why {
-            let mut name = format!("{}-moved", m.branch);
+            // A try of this move cut short made one at its commit, out
+            // nowhere now: that's the one it lands on again.
+            let out_anywhere = |name: &str| {
+                list.lines()
+                    .any(|l| l == format!("branch refs/heads/{name}"))
+            };
             let mut n = 1;
-            while git(
-                repo,
-                &["rev-parse", "-q", "--verify", &format!("refs/heads/{name}")],
-                &[],
-            )
-            .is_ok()
-            {
-                n += 1;
-                name = format!("{}-moved-{n}", m.branch);
+            let mut name = format!("{}-moved", m.branch);
+            loop {
+                let r = format!("refs/heads/{name}");
+                match git(repo, &["rev-parse", "-q", "--verify", &r], &[]) {
+                    Err(_) => {
+                        git(repo, &["update-ref", &r, &m.tip, ""], &[])?;
+                        undo.steps
+                            .push(vec!["update-ref".into(), "-d".into(), r, m.tip.clone()]);
+                        break;
+                    }
+                    Ok(at) if at == m.tip && !out_anywhere(&name) => break,
+                    Ok(_) => {
+                        n += 1;
+                        name = format!("{}-moved-{n}", m.branch);
+                    }
+                }
             }
-            let alt = format!("refs/heads/{name}");
-            git(repo, &["update-ref", &alt, &m.tip, ""], &[])?;
-            undo.steps
-                .push(vec!["update-ref".into(), "-d".into(), alt, m.tip.clone()]);
             on = Some((name.clone(), why));
             checkout = name;
         } else if !cur.is_empty() && cur != m.tip {
@@ -650,6 +666,29 @@ mod tests {
         assert_eq!(out(&dst, &["rev-parse", "--abbrev-ref", "HEAD"]), "work");
         assert_eq!(out(&dst, &["rev-parse", "refs/heads/work"]), before);
         assert_eq!(out(&dst, &["status", "--porcelain"]), status);
+        // Cut short there and tried again (its worktree taken away first,
+        // as a retry does): it lands on the same branch, not a second.
+        out(
+            &dst,
+            &["worktree", "remove", "--force", &new.display().to_string()],
+        );
+        let a = apply(&dst, &m, "m4", &bundle, &new).unwrap();
+        assert_eq!(a.instead().unwrap().0, "work-moved");
+        a.keep();
+        assert!(
+            git(
+                &dst,
+                &["rev-parse", "-q", "--verify", "refs/heads/work-moved-2"],
+                &[]
+            )
+            .is_err()
+        );
+        // Another move of it while that one's out: a branch of its own.
+        let other = base.join("dst-moved-again");
+        let b6 = base.join("m6.bundle");
+        let m6 = pack(&src, "m6", &tips(&dst), &[], &b6).unwrap();
+        let a = apply(&dst, &m6, "m6", &b6, &other).unwrap();
+        assert_eq!(a.instead().unwrap().0, "work-moved-2");
         let _ = std::fs::remove_dir_all(&base);
     }
 
