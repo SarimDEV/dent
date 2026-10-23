@@ -17,4 +17,4 @@ Status: accepted (2026-10-23, built while the owner was away; theirs to change) 
 
 ## Why
 
-T3 Code's users report memory spikes past 10 GB, and macOS has no limit that would stop them: a runaway agent takes the Mac down into swap, and every other agent and app with it. Stopping one agent with a clear reason, and keeping its conversation, costs far less than that.
+Agents have been seen to use 10 GB and more, and macOS has no limit that would stop them: a runaway agent takes the Mac down into swap, and every other agent and app with it. Stopping one agent with a clear reason, and keeping its conversation, costs far less than that.
