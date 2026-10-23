@@ -62,6 +62,8 @@ case "$name" in
   signed-out) export FAKE_CLAUDE_SIGNED_OUT=1 ;;
   missing) walk_claude="$root/no-such-claude" ;;
   limited) export DENT_CAPS_OFF="steer,stop_task,rewind,fork,mode:plan" ;;
+  # Low memory limits, so a fake agent holding 300 MB is warned about and stopped.
+  cutoffs) export DENT_MEMORY_WARN=$((100 << 20)) DENT_MEMORY_STOP=$((250 << 20)) DENT_MEMORY_EVERY_MS=300 FAKE_CLAUDE_HOG_MB=300 ;;
 esac
 # A locked or sleeping screen draws no windows, so a walk would stop dead
 # with nothing to say why: say so now. While it runs, the display stays awake.
