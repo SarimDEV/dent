@@ -95,6 +95,11 @@ impl Record {
             (None, None) => None,
             _ => return Err(bad("half an update")),
         };
+        // A trial is always of an update: without its id there's no
+        // snapshot to go back to.
+        if some("pending").is_some() && update.is_none() {
+            return Err(bad("a trial with no update"));
+        }
         let outcome = match some("outcome") {
             Some(o) => Some(Outcome::parse(&o).ok_or_else(|| bad(&o))?),
             None => None,
@@ -209,6 +214,7 @@ mod tests {
             "active=a\njunk\n",
             "active=../x\n",
             "pending=a\n",
+            "active=a\npending=b\n",
             "active=a\noutcome=u1 a b\n",
         ] {
             std::fs::write(dir.join(FILE), broken).unwrap();

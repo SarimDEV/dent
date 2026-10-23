@@ -53,9 +53,13 @@ const USAGE: &str = "usage: dent-daemon [--state DIR]   run the daemon
        dent-daemon uninstall            stop the service and remove it (sessions stay)
        dent-daemon status               how the service stands
        dent-daemon doctor               check what dent needs here, and say how to fix what isn't right
-       dent-daemon update DIR           update the service to the build in DIR";
+       dent-daemon update DIR [--allow-downgrade]   update the service to the build in DIR";
 
 fn main() -> Result<()> {
+    // Before any thread: what the launcher and systemd gave this process is
+    // taken, and taken out of what its children inherit.
+    launcher::init();
+    scopes::init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let state = args
         .iter()
@@ -105,7 +109,11 @@ fn main() -> Result<()> {
             let dir = args
                 .get(1)
                 .context("dent-daemon update DIR (a folder holding the new build)")?;
-            return service::update(&paths, std::path::Path::new(dir));
+            return service::update(
+                &paths,
+                std::path::Path::new(dir),
+                args.iter().any(|a| a == "--allow-downgrade"),
+            );
         }
         Some("pair") => return admin::pair(&paths),
         Some("devices") => return admin::devices(&paths, &args[1..]),

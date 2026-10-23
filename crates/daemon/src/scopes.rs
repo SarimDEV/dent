@@ -8,12 +8,19 @@
 /// The slice every agent's scope goes in.
 const SLICE: &str = "dentagents.slice";
 
-/// Started by a systemd unit (systemd sets `INVOCATION_ID` for what a
-/// unit runs, and it's inherited), with `systemd-run` there to use.
-pub fn under_systemd() -> bool {
-    static YES: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+static UNDER_SYSTEMD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Note whether a systemd unit started this daemon (systemd sets
+/// `INVOCATION_ID` for what a unit runs), and take the variable out of what
+/// children inherit: a `dent-daemon` an agent runs isn't the service's.
+/// Call first thing in `main`, before any thread starts.
+pub fn init() {
+    UNDER_SYSTEMD.get_or_init(|| {
+        let unit = std::env::var_os("INVOCATION_ID").is_some();
+        // SAFETY: called before any thread starts.
+        unsafe { std::env::remove_var("INVOCATION_ID") };
         cfg!(target_os = "linux")
-            && std::env::var_os("INVOCATION_ID").is_some()
+            && unit
             && std::process::Command::new("systemd-run")
                 .arg("--version")
                 .stdout(std::process::Stdio::null())
@@ -21,7 +28,11 @@ pub fn under_systemd() -> bool {
                 .status()
                 .is_ok_and(|s| s.success())
     });
-    *YES
+}
+
+/// Started by a systemd unit, with `systemd-run` there to use.
+pub fn under_systemd() -> bool {
+    UNDER_SYSTEMD.get().copied().unwrap_or(false)
 }
 
 /// `argv` run in a scope of its own (in `slice`, when given), when under

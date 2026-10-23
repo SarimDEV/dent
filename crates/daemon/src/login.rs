@@ -80,6 +80,13 @@ pub fn blocked() -> Option<String> {
     if real_home().is_some_and(|h| h != crate::paths::home()) {
         return Some("dent is running with a home folder of its own here".into());
     }
+    // One way of running the daemon: the service already starts it at login.
+    if crate::service::installed().is_some() {
+        return Some(
+            "dent runs as a service here, which already starts it at login (dent-daemon uninstall to stop that)"
+                .into(),
+        );
+    }
     let bin = std::env::current_exe().ok()?;
     guarded(&bin).then(|| {
         "This build runs from a folder macOS keeps background programs out of; install dent.app in Applications first".to_string()

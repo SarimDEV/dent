@@ -18,6 +18,9 @@ enum Trial {
     Fails,
     /// Never gets ready.
     Hangs,
+    /// Finds another daemon holding the folder (which writes to the
+    /// database meanwhile).
+    Locked,
 }
 
 const DAEMON: &str = r#"#!/bin/sh
@@ -75,6 +78,9 @@ impl Rig {
             Trial::Migrates => r#"echo "column from $V" >> "$S/dent.db""#,
             Trial::Fails => r#"echo "half a table" >> "$S/dent.db"; log failing; exit 3"#,
             Trial::Hangs => "sleep 100 & wait $!",
+            Trial::Locked => {
+                r#"echo "the other daemon's write" >> "$S/dent.db"; log locked; exit 75"#
+            }
         };
         let exe = dir.join("dent-daemon");
         std::fs::write(&exe, DAEMON.replace("@@TRIAL@@", trial)).unwrap();
@@ -345,4 +351,29 @@ fn a_record_it_cant_read_stops_startup() {
 #[allow(dead_code)]
 fn here() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
+}
+
+#[test]
+fn a_trial_that_finds_another_daemon_leaves_its_database_alone() {
+    let mut r = Rig::new("lockedtrial");
+    r.version("a", Trial::Migrates, 1);
+    r.version("b", Trial::Locked, 1);
+    r.active("a");
+    r.start(&[]);
+    assert!(r.saw("a start", 1, 5.));
+    r.ask("b");
+    assert!(r.saw("b locked", 1, 10.), "{}", r.log());
+    assert!(r.saw("a start", 2, 10.), "{}", r.log());
+    // The database is the other daemon's now: nothing is put back over it.
+    assert!(r.db().contains("the other daemon's write"), "{}", r.db());
+    // And b wasn't the trouble: it isn't held back.
+    let rec = r.record();
+    assert!(!rec.contains("never_retry"), "{rec}");
+    assert!(rec.contains("not_tried"), "{rec}");
+    assert!(
+        !r.state
+            .join("snapshots")
+            .read_dir()
+            .is_ok_and(|mut d| d.next().is_some())
+    );
 }

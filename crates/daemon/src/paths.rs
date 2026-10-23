@@ -36,22 +36,33 @@ impl Paths {
     }
 
     pub fn holder(&self) -> PathBuf {
-        // On Linux the user's runtime folder: set alike in an SSH login and
-        // a systemd service, and never swept, where /tmp's files go after
+        // On Linux the user's runtime folder, found by uid so a service, an
+        // SSH login and cron agree: never swept, where /tmp's files go after
         // ten days unused (a holder waiting on an agent for that long would
         // lose its socket).
+        // SAFETY: getuid can't fail.
         let runtime = cfg!(target_os = "linux")
-            .then(|| std::env::var_os("XDG_RUNTIME_DIR"))
-            .flatten()
-            .map(PathBuf::from)
+            .then(|| PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() })))
             .filter(|p| p.is_dir());
-        let tmp = runtime
-            .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("/tmp"));
-        tmp.join(format!(
+        runtime
+            .map(|r| r.join(self.holder_name()))
+            .unwrap_or_else(|| self.holder_in_tmp())
+    }
+
+    /// Where the holder was before it moved to the runtime folder (and
+    /// still is on macOS): a daemon finds one still running there.
+    pub fn holder_in_tmp(&self) -> PathBuf {
+        std::env::var_os("TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join(self.holder_name())
+    }
+
+    fn holder_name(&self) -> String {
+        format!(
             "dent-{:016x}",
             fnv(self.state.as_os_str().as_encoded_bytes())
-        ))
+        )
     }
 }
 

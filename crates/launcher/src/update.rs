@@ -178,6 +178,9 @@ pub fn apply(
     eprintln!("dent-launcher: update {id}: {} -> {to}", rec.active);
     running.stop(state, Some(&format!("update {to}")));
     snapshot(state, &id)?;
+    if stopping() {
+        return Ok(None);
+    }
     let mut trial = Daemon::start(state, to, true, None)?;
     let until = Instant::now() + prepare_limit();
     let why = loop {
@@ -189,6 +192,25 @@ pub fn apply(
             break None;
         }
         if let Some(e) = trial.ended() {
+            // Another daemon took the folder before the trial could: it never
+            // opened the database, and that other daemon has it open now, so
+            // nothing is put back and the version isn't held against.
+            if e == Ended::Locked {
+                eprintln!("dent-launcher: another daemon took the folder; {to} wasn't tried");
+                rec.pending = None;
+                let (id, from) = rec.update.take().unwrap_or_default();
+                rec.outcome = Some(crate::record::Outcome {
+                    id,
+                    from,
+                    to: to.to_string(),
+                    how: "not_tried".into(),
+                });
+                rec.save(state)?;
+                if let Some(o) = &rec.outcome {
+                    let _ = std::fs::remove_dir_all(snapshots(state).join(&o.id));
+                }
+                return Daemon::start(state, &rec.active, false, None).map(Some);
+            }
             break Some(format!("it {}", ended(&e)));
         }
         if Instant::now() >= until {
@@ -203,7 +225,8 @@ pub fn apply(
             // Asked for again and passed this time: no longer held back.
             rec.never_retry.retain(|v| v != to);
             rec.save(state)?; // durable before the daemon is told
-            trial.say("committed");
+            let line = rec.outcome.as_ref().map(|o| o.line()).unwrap_or_default();
+            trial.say(&format!("committed {line}"));
             eprintln!("dent-launcher: {to} committed");
             prune(state, &[&rec.active, &from], &id);
             Ok(Some(trial))
@@ -214,6 +237,8 @@ pub fn apply(
             restore(state, &id)?;
             rec.rolled_back();
             rec.save(state)?;
+            // Put back: a copy of a database that's live again is no use.
+            let _ = std::fs::remove_dir_all(snapshots(state).join(&id));
             let outcome = rec.outcome.as_ref().map(|o| o.line());
             Daemon::start(state, &rec.active, false, outcome.as_deref()).map(Some)
         }

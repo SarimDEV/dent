@@ -2349,7 +2349,7 @@ impl Session {
                 .zip(crate::scopes::oom_kills())
                 .is_some_and(|(was, now)| now > was);
         let why = match (code, signal) {
-            _ if starved => "the machine ran out of memory".into(),
+            _ if starved => "it ran out of memory".into(),
             (_, Some(s)) => format!("signal {s}"),
             (Some(c), _) => format!("exit code {c}"),
             _ => "no exit status".into(),

@@ -133,6 +133,8 @@ Run on 2026-10-22 against the real code (`dent-daemon install`, `dent-launcher`)
 | Update with a real daemon | Committed in 1.4 s; the holder and a running agent kept their pids |
 | `systemctl --user restart dent` mid-command | A haiku agent's 20 s command finished (`slept-well`) and its turn completed under the new daemon |
 | R-E3 with the real daemon | A trial that couldn't take its port (another program held it) rolled back: the snapshot went back, all 57 events kept, the CLI said "…didn't start, so … runs again"; the version was held back from automatic retries, then retried by hand once the port was free, and committed |
+| R-E5, out of memory | With the agents' slice capped below what Claude Code needs, the kernel killed the agent; the slice's `oom_kill` count rose, and the session ended "Claude Code stopped unexpectedly (it ran out of memory)". The daemon and the holder carried on |
+| `dent-daemon doctor` | On the VM, about the service: linger, the addresses devices reach, PATH from the login shell, Claude signed in by the shell's token as the service sees it, no SSH agent (a note, not a fault), room for updates, the database's quick check |
 | The launcher's own cases | `crates/launcher/tests`: failed migration, a trial that never gets ready, cut off mid-restore and mid-trial, a newer launcher protocol, too little room, a crashed daemon, a locked folder, an unreadable record |
 | macOS LaunchAgent | Installed, updated (APFS clone snapshot of the database and its WAL files), a daemon killed with `-9` back within a second, reinstalled with a changed launcher (restarted), uninstalled with nothing left running. Found that `launchctl bootout` returns before the job has stopped; install and uninstall now wait for it |
 

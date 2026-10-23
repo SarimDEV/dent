@@ -127,11 +127,12 @@ impl Daemon {
     /// goes, so devices hear "restarting" or "updating" rather than "quit").
     /// Asked politely, then made to.
     pub fn stop(mut self, state: &Path, reason: Option<&str>) -> Ended {
-        if let Some(why) = reason {
-            let _ = crate::disk::write_atomic(&state.join("stop-reason"), why.as_bytes());
-        }
+        // Already gone: a reason left now would be the next daemon's.
         if let Some(e) = self.ended() {
             return e;
+        }
+        if let Some(why) = reason {
+            let _ = crate::disk::write_atomic(&state.join("stop-reason"), why.as_bytes());
         }
         // SAFETY: signalling our own child by its pid.
         unsafe {

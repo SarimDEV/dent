@@ -127,7 +127,7 @@ Exit: one project lives on two machines; a new session goes to the right one; fi
 
 Exit: `dent daemon install` on a fresh Mac and a fresh Linux box; an update rolls out across both while replies keep streaming; a broken release rolls back by itself.
 
-Status (2026-10-22): the launcher, `dent-daemon install`/`update`/`status`/`uninstall`, `service.env` and the holder outside the service are built, and run for real on the Linux VM and a Mac ([remote-tests.md](remote-tests.md#stage-3-results)). Still to come: `dent doctor`, release downloads, the one button in the app, and out-of-memory detection (the agents slice).
+Status (2026-10-22): the launcher, `dent-daemon install`/`update`/`status`/`uninstall`/`doctor`, `service.env`, the holder outside the service, and each agent in a scope of its own under `dentagents.slice` (so running out of memory is said as such) are built, and run for real on the Linux VM and a Mac ([remote-tests.md](remote-tests.md#stage-3-results)). Still to come: release downloads, the one button in the app, and continuing turns a reboot cut off.
 
 - **The launcher** ([0065](decisions/0065-launcher-and-updates.md)), `service.env`, a two-phase install marker, and keeping the current and previous versions.
 - **`dent doctor`:** service state, linger, the agent PATH and where it came from, `SSH_AUTH_SOCK`, listening addresses, firewall, Tailscale, Bonjour and the local network permission, and offline database repair.

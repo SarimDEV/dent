@@ -253,13 +253,15 @@ WantedBy=default.target
     )
 }
 
-/// A path as one systemd word: quoted, with `\\`, `"` and `%` escaped.
+/// A path as one systemd word: quoted, with `\\`, `"`, `%` and `$`
+/// escaped (systemd expands the last two).
 fn systemd_quote(s: &str) -> String {
     format!(
         "\"{}\"",
         s.replace('\\', "\\\\")
             .replace('"', "\\\"")
             .replace('%', "%%")
+            .replace('$', "$$")
     )
 }
 
@@ -349,6 +351,9 @@ pub fn install(paths: &Paths, allow_downgrade: bool) -> Result<()> {
         bail!("the dent-launcher beside this build is too old for it");
     }
     let state = &paths.state;
+    // An older build doesn't replace a newer one unless asked to; said
+    // before anything is written.
+    guard(state, from, allow_downgrade)?;
     std::fs::create_dir_all(state)?;
     {
         use std::os::unix::fs::PermissionsExt;
@@ -359,16 +364,6 @@ pub fn install(paths: &Paths, allow_downgrade: bool) -> Result<()> {
     let intent = state.join("install-intent");
     std::fs::write(&intent, "")?;
     let version = stage(state, from)?;
-    // An older build doesn't replace a newer one unless asked to.
-    if let Some(was) = active(state).and_then(|a| version_of(state, &a))
-        && let Some(now) = version_of(state, &version)
-        && semver(&now) < semver(&was)
-        && !allow_downgrade
-    {
-        bail!(
-            "this build is {now}, older than the {was} installed; add --allow-downgrade to go back"
-        );
-    }
     // The launcher: replaced whole, so the service never runs half of one.
     let launcher = launcher_path(state);
     std::fs::create_dir_all(launcher.parent().context("no bin folder")?)?;
@@ -379,7 +374,11 @@ pub fn install(paths: &Paths, allow_downgrade: bool) -> Result<()> {
         std::fs::rename(&tmp, &launcher)?;
     }
     write_service_env(state)?;
-    let fresh = active(state).is_none();
+    // Nothing installed yet, or the version it says runs is gone (pruned,
+    // or deleted by hand): this one runs, with no trial, as there's nothing
+    // that ran before to go back to.
+    let fresh =
+        active(state).is_none_or(|a| !state.join("versions").join(a).join("dent-daemon").is_file());
     if fresh {
         std::fs::write(state.join("launcher.state"), format!("active={version}\n"))?;
     }
@@ -390,6 +389,7 @@ pub fn install(paths: &Paths, allow_downgrade: bool) -> Result<()> {
         std::thread::sleep(Duration::from_millis(500));
     }
     let def = manager.definition(state);
+    let had = manager.installed();
     let def_changed = std::fs::read_to_string(manager.file()).ok().as_deref() != Some(def.as_str());
     if def_changed {
         std::fs::create_dir_all(manager.file().parent().context("no service folder")?)?;
@@ -400,22 +400,35 @@ pub fn install(paths: &Paths, allow_downgrade: bool) -> Result<()> {
         // Devices hear "restarting", not "quit".
         std::fs::write(state.join("stop-reason"), "restart")?;
     }
-    manager.start(restart)?;
-    let Some(Reply::Welcome {
-        managed, release, ..
-    }) = wait_up(paths, Duration::from_secs(30))
-    else {
-        bail!(
-            "the service started but the daemon didn't answer in 30 s; see {}",
-            log_hint(manager, state)
-        );
+    let up = manager
+        .start(restart)
+        .and_then(|()| match wait_up(paths, Duration::from_secs(30)) {
+            Some(Reply::Welcome {
+                managed: true,
+                release,
+                ..
+            }) => Ok(release),
+            Some(_) => bail!(
+                "another daemon, not the service, answers for {}",
+                state.display()
+            ),
+            None => bail!(
+                "the service started but the daemon didn't answer in 30 s; see {}",
+                log_hint(manager, state)
+            ),
+        });
+    let release = match up {
+        Ok(r) => r,
+        // A first install that never ran leaves nothing behind that would
+        // make the app wait on a service that isn't there.
+        Err(e) => {
+            if !had {
+                let _ = manager.remove();
+                let _ = std::fs::remove_file(&launcher);
+            }
+            return Err(e);
+        }
     };
-    if !managed {
-        bail!(
-            "another daemon, not the service, answers for {}",
-            state.display()
-        );
-    }
     // Installed over an older version: updated through the launcher, which
     // trials it and puts the old one back if it fails.
     if release != version {
@@ -426,6 +439,32 @@ pub fn install(paths: &Paths, allow_downgrade: bool) -> Result<()> {
     println!("dent runs as a service on this machine ({version}).");
     if manager == Manager::Systemd {
         linger();
+    }
+    Ok(())
+}
+
+/// The version a build beside `from` says it is.
+fn version_beside(from: &Path) -> Option<String> {
+    let out = Command::new(from.join("dent-daemon"))
+        .arg("manifest")
+        .output()
+        .ok()?;
+    manifest_field(&String::from_utf8_lossy(&out.stdout), "version")
+}
+
+/// Refuse to put an older build in place of the one that runs, unless
+/// asked to (`--allow-downgrade`).
+fn guard(state: &Path, from: &Path, allow: bool) -> Result<()> {
+    if allow {
+        return Ok(());
+    }
+    if let Some(was) = active(state).and_then(|a| version_of(state, &a))
+        && let Some(now) = version_beside(from)
+        && semver(&now) < semver(&was)
+    {
+        bail!(
+            "this build is {now}, older than the {was} that runs; add --allow-downgrade to go back"
+        );
     }
     Ok(())
 }
@@ -506,7 +545,8 @@ fn update_to(paths: &Paths, version: &str) -> Result<()> {
 }
 
 /// `dent-daemon update DIR`: stage the build in DIR and update to it.
-pub fn update(paths: &Paths, from: &Path) -> Result<()> {
+pub fn update(paths: &Paths, from: &Path, allow_downgrade: bool) -> Result<()> {
+    guard(&paths.state, from, allow_downgrade)?;
     let version = stage(&paths.state, from)?;
     update_to(paths, &version)?;
     println!("Updated to {version}.");
@@ -584,10 +624,10 @@ pub fn status(paths: &Paths) -> Result<()> {
     if let Some(o) = manifest_field(&state, "outcome") {
         let w: Vec<&str> = o.split(' ').collect();
         if let [_, from, to, how] = w[..] {
-            let how = if how == "committed" {
-                "updated"
-            } else {
-                "rolled back"
+            let how = match how {
+                "committed" => "updated",
+                "not_tried" => "not tried (another daemon had the state folder)",
+                _ => "rolled back",
             };
             println!("Last update: {from} → {to}, {how}");
         }
@@ -610,10 +650,10 @@ mod tests {
     fn the_unit_quotes_paths_and_stops_only_the_launcher() {
         let u = super::systemd_unit(
             Path::new("/home/a b/.local/state/dent/bin/dent-launcher"),
-            Path::new("/home/a b/.local/state/dent 100%"),
+            Path::new("/home/a b/.local/state/dent 100%$x"),
         );
         assert!(u.contains(
-            "ExecStart=\"/home/a b/.local/state/dent/bin/dent-launcher\" run --state \"/home/a b/.local/state/dent 100%%\""
+            "ExecStart=\"/home/a b/.local/state/dent/bin/dent-launcher\" run --state \"/home/a b/.local/state/dent 100%%$$x\""
         ), "{u}");
         assert!(u.contains("KillMode=mixed"));
         assert!(u.contains("Restart=always"));

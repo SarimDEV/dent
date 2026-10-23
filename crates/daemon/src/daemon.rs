@@ -507,7 +507,17 @@ impl Daemon {
         // and the holder, with every agent, must outlive that.
         argv = crate::scopes::holder(argv);
         let start = holder::Start { argv };
-        let (conn, mut rx) = holder::connect(&dir, Some(&start)).await?;
+        // One an older daemon started in /tmp is still the one holding the
+        // agents: it's used until it goes, rather than a second beside it.
+        let before = self.paths.holder_in_tmp();
+        let found = match before != dir {
+            true => holder::connect(&before, None).await.ok(),
+            false => None,
+        };
+        let (conn, mut rx) = match found {
+            Some(c) => c,
+            None => holder::connect(&dir, Some(&start)).await?,
+        };
         let conn = Arc::new(conn);
         *h = Some(conn.clone());
         let me = self.clone();

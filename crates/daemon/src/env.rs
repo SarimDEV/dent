@@ -42,7 +42,9 @@ fn passed(service: bool) -> Vec<&'static str> {
         "https_proxy",
         "no_proxy",
     ];
-    if service {
+    // Only where there's no keychain to sign in with: a Mac's LaunchAgent
+    // runs in your login session, keychain and all, as the app does.
+    if service && cfg!(target_os = "linux") {
         for d in crate::agent::DRIVERS {
             names.extend(d.env_names());
         }
@@ -126,18 +128,21 @@ const END: &str = "__DENT_ENV_END__";
 /// `claude`), read from `env` between markers, so whatever a profile prints
 /// around it, and a shell like fish that keeps PATH as a list, don't get in.
 fn login_env(shell: &str) -> Option<Vec<(String, String)>> {
-    let mut child = Command::new(shell)
-        .args([
-            "-i",
-            "-l",
-            "-c",
-            &format!("echo {BEGIN}; /usr/bin/env; echo {END}"),
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+    let mut cmd = Command::new(shell);
+    cmd.args([
+        "-i",
+        "-l",
+        "-c",
+        &format!("echo {BEGIN}; /usr/bin/env; echo {END}"),
+    ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
+    // A group of its own, so what a profile starts (an agent, a prompt
+    // daemon) goes with it, and can't hold the pipe open.
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let mut child = cmd.spawn().ok()?;
+    let group = child.id() as i32;
     // A slow or broken shell profile mustn't hold up the daemon.
     let (tx, rx) = std::sync::mpsc::channel();
     let mut out = child.stdout.take()?;
@@ -147,7 +152,8 @@ fn login_env(shell: &str) -> Option<Vec<(String, String)>> {
         let _ = tx.send(s);
     });
     let got = rx.recv_timeout(Duration::from_secs(5)).ok();
-    let _ = child.kill();
+    // SAFETY: signalling the group we just made.
+    unsafe { libc::kill(-group, libc::SIGKILL) };
     let _ = child.wait();
     env_from(&got?)
 }

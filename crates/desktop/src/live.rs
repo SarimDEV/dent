@@ -223,13 +223,31 @@ fn run(
     }
 }
 
+/// Whether `dent-daemon install` set this state folder up as a service:
+/// its launcher is there and the service manager has its definition. (An
+/// uninstall removes both; a folder left from one isn't a service.)
+fn service_runs(state: &Path) -> bool {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    let definition = if cfg!(target_os = "macos") {
+        home.join("Library/LaunchAgents/sh.dent.launcher.plist")
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| home.join(".config"))
+            .join("systemd/user/dent.service")
+    };
+    state.join("bin/dent-launcher").is_file() && definition.is_file()
+}
+
 /// Start the daemon from beside this app, in its own process group so it
 /// outlives the window.
 fn start_daemon(state: &Path, ui: UnboundedSender<Incoming>) -> Result<(), String> {
     // Installed as a service (`dent-daemon install`), the launcher runs the
     // daemon and starts it again itself; one started here would take the
     // state folder from it, mid-update even.
-    if state.join("launcher.state").is_file() && state.join("bin/dent-launcher").is_file() {
+    if service_runs(state) {
         return Ok(());
     }
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
