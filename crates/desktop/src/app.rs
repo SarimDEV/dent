@@ -896,6 +896,9 @@ pub struct Dent {
     pub outbox: Vec<crate::outbox::Outgoing>,
     /// This machine's id, from its daemon's welcome.
     pub machine_id: String,
+    /// What runs on it, and how its last update went, from the same.
+    pub machine_version: String,
+    pub machine_update: Option<dent_protocol::UpdateOutcome>,
     /// The page of Settings showing.
     pub settings_tab: crate::settings::Tab,
     /// The devices this machine trusts, as its daemon last said.
@@ -1802,6 +1805,8 @@ impl Dent {
                 .map(crate::machines::MachineView::saved)
                 .collect(),
             machine_id: String::new(),
+            machine_version: String::new(),
+            machine_update: None,
             settings_tab: crate::settings::Tab::General,
             devices: Vec::new(),
             pairing: None,
@@ -3141,9 +3146,13 @@ impl Dent {
                     machine,
                     id,
                     agents,
+                    version,
+                    update,
                 } => {
                     self.machine = machine;
                     self.machine_id = id;
+                    self.machine_version = version;
+                    self.machine_update = update;
                     self.connection = Ok(());
                     // What each agent is (names, what it can do) from the
                     // welcome; how it stands comes with the Agents reply.

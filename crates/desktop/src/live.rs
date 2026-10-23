@@ -27,6 +27,10 @@ pub enum Incoming {
         /// The agents it drives, the default first; empty from a daemon
         /// older than agent ids.
         agents: Vec<dent_protocol::AgentInfo>,
+        /// What runs (the launcher's name for it, else the daemon's
+        /// version), and how its last update went.
+        version: String,
+        update: Option<dent_protocol::UpdateOutcome>,
     },
     Down(String),
     Out {
@@ -162,6 +166,9 @@ fn run(
                                 agents,
                                 id,
                                 managed,
+                                version,
+                                release,
+                                update,
                                 ..
                             },
                     } if req == 1 => {
@@ -182,6 +189,8 @@ fn run(
                             machine,
                             id,
                             agents,
+                            version: if release.is_empty() { version } else { release },
+                            update: update.map(|u| *u),
                         }
                     }
                     Out::Error { message } if req == 1 => Incoming::Down(message),

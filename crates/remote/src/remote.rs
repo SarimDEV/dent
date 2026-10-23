@@ -41,6 +41,10 @@ pub enum Event {
         name: String,
         id: String,
         version: String,
+        /// The launcher's name for the version that runs, when the service
+        /// runs it, and how its last update went.
+        release: String,
+        update: Option<dent_protocol::UpdateOutcome>,
         /// The protocol it speaks.
         proto: u32,
         agents: Vec<AgentInfo>,
@@ -518,7 +522,7 @@ async fn run(
                         let (req, out) = (env.req, env.body);
                         if req == HELLO {
                             match out {
-                                Out::Reply { reply: Reply::Welcome { proto, machine, id, version, agents, addresses, wake, epoch: e, .. } } => {
+                                Out::Reply { reply: Reply::Welcome { proto, machine, id, version, agents, addresses, wake, epoch: e, release, update, .. } } => {
                                     if !saved.id.is_empty() && !id.is_empty() && id != saved.id {
                                         events(Event::DifferentMachine(via.0.clone()));
                                         continue;
@@ -543,6 +547,8 @@ async fn run(
                                         name: machine.clone(),
                                         id,
                                         version,
+                                        release,
+                                        update: update.map(|u| *u),
                                         proto,
                                         agents,
                                         via: via.0.clone(),

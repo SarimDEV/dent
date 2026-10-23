@@ -179,3 +179,7 @@ Open entries are ranked by cost, highest first. When one is fixed, move it to Do
 - Seen: 2026-10-18, review fixes. "The plan moves along and the turn ends" failed twice in a row on the full walk (433 checks, 1 failed, about 9 min each). The fake's `make a plan slowly` holds each of two steps 12 s, so the turn runs about 24 s, but the check allowed 20 s from a point a second or two in. It passed earlier only when the steps before it happened to take longer.
 - Fix: the check allows 30 s.
 - Result: see the next full run in this batch's PR.
+
+## 2026-10-23: verify on main checks formatting only
+
+`just verify` diffs against `origin/main`, so run on main after a merge it says "no crate changed" and checks only formatting; three clean runs there proved nothing. And a merge chained after a verify in one command ran whatever the verify said (#46 went in after a run that wasn't clean; `just verify-all` on main then passed). Now: verify on the branch, read the result, then merge in a separate step; check main with `just verify-all`.

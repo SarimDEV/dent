@@ -1638,6 +1638,11 @@ impl Dent {
             crate::machines_page::Standing::Online | crate::machines_page::Standing::Connecting => {
                 return None;
             }
+            // Back in a moment, its agents running all the while.
+            crate::machines_page::Standing::Updating => (
+                "is updating",
+                "Its sessions keep running, and it's back in a moment. Messages wait here till then.",
+            ),
             crate::machines_page::Standing::Asleep => (
                 "is asleep",
                 "The agent paused there and carries on when it wakes. Messages wait here till then.",
