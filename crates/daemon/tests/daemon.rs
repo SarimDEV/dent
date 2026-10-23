@@ -4641,3 +4641,46 @@ fn an_agent_using_too_much_memory_is_warned_about_then_stopped() {
         1
     );
 }
+
+/// A login shell asked for its environment that outlived its daemon (it
+/// died mid-ask; such shells can hang for good) is stopped by the next
+/// daemon on the same state. One whose pid now belongs to something else
+/// is left alone.
+#[test]
+fn a_login_shell_a_dead_daemon_left_asking_is_stopped_by_the_next() {
+    use std::os::unix::process::CommandExt;
+    let mut w = World::new(&[]);
+    w.kill();
+    let mut stuck = Command::new("sleep")
+        .arg("60")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let mut other = Command::new("sleep")
+        .arg("60")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let dir = w.state.join("env-shells");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(stuck.id().to_string()), now.to_string()).unwrap();
+    // Written down as started an hour ago: not this process.
+    std::fs::write(
+        dir.join(other.id().to_string()),
+        (now - 3_600_000).to_string(),
+    )
+    .unwrap();
+    w.start();
+    let until = Instant::now() + Duration::from_secs(5);
+    while stuck.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < until, "the left shell is still running");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(other.try_wait().unwrap().is_none(), "stopped a stranger");
+    let _ = other.kill();
+    let _ = other.wait();
+}

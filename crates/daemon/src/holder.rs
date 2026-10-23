@@ -314,7 +314,7 @@ pub fn stop_left_behind(dir: &Path, id: &str) {
 
 /// Whether process `pid` started at `started` (ms since the epoch), to the
 /// few seconds `ps` can tell.
-fn started_at(pid: i32, started: u64) -> bool {
+pub fn started_at(pid: i32, started: u64) -> bool {
     let Ok(out) = std::process::Command::new("ps")
         .args(["-o", "etime=", "-p", &pid.to_string()])
         .output()

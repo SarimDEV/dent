@@ -60,16 +60,33 @@ pub fn stop_all(state: &Path) {
         // SAFETY: kill has no memory preconditions.
         unsafe { libc::kill(pid, libc::SIGKILL) };
     }
+    // Login shells it was asking for their environment, as its next run
+    // would stop them.
+    let shells = std::fs::read_dir(state.join("env-shells"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_string_lossy().parse::<i32>().ok());
+    for pid in shells {
+        if args_of(pid).contains("__DENT_ENV_BEGIN__") {
+            // SAFETY: kill has no memory preconditions; the shell's group.
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+        }
+    }
     for pid in agent_pids(state) {
-        let comm = std::process::Command::new("ps")
-            // The command line: Linux cuts `comm` to 15 characters.
-            .args(["-o", "args=", "-p", &pid.to_string()])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default();
-        if comm.contains("dent-fake-claude") {
+        if args_of(pid).contains("dent-fake-claude") {
             // SAFETY: as above; a negative pid is the agent's group.
             unsafe { libc::kill(-pid, libc::SIGKILL) };
         }
     }
+}
+
+/// A process's command line (not `comm`, which Linux cuts to 15
+/// characters); empty when it isn't there.
+fn args_of(pid: i32) -> String {
+    std::process::Command::new("ps")
+        .args(["-o", "args=", "-p", &pid.to_string()])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
 }
