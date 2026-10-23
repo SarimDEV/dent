@@ -69,6 +69,11 @@ const CTL_QUEUE: usize = 64;
 /// How often trust through the Tailscale account is checked again on a
 /// live connection ([decision 0061]).
 const RECHECK: Duration = Duration::from_secs(300);
+/// A burst of changes from Tailscale settles this long before trust is
+/// checked again, and checks are at least [`CHECK_GAP`] apart: a large
+/// tailnet's peers come and go all day.
+const SETTLE: Duration = Duration::from_secs(2);
+const CHECK_GAP: Duration = Duration::from_secs(10);
 /// Lines waiting to go to one remote client.
 /// File replies waiting to go to one device: each up to [`READ_MAX`]
 /// bytes, so a few is plenty.
@@ -93,6 +98,9 @@ pub struct Net {
     window: Mutex<Window>,
     pub lan: AtomicBool,
     tailscale: tokio::sync::Mutex<Option<(Option<tailnet::SelfNode>, Instant)>>,
+    /// Counts changes Tailscale has told of, settled: trust by account is
+    /// checked again on each.
+    tailnet: tokio::sync::watch::Sender<u64>,
     /// Device keys trusted through Tailscale lately, so a LAN attempt from
     /// one can be told "trusted on Tailscale" rather than "pair".
     via_tailscale: Mutex<HashSet<Vec<u8>>>,
@@ -145,6 +153,7 @@ impl Net {
             window: Mutex::new(Window::default()),
             lan: AtomicBool::new(lan),
             tailscale: tokio::sync::Mutex::new(None),
+            tailnet: tokio::sync::watch::channel(0).0,
             via_tailscale: Mutex::new(HashSet::new()),
             removed: broadcast::channel(16).0,
             bye: broadcast::channel(4).0,
@@ -272,6 +281,7 @@ pub async fn serve(d: Arc<Daemon>, listener: Option<TcpListener>) -> Result<()> 
         return Ok(());
     };
     let keys = Arc::new(identity.keys.clone());
+    tokio::spawn(follow_tailnet(d.clone()));
     eprintln!(
         "dent-daemon: remote access on port {} as {}",
         d.net.port,
@@ -305,6 +315,42 @@ pub async fn serve(d: Arc<Daemon>, listener: Option<TcpListener>) -> Result<()> 
         tokio::spawn(async move {
             let _ = conn(d, keys, stream, peer, permit).await;
         });
+    }
+}
+
+/// Follows Tailscale's changes while the daemon runs, so a device trusted
+/// through the account is checked again when the network changes, not only
+/// every [`RECHECK`] ([decision 0061]). Without Tailscale, it tries again
+/// now and then, less often each time.
+///
+/// [decision 0061]: ../../../docs/decisions/0061-trust.md
+async fn follow_tailnet(d: Arc<Daemon>) {
+    let poke = Arc::new(tokio::sync::Notify::new());
+    {
+        let (d, poke) = (d.clone(), poke.clone());
+        tokio::spawn(async move {
+            loop {
+                // Changes while a round runs leave one permit: one more round.
+                poke.notified().await;
+                tokio::time::sleep(SETTLE).await;
+                // This machine's own node may be what changed.
+                *d.net.tailscale.lock().await = None;
+                d.net.tailnet.send_modify(|n| *n += 1);
+                tokio::time::sleep(CHECK_GAP).await;
+            }
+        });
+    }
+    let mut wait = Duration::from_secs(5);
+    loop {
+        let started = Instant::now();
+        let p = poke.clone();
+        let watched = tailnet::watch(move || p.notify_one()).await.is_ok();
+        // A watch that ran a while was healthy: the next try comes soon.
+        if watched && started.elapsed() > Duration::from_secs(60) {
+            wait = Duration::from_secs(5);
+        }
+        tokio::time::sleep(wait).await;
+        wait = (wait * 2).min(RECHECK);
     }
 }
 
@@ -846,6 +892,7 @@ async fn trusted(
     };
     let mut writer_done = false;
     let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + RECHECK, RECHECK);
+    let mut tailnet = d.net.tailnet.subscribe();
 
     let result: Result<()> = async {
         if d.net.asleep.load(Ordering::Relaxed) {
@@ -884,7 +931,13 @@ async fn trusted(
                     }
                     return Ok(());
                 }
-                _ = tick.tick(), if recheck.is_some() => {
+                // Every few minutes, and when Tailscale says something changed.
+                _ = async {
+                    tokio::select! {
+                        _ = tick.tick() => {}
+                        _ = tailnet.changed() => {}
+                    }
+                }, if recheck.is_some() => {
                     if let Some(ip) = recheck
                         && !still_same_account(&d.net, ip).await
                     {
