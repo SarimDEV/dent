@@ -32,6 +32,7 @@ mod failures;
 mod find;
 mod finish;
 mod keys;
+mod load;
 mod look;
 mod markdown;
 mod motion;
@@ -57,7 +58,7 @@ mod worktrees;
 mod zoom;
 use {
     ambient::*, attaching::*, bench::*, changes::*, checks::*, common::*, composing::*, demo::*,
-    edges::*, failures::*, find::*, finish::*, keys::*, look::*, markdown::*, motion::*,
+    edges::*, failures::*, find::*, finish::*, keys::*, load::*, look::*, markdown::*, motion::*,
     narration::*, parity::*, pickup::*, pins::*, polish::*, prs::*, queue::*, real::*, recall::*,
     reply::*, setup::*, stills::*, sweep::*, switching::*, takeback::*, typing::*, view::*,
     visuals::*, worktrees::*, zoom::*,
@@ -231,6 +232,7 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("recall", &[recall]),
     ("visuals", &[visuals]),
     ("bench", &[bench]),
+    ("load", &[load]),
     ("rows", &[rows]),
     ("crash-mid-reply", &[crash_mid_reply]),
     ("fold", &[fold]),
