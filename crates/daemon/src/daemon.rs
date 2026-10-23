@@ -1206,11 +1206,12 @@ impl Daemon {
         agent: &'static dyn crate::agent::Driver,
         prompt: &str,
     ) -> Result<String> {
-        let argv = agent.ask(&self.env(), prompt);
+        let env = self.env();
+        let argv = agent.ask(&env, prompt);
         let dir = self.paths.state.join("titles");
         std::fs::create_dir_all(&dir)?;
         let dir = dir.display().to_string();
-        let got = tokio::task::spawn_blocking(move || run_aside(agent, &argv, &dir))
+        let got = tokio::task::spawn_blocking(move || run_aside(agent, &argv, &env.vars, &dir))
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?
             .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1597,12 +1598,14 @@ impl Daemon {
         if !driver.caps().aside {
             bail!("{} can't answer side questions", driver.name());
         }
-        let argv = driver.aside(&self.env(), row.model.as_deref(), &agent, question);
+        let env = self.env();
+        let argv = driver.aside(&env, row.model.as_deref(), &agent, question);
         let (me, session, id, cwd) = (self.clone(), session.to_string(), id.to_string(), row.cwd);
         tokio::spawn(async move {
-            let got = tokio::task::spawn_blocking(move || run_aside(driver, &argv, &cwd))
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()));
+            let got =
+                tokio::task::spawn_blocking(move || run_aside(driver, &argv, &env.vars, &cwd))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
             let body = match got {
                 Ok((text, agent_session)) => Body::AsideReply {
                     id,
@@ -2006,9 +2009,12 @@ pub fn title(text: &str) -> String {
 /// names append `-n`).
 /// Run a side question to the end: its answer and the agent conversation
 /// that holds it. Gives up after three minutes.
+/// Run a one-off agent command (a title, a side question), with what the
+/// agent needs from the login shell (`env`, as agents in the holder get it).
 fn run_aside(
     agent: &dyn crate::agent::Driver,
     argv: &[String],
+    env: &[(String, String)],
     cwd: &str,
 ) -> std::result::Result<(String, Option<String>), String> {
     use crate::agent::OneOff;
@@ -2019,6 +2025,7 @@ fn run_aside(
     let name = agent.name();
     let mut child = std::process::Command::new(&argv[0])
         .args(&argv[1..])
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
