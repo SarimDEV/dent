@@ -497,13 +497,31 @@ impl Daemon {
         }
         let bin = sibling("dent-session-holder")?;
         let dir = self.paths.holder();
-        let start = holder::Start {
-            argv: vec![
-                bin.display().to_string(),
-                "--dir".into(),
-                dir.display().to_string(),
-            ],
-        };
+        let mut argv = vec![
+            bin.display().to_string(),
+            "--dir".into(),
+            dir.display().to_string(),
+        ];
+        // Run by systemd, the holder goes in a scope of its own: stopping or
+        // restarting the service stops everything in the service's cgroup,
+        // and the holder, with every agent, must outlive that ([spike 13]).
+        //
+        // [spike 13]: ../../docs/spikes/13-service-and-updates.md
+        if under_systemd() {
+            argv.splice(
+                0..0,
+                [
+                    "systemd-run",
+                    "--user",
+                    "--scope",
+                    "--quiet",
+                    "--collect",
+                    "--",
+                ]
+                .map(String::from),
+            );
+        }
+        let start = holder::Start { argv };
         let (conn, mut rx) = holder::connect(&dir, Some(&start)).await?;
         let conn = Arc::new(conn);
         *h = Some(conn.clone());
@@ -2084,6 +2102,19 @@ pub fn uuid() -> String {
 }
 
 /// A binary installed next to this one.
+/// Started by a systemd unit (systemd sets `INVOCATION_ID` for what a
+/// unit runs, and it's inherited), with `systemd-run` there to use.
+fn under_systemd() -> bool {
+    cfg!(target_os = "linux")
+        && std::env::var_os("INVOCATION_ID").is_some()
+        && std::process::Command::new("systemd-run")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+}
+
 pub fn sibling(name: &str) -> Result<std::path::PathBuf> {
     let me = std::env::current_exe()?;
     let p = me.with_file_name(name);

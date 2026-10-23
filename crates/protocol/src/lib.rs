@@ -1552,6 +1552,12 @@ pub enum Request {
     /// Exit so a newer daemon can take over. Agents keep running in the
     /// session holder, and the client starts the new daemon.
     Restart,
+    /// Under the launcher: run `version`, already staged on the machine
+    /// (`dent-daemon update DIR`). It's trialled and rolled back if it
+    /// fails; the answer says whether the launcher took it on.
+    Update {
+        version: String,
+    },
     /// What the session's directory has changed, against its last commit;
     /// with `turn` (one of your messages), only what that turn changed.
     Changes {
@@ -1785,6 +1791,19 @@ pub enum Reply {
         /// How to wake it from its own network while it sleeps.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         wake: Vec<Wake>,
+        /// It runs under `dent-launcher`, which chooses its version: it's
+        /// updated with [`Request::Update`], never by being asked to
+        /// restart beside a newer build.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        managed: bool,
+        /// The launcher's name for the version that runs (`0.1.0-3f2a9c1e`).
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        release: String,
+        /// How its last update went, said by id so a client tells an update
+        /// from a rollback without guessing from versions
+        /// ([decision 0065](../../docs/decisions/0065-launcher-and-updates.md)).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        update: Option<Box<UpdateOutcome>>,
     },
     Ok,
     Pairing {
@@ -1949,6 +1968,7 @@ impl Request {
             | R::Recent
             | R::Adopt { .. }
             | R::Restart
+            | R::Update { .. }
             | R::FilesIn { .. }
             | R::Folders { .. }
             | R::AddProject { .. }
@@ -2065,6 +2085,16 @@ pub fn build_stamp(path: &std::path::Path) -> String {
             format!("{}-{t}", m.len())
         })
         .unwrap_or_default()
+}
+
+/// How an update went: `from` to `to`, kept or rolled back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateOutcome {
+    pub id: String,
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub rolled_back: bool,
 }
 
 /// One line of the wire format.

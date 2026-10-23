@@ -2195,6 +2195,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dent-launcher"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "dent-link"
 version = "0.0.0"
 dependencies = [

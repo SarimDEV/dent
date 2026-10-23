@@ -1,0 +1,18 @@
+[package]
+name = "dent-launcher"
+description = "Tiny, rarely changed process the service manager runs: it owns which daemon version runs, trials updates and rolls them back."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "dent-launcher"
+path = "src/main.rs"
+
+[dependencies]
+libc = "=0.2.190"
+
+[lints]
+workspace = true

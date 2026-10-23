@@ -36,8 +36,17 @@ impl Paths {
     }
 
     pub fn holder(&self) -> PathBuf {
-        let tmp = std::env::var_os("TMPDIR")
+        // On Linux the user's runtime folder: set alike in an SSH login and
+        // a systemd service, and never swept, where /tmp's files go after
+        // ten days unused (a holder waiting on an agent for that long would
+        // lose its socket).
+        let runtime = cfg!(target_os = "linux")
+            .then(|| std::env::var_os("XDG_RUNTIME_DIR"))
+            .flatten()
             .map(PathBuf::from)
+            .filter(|p| p.is_dir());
+        let tmp = runtime
+            .or_else(|| std::env::var_os("TMPDIR").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("/tmp"));
         tmp.join(format!(
             "dent-{:016x}",

@@ -41,11 +41,17 @@ fn said(s: &dent_protocol::FileStat) -> String {
     }
 }
 
-pub async fn serve(d: Arc<Daemon>) -> Result<()> {
-    let sock = d.paths.socket();
+/// The socket local clients connect to, bound (an old one left by a
+/// daemon that's gone is replaced).
+pub fn bind(paths: &crate::paths::Paths) -> Result<UnixListener> {
+    let sock = paths.socket();
     let _ = std::fs::remove_file(&sock);
     let listener = UnixListener::bind(&sock).with_context(|| format!("bind {}", sock.display()))?;
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
+}
+
+pub async fn serve(d: Arc<Daemon>, listener: UnixListener) -> Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
         let d = d.clone();
@@ -205,6 +211,9 @@ pub async fn session(
                         epoch: d.net.epoch.clone(),
                         addresses: d.net.addresses().await,
                         wake: crate::remote::addrs::wake_targets(),
+                        managed: crate::launcher::get().is_some(),
+                        release: crate::launcher::version().unwrap_or_default(),
+                        update: crate::launcher::outcome(),
                     })
                 }
             }
@@ -293,6 +302,16 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 std::process::exit(0);
             });
+            Reply::Ok
+        }
+        // The launcher trials it; this daemon is stopped if it's taken on.
+        Request::Update { version } => {
+            let Some(l) = crate::launcher::get() else {
+                anyhow::bail!(
+                    "this daemon isn't run by dent-launcher, so it can't update itself; install it with `dent-daemon install`"
+                );
+            };
+            tokio::task::spawn_blocking(move || l.update(&version)).await??;
             Reply::Ok
         }
         Request::Create {

@@ -161,17 +161,21 @@ fn run(
                                 build,
                                 agents,
                                 id,
+                                managed,
                                 ..
                             },
                     } if req == 1 => {
                         // A daemon older than the one installed beside the app
                         // makes way for it; agents keep running in the holder.
+                        // One the service runs is updated through its
+                        // launcher instead: restarted, it would come back as
+                        // the same version, again and again.
                         let installed = std::env::current_exe()
                             .ok()
                             .map(|p| dent_protocol::build_stamp(&p.with_file_name("dent-daemon")))
                             .unwrap_or_default();
                         // One too old to say its build is older still.
-                        if !installed.is_empty() && installed != build {
+                        if !managed && !installed.is_empty() && installed != build {
                             let _ = restart_tx.send(());
                         }
                         Incoming::Up {
@@ -222,6 +226,12 @@ fn run(
 /// Start the daemon from beside this app, in its own process group so it
 /// outlives the window.
 fn start_daemon(state: &Path, ui: UnboundedSender<Incoming>) -> Result<(), String> {
+    // Installed as a service (`dent-daemon install`), the launcher runs the
+    // daemon and starts it again itself; one started here would take the
+    // state folder from it, mid-update even.
+    if state.join("launcher.state").is_file() && state.join("bin/dent-launcher").is_file() {
+        return Ok(());
+    }
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     let bin = me.with_file_name("dent-daemon");
     if !bin.exists() {
