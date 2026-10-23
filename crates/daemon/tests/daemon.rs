@@ -3819,7 +3819,9 @@ fn carry_then(
     mut before_accept: impl FnMut(),
 ) -> Result<Result<String, String>, String> {
     use dent_client_core::carry::{Carrier, Ended, Side, Step};
-    let mut c = Carrier::new(session, id, "b").with_chunk(chunk);
+    let mut c = Carrier::new(session, id, "b")
+        .to_machine("b-key")
+        .with_chunk(chunk);
     let mut step = c.start();
     let mut reads = 0;
     loop {
@@ -3882,7 +3884,8 @@ fn a_session_moves_with_its_conversation_and_its_uncommitted_work() {
     a.pump_for(Duration::from_millis(300));
     assert!(a.events(&s).iter().any(|e| matches!(
         e,
-        Body::Move { state: dent_protocol::MoveState::Departed, to_session: Some(t), .. } if *t == to
+        Body::Move { state: dent_protocol::MoveState::Departed, to_session: Some(t), to_machine, .. }
+            if *t == to && to_machine == "b-key"
     )));
     let refused = a.call(Request::Send {
         session: s.clone(),
@@ -4147,6 +4150,7 @@ fn a_move_waits_for_the_turn_and_a_message_meanwhile_calls_it_off() {
         session: s.into(),
         id: id.into(),
         to: "b".into(),
+        to_machine: String::new(),
         have: Some(Vec::new()),
     };
     // Asked while it works: it waits, then packs once the turn is over.
@@ -4312,6 +4316,7 @@ fn a_source_that_dies_while_packing_packs_again_and_the_move_finishes() {
         session: s.clone(),
         id: "mv8".into(),
         to: "b".into(),
+        to_machine: String::new(),
         have: Some(Vec::new()),
     });
     let until = Instant::now() + Duration::from_secs(10);
@@ -4365,6 +4370,7 @@ fn a_move_called_off_after_packing_sends_nothing_and_its_id_is_spent() {
         session: s.clone(),
         id: "mv9".into(),
         to: "b".into(),
+        to_machine: String::new(),
         have: Some(Vec::new()),
     }))
     .unwrap();

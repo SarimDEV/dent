@@ -52,6 +52,10 @@ pub struct Probe {
     pub session: String,
     pub remotes: Option<Vec<GitRemote>>,
     pub has: HashMap<String, bool>,
+    /// What couldn't be found out: the remotes ("") or a machine's
+    /// answer. Such a machine is offered as online, and the move asks
+    /// again.
+    pub unsure: std::collections::HashSet<String>,
 }
 
 /// How long an answer may take before the move counts as stopped: packing
@@ -67,8 +71,8 @@ fn patience(req: &Request) -> Duration {
 
 impl Dent {
     /// Move session `id` (as this device keeps it) to `to` ("" is this
-    /// one). The same session moved again after it stopped goes on with
-    /// the same move.
+    /// one). A move the session says is under way goes on with the same
+    /// id, to the machine it was going to; anything else is a new move.
     pub fn start_move(&mut self, id: &str, to: &str, cx: &mut Context<Self>) {
         if self.moves.get(id).is_some_and(|r| r.stopped.is_none()) {
             return;
@@ -76,29 +80,30 @@ impl Dent {
         let (from, plain) = fleet::split(id);
         let (from, plain) = (from.to_string(), plain.to_string());
         let to_name = self.machine_name(to);
-        // Picking it up again keeps the move's id: the machines pick up
-        // where it stood. So does one the session says is under way (this
-        // app restarted, or another device began it).
-        let live = self
-            .session(id)
-            .and_then(|s| match (&s.moving, &s.move_id) {
-                (
-                    Some((
-                        _,
-                        _,
-                        dent_protocol::MoveState::Pending
-                        | dent_protocol::MoveState::Departing { .. },
-                    )),
-                    Some(m),
-                ) => Some(m.clone()),
-                _ => None,
-            });
-        let move_id = match (self.moves.get(id), live) {
-            (Some(r), _) if r.to == to => r.carrier.id().to_string(),
-            (_, Some(m)) => m,
-            _ => dent_client_core::carry::new_id(crate::cards::now_ms(), rand_u64()),
+        // Under way (stopped partway, this app restarted, or another
+        // device began it): the machines pick up where it stood. A move
+        // that ended keeps no claim: its id is spent there.
+        let live = self.live_move(id);
+        let move_id = match live {
+            Some((going, m, target)) => {
+                let same = match (self.moves.get(id), target) {
+                    (Some(r), _) => r.to == to,
+                    (None, Some(target)) => target == to,
+                    (None, None) => going == to_name,
+                };
+                if !same {
+                    self.toast(
+                        crate::app::ToastAction::Info,
+                        format!("It's moving to {going}: call that off or continue here first"),
+                    );
+                    return;
+                }
+                m
+            }
+            None => dent_client_core::carry::new_id(crate::cards::now_ms(), rand_u64()),
         };
-        let mut carrier = Carrier::new(&plain, &move_id, &to_name);
+        let mut carrier =
+            Carrier::new(&plain, &move_id, &to_name).to_machine(&self.machine_key(to));
         let step = carrier.start();
         self.moves.insert(
             id.to_string(),
@@ -114,6 +119,50 @@ impl Dent {
         );
         self.move_step(id, step, cx);
         cx.notify();
+    }
+
+    /// The move session `id` says is under way: where to by name, its id,
+    /// and the machine it goes to, when that's known here.
+    pub fn live_move(&self, id: &str) -> Option<(String, String, Option<String>)> {
+        let s = self.session(id)?;
+        match (&s.moving, &s.move_id) {
+            (
+                Some((
+                    to,
+                    _,
+                    dent_protocol::MoveState::Pending | dent_protocol::MoveState::Departing { .. },
+                )),
+                Some(m),
+            ) => Some((to.clone(), m.clone(), self.move_target(s))),
+            _ => None,
+        }
+    }
+
+    /// Machine `m` ("" is this one) by the id every device knows it by.
+    pub fn machine_key(&self, m: &str) -> String {
+        if m.is_empty() {
+            self.machine_id.clone()
+        } else {
+            m.to_string()
+        }
+    }
+
+    /// The machine session `s` is moving or moved to, as this device
+    /// keeps it: by its id when its daemon said, else by name when the
+    /// name is one machine's.
+    pub fn move_target(&self, s: &crate::data::Session) -> Option<String> {
+        match s.move_to.as_deref() {
+            Some(key) if key == self.machine_id => Some(String::new()),
+            Some(key) => self
+                .machines
+                .iter()
+                .any(|m| m.id == key)
+                .then(|| key.to_string()),
+            None => {
+                let (to, ..) = s.moving.as_ref()?;
+                self.machine_by_name(to)
+            }
+        }
     }
 
     fn move_step(&mut self, id: &str, step: Step, cx: &mut Context<Self>) {
@@ -144,9 +193,12 @@ impl Dent {
             Step::Done(Ok(there)) => {
                 let to = run.to.clone();
                 self.moves.remove(id);
-                // The window follows it to the machine it went to.
-                let key = fleet::qualify(&to, &there);
-                self.pending_select = Some(key);
+                // The window follows it to the machine it went to, when
+                // it's still the one open: a move finishing elsewhere
+                // doesn't take the window away from what you're doing.
+                if self.current().is_some_and(|s| s.id == id) {
+                    self.pending_select = Some(fleet::qualify(&to, &there));
+                }
                 cx.notify();
             }
             // Nothing was packed: it works here as it was.
@@ -170,6 +222,32 @@ impl Dent {
                 cx.notify();
             }
             Step::Done(Err(e)) => {
+                // Stopped before the machine it leaves took it on: nothing
+                // is held, so there's nothing to retry or keep. It says
+                // why and works here as it was.
+                let name = run.to_name.clone();
+                if self.live_move(id).is_none() {
+                    self.moves.remove(id);
+                    let why = match e {
+                        Ended::Stopped { why, .. } => why,
+                        _ => "it stopped".into(),
+                    };
+                    // Ended there (called off, or a message sent while it
+                    // waited): the chat says so already.
+                    if why.contains("move ended") {
+                        cx.notify();
+                        return;
+                    }
+                    self.toast(
+                        crate::app::ToastAction::Info,
+                        format!("Couldn't move it to {name}: {why}"),
+                    );
+                    cx.notify();
+                    return;
+                }
+                let Some(run) = self.moves.get_mut(id) else {
+                    return;
+                };
                 run.out = None;
                 run.stopped = Some(e);
                 cx.notify();
@@ -261,6 +339,7 @@ impl Dent {
                 session: plain.to_string(),
                 id: "probe".into(),
                 to: String::new(),
+                to_machine: String::new(),
                 have: None,
             },
         );
@@ -294,6 +373,13 @@ impl Dent {
         }
     }
 
+    /// The remotes, or machine `machine`'s answer, couldn't be had.
+    pub fn probe_unsure(&mut self, id: &str, machine: String) {
+        if let Some(p) = self.move_probe.as_mut().filter(|p| p.session == id) {
+            p.unsure.insert(machine);
+        }
+    }
+
     pub fn probe_has(&mut self, id: &str, machine: String, found: bool) {
         if let Some(p) = self.move_probe.as_mut().filter(|p| p.session == id) {
             p.has.insert(machine, found);
@@ -324,9 +410,13 @@ impl Dent {
         }
     }
 
-    /// Where a session moved to `name` as `there` is: the machine of that
-    /// name that has it, when names are shared.
-    pub fn moved_to(&self, name: &str, there: &str) -> Option<String> {
+    /// Where session `s`, moved to `name` as `there`, is: the machine it
+    /// went to, or, from an older daemon that said only its name, the
+    /// machine of that name that has it.
+    pub fn moved_to(&self, s: &crate::data::Session, name: &str, there: &str) -> Option<String> {
+        if s.move_to.is_some() {
+            return self.move_target(s).map(|m| fleet::qualify(&m, there));
+        }
         let all = self.machines_named(name);
         all.iter()
             .find(|m| self.session(&fleet::qualify(m, there)).is_some())
@@ -366,6 +456,17 @@ impl Dent {
             .and_then(|p| p.remotes.as_ref())
             .is_some_and(|r| r.is_empty());
         let has = |m: &str| probe.and_then(|p| p.has.get(m).copied());
+        let unsure = |m: &str| probe.is_some_and(|p| p.unsure.contains("") || p.unsure.contains(m));
+        // Under way already: only where it's going, and that's not chosen
+        // again (its banner carries it).
+        let going = self
+            .moves
+            .get(&id)
+            .map(|r| (r.to_name.clone(), Some(r.to.clone()), r.stopped.is_none()))
+            .or_else(|| {
+                self.live_move(&id)
+                    .map(|(to, _, target)| (to, target, false))
+            });
         let go = |to: String| -> Option<crate::chat::Act> {
             let id = id.clone();
             Some(std::rc::Rc::new(
@@ -374,6 +475,21 @@ impl Dent {
                     this.start_move(&id, &to, cx);
                 },
             ))
+        };
+        let hold = |e: &mut Entry, name: &str, machine: &str| {
+            let Some((to, target, carrying)) = &going else {
+                return;
+            };
+            let there = target.as_deref().map_or(to == name, |t| t == machine);
+            if !there {
+                e.note = Some(format!("It's moving to {}", crate::data::machine_short(to)));
+                e.off = Some("Call that move off, or continue here, first");
+                e.act = None;
+            } else if *carrying {
+                e.note = Some("On its way there".into());
+                e.off = Some("It's on its way there");
+                e.act = None;
+            }
         };
         let mut v = Vec::new();
         // This Mac, when the session runs elsewhere.
@@ -392,6 +508,7 @@ impl Dent {
                 e.off = Some("It doesn't have this project; bring it there first");
                 e.act = None;
             }
+            hold(&mut e, &self.machine_name(""), "");
             v.push(e);
         }
         for m in self.added_machines() {
@@ -406,7 +523,7 @@ impl Dent {
                         Some("It doesn't have this project; bring it there first"),
                     ),
                     Some(true) => (format!("Has {project}{ms}"), None),
-                    _ if anywhere => (format!("Online{ms}"), None),
+                    _ if anywhere || unsure(&m.id) => (format!("Online{ms}"), None),
                     _ => (format!("Checking for {project}…{ms}"), None),
                 },
                 Standing::Connecting => ("Connecting…".into(), Some("It isn't connected yet")),
@@ -429,10 +546,11 @@ impl Dent {
                 e.off = off;
                 e.act = None;
             }
+            hold(&mut e, &self.machine_name(&m.id), &m.id);
             v.push(e);
         }
         v.push(Entry::note(
-            "It goes once this turn ends, with its uncommitted work and its whole conversation, and carries on there.",
+            "It goes when this turn ends, with its uncommitted work and its whole conversation.",
         ));
         v
     }

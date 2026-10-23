@@ -178,3 +178,252 @@ pub(super) fn move_stopped() -> Vec<(f32, Act)> {
     ]);
     v
 }
+
+/// The machine menu, banner and moved card at their limits: a long
+/// machine name, every way a machine can stand, a move partway through
+/// sending, and the record a long-named machine left. Drawn from state put
+/// in place, so it needs no second machine.
+pub(super) fn move_limits() -> Vec<(f32, Act)> {
+    let mut v = new_session("hello there");
+    v.extend([
+        (0.1, Until("it answers", |d, _| answered(d), 20.)),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                use dent_client_core::machine::State;
+                let mut add = |id: &str, name: &str, state: State, rtt: Option<u64>| {
+                    let mut m = crate::machines::MachineView::saved(dent_remote::store::Saved {
+                        id: id.into(),
+                        name: name.into(),
+                        ..Default::default()
+                    });
+                    m.state = state;
+                    m.rtt = rtt;
+                    d.machines.push(m);
+                };
+                add("aa01", "dent-linux", State::Online, Some(18));
+                add(
+                    "aa02",
+                    "Sarim's MacBook Pro (Work, 2024 M4 Max)",
+                    State::Online,
+                    Some(240),
+                );
+                add("aa03", "studio", State::Away(dent_link::Goodbye::Sleep), None);
+                add(
+                    "aa04",
+                    "build-box",
+                    State::Unreachable { why: "timed out".into() },
+                    None,
+                );
+                add("aa05", "pi", State::NeedsCode { pairing_open: false }, None);
+                add("aa06", "new-one", State::Connecting, None);
+                cx.notify();
+            }),
+        ),
+        (0.3, Click("chip-sessionmachine")),
+        (
+            0.1,
+            Until("the menu opens", |d, _| d.menu.is_some(), 3.),
+        ),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                // As the probe would answer: one has it, one doesn't.
+                if let Some(p) = d.move_probe.as_mut() {
+                    p.remotes = Some(vec![dent_protocol::GitRemote {
+                        name: "origin".into(),
+                        url: "git@example.com:a/proj.git".into(),
+                    }]);
+                    p.has.insert("aa01".into(), true);
+                    p.has.insert("aa02".into(), false);
+                }
+                cx.notify();
+            }),
+        ),
+        (0.6, Shot("limits-menu")),
+        (0.1, Key("escape")),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                let Some(id) = current(d).map(|s| s.id.clone()) else {
+                    return;
+                };
+                use dent_client_core::carry::{Carrier, Side};
+                use dent_protocol::Reply;
+                let mut c = Carrier::new(&id, "m2", "Sarim's MacBook Pro (Work, 2024 M4 Max)");
+                c.start();
+                c.answer(Side::From, Ok(Reply::MoveRemotes { remotes: vec![] }));
+                c.answer(Side::To, Ok(Reply::MoveHave { found: true, tips: vec![] }));
+                c.answer(
+                    Side::From,
+                    Ok(Reply::MovePacked {
+                        manifest: Box::new(dent_protocol::MoveManifest {
+                            id: "m2".into(),
+                            from_machine: String::new(),
+                            from_name: String::new(),
+                            from_session: id.clone(),
+                            agent: "claude".into(),
+                            agent_session: String::new(),
+                            cwd: String::new(),
+                            title: String::new(),
+                            model: None,
+                            permission: Default::default(),
+                            effort: None,
+                            repo: None,
+                            files_from: String::new(),
+                            parts: vec![dent_protocol::MovePart {
+                                name: "conversation".into(),
+                                bytes: 3_400_000,
+                                sha256: String::new(),
+                            }],
+                        }),
+                    }),
+                );
+                c.answer(
+                    Side::To,
+                    Ok(Reply::MoveParts { have: vec![("conversation".into(), 1_200_000)] }),
+                );
+                d.moves.insert(
+                    id.clone(),
+                    crate::moves::Run {
+                        carrier: c,
+                        from: String::new(),
+                        to: "aa02".into(),
+                        to_name: "Sarim's MacBook Pro (Work, 2024 M4 Max)".into(),
+                        out: None,
+                        run: 0,
+                        stopped: None,
+                    },
+                );
+                d.rebuild(&id);
+                cx.notify();
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "partway through sending, the banner counts it",
+                |d, _| drawn(d, "move-banner").is_some(),
+                3.,
+            ),
+        ),
+        (0.4, Shot("limits-sending")),
+        (
+            0.1,
+            Until(
+                "while it goes, the menu offers nowhere else, and not there again",
+                |d, _| {
+                    let e = d.move_entries();
+                    let row = |k: &str| e.iter().find(|e| e.key == k);
+                    row("move-aa01").is_some_and(|e| {
+                        !e.choosable()
+                            && e.note.as_deref().is_some_and(|n| n.starts_with("It's moving to"))
+                    }) && row("move-aa02").is_some_and(|e| !e.choosable())
+                },
+                3.,
+            ),
+        ),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                let Some(id) = current(d).map(|s| s.id.clone()) else {
+                    return;
+                };
+                if let Some(r) = d.moves.get_mut(&id) {
+                    r.stopped = Some(dent_client_core::carry::Ended::Stopped {
+                        side: dent_client_core::carry::Side::To,
+                        why: "stopped taking conversation at 1200000 bytes: no space left on device (os error 28)".into(),
+                    });
+                }
+                if let Some(v) = d.core.list.get_mut(&id) {
+                    v.moving = Some((
+                        "Sarim's MacBook Pro (Work, 2024 M4 Max)".into(),
+                        None,
+                        dent_protocol::MoveState::Departing { sent: true },
+                    ));
+                }
+                d.rebuild(&id);
+                cx.notify();
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "stopped for a long reason, the banner says it whole",
+                |d, _| drawn(d, "move-retry").is_some(),
+                3.,
+            ),
+        ),
+        (0.4, Shot("limits-stopped")),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                let Some(id) = current(d).map(|s| s.id.clone()) else {
+                    return;
+                };
+                // Under way as the session says (this app restarted): the
+                // same move goes on, and only to where it was going.
+                d.moves.remove(&id);
+                if let Some(v) = d.core.list.get_mut(&id) {
+                    v.moving = Some(("dent-linux".into(), None, dent_protocol::MoveState::Pending));
+                    v.move_id = Some("m3".into());
+                    v.move_to = Some("aa01".into());
+                }
+                d.rebuild(&id);
+                d.start_move(&id, "aa02", cx);
+                let refused = !d.moves.contains_key(&id);
+                d.start_move(&id, "aa01", cx);
+                let same = d.moves.get(&id).is_some_and(|r| r.carrier.id() == "m3");
+                // Ended there (its id spent): picked again, it's a new move.
+                d.moves.remove(&id);
+                if let Some(v) = d.core.list.get_mut(&id) {
+                    v.moving = None;
+                }
+                d.rebuild(&id);
+                d.start_move(&id, "aa01", cx);
+                let fresh = d.moves.get(&id).is_some_and(|r| r.carrier.id() != "m3");
+                d.moves.remove(&id);
+                // The refusal's note isn't part of the stills after.
+                d.toast = None;
+                IDS.store(refused && same && fresh, std::sync::atomic::Ordering::Relaxed);
+                cx.notify();
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "a move under way goes on under its id, only to where it was going; one that ended starts anew",
+                |_, _| IDS.load(std::sync::atomic::Ordering::Relaxed),
+                1.,
+            ),
+        ),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                let Some(id) = current(d).map(|s| s.id.clone()) else {
+                    return;
+                };
+                d.moves.remove(&id);
+                if let Some(v) = d.core.list.get_mut(&id) {
+                    v.moving = Some((
+                        "Sarim's MacBook Pro (Work, 2024 M4 Max)".into(),
+                        Some("s-there".into()),
+                        dent_protocol::MoveState::Departed,
+                    ));
+                    v.move_to = Some("aa02".into());
+                }
+                d.rebuild(&id);
+                cx.notify();
+            }),
+        ),
+        (
+            0.1,
+            Until("the record says where it went", |d, _| drawn(d, "moved-card").is_some(), 3.),
+        ),
+        (0.4, Shot("limits-left")),
+    ]);
+    v
+}
+
+/// What [`move_limits`] found of the ids a move goes on with.
+static IDS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

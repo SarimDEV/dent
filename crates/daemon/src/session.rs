@@ -1117,6 +1117,7 @@ impl Session {
             self.log(Body::Move {
                 id: m.id.clone(),
                 to: m.to.clone(),
+                to_machine: m.to_machine.clone(),
                 state: m.state.clone(),
                 to_session: m.to_session.clone(),
             });
@@ -1152,7 +1153,9 @@ impl Session {
     fn move_op(&mut self, step: crate::moving::state::Step) -> Result<()> {
         use crate::moving::state::Step;
         let step = match step {
-            Step::Start { id, to, .. } => {
+            Step::Start {
+                id, to, to_machine, ..
+            } => {
                 // A move that ended doesn't start again under its id: its
                 // package is gone, and the session has moved on since.
                 let ended = self
@@ -1176,7 +1179,12 @@ impl Session {
                 }
                 // Busy: it waits for the turn, and work left running, to end.
                 let busy = self.in_turn || !self.background.is_empty();
-                Step::Start { id, to, busy }
+                Step::Start {
+                    id,
+                    to,
+                    to_machine,
+                    busy,
+                }
             }
             other => other,
         };
