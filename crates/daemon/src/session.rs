@@ -117,6 +117,8 @@ pub enum Op {
         signal: Option<i32>,
     },
     HolderLost,
+    /// A step in moving it to another machine.
+    Move(crate::moving::state::Step),
 }
 
 struct Proc {
@@ -217,6 +219,8 @@ struct Session {
     /// until its target shows (`None` after).
     preparing: Option<(String, Option<String>)>,
     background: Vec<Task>,
+    /// Its move to another machine, while there is one, or once it moved.
+    moving: Option<crate::moving::state::Move>,
     /// Which tool call started each background task.
     task_calls: HashMap<String, String>,
     /// The thinking streaming now, and the sentence of it on the working
@@ -305,6 +309,7 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
         said: false,
         preparing: None,
         background: Vec::new(),
+        moving: None,
         task_calls: HashMap::new(),
         mcp_told: HashSet::new(),
         thinking: String::new(),
@@ -331,6 +336,12 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
         watch: None,
     };
     s.rebuild();
+    s.moving =
+        s.d.store()
+            .get(&crate::moving::move_key(&s.id))
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_str(&v).ok());
     // A side question this daemon never saw finish won't be answered now.
     if let Ok(events) = s.d.store().session_events(&s.id) {
         let mut open: Vec<String> = Vec::new();
@@ -616,7 +627,20 @@ impl Session {
     }
 
     async fn op(&mut self, op: Op) -> Result<()> {
+        // A session on its way to another machine starts nothing here, and
+        // one that went is a record (decision 0064).
+        if fenced_by_moves(&op)
+            && let Some(why) = crate::moving::state::fence(self.moving.as_ref())
+        {
+            anyhow::bail!(why);
+        }
+        // A message while the move waits for the turn to end calls it off:
+        // you're still working here.
+        if matches!(op, Op::Send { .. }) {
+            self.move_step(crate::moving::state::Step::Message)?;
+        }
         match op {
+            Op::Move(step) => self.move_op(step),
             Op::Send {
                 id,
                 text,
@@ -913,7 +937,69 @@ impl Session {
         }
     }
 
+    /// A step in its move: persisted, then said.
+    fn move_step(&mut self, step: crate::moving::state::Step) -> Result<()> {
+        let was = self.moving.clone();
+        let now = crate::moving::state::next(was.as_ref(), step).map_err(anyhow::Error::msg)?;
+        if now == was {
+            return Ok(());
+        }
+        let key = crate::moving::move_key(&self.id);
+        match &now {
+            Some(m) => self.d.store().put(&key, &serde_json::to_string(m)?)?,
+            None => self.d.store().del(&key)?,
+        }
+        if let Some(m) = &now {
+            self.log(Body::Move {
+                id: m.id.clone(),
+                to: m.to.clone(),
+                state: m.state.clone(),
+                to_session: m.to_session.clone(),
+            });
+        }
+        // Over (called off, failed, kept here): nothing is kept of it.
+        self.moving = now.filter(|m| {
+            matches!(
+                m.state,
+                dent_protocol::MoveState::Pending
+                    | dent_protocol::MoveState::Departing { .. }
+                    | dent_protocol::MoveState::Departed
+            )
+        });
+        if self.moving.is_none() {
+            self.d.store().del(&key)?;
+        }
+        Ok(())
+    }
+
+    fn move_op(&mut self, step: crate::moving::state::Step) -> Result<()> {
+        use crate::moving::state::Step;
+        let step = match step {
+            Step::Start { id, to, .. } => {
+                // Messages waiting would start a turn here once it's fenced.
+                if !self.held.is_empty() {
+                    anyhow::bail!("send or take back the messages waiting first, then move it");
+                }
+                // Busy: it waits for the turn, and work left running, to end.
+                let busy = self.in_turn || !self.background.is_empty();
+                Step::Start { id, to, busy }
+            }
+            other => other,
+        };
+        self.move_step(step)
+    }
+
     fn update_status(&mut self) {
+        // The turn (and work it left) it waited for is over: fenced now.
+        if self
+            .moving
+            .as_ref()
+            .is_some_and(|m| m.state == dent_protocol::MoveState::Pending)
+            && !self.in_turn
+            && self.background.is_empty()
+        {
+            let _ = self.move_step(crate::moving::state::Step::Quiet);
+        }
         let s = if !self.asked.is_empty() {
             Status::NeedsYou
         } else if self.in_turn {
@@ -2961,4 +3047,24 @@ mod withdraw_tests {
         );
         assert_eq!(withdrawn_turns(&e), vec![4..=8]);
     }
+}
+
+/// What a move fences: anything that starts agent work or changes the
+/// session's folder or how its agent runs. Answers to the agent's own
+/// questions, stopping, reading and naming still work.
+fn fenced_by_moves(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::Send { .. }
+            | Op::Requeue { .. }
+            | Op::Rewind { .. }
+            | Op::SetModel(_)
+            | Op::SetPermission(_)
+            | Op::SetEffort(_)
+            | Op::Act { .. }
+            | Op::Restart
+            | Op::Resume(_)
+            | Op::Reopen
+            | Op::SetUp
+    )
 }

@@ -24,6 +24,7 @@ mod holder;
 mod launcher;
 mod login;
 mod machine;
+mod moving;
 mod paths;
 mod plan_tool;
 mod power;

@@ -98,3 +98,30 @@ The failure study gave the protocol: the state machine, the uncertain mark, the 
 
 - [daemon.md](../daemon.md#moving-sessions-between-machines) is rewritten to this record once it's accepted.
 - Moves arrive with stage 4 of the plan, after links, projects and the launcher.
+
+## Building it (2026-10-22)
+
+How the code is laid out, so each part can be built and tested on its own:
+
+- **`daemon/src/moving/`:** `state.rs` (the source's states, written as `Body::Move` events, and the fence), `pack.rs` (the git snapshot and bundle, ported from [spikes/move-git](../../spikes/move-git), and the conversation's parts), `accept.rs` (the target's steps) and `mod.rs` (requests).
+- **A move's folder on each side.** On the source it's `moves/<id>/`: its parts, a `manifest.json` (written with fsync), and `uncertain` once anything may have been sent. On the target it's `moves-in/<id>/`: parts as they arrive, and `accepted` holding the new session's id.
+- **Parts:**
+  - `git.bundle`, for a session in a repository;
+  - `transcript.jsonl`, the agent's own transcript;
+  - `agent/…`, its side files (subagents, saved tool results);
+  - `events.jsonl`, dent's events as bodies;
+  - `files/…`, attachments dent saved for it.
+
+  Each part is listed in the manifest with its size and SHA-256.
+- **Requests, all carried by a client both machines trust:**
+  - to the target first: `MoveHave`, which says which of the source's remotes it has as a repository, and its commit tips;
+  - to the source: `MovePack` (with those tips; pending, then departing, then packed);
+  - `MoveRead` for each part, as a ranged read, as files are read;
+  - to the target: `MoveIn` with the manifest (idempotent by id), `MoveWrite` for each chunk at its offset, then `MoveAccept`, which answers the new session, or a typed not-accepted when it wrote nothing;
+  - back to the source: `MoveDone` with that session (departed). `MoveCancel` and `MoveContinueHere` are the ways back.
+- **Where it lands:**
+  - In a repository the target has (matched by remote), the move goes into a new worktree there.
+  - Without one, it's cloned from the source's remotes first, as bringing a project does.
+  - A session in dent's scratch folder lands in the target's.
+  - A folder that isn't a repository and isn't the scratch folder can't move yet. That's said in preflight.
+- **`dent move SESSION --to MACHINE`** in the CLI carries it. It resumes from what each side says it has, so it can be stopped and run again with the same move id at any point.

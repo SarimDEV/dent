@@ -376,12 +376,16 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             until,
             id,
         } => Reply::Created {
-            session: match until {
-                Some(seq) => d.fork_until(&session, seq, id.as_deref()).await?,
-                None => d.fork(&session, before.as_deref(), id.as_deref()).await?,
+            session: {
+                crate::moving::check(&d.store(), &session)?;
+                match until {
+                    Some(seq) => d.fork_until(&session, seq, id.as_deref()).await?,
+                    None => d.fork(&session, before.as_deref(), id.as_deref()).await?,
+                }
             },
         },
         Request::Aside { session, id, text } => {
+            crate::moving::check(&d.store(), &session)?;
             d.aside(&session, &id, &text).await?;
             Reply::Ok
         }

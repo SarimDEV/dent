@@ -241,6 +241,17 @@ pub enum Body {
     Notice {
         text: String,
     },
+    /// The session is moving to another machine, or moved, or isn't any
+    /// more ([decision 0064](../../docs/decisions/0064-moving-sessions.md)).
+    Move {
+        id: String,
+        /// The machine it goes to.
+        to: String,
+        state: MoveState,
+        /// Its id there, once it's arrived.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_session: Option<SessionId>,
+    },
     /// The session's pull request, said when it's first seen and whenever
     /// its state, checks or review change; `None` when it no longer has one.
     PullRequest {
@@ -2085,6 +2096,81 @@ pub fn build_stamp(path: &std::path::Path) -> String {
             format!("{}-{t}", m.len())
         })
         .unwrap_or_default()
+}
+
+/// What a moved session is made of, said by the machine it leaves and
+/// checked by the one it goes to ([decision 0064](../../docs/decisions/0064-moving-sessions.md)).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveManifest {
+    pub id: String,
+    /// The machine and session it leaves.
+    pub from_machine: String,
+    pub from_session: SessionId,
+    pub agent: String,
+    /// The agent's own id for the conversation, on the machine it leaves.
+    #[serde(default)]
+    pub agent_session: String,
+    /// Where it worked there, for the notice the agent gets first.
+    pub cwd: String,
+    pub title: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    pub permission: Permission,
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// In a repository: what moves of it. `None` for dent's scratch folder.
+    #[serde(default)]
+    pub repo: Option<MoveRepo>,
+    pub parts: Vec<MovePart>,
+}
+
+/// A repository's part in a move: two commits on top of its `HEAD` (the
+/// working tree, and the index), in the `git.bundle` part.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveRepo {
+    pub tip: String,
+    pub snapshot: String,
+    pub index: String,
+    /// The branch it was on; empty when detached.
+    pub branch: String,
+    /// Where it can be cloned from, `origin` first.
+    pub remotes: Vec<GitRemote>,
+    /// The session's folder inside the repository (`""` at its root).
+    #[serde(default)]
+    pub subdir: String,
+}
+
+/// One file of a move: its name in the move, size and SHA-256 (hex).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MovePart {
+    pub name: String,
+    pub bytes: u64,
+    pub sha256: String,
+}
+
+/// Where a session's move to another machine stands, on the machine it
+/// leaves ([decision 0064](../../docs/decisions/0064-moving-sessions.md)).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum MoveState {
+    /// Waiting for the turn (or work left running) to end.
+    Pending,
+    /// Fenced: nothing starts agent work or changes the folder. `sent`
+    /// once anything may have reached the other machine: it may hold a
+    /// copy, so only Continue here undoes it.
+    Departing {
+        #[serde(default)]
+        sent: bool,
+    },
+    /// It went: this session is a record that points there.
+    Departed,
+    /// It didn't go, and works here again: why.
+    Failed { why: String },
+    /// Called off before anything was sent.
+    Cancelled,
+    /// Kept here after it may have been sent (the other machine may hold
+    /// a copy).
+    ContinuedHere,
 }
 
 /// How an update went: `from` to `to`, kept or rolled back.

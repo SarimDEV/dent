@@ -44,6 +44,9 @@ pub struct SessionView {
     pub root: Option<String>,
     /// Its branch's pull request, as the daemon last said.
     pub pr: Option<dent_protocol::PullRequest>,
+    /// Its move to another machine, while there is one, or once it moved:
+    /// the machine, its id there once it arrived, and where it stands.
+    pub moving: Option<(String, Option<String>, dent_protocol::MoveState)>,
     pub agent: String,
     pub model: Option<String>,
     pub permission: Permission,
@@ -1119,6 +1122,32 @@ impl SessionView {
                 note: Note::Info,
                 text: text.clone(),
             }),
+            Body::Move {
+                to,
+                state,
+                to_session,
+                ..
+            } => {
+                use dent_protocol::MoveState as M;
+                // What ended the move is said in the chat; while it runs, the
+                // session's own state shows it.
+                let said = match state {
+                    M::Departed => Some(format!("Moved to {to}")),
+                    M::Failed { why } => Some(format!("Didn't move to {to}: {why}")),
+                    M::ContinuedHere => Some(format!("Kept here. {to} may have a copy of it too")),
+                    M::Pending | M::Departing { .. } | M::Cancelled => None,
+                };
+                if let Some(text) = said {
+                    self.push(Entry::Note {
+                        note: Note::Info,
+                        text,
+                    });
+                }
+                self.moving = match state {
+                    M::Cancelled | M::Failed { .. } | M::ContinuedHere => None,
+                    _ => Some((to.clone(), to_session.clone(), state.clone())),
+                };
+            }
             Body::PullRequest { pr } => {
                 // What you'd want to know of: checks starting to fail,
                 // changes asked for, a merge. It counts as news.
