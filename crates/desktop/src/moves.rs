@@ -621,6 +621,10 @@ impl Dent {
                     _ => (format!("Checking for {project}…{ms}"), None),
                 },
                 Standing::Connecting => ("Connecting…".into(), Some("It isn't connected yet")),
+                Standing::Updating => (
+                    "Updating · back in a moment".into(),
+                    Some("It's updating; its sessions keep running"),
+                ),
                 Standing::Asleep => ("Asleep · wake it first".into(), Some("It's asleep")),
                 Standing::Unreachable => ("Can't reach it".into(), Some("It can't be reached")),
                 Standing::NeedsCode => (

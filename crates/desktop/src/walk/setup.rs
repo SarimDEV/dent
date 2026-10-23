@@ -530,7 +530,38 @@ fn made_up_machines() -> Vec<crate::machines::MachineView> {
             None,
             "10.0.0.9:7480",
         ),
+        m(
+            "9d4f02aa61b3",
+            "studio",
+            State::Away(Goodbye::Update {
+                to: "0.4.3".into(),
+                expected_down_ms: 4000,
+            }),
+            None,
+            "studio.example.ts.net:7480",
+        ),
     ]
+    .into_iter()
+    .map(|mut v| {
+        // What each runs, as its last welcome said: one went back from an
+        // update, one asleep on an older one.
+        match v.id.as_str() {
+            "8e2e34085ddf" => v.release = "0.4.3".into(),
+            "7b20f1c8e94a" => {
+                v.release = "0.4.2".into();
+                v.update = Some(dent_protocol::UpdateOutcome {
+                    id: "u7".into(),
+                    from: "0.4.2".into(),
+                    to: "0.4.3".into(),
+                    rolled_back: true,
+                });
+            }
+            "c27b19e4a0d2" => v.version = "0.4.1".into(),
+            _ => {}
+        }
+        v
+    })
+    .collect()
 }
 
 /// Settings › Machines against the machines really saved

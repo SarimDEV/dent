@@ -729,6 +729,7 @@ impl Dent {
                 let word = match Standing::of(m) {
                     Standing::Online | Standing::Connecting => return None,
                     Standing::Asleep => "asleep",
+                    Standing::Updating => "updating",
                     Standing::NeedsCode => "needs a code",
                     _ => "can't reach",
                 };

@@ -20,6 +20,10 @@ pub struct MachineView {
     /// the last welcome.
     pub via: Option<(String, Trust)>,
     pub version: String,
+    /// The launcher's name for what runs there, and how its last update
+    /// went, since its last welcome.
+    pub release: String,
+    pub update: Option<dent_protocol::UpdateOutcome>,
     /// The protocol its daemon speaks, since its last welcome.
     pub proto: Option<u32>,
     pub agents: Vec<AgentInfo>,
@@ -45,6 +49,8 @@ impl MachineView {
             rtt: None,
             via: None,
             version: String::new(),
+            release: String::new(),
+            update: None,
             proto: None,
             agents: Vec::new(),
             agents_known: false,
@@ -117,6 +123,8 @@ pub fn apply(list: &mut Vec<MachineView>, id: &str, event: Event) {
         Event::Welcome {
             name,
             version,
+            release,
+            update,
             proto,
             agents,
             via,
@@ -125,6 +133,8 @@ pub fn apply(list: &mut Vec<MachineView>, id: &str, event: Event) {
         } => {
             m.saved.name = name;
             m.version = version;
+            m.release = release;
+            m.update = update;
             m.proto = Some(proto);
             // The welcome says what each agent is; how it stands (installed,
             // signed in) comes with the Agents reply, so a reconnect keeps

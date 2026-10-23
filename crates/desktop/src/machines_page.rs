@@ -30,6 +30,8 @@ use crate::theme::{Status, Theme};
 use crate::ui::{self, Arrive, From, Press, probe};
 
 const STRIP_H: f32 = 210.;
+/// Machines not connected drawn in the strip's column; more are counted.
+const FAR_MAX: usize = 2;
 /// Across the strip, as parts of its width: this Mac, the round-trip axis
 /// (1 ms to 300 ms), the line before machines that aren't connected.
 const HOME_X: f32 = 0.087;
@@ -67,6 +69,9 @@ pub struct Adding {
 pub enum Standing {
     Online,
     Connecting,
+    /// Said it's updating or restarting: back in a moment, its sessions
+    /// running all the while.
+    Updating,
     Asleep,
     Unreachable,
     NeedsCode,
@@ -82,6 +87,7 @@ impl Standing {
             State::Off | State::Connecting | State::Reconnecting => Standing::Connecting,
             State::Away(Goodbye::Sleep) => Standing::Asleep,
             State::Away(Goodbye::Awake) => Standing::Connecting,
+            State::Away(Goodbye::Update { .. } | Goodbye::Restart { .. }) => Standing::Updating,
             State::Away(_) | State::Unreachable { .. } => Standing::Unreachable,
             State::NeedsCode { .. } => Standing::NeedsCode,
             State::Removed | State::Incompatible { .. } | State::TrustedElsewhere { .. } => {
@@ -97,7 +103,7 @@ impl Standing {
     /// The dot on its holder: none while online or finding out.
     fn dot(self, t: &Theme) -> Option<Hsla> {
         match self {
-            Standing::Online | Standing::Connecting => None,
+            Standing::Online | Standing::Connecting | Standing::Updating => None,
             Standing::Asleep => Some(t.waiting.0),
             _ => Some(t.idle.0),
         }
@@ -122,6 +128,50 @@ pub fn route_kind(addr: &str) -> &'static str {
             .zip(host.split('.').nth(1).and_then(|b| b.parse::<u8>().ok()))
             .is_some_and(|(a, b)| a == 100 && (64..128).contains(&b));
     if tailnet { "Tailscale" } else { "LAN" }
+}
+
+/// A version as a row says it: a release by its number, a build made
+/// from source by its stamp (`0.0.0-3f2a9c1e` reads "build 3f2a9c1e").
+pub fn version_word(v: &str) -> String {
+    match v.strip_prefix("0.0.0-") {
+        Some(stamp) => format!("build {}", stamp.chars().take(8).collect::<String>()),
+        // Built from source and run by hand, not by the service.
+        None if v == "0.0.0" => "dev build".to_string(),
+        None => v.to_string(),
+    }
+}
+
+/// A row's line with what runs there, and the last update when it went
+/// back: that's worth saying until the next one.
+fn with_version(
+    line: String,
+    version: &str,
+    update: Option<&dent_protocol::UpdateOutcome>,
+) -> String {
+    if version.is_empty() {
+        return line;
+    }
+    match update.filter(|u| u.rolled_back) {
+        Some(u) => format!(
+            "{line} · {} · went back from {}",
+            version_word(version),
+            version_word(&u.to)
+        ),
+        None => format!("{line} · {}", version_word(version)),
+    }
+}
+
+/// The last update, for a machine's details.
+fn last_update(u: &dent_protocol::UpdateOutcome) -> String {
+    if u.rolled_back {
+        format!(
+            "{} didn't start, so it went back to {}",
+            version_word(&u.to),
+            version_word(&u.from)
+        )
+    } else {
+        format!("{} to {}", version_word(&u.from), version_word(&u.to))
+    }
 }
 
 /// A fingerprint in groups of four, as keys are read out.
@@ -326,6 +376,7 @@ impl Dent {
                     None,
                 ),
                 Standing::Connecting => ("Connecting…".into(), None),
+                Standing::Updating => ("Updating · starts when it's back".into(), None),
                 // A new session there waits on this Mac and starts when it's
                 // back (decision 0063).
                 Standing::Asleep => ("Asleep · starts when it wakes".into(), None),
@@ -378,6 +429,10 @@ impl Dent {
         let standings: Vec<Standing> = self.machines.iter().map(Standing::of).collect();
         let online = 1 + standings.iter().filter(|s| s.connected()).count();
         let asleep = standings.iter().filter(|s| **s == Standing::Asleep).count();
+        let updating = standings
+            .iter()
+            .filter(|s| **s == Standing::Updating)
+            .count();
         let away = standings
             .iter()
             .filter(|s| {
@@ -396,6 +451,9 @@ impl Dent {
             summary.push(format!("{online} online"));
             if asleep > 0 {
                 summary.push(format!("{asleep} asleep"));
+            }
+            if updating > 0 {
+                summary.push(format!("{updating} updating"));
             }
             if away > 0 {
                 summary.push(format!("{away} can't reach"));
@@ -567,8 +625,15 @@ impl Dent {
             .filter(|m| !Standing::of(m).connected())
             .count()
             .max(1);
+        // The column holds two whole; more are counted in its heading (the
+        // rows below list every one).
+        let more = far_n.saturating_sub(FAR_MAX);
+        let far_n = far_n.min(FAR_MAX);
         for m in &self.machines {
             let st = Standing::of(m);
+            if !st.connected() && far >= FAR_MAX {
+                continue;
+            }
             let shape = shapes.get(&m.id).copied().unwrap_or(Shape::Circle);
             let (x, y, caption) = if st.connected() {
                 let ms = m.rtt.unwrap_or(1);
@@ -582,6 +647,7 @@ impl Dent {
                 let words = match st {
                     Standing::Asleep => "Asleep",
                     Standing::Connecting => "Connecting…",
+                    Standing::Updating => "Updating…",
                     Standing::NeedsCode => "Needs a code",
                     _ => "Can't reach",
                 };
@@ -826,7 +892,15 @@ impl Dent {
                     .left(relative(AWAY_X))
                     .top(px(22.))
                     .pl(px(space::S4))
-                    .child(ui::section_label("Not connected", None, &t)),
+                    .child(ui::section_label(
+                        &if more > 0 {
+                            format!("Not connected · {more} more")
+                        } else {
+                            "Not connected".to_string()
+                        },
+                        None,
+                        &t,
+                    )),
             )
             .child(node_el(&home, HOME_NODE, true, 0))
             .children(
@@ -856,7 +930,11 @@ impl Dent {
             &name,
             Some("This Mac"),
             match &self.connection {
-                Ok(()) => "Online".to_string(),
+                Ok(()) => with_version(
+                    "Online".to_string(),
+                    &self.machine_version,
+                    self.machine_update.as_ref(),
+                ),
                 Err(why) => why.clone(),
             },
             holder(local_shape, None, 32., false, &t),
@@ -865,23 +943,52 @@ impl Dent {
             cx,
         ));
         if local_open {
-            rows.push(self.details(vec![("Key", grouped(&self.machine_id), true)], None, cx));
+            let mut d = Vec::new();
+            if !self.machine_version.is_empty() {
+                d.push(("dent", self.machine_version.clone(), false));
+            }
+            if let Some(u) = &self.machine_update {
+                d.push(("Last update", last_update(u), false));
+            }
+            d.push(("Key", grouped(&self.machine_id), true));
+            rows.push(self.details(d, None, cx));
         }
         for m in &self.machines {
             let st = Standing::of(m);
             let shape = shapes.get(&m.id).copied().unwrap_or(Shape::Circle);
             let faded = matches!(st, Standing::Unreachable | Standing::Blocked);
             let meta = match (st, m.standing()) {
-                (Standing::Online, _) => format!(
-                    "Online · {}",
-                    m.via
-                        .as_ref()
-                        .map_or("Tailscale", |(addr, trust)| match trust {
-                            Trust::Tailscale { .. } => "Tailscale",
-                            _ => route_kind(addr),
-                        })
+                (Standing::Online, _) => with_version(
+                    format!(
+                        "Online · {}",
+                        m.via
+                            .as_ref()
+                            .map_or("Tailscale", |(addr, trust)| match trust {
+                                Trust::Tailscale { .. } => "Tailscale",
+                                _ => route_kind(addr),
+                            })
+                    ),
+                    if m.release.is_empty() {
+                        &m.version
+                    } else {
+                        &m.release
+                    },
+                    m.update.as_ref(),
+                ),
+                // Away, what it ran when last heard from.
+                (Standing::Asleep, _) if !m.version.is_empty() => format!(
+                    "Asleep · {}",
+                    version_word(if m.release.is_empty() {
+                        &m.version
+                    } else {
+                        &m.release
+                    })
                 ),
                 (Standing::Connecting, _) => "Connecting…".into(),
+                (Standing::Updating, State::Away(Goodbye::Update { to, .. })) => {
+                    format!("Updating to {} · sessions keep running", version_word(to))
+                }
+                (Standing::Updating, _) => "Restarting · sessions keep running".into(),
                 (Standing::Asleep, _) => "Asleep".into(),
                 (Standing::NeedsCode, _) => "Needs a code from it".into(),
                 (_, State::Removed) => "This device was removed".into(),
@@ -893,7 +1000,9 @@ impl Dent {
             // Wake sends the packets from here, then tries again.
             let wakes =
                 matches!(st, Standing::Asleep | Standing::Unreachable) && !m.saved.wake.is_empty();
-            let retry = (!st.connected() && st != Standing::Connecting).then(|| {
+            let retry = (!st.connected()
+                && !matches!(st, Standing::Connecting | Standing::Updating))
+            .then(|| {
                 let id = m.id.clone();
                 let (cards, name) = (m.saved.wake.clone(), m.name().to_string());
                 ui::inner_button(
@@ -972,7 +1081,15 @@ impl Dent {
                     d.push(("Routes", routes.join("\n"), true));
                 }
                 if !m.version.is_empty() {
-                    d.push(("dent", m.version.clone(), false));
+                    let v = if m.release.is_empty() {
+                        &m.version
+                    } else {
+                        &m.release
+                    };
+                    d.push(("dent", v.clone(), false));
+                }
+                if let Some(u) = &m.update {
+                    d.push(("Last update", last_update(u), false));
                 }
                 if !m.agents.is_empty() {
                     d.push((
@@ -1040,8 +1157,9 @@ impl Dent {
             .child(holder)
             .child(
                 div()
-                    // Gives way in a narrow window, its name ending in "…".
-                    .w(px(240.))
+                    // Gives way in a narrow window, its name ending in "…";
+                    // room for its version and how its last update went.
+                    .w(px(360.))
                     .min_w(px(120.))
                     .flex_shrink(1.)
                     .flex()
@@ -1924,8 +2042,80 @@ const LINE_H: f32 = 24.;
 #[cfg(test)]
 mod tests {
     // Not a glob: GPUI's prelude has a `test` of its own.
-    use super::{AXIS, axis_x, peers_from, route_kind, shapes_for};
+    use super::{
+        AXIS, axis_x, last_update, peers_from, route_kind, shapes_for, version_word, with_version,
+    };
     use crate::machines::MachineView;
+
+    /// A row says what runs there: a release by number, a build by its
+    /// stamp, and an update that went back until the next one.
+    #[test]
+    fn rows_say_the_version_and_an_update_that_went_back() {
+        use dent_protocol::UpdateOutcome;
+        assert_eq!(version_word("0.4.3"), "0.4.3");
+        assert_eq!(version_word("0.0.0-547cd3579abc"), "build 547cd357");
+        assert_eq!(version_word("0.0.0"), "dev build");
+        assert_eq!(with_version("Online".into(), "", None), "Online");
+        assert_eq!(
+            with_version("Online".into(), "0.4.3", None),
+            "Online · 0.4.3"
+        );
+        let up = |rolled_back| UpdateOutcome {
+            id: "u1".into(),
+            from: "0.4.2".into(),
+            to: "0.4.3".into(),
+            rolled_back,
+        };
+        assert_eq!(
+            with_version("Online".into(), "0.4.3", Some(&up(false))),
+            "Online · 0.4.3"
+        );
+        assert_eq!(
+            with_version("Online".into(), "0.4.2", Some(&up(true))),
+            "Online · 0.4.2 · went back from 0.4.3"
+        );
+        assert_eq!(last_update(&up(false)), "0.4.2 to 0.4.3");
+        assert_eq!(
+            last_update(&up(true)),
+            "0.4.3 didn't start, so it went back to 0.4.2"
+        );
+    }
+
+    /// Updating or restarting, it's back in a moment, through every retry
+    /// meanwhile: never "can't reach".
+    #[test]
+    fn a_machine_updating_is_updating_till_it_is_back() {
+        use super::Standing;
+        use dent_client_core::machine::State;
+        use dent_link::Goodbye;
+        let mut list = vec![MachineView::saved(dent_remote::Saved {
+            id: "ab12".into(),
+            ..Default::default()
+        })];
+        let mut goes = |s: State| {
+            crate::machines::apply(&mut list, "ab12", dent_remote::remote::Event::State(s));
+            Standing::of(&list[0])
+        };
+        let update = State::Away(Goodbye::Update {
+            to: "0.4.3".into(),
+            expected_down_ms: 2000,
+        });
+        assert_eq!(goes(update), Standing::Updating);
+        assert_eq!(goes(State::Reconnecting), Standing::Updating);
+        assert_eq!(goes(State::Connecting), Standing::Updating);
+        assert_eq!(goes(State::Online), Standing::Online);
+        let restart = State::Away(Goodbye::Restart {
+            expected_down_ms: 500,
+        });
+        assert_eq!(goes(restart), Standing::Updating);
+        // Not back after all: said so.
+        assert_eq!(
+            goes(State::Unreachable {
+                why: "timeout".into()
+            }),
+            Standing::Unreachable
+        );
+    }
 
     #[test]
     fn a_machine_being_added_moves_no_other_off_its_shape() {
