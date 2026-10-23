@@ -2,6 +2,8 @@
 //! misbehave: what a script calling it would see. The CLI keeps its key and
 //! saved machines in `DENT_CLIENT_STATE`, a fresh folder per test.
 
+mod common;
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -193,6 +195,7 @@ impl Drop for Daemon {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        common::stop_all(&self.state);
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }

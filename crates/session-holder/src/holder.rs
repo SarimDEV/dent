@@ -446,6 +446,10 @@ impl Holder {
             });
         }
         let pid = p.pid;
+        // Who it is, for whoever finds it running after the holder has
+        // gone: its pid, and when it started, so a pid used again by
+        // something else is never taken for it.
+        let _ = std::fs::write(dir.join("pid"), format!("{pid} {}\n", p.started));
         procs.insert(id, p);
         Ok(Msg::Spawned { pid })
     }

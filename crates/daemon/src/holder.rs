@@ -282,3 +282,89 @@ impl Holder {
         }
     }
 }
+
+/// An agent the holder started, still running after the holder went: it
+/// doesn't take its agents with it, each leading a group of its own. Left
+/// running, it would go on working (and editing files) beside the agent
+/// that carries on from it. So it's stopped, with everything it started,
+/// but only while the process there is the one the holder recorded: its
+/// age must match when it was started, or the pid now belongs to another.
+pub fn stop_left_behind(dir: &Path, id: &str) {
+    let Ok(s) = std::fs::read_to_string(dir.join("procs").join(id).join("pid")) else {
+        return;
+    };
+    let mut f = s.split_whitespace();
+    let (Some(Ok(pid)), Some(Ok(started))) = (
+        f.next().map(str::parse::<i32>),
+        f.next().map(str::parse::<u64>),
+    ) else {
+        return;
+    };
+    if pid <= 1 || !started_at(pid, started) {
+        return;
+    }
+    // SAFETY: kill has no memory preconditions; a negative pid is its group.
+    unsafe { libc::kill(-pid, libc::SIGTERM) };
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(2));
+        // SAFETY: as above.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    });
+}
+
+/// Whether process `pid` started at `started` (ms since the epoch), to the
+/// few seconds `ps` can tell.
+fn started_at(pid: i32, started: u64) -> bool {
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-o", "etime=", "-p", &pid.to_string()])
+        .output()
+    else {
+        return false;
+    };
+    let Some(age) = elapsed(String::from_utf8_lossy(&out.stdout).trim()) else {
+        return false;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    now.saturating_sub(started / 1000).abs_diff(age) <= 5
+}
+
+/// `ps`'s elapsed time, `[[dd-]hh:]mm:ss`, in seconds.
+fn elapsed(s: &str) -> Option<u64> {
+    let (days, rest) = match s.split_once('-') {
+        Some((d, r)) => (d.parse::<u64>().ok()?, r),
+        None => (0, s),
+    };
+    let mut secs = 0;
+    for part in rest.split(':') {
+        secs = secs * 60 + part.parse::<u64>().ok()?;
+    }
+    Some(days * 86_400 + secs)
+}
+
+#[cfg(test)]
+mod left_behind_tests {
+    use super::*;
+
+    #[test]
+    fn reads_ps_elapsed_times() {
+        assert_eq!(elapsed("00:07"), Some(7));
+        assert_eq!(elapsed("01:02:03"), Some(3723));
+        assert_eq!(elapsed("2-00:00:01"), Some(172_801));
+        assert_eq!(elapsed(""), None);
+    }
+
+    #[test]
+    fn a_pid_now_someone_elses_is_left_alone() {
+        // This test process didn't start at the epoch.
+        assert!(!started_at(std::process::id() as i32, 1000));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        // Nor is a process that isn't there.
+        assert!(!started_at(i32::MAX - 1, now));
+    }
+}

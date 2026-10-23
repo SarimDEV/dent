@@ -122,6 +122,12 @@ pub enum Op {
         signal: Option<i32>,
     },
     HolderLost,
+    /// Its agent's process group uses this much memory, past the warning
+    /// limit ([`crate::memory`]).
+    Memory {
+        proc: String,
+        bytes: u64,
+    },
     /// A step in moving it to another machine.
     Move(crate::moving::state::Step),
 }
@@ -141,6 +147,12 @@ struct Proc {
     /// The agents' slice's out-of-memory kills when it started (under
     /// systemd), to tell running out of memory from a plain kill.
     ooms: Option<u64>,
+    /// Said once that it uses a lot of memory.
+    warned: bool,
+    /// Measured past the stopping limit once: twice in a row stops it.
+    high: bool,
+    /// Stopped by dent for using this much memory.
+    over: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -390,6 +402,14 @@ impl Session {
         format!("stop.{}", self.id)
     }
 
+    /// Its agent, if it outlived the holder that ran it.
+    fn stop_left_behind(&self, proc: &str) {
+        let paths = &self.d.paths;
+        for dir in [paths.holder(), paths.holder_in_tmp()] {
+            crate::holder::stop_left_behind(&dir, proc);
+        }
+    }
+
     /// Where the message it carries on with is kept, until it's sent.
     fn carry_on_key(&self) -> String {
         format!("carry_on.{}", self.id)
@@ -448,29 +468,33 @@ impl Session {
         }
         // Waiting on you, or being stopped by you: yours to carry on.
         let waiting = !self.asked.is_empty() || self.stop_asked;
+        let carry = !waiting
+            && self.held.is_empty()
+            && crate::moving::state::fence(self.moving.as_ref()).is_none();
+        // Only times it really carried on count: those you took over don't.
+        let too_often = carry && self.carry_ons().len() >= CARRY_ON_MAX;
+        // Kept before the turn is logged as ended: a daemon that goes in
+        // between finds the turn still running, and comes here again,
+        // keeping the message it kept the first time.
+        let kept = carry && !too_often && {
+            let due = self
+                .carry_on()
+                .unwrap_or_else(|| (crate::daemon::new_id(), dent_protocol::carry_on_text(&lost)));
+            serde_json::to_string(&due)
+                .ok()
+                .is_some_and(|v| self.d.store().put(&self.carry_on_key(), &v).is_ok())
+        };
         self.end_turn(Outcome::Interrupted {
             reason: Some(reason.into()),
         });
-        if waiting
-            || !self.held.is_empty()
-            || crate::moving::state::fence(self.moving.as_ref()).is_some()
-        {
-            return;
-        }
-        // Only times it really carried on count: those you took over don't.
-        if self.carry_ons().len() >= CARRY_ON_MAX {
+        if too_often {
             self.log(Body::Notice {
                 text: format!(
                     "Cut off {CARRY_ON_MAX} times in {} minutes, so it waits for you to continue.",
                     CARRY_ON_WINDOW / 60
                 ),
             });
-            return;
         }
-        let due = (crate::daemon::new_id(), dent_protocol::carry_on_text(&lost));
-        let kept = serde_json::to_string(&due)
-            .ok()
-            .is_some_and(|v| self.d.store().put(&self.carry_on_key(), &v).is_ok());
         if kept {
             self.carry_on_at = Some(Instant::now() + RELEASE_GRACE);
         }
@@ -659,6 +683,9 @@ impl Session {
                 stopping: false,
                 resumed: true,
                 ooms: crate::scopes::oom_kills(),
+                warned: false,
+                high: false,
+                over: None,
             });
             let now = Instant::now();
             if !self.in_turn {
@@ -675,6 +702,7 @@ impl Session {
             }
         } else {
             let _ = self.d.store().clear_proc(&self.id);
+            self.stop_left_behind(&proc);
             self.cut_off("dent restarted while the agent was working");
         }
         self.release_held_soon();
@@ -960,9 +988,38 @@ impl Session {
                 }
                 Ok(())
             }
+            Op::Memory { proc, bytes } => {
+                let limits = crate::memory::limits();
+                let name = self.agent.name();
+                let Some(p) = self.proc.as_mut().filter(|p| p.id == proc && !p.stopping) else {
+                    return Ok(());
+                };
+                // Twice in a row: one reading can count memory its
+                // processes share more than once.
+                let again = std::mem::replace(&mut p.high, bytes >= limits.stop);
+                if bytes >= limits.stop {
+                    if again && p.over.is_none() {
+                        p.over = Some(bytes);
+                        if let Ok(h) = self.d.holder().await {
+                            let _ = h.stop(&proc, Duration::from_secs(2)).await;
+                        }
+                    }
+                } else if bytes >= limits.warn && !p.warned {
+                    p.warned = true;
+                    self.log(Body::Notice {
+                        text: format!(
+                            "{name} is using {} of memory. dent stops it at {}, before it slows this machine down.",
+                            crate::memory::words(bytes),
+                            crate::memory::words(limits.stop)
+                        ),
+                    });
+                }
+                Ok(())
+            }
             Op::HolderLost => {
                 if let Some(p) = self.proc.take() {
                     let _ = self.d.store().clear_proc(&self.id);
+                    self.stop_left_behind(&p.id);
                     self.controls_gone();
                     self.cut_off("the process holding the agent stopped");
                     drop(p);
@@ -1519,6 +1576,9 @@ impl Session {
             stopping: false,
             resumed,
             ooms,
+            warned: false,
+            high: false,
+            over: None,
         });
         self.start_by = Some(Instant::now() + start_limit());
         self.control(Ctl::Initialize).await?;
@@ -2609,6 +2669,11 @@ impl Session {
                 .zip(crate::scopes::oom_kills())
                 .is_some_and(|(was, now)| now > was);
         let why = match (code, signal) {
+            _ if p.over.is_some() => format!(
+                "dent stopped it: it used {} of memory, past this machine's limit of {}",
+                crate::memory::words(p.over.unwrap_or(0)),
+                crate::memory::words(crate::memory::limits().stop)
+            ),
             _ if starved => "it ran out of memory".into(),
             (_, Some(s)) => format!("signal {s}"),
             (Some(c), _) => format!("exit code {c}"),
@@ -2621,19 +2686,24 @@ impl Session {
         }
         let name = self.agent.name();
         if self.in_turn {
-            let reason = if p.stopping {
+            // Stopped for memory, then by you too: still says why.
+            let reason = if p.stopping && p.over.is_none() {
                 None
             } else if code == Some(127) {
                 Some(format!(
                     "Couldn't find {name} (`{}`). Install it, then send again.",
                     self.agent.command()
                 ))
-            } else if last.is_empty() {
+            } else if last.is_empty() || p.over.is_some() {
                 Some(format!("{name} stopped unexpectedly ({why})"))
             } else {
                 Some(format!("{name} stopped unexpectedly ({why}): {last}"))
             };
             self.end_turn(Outcome::Interrupted { reason });
+        } else if p.over.is_some() {
+            self.log(Body::Notice {
+                text: format!("{name} exited ({why})"),
+            });
         } else if code != Some(0) && !last.is_empty() {
             self.log(Body::Notice {
                 text: format!("{name} exited ({why}): {last}"),
