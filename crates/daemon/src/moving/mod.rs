@@ -421,6 +421,10 @@ impl Daemon {
         // The agent's conversation, under a new id of its own.
         let agent_to = derived_uuid(&format!("{}/{}", m.from_machine, m.id));
         let files = state.join("attachments").join(&session);
+        // Without the transcript (it couldn't be found there), there's
+        // nothing to put in place: the first message there finds no
+        // conversation, and starts one given what was said, as text.
+        let carried = m.parts.iter().any(|p| p.name == "transcript.jsonl");
         let placed = {
             let (parts, from, to, cwd, files) = (
                 parts.clone(),
@@ -430,7 +434,7 @@ impl Daemon {
                 files.clone(),
             );
             tokio::task::spawn_blocking(move || -> Result<(), String> {
-                if !from.is_empty() {
+                if !from.is_empty() && carried {
                     driver
                         .place_conversation(&parts, &from, &to, &cwd)
                         .map_err(|e| format!("{e:#}"))?;

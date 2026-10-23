@@ -1242,7 +1242,18 @@ impl Dent {
                         .arrive("to-latest-arrive", From::Below, motion::BASE),
                 )
         });
-        let footer: AnyElement = if s.closed {
+        let footer: AnyElement = if let Some(card) = self.moved_card(s, cx) {
+            div()
+                .relative()
+                .w_full()
+                .max_w(px(size::COLUMN + space::S8 * 2.))
+                .mx_auto()
+                .px(px(space::S8))
+                .pb(px(space::S4))
+                .children(latest)
+                .child(card)
+                .into_any_element()
+        } else if s.closed {
             let id = s.id.clone();
             div()
                 .relative()
@@ -1364,6 +1375,7 @@ impl Dent {
             .flex()
             .flex_col()
             .child(self.header(s, cx))
+            .children(self.move_banner(s, cx))
             .children(self.away_banner(s, cx))
             .child(transcript)
             .child(footer)
@@ -1372,6 +1384,238 @@ impl Dent {
 
     /// Under the header while the session's machine is away: what that
     /// means for it, and Retry. Messages written meanwhile wait here.
+    /// A move under way, or stopped partway: what it's doing, as the
+    /// away banner says a machine's state, with what can be done about it.
+    fn move_banner(&self, s: &Session, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use dent_client_core::carry::{Ended, Phase};
+        use dent_protocol::MoveState as M;
+        let t = self.t;
+        let run = self.moves.get(&s.id);
+        // Stopped, and working here again (the machine it was leaving said
+        // no): the chat says why, and choosing a machine starts afresh.
+        if run.is_some_and(|r| r.stopped.is_some()) && s.moving.is_none() {
+            return None;
+        }
+        let to = match (run, &s.moving) {
+            (Some(r), _) => r.to_name.clone(),
+            (None, Some((to, _, M::Pending | M::Departing { .. }))) => to.clone(),
+            _ => return None,
+        };
+        let sent = matches!(&s.moving, Some((_, _, M::Departing { sent: true })));
+        let id = s.id.clone();
+        // (what, the rest, how far along, stopped)
+        let (what, rest, bar, stopped) = match run.map(|r| (r.phase(), &r.stopped)) {
+            Some((_, Some(e))) => {
+                let why = match e {
+                    Ended::Stopped { why, .. } => why.clone(),
+                    Ended::NotAccepted(why) => why.clone(),
+                    Ended::NoProject => format!("{to} doesn't have this project"),
+                };
+                (format!("The move to {to} stopped"), why, None, true)
+            }
+            Some((Phase::Waiting, _)) => (
+                format!("Moving to {to}"),
+                "once this turn ends".to_string(),
+                None,
+                false,
+            ),
+            Some((Phase::Sending { sent, total }, _)) => (
+                format!("Moving to {to}"),
+                format!("Sending {} of {}", mb(sent), mb(total)),
+                Some(if total == 0 {
+                    1.
+                } else {
+                    sent as f32 / total as f32
+                }),
+                false,
+            ),
+            Some((Phase::Arriving, _)) => (
+                format!("Moving to {to}"),
+                "arriving there".to_string(),
+                Some(1.),
+                false,
+            ),
+            Some(_) => (format!("Moving to {to}"), String::new(), None, false),
+            // Begun here before this app restarted, or by another device.
+            None => (
+                format!("The move to {to} isn't being carried"),
+                "Retry carries on with it".to_string(),
+                None,
+                true,
+            ),
+        };
+        let tint = if stopped {
+            t.signal(Status::Waiting)
+                .0
+                .opacity(if t.dark { 0.12 } else { 0.10 })
+        } else {
+            t.tint()
+        };
+        let (rid, kid, cid) = (id.clone(), id.clone(), id.clone());
+        let to_id = self
+            .moves
+            .get(&s.id)
+            .map(|r| r.to.clone())
+            .or_else(|| self.machine_by_name(&to));
+        // Before anything went, it can be called off; after, only kept here.
+        let early =
+            !sent && run.is_some_and(|r| matches!(r.phase(), Phase::Asking | Phase::Waiting));
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .bg(tint)
+                .border_b_1()
+                .border_color(t.hairline)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S3))
+                        .px(px(space::S4))
+                        .py(px(space::S2))
+                        .ty(UI)
+                        .child(icon(
+                            "arrow-left-right",
+                            14.,
+                            if stopped { t.waiting.0 } else { t.quiet },
+                        ))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .gap(px(space::S1H))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(t.ink)
+                                        .child(what),
+                                )
+                                .child(
+                                    div()
+                                        .flex_shrink(10.)
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_color(t.quiet)
+                                        .child(rest),
+                                ),
+                        )
+                        .when(stopped && to_id.is_some(), |d| {
+                            let to_id = to_id.clone().unwrap_or_default();
+                            d.child(
+                                button("move-retry", "Retry", true, &t)
+                                    .relative()
+                                    .child(probe(&self.probes, "move-retry"))
+                                    .on_press(cx.listener(move |this, _, _, cx| {
+                                        this.start_move(&rid, &to_id, cx)
+                                    })),
+                            )
+                        })
+                        .when(stopped || sent, |d| {
+                            d.child(
+                                ghost("move-keep", "Continue here", &t)
+                                    .flex_none()
+                                    .relative()
+                                    .child(probe(&self.probes, "move-keep"))
+                                    .with_tip(tip(
+                                        "Keep it on this machine; the other may hold a copy",
+                                        None,
+                                        t,
+                                    ))
+                                    .on_press(cx.listener(move |this, _, _, cx| {
+                                        this.stop_move(&kid, true, cx)
+                                    })),
+                            )
+                        })
+                        .when(early, |d| {
+                            d.child(
+                                ghost("move-call-off", "Call off", &t)
+                                    .flex_none()
+                                    .relative()
+                                    .child(probe(&self.probes, "move-call-off"))
+                                    .on_press(cx.listener(move |this, _, _, cx| {
+                                        this.stop_move(&cid, false, cx)
+                                    })),
+                            )
+                        }),
+                )
+                // How much has gone, while it sends.
+                .when_some(bar, |d, k| {
+                    d.child(
+                        div().h(px(2.)).w_full().child(
+                            div()
+                                .h_full()
+                                .w(relative(k.clamp(0., 1.)))
+                                .bg(t.ink.opacity(0.5)),
+                        ),
+                    )
+                })
+                .child(probe(&self.probes, "move-banner"))
+                .arrive("move-banner", From::Above, motion::BASE)
+                .into_any_element(),
+        )
+    }
+
+    /// Moved: where the reply box was, where it carries on now.
+    fn moved_card(&self, s: &Session, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = self.t;
+        let Some((to, Some(there), dent_protocol::MoveState::Departed)) = &s.moving else {
+            return None;
+        };
+        let machine = self.machine_by_name(to);
+        let key = machine
+            .as_deref()
+            .map(|m| dent_client_core::fleet::qualify(m, there));
+        let short = crate::data::machine_short(to);
+        let open = key.map(|key| {
+            button("open-moved", format!("Open on {short}"), true, &t)
+                .relative()
+                .child(probe(&self.probes, "open-moved"))
+                .on_press(cx.listener(move |this, _, window, cx| {
+                    if this.session(&key).is_some() {
+                        this.select(Some(key.clone()), window, cx);
+                    } else {
+                        this.pending_select = Some(key.clone());
+                    }
+                }))
+        });
+        Some(
+            div()
+                .px(px(space::S4))
+                .py(px(space::S3))
+                .rounded(px(radius::XL))
+                .border_1()
+                .border_color(t.hairline)
+                .flex()
+                .items_center()
+                .gap(px(space::S3))
+                .child(icon("arrow-left-right", 15., t.quiet))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .ty(UI)
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(t.ink)
+                                .child(format!("This session carries on on {short}")),
+                        )
+                        .child(div().text_color(t.quiet).child(
+                            "This is how it was when it left. Its folder here stays until you remove it.",
+                        )),
+                )
+                .children(open)
+                .child(probe(&self.probes, "moved-card"))
+                .into_any_element(),
+        )
+    }
+
     fn away_banner(&self, s: &Session, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = self.t;
         let owner = dent_client_core::fleet::split(&s.id).0;
@@ -4140,6 +4384,13 @@ impl Dent {
                             // row wraps instead of squeezing.
                             .when(!fit.fits, |d| d.flex_wrap())
                             .child(self.attach_button(cx))
+                            // Where it runs, with more than one machine:
+                            // choosing another moves it there.
+                            .children(self.has_machines().then(|| {
+                                let at = dent_client_core::fleet::split(&s.id).0;
+                                let name = crate::data::machine_short(&self.machine_name(at));
+                                keep(true, self.chip(Menu::SessionMachine, "", &name, false, cx))
+                            }))
                             .child(keep(
                                 !fit.fits,
                                 self.chip(
@@ -5462,10 +5713,18 @@ impl Dent {
                     }))
                     // The machine chip wears the machine's shape.
                     .map(|d| {
-                        if which == Menu::Machine {
+                        if matches!(which, Menu::Machine | Menu::SessionMachine) {
+                            let at = match which {
+                                Menu::SessionMachine => self
+                                    .selected
+                                    .as_deref()
+                                    .map(|id| dent_client_core::fleet::split(id).0.to_string())
+                                    .unwrap_or_default(),
+                                _ => self.defaults.machine.clone(),
+                            };
                             let shape = self
                                 .shapes()
-                                .get(self.defaults.machine.as_str())
+                                .get(at.as_str())
                                 .copied()
                                 .unwrap_or(crate::glyph::Shape::Circle);
                             d.child(crate::glyph::glyph(shape, t.ink, 10.))
@@ -5528,6 +5787,9 @@ impl Dent {
                                 Menu::Stash => "Drafts put aside".into(),
                                 Menu::Agent => "The agent it runs".into(),
                                 Menu::Machine => "The machine it runs on".into(),
+                                Menu::SessionMachine => {
+                                    "Where it runs: another machine moves it there".into()
+                                }
                             },
                             t,
                         ))
@@ -5615,6 +5877,7 @@ impl Dent {
             Menu::Actions => self.action_entries(),
             Menu::Pickup => self.pickup_entries(),
             Menu::Machine => self.machine_entries(),
+            Menu::SessionMachine => self.move_entries(),
             Menu::Stash => self.stash_entries(),
             Menu::Agent => {
                 let current = self.agent_id_on(&self.defaults.machine, self.new_agent().as_deref());
@@ -7632,3 +7895,8 @@ const START_W: f32 = 88.;
 /// About what the agent chip takes, its icon and a short name, for the
 /// row's fitting.
 const AGENT_CHIP_W: f32 = 96.;
+
+/// A size in megabytes, as a progress line says it: 1.2 MB.
+fn mb(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1_048_576.)
+}

@@ -27,7 +27,11 @@ pub fn folder_for(cwd: &str) -> PathBuf {
 
 /// The conversation's files and their names in the move.
 pub fn conversation(agent_session: &str) -> Option<Vec<(PathBuf, String)>> {
-    let transcript = super::terminal::find(agent_session)?;
+    // Not found (removed, or kept somewhere this machine doesn't look):
+    // nothing to carry; the other machine starts it again from the recap.
+    let Some(transcript) = super::terminal::find(agent_session) else {
+        return Some(Vec::new());
+    };
     let mut out = vec![(transcript.clone(), "transcript.jsonl".to_string())];
     let side = transcript.with_extension("");
     for f in files_under(&side) {

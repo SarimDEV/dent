@@ -360,6 +360,8 @@ pub enum Menu {
     Agent,
     /// The machine a new session runs on, when there's more than one.
     Machine,
+    /// The machine the open session runs on: another one moves it there.
+    SessionMachine,
 }
 
 impl Menu {
@@ -387,7 +389,10 @@ impl Menu {
     pub fn upward(self) -> bool {
         matches!(
             self,
-            Menu::SessionModel | Menu::SessionPermission | Menu::SessionEffort
+            Menu::SessionModel
+                | Menu::SessionPermission
+                | Menu::SessionEffort
+                | Menu::SessionMachine
         )
     }
 }
@@ -670,6 +675,14 @@ pub struct Completion {
 
 /// What a request's reply is for.
 pub enum Waiting {
+    /// A step of the move this device carries for a session.
+    Move(String, dent_client_core::carry::Side),
+    /// A move called off or kept here.
+    MoveStopped,
+    /// A session's Git remotes, as its machine menu opens.
+    MoveRemotes(String),
+    /// Whether a machine has a session's repository.
+    MoveHas(String, String),
     /// An agent's models, by [`App::model_key`].
     Models(String),
     /// An agent's usage.
@@ -947,6 +960,11 @@ pub struct Dent {
     given_back: std::collections::HashSet<String>,
     /// Requests whose replies matter, by request number.
     waiting: HashMap<u64, Waiting>,
+    /// Moves this device carries, by session.
+    pub moves: HashMap<String, crate::moves::Run>,
+    /// What the other machines have of the session whose machine menu is
+    /// open.
+    pub move_probe: Option<crate::moves::Probe>,
     /// Each session's changes, from the daemon.
     pub changes: HashMap<String, Rc<Vec<FileDiff>>>,
     /// Choices made so far on a question, by question id.
@@ -1810,6 +1828,8 @@ impl Dent {
             opened_far: HashMap::new(),
             files_seen: HashMap::new(),
             waiting: HashMap::new(),
+            moves: HashMap::new(),
+            move_probe: None,
             changes: HashMap::new(),
             picks: HashMap::new(),
             creating: false,
@@ -3455,6 +3475,31 @@ impl Dent {
             return;
         };
         match (w, out) {
+            (Waiting::Move(id, side), out) => {
+                let answer = match out {
+                    Out::Reply { reply } => Ok(reply),
+                    Out::Error { message } => Err(message),
+                    other => Err(format!("unexpected answer {other:?}")),
+                };
+                self.move_answer(&id, side, answer, cx);
+            }
+            (Waiting::MoveStopped, Out::Error { message }) => {
+                self.toast(ToastAction::Info, message);
+            }
+            (Waiting::MoveStopped, _) => {}
+            (
+                Waiting::MoveRemotes(id),
+                Out::Reply {
+                    reply: Reply::MoveRemotes { remotes },
+                },
+            ) => self.probe_remotes(&id, remotes),
+            (
+                Waiting::MoveHas(id, machine),
+                Out::Reply {
+                    reply: Reply::MoveHave { found, .. },
+                },
+            ) => self.probe_has(&id, machine, found),
+            (Waiting::MoveRemotes(_) | Waiting::MoveHas(..), _) => {}
             (
                 Waiting::Models(agent),
                 Out::Reply {
@@ -5810,6 +5855,11 @@ impl Dent {
         self.waiting.insert(n, w);
     }
 
+    /// Stop waiting for the reply to request `n`.
+    pub fn waiting_remove(&mut self, n: u64) {
+        self.waiting.remove(&n);
+    }
+
     /// Ask the machine new sessions go to.
     pub fn ask_here(&mut self, req: Request, w: Waiting) {
         let n = self.live.send_to(&self.defaults.machine, req);
@@ -5863,6 +5913,11 @@ impl Dent {
         }
         match which {
             Menu::Project => self.open_project_picker(window, cx),
+            Menu::SessionMachine => {
+                if let Some(id) = self.selected.clone() {
+                    self.probe_machines(&id);
+                }
+            }
             Menu::Base => self.branch_query.update(cx, |f, cx| {
                 put(f, "", window, cx);
                 f.focus_field(window, cx);

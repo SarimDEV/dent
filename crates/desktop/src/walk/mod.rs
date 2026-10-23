@@ -37,6 +37,7 @@ mod load;
 mod look;
 mod markdown;
 mod motion;
+mod moving;
 mod narration;
 mod parity;
 mod pickup;
@@ -60,9 +61,9 @@ mod zoom;
 use {
     ambient::*, attaching::*, bench::*, changes::*, checks::*, common::*, composing::*, cutoffs::*,
     demo::*, edges::*, failures::*, find::*, finish::*, keys::*, load::*, look::*, markdown::*,
-    motion::*, narration::*, parity::*, pickup::*, pins::*, polish::*, prs::*, queue::*, real::*,
-    recall::*, reply::*, setup::*, stills::*, sweep::*, switching::*, takeback::*, typing::*,
-    view::*, visuals::*, worktrees::*, zoom::*,
+    motion::*, moving::*, narration::*, parity::*, pickup::*, pins::*, polish::*, prs::*, queue::*,
+    real::*, recall::*, reply::*, setup::*, stills::*, sweep::*, switching::*, takeback::*,
+    typing::*, view::*, visuals::*, worktrees::*, zoom::*,
 };
 
 type Pred = fn(&Dent, &App) -> bool;
@@ -255,6 +256,7 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("machines", &[machines]),
     ("machines-live", &[machines_live]),
     ("bring-live", &[bring_live]),
+    ("move-live", &[move_live]),
     ("kept-live", &[kept_live]),
     ("files-live", &[files_live]),
     ("break-live", &[break_live]),

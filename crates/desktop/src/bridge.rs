@@ -583,6 +583,8 @@ pub fn session(
         root: v.root.clone(),
         pr: v.pr.clone(),
         machine: cx.machine.to_string(),
+        moving: v.moving.clone(),
+        move_id: v.move_id.clone(),
         paused: false,
         agent: format!(
             "{} · {}",
