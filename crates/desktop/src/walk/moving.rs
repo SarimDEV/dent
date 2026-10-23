@@ -624,7 +624,12 @@ pub(super) fn move_clone() -> Vec<(f32, Act)> {
 /// repository cloned here, with an environment file, a commit not pushed
 /// and an edit not committed.
 fn spoon_knife() -> String {
-    let dir = std::env::temp_dir().join(format!("dent-walk-sk-{}", std::process::id()));
+    walk_repo("https://github.com/octocat/Spoon-Knife.git", "sk")
+}
+
+/// A public repository cloned here for a live walk, as [`spoon_knife`].
+fn walk_repo(url: &str, tag: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("dent-walk-{tag}-{}", std::process::id()));
     if !dir.exists() {
         let git = |args: &[&str], at: &std::path::Path| {
             let _ = std::process::Command::new("git")
@@ -637,12 +642,7 @@ fn spoon_knife() -> String {
                 .status();
         };
         git(
-            &[
-                "clone",
-                "-q",
-                "https://github.com/octocat/Spoon-Knife.git",
-                &dir.display().to_string(),
-            ],
+            &["clone", "-q", url, &dir.display().to_string()],
             &std::env::temp_dir(),
         );
         let _ = std::fs::write(dir.join(".git/info/exclude"), ".env\n");
@@ -753,5 +753,75 @@ pub(super) fn move_clone_live() -> Vec<(f32, Act)> {
             ),
         ),
         (0.8, Shot("live-arrived")),
+    ]
+}
+
+/// Moving to a machine really saved whose own checkout of the project has
+/// the session's branch out (`DENT_CLIENT_STATE`; octocat/Hello-World on
+/// master there): it lands beside it, on a branch of its own, and says so.
+pub(super) fn move_beside_live() -> Vec<(f32, Act)> {
+    vec![
+        (
+            0.1,
+            Until(
+                "a saved machine comes online",
+                |d, _| d.machines.iter().any(|m| m.rtt.is_some()),
+                30.,
+            ),
+        ),
+        (0.3, Key("cmd-n")),
+        (
+            0.2,
+            Call(|d, _, cx| {
+                d.set_project(Some(walk_repo(
+                    "https://github.com/octocat/Hello-World.git",
+                    "hw",
+                )));
+                cx.notify();
+            }),
+        ),
+        (0.2, Type(Field::Starter, "say: ready to land beside")),
+        (0.2, Click("start")),
+        (0.1, Until("it answers here", |d, _| answered(d), 30.)),
+        (0.2, Click("chip-sessionmachine")),
+        (
+            0.1,
+            Until(
+                "the other machine has it",
+                |d, _| {
+                    d.move_entries().iter().any(|e| {
+                        e.choosable() && e.note.as_deref().is_some_and(|n| n.starts_with("Has "))
+                    })
+                },
+                15.,
+            ),
+        ),
+        (
+            0.1,
+            Call(|d, w, cx| {
+                let e = d
+                    .move_entries()
+                    .into_iter()
+                    .find(|e| e.note.as_deref().is_some_and(|n| n.starts_with("Has ")));
+                if let Some(e) = e {
+                    d.choose_entry(&e, w, cx);
+                }
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "it arrives there, on a branch of its own, and says so",
+                |d, _| {
+                    current(d).is_some_and(|s| {
+                        s.id.contains('/')
+                            && s.title.contains("ready to land beside")
+                            && s.branch.as_deref() == Some("master-moved")
+                    })
+                },
+                120.,
+            ),
+        ),
+        (0.8, Shot("beside-arrived")),
     ]
 }

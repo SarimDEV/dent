@@ -649,17 +649,22 @@ impl Daemon {
                 version: None,
             },
         ));
+        // On a branch of its own here: said, to you and to the agent.
+        let instead = applied.as_ref().and_then(|a| a.instead()).cloned();
+        let from = if m.from_name.is_empty() {
+            &m.from_machine
+        } else {
+            &m.from_name
+        };
         bodies.push((
             now,
             Body::Notice {
-                text: format!(
-                    "Moved here from {}",
-                    if m.from_name.is_empty() {
-                        &m.from_machine
-                    } else {
-                        &m.from_name
+                text: match &instead {
+                    Some((name, why)) => {
+                        format!("Moved here from {from}, onto a new branch, {name}: {why}")
                     }
-                ),
+                    None => format!("Moved here from {from}"),
+                },
             },
         ));
         bodies.push((
@@ -672,6 +677,9 @@ impl Daemon {
             "from_machine": m.from_machine,
             "from_cwd": m.cwd,
             "to_cwd": cwd_s,
+            "branch": instead.as_ref().map(|(name, why)| {
+                format!("Its branch here is {name}, not {}: {why}.", m.repo.as_ref().map_or("", |r| r.branch.as_str()))
+            }),
         })
         .to_string();
         let kv = vec![
