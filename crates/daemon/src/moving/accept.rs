@@ -164,7 +164,13 @@ pub fn verify(state: &Path, m: &MoveManifest) -> Result<(), String> {
 /// `git@host:org/repo.git`, `ssh://git@host/org/repo` and
 /// `https://host/org/repo` are one.
 pub fn same_remote(a: &str, b: &str) -> bool {
-    fn norm(u: &str) -> String {
+    remote_key(a) == remote_key(b)
+}
+
+/// A remote's address as [`same_remote`] compares it: one string for every
+/// way of writing it.
+pub fn remote_key(u: &str) -> String {
+    {
         let u = u.trim().trim_end_matches('/');
         let u = u.strip_suffix(".git").unwrap_or(u);
         let rest = match u.split_once("://") {
@@ -179,7 +185,6 @@ pub fn same_remote(a: &str, b: &str) -> bool {
         let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
         format!("{}/{}", host.to_lowercase(), path)
     }
-    norm(a) == norm(b)
 }
 
 #[cfg(test)]

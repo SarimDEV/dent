@@ -688,6 +688,12 @@ impl Dent {
         cx: &mut Context<Self>,
     ) {
         let there = self.machine_name(to);
+        // The machine menu closed meanwhile: old news, which mustn't light
+        // a row in whatever menu is open now.
+        if self.menu != Some(crate::app::Menu::SessionMachine) {
+            self.move_clone = None;
+            return;
+        }
         let Some(c) = self
             .move_clone
             .as_mut()
@@ -770,10 +776,12 @@ impl Dent {
         let clone = CloneThere {
             dir: c.dir.clone(),
             paths: c.ticked.iter().cloned().collect(),
+            // The session's branch: the clone there lets go of it if it
+            // checks it out, so the session lands on it.
             bring: Bring {
                 name: p.name.clone(),
                 remotes: p.remotes.clone(),
-                branch: None,
+                branch: self.session(&c.session).and_then(|s| s.branch.clone()),
                 files: Vec::new(),
             },
         };

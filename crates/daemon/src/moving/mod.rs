@@ -62,6 +62,12 @@ async fn lock_move(id: &str) -> tokio::sync::OwnedMutexGuard<()> {
     m.lock_owned().await
 }
 
+/// The ignored files a project cloned for a move took from the machine
+/// the session left, by the clone's folder.
+pub fn carried_key(project: &str) -> String {
+    format!("move-carried/{project}")
+}
+
 /// What a session that arrived here tells its agent first: where it came
 /// from. Kept until said.
 pub fn arrived_key(session: &str) -> String {
@@ -114,7 +120,15 @@ impl Daemon {
             let mut jobs = crate::daemon::lock(&self.clones);
             match jobs.get(id) {
                 Some(None) => return Ok(Reply::Cloning),
-                Some(Some(Ok(r))) => return Ok(r.clone()),
+                // Done, and still there: said again. Gone since, it's
+                // cloned afresh.
+                Some(Some(Ok(r))) if matches!(r, Reply::ProjectMade { path, .. } if Path::new(path).exists()) =>
+                {
+                    return Ok(r.clone());
+                }
+                Some(Some(Ok(_))) => {
+                    jobs.remove(id);
+                }
                 // Failed: said once, and tried afresh when asked again.
                 Some(Some(Err(why))) => {
                     let why = why.clone();
@@ -149,7 +163,7 @@ impl Daemon {
         let url = b
             .remotes
             .first()
-            .map(|r| r.url.as_str())
+            .map(|r| accept::remote_key(&r.url))
             .unwrap_or_default();
         let _turn = lock_move(&format!("clone:{url}")).await;
         if let Some(root) = local_repo(self, &b.remotes).await {
@@ -162,23 +176,35 @@ impl Daemon {
         if std::env::var_os("DENT_TEST_SLOW_CLONE").is_some() {
             tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         }
-        let dest = crate::projects::free_in_root(&crate::projects::slug(&b.name))
-            .map_err(|e| format!("{e:#}"))?;
+        // One folder per move, kept from its first try: a try cut short
+        // (a restart) is made again there, not beside it as `-2`.
+        let at = format!("move-clone/{id}");
+        let kept = self.store().get(&at).ok().flatten();
+        let dest = match kept {
+            Some(p) => PathBuf::from(p),
+            None => {
+                let p = crate::projects::free_in_root(&crate::projects::slug(&b.name))
+                    .map_err(|e| format!("{e:#}"))?;
+                self.store()
+                    .put(&at, &p.display().to_string())
+                    .map_err(|e| format!("{e:#}"))?;
+                p
+            }
+        };
         let staging = crate::bring::staging(&self.paths.state, &format!("move-{id}"));
         let files = std::mem::take(&mut b.files);
-        // Cloned with no branch of its own: the moving session brings its
-        // branch, and lands in a worktree on it.
-        b.branch = None;
+        let carried: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
+        // Cloned on its default branch: the moving session brings its own,
+        // and lands in a worktree on it.
+        let session_branch = b.branch.take();
         let (to, st) = (dest.clone(), staging.clone());
         let got = tokio::task::spawn_blocking(move || {
             crate::bring::stage(&st, &files)?;
             let got = crate::bring::clone_into(&to, &b, &st)?;
-            // Its checkout holds no branch, so the session lands on its
-            // own (the one a clone checks out, as often as not) with what
-            // it has that the remote doesn't.
-            // (A remote whose default branch has no commits leaves none
-            // to hold.)
-            if crate::workspace::run(&to, &["rev-parse", "-q", "--verify", "HEAD"]).is_ok() {
+            // Out on the session's branch, the checkout lets go of it, so
+            // the session lands on its own with what it has that the
+            // remote doesn't. Any other branch stays as cloned.
+            if session_branch.is_some() && crate::workspace::branch(&to) == session_branch {
                 crate::workspace::run(&to, &["checkout", "-q", "--detach"])?;
             }
             Ok(got)
@@ -189,6 +215,13 @@ impl Daemon {
         let (_, notes) = got?;
         let path = dest.display().to_string();
         crate::server::remember_project(self, &path).map_err(|e| format!("{e:#}"))?;
+        // What it took from the machine the session left, for the
+        // session's worktree (as `.env` files are).
+        let _ = self.store().put(
+            &carried_key(&path),
+            &serde_json::to_string(&carried).unwrap_or_default(),
+        );
+        let _ = self.store().del(&at);
         Ok(Reply::ProjectMade {
             path,
             warning: (!notes.is_empty()).then(|| notes.join("; ")),
@@ -507,6 +540,13 @@ impl Daemon {
                     std::fs::create_dir_all(p)?;
                 }
                 std::fs::write(&landing, new.display().to_string())?;
+                let carried: Vec<String> = self
+                    .store()
+                    .get(&carried_key(&root.display().to_string()))
+                    .ok()
+                    .flatten()
+                    .and_then(|v| serde_json::from_str(&v).ok())
+                    .unwrap_or_default();
                 let (r2, id2, root2, new2, bundle) = (
                     r.clone(),
                     id.to_string(),
@@ -518,8 +558,10 @@ impl Daemon {
                     let a = git::apply(&root2, &r2, &id2, &bundle, &new2)?;
                     // Its settings and secrets here (`.env`), as a new
                     // worktree gets: the checkout's, which a project
-                    // cloned for it took from the machine it left.
+                    // cloned for it took from the machine it left, with
+                    // whatever else that clone took.
                     crate::workspace::copy_env(&root2, &new2);
+                    crate::workspace::copy_files(&root2, &new2, &carried);
                     Ok::<_, String>(a)
                 })
                 .await?;
@@ -648,7 +690,11 @@ impl Daemon {
             .store()
             .session(&session)?
             .context("session row missing")?;
+        let cwd = row.cwd.clone();
         crate::session::start(self.clone(), row, Vec::new());
+        // Where it works in git here, said now: clients name it by its
+        // project, not its new worktree's folder.
+        self.note_workspace(&session, &cwd).await;
         Ok(Reply::Created { session })
     }
 }
@@ -657,6 +703,24 @@ impl Daemon {
 /// a carrier asking again gets its answer.
 pub fn sweep(state: &Path, store: &crate::store::Store) {
     let week = std::time::Duration::from_secs(7 * 24 * 3600);
+    // Files waiting for a clone that never finished (a restart, or the
+    // move called off): a day on, they go, secrets and all.
+    for e in std::fs::read_dir(state.join("bring"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("move-"))
+    {
+        let stale = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= std::time::Duration::from_secs(24 * 3600));
+        if stale {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
     for e in std::fs::read_dir(state.join("moves"))
         .into_iter()
         .flatten()

@@ -619,3 +619,139 @@ pub(super) fn move_clone() -> Vec<(f32, Act)> {
     ]);
     v
 }
+
+/// The project a [`move_clone_live`] session works in: a real public
+/// repository cloned here, with an environment file, a commit not pushed
+/// and an edit not committed.
+fn spoon_knife() -> String {
+    let dir = std::env::temp_dir().join(format!("dent-walk-sk-{}", std::process::id()));
+    if !dir.exists() {
+        let git = |args: &[&str], at: &std::path::Path| {
+            let _ = std::process::Command::new("git")
+                .args(args)
+                .current_dir(at)
+                .env("GIT_AUTHOR_NAME", "walk")
+                .env("GIT_AUTHOR_EMAIL", "walk@example.com")
+                .env("GIT_COMMITTER_NAME", "walk")
+                .env("GIT_COMMITTER_EMAIL", "walk@example.com")
+                .status();
+        };
+        git(
+            &[
+                "clone",
+                "-q",
+                "https://github.com/octocat/Spoon-Knife.git",
+                &dir.display().to_string(),
+            ],
+            &std::env::temp_dir(),
+        );
+        let _ = std::fs::write(dir.join(".git/info/exclude"), ".env\n");
+        let _ = std::fs::write(dir.join(".env"), "SECRET=from-the-mac\n");
+        let _ = std::fs::write(dir.join("local.md"), "unpushed\n");
+        git(&["add", "local.md"], &dir);
+        git(&["commit", "-qm", "not pushed yet"], &dir);
+        let _ = std::fs::write(dir.join("README.md"), "edited, not committed\n");
+    }
+    dir.display().to_string()
+}
+
+/// Moving to a machine really saved that hasn't the project
+/// (`DENT_CLIENT_STATE`): its row offers to clone it there, the clone
+/// takes the environment file, and the session arrives with its commit
+/// and its edit, the window following it. Not in `checks`: it needs
+/// another machine and GitHub.
+pub(super) fn move_clone_live() -> Vec<(f32, Act)> {
+    vec![
+        (
+            0.1,
+            Until(
+                "a saved machine comes online",
+                |d, _| d.machines.iter().any(|m| m.rtt.is_some()),
+                30.,
+            ),
+        ),
+        (0.3, Key("cmd-n")),
+        (
+            0.2,
+            Call(|d, _, cx| {
+                d.set_project(Some(spoon_knife()));
+                cx.notify();
+            }),
+        ),
+        (0.2, Type(Field::Starter, "say: ready to clone and move")),
+        (0.2, Click("start")),
+        (0.1, Until("it answers here", |d, _| answered(d), 30.)),
+        (0.2, Click("chip-sessionmachine")),
+        (
+            0.1,
+            Until(
+                "the other machine offers to clone it there",
+                |d, _| {
+                    d.move_entries().iter().any(|e| {
+                        e.choosable()
+                            && e.note
+                                .as_deref()
+                                .is_some_and(|n| n.ends_with("Clone it there"))
+                    })
+                },
+                15.,
+            ),
+        ),
+        (0.4, Shot("live-offered")),
+        (
+            0.1,
+            Call(|d, w, cx| {
+                let key = d.move_entries().into_iter().find(|e| {
+                    e.note
+                        .as_deref()
+                        .is_some_and(|n| n.ends_with("Clone it there"))
+                });
+                if let Some(e) = key {
+                    d.choose_entry(&e, w, cx);
+                }
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "the clone is listed, its environment file ticked",
+                |d, _| {
+                    let e = d.move_entries();
+                    e.iter().any(|e| e.key == "move-clone-go")
+                        && e.iter().any(|e| e.key == "move-f-.env" && e.on)
+                },
+                10.,
+            ),
+        ),
+        (0.4, Shot("live-files")),
+        (0.1, Click("move-clone-go")),
+        (
+            0.1,
+            Until(
+                "while it clones there, the banner says so",
+                |d, _| {
+                    current(d).is_some_and(|s| {
+                        d.moves
+                            .get(&s.id)
+                            .is_some_and(|r| r.phase() == dent_client_core::carry::Phase::Cloning)
+                    })
+                },
+                20.,
+            ),
+        ),
+        (0.2, Shot("live-cloning")),
+        (
+            0.1,
+            Until(
+                "it arrives there and the window follows it",
+                |d, _| {
+                    current(d).is_some_and(|s| {
+                        s.id.contains('/') && s.title.contains("ready to clone and move")
+                    })
+                },
+                180.,
+            ),
+        ),
+        (0.8, Shot("live-arrived")),
+    ]
+}

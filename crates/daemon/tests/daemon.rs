@@ -4855,7 +4855,11 @@ fn sessions_moved_at_once_each_arrive_whole_and_apart() {
 fn a_session_moves_to_a_machine_that_clones_its_project_first() {
     use dent_client_core::carry::{Carrier, CloneThere};
     let m = Moves::new("clone", false);
-    std::fs::write(m.on_a.join(".gitignore"), ".env\nnode_modules/\n").unwrap();
+    std::fs::write(
+        m.on_a.join(".gitignore"),
+        ".env\nnode_modules/\nconfig/master.key\n",
+    )
+    .unwrap();
     git_in(&m.on_a, &["add", ".gitignore"]);
     git_in(&m.on_a, &["commit", "-qm", "ignore"]);
     git_in(&m.on_a, &["push", "-q", "origin", "work"]);
@@ -4875,6 +4879,8 @@ fn a_session_moves_to_a_machine_that_clones_its_project_first() {
     git_in(&m.on_a, &["add", "local.md"]);
     git_in(&m.on_a, &["commit", "-qm", "not pushed yet"]);
     std::fs::write(m.on_a.join(".env"), "KEY=from-a\n").unwrap();
+    std::fs::create_dir_all(m.on_a.join("config")).unwrap();
+    std::fs::write(m.on_a.join("config/master.key"), "k3y\n").unwrap();
     let mut a = m.a.client();
     let mut b = m.b.client();
     a.subscribe(0);
@@ -4891,7 +4897,7 @@ fn a_session_moves_to_a_machine_that_clones_its_project_first() {
         .with_chunk(4096)
         .clone_there(CloneThere {
             dir: m.on_a.display().to_string(),
-            paths: vec![".env".into()],
+            paths: vec![".env".into(), "config/master.key".into()],
             bring: dent_protocol::Bring {
                 name: "app".into(),
                 remotes: vec![dent_protocol::GitRemote {
@@ -4913,6 +4919,16 @@ fn a_session_moves_to_a_machine_that_clones_its_project_first() {
         })
         .unwrap();
     let cwd = Path::new(&cwd);
+    // Said at once where it works in git: its project's checkout.
+    let root = b.events(&to).into_iter().find_map(|e| match e {
+        Body::Workspace { root, .. } => root,
+        _ => None,
+    });
+    assert!(
+        root.as_deref()
+            .is_some_and(|r| r.ends_with("dent/projects/app")),
+        "{root:?}"
+    );
     assert_eq!(
         std::fs::read_to_string(cwd.join("notes.md")).unwrap(),
         "draft\n"
@@ -4932,6 +4948,11 @@ fn a_session_moves_to_a_machine_that_clones_its_project_first() {
         std::fs::read_to_string(cwd.join(".env")).unwrap(),
         "KEY=from-a\n",
         "the worktree has the ticked .env"
+    );
+    assert_eq!(
+        std::fs::read_to_string(cwd.join("config/master.key")).unwrap(),
+        "k3y\n",
+        "and the other file ticked"
     );
     // The clone itself, kept as one of that machine's projects.
     let cloned = m.root.join("home-b/dent/projects/app");
