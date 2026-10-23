@@ -3481,7 +3481,7 @@ impl Dent {
                     Out::Error { message } => Err(message),
                     other => Err(format!("unexpected answer {other:?}")),
                 };
-                self.move_answer(&id, side, answer, cx);
+                self.move_answer(&id, side, req, answer, cx);
             }
             (Waiting::MoveStopped, Out::Error { message }) => {
                 self.toast(ToastAction::Info, message);

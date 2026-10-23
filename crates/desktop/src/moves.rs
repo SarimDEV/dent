@@ -30,7 +30,13 @@ pub struct Run {
     pub out: Option<u64>,
     /// How it stopped, while it waits for Retry or Continue here.
     pub stopped: Option<Ended>,
+    /// Which run this is, so a timer or answer meant for an earlier run of
+    /// the same session's move never reaches this one.
+    pub run: u64,
 }
+
+/// Counts runs.
+static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Run {
     pub fn phase(&self) -> Phase {
@@ -103,6 +109,7 @@ impl Dent {
                 to_name,
                 out: None,
                 stopped: None,
+                run: RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             },
         );
         self.move_step(id, step, cx);
@@ -117,13 +124,17 @@ impl Dent {
             Step::Ask(side, req) => self.move_ask(id, side, req, cx),
             Step::Wait(ms, side, req) => {
                 run.out = None;
-                let id = id.to_string();
+                let (id, this_run) = (id.to_string(), run.run);
                 cx.spawn(async move |this, cx| {
                     cx.background_executor()
                         .timer(Duration::from_millis(ms))
                         .await;
                     let _ = this.update(cx, |this, cx| {
-                        if this.moves.get(&id).is_some_and(|r| r.stopped.is_none()) {
+                        // Still this run, waiting: not one called off and
+                        // begun again meanwhile.
+                        if this.moves.get(&id).is_some_and(|r| {
+                            r.run == this_run && r.stopped.is_none() && r.out.is_none()
+                        }) {
                             this.move_ask(&id, side, req, cx);
                         }
                     });
@@ -187,22 +198,24 @@ impl Dent {
                 if this.moves.get(&id).is_some_and(|r| r.out == Some(n)) {
                     this.waiting_remove(n);
                     let why = format!("{} didn't answer", this.machine_name(&machine));
-                    this.move_answer(&id, side, Err(why), cx);
+                    this.move_answer(&id, side, n, Err(why), cx);
                 }
             });
         })
         .detach();
     }
 
-    /// A machine answered the move's last request.
+    /// A machine answered request `n` of the move. Only the one out now
+    /// counts: an answer to an earlier run's request is dropped.
     pub fn move_answer(
         &mut self,
         id: &str,
         side: Side,
+        n: u64,
         answer: Result<Reply, String>,
         cx: &mut Context<Self>,
     ) {
-        let Some(run) = self.moves.get_mut(id) else {
+        let Some(run) = self.moves.get_mut(id).filter(|r| r.out == Some(n)) else {
             return;
         };
         run.out = None;
@@ -217,6 +230,10 @@ impl Dent {
         let Some(run) = self.moves.remove(id) else {
             return;
         };
+        // Its step out now is forgotten: the answer has nowhere to go.
+        if let Some(n) = run.out {
+            self.waiting_remove(n);
+        }
         let (_, plain) = fleet::split(id);
         let n = self.live.send_to(
             &run.from,
@@ -283,15 +300,38 @@ impl Dent {
         }
     }
 
-    /// The machine this device calls `name` ("" for this one).
-    pub fn machine_by_name(&self, name: &str) -> Option<String> {
+    /// Every machine this device calls `name` ("" for this one): two
+    /// machines can share one.
+    pub fn machines_named(&self, name: &str) -> Vec<String> {
+        let mut v = Vec::new();
         if name == self.machine_name("") {
-            return Some(String::new());
+            v.push(String::new());
         }
-        self.machines
-            .iter()
-            .find(|m| m.saved.name == name || m.name() == name)
-            .map(|m| m.id.clone())
+        v.extend(
+            self.machines
+                .iter()
+                .filter(|m| m.saved.name == name || m.name() == name)
+                .map(|m| m.id.clone()),
+        );
+        v
+    }
+
+    /// The machine called `name`, only when that name is one machine's.
+    pub fn machine_by_name(&self, name: &str) -> Option<String> {
+        match &self.machines_named(name)[..] {
+            [one] => Some(one.clone()),
+            _ => None,
+        }
+    }
+
+    /// Where a session moved to `name` as `there` is: the machine of that
+    /// name that has it, when names are shared.
+    pub fn moved_to(&self, name: &str, there: &str) -> Option<String> {
+        let all = self.machines_named(name);
+        all.iter()
+            .find(|m| self.session(&fleet::qualify(m, there)).is_some())
+            .or(all.first())
+            .map(|m| fleet::qualify(m, there))
     }
 
     /// Every machine that answers now, this one ("") included.

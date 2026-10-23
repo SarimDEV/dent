@@ -147,6 +147,7 @@ pub(super) fn move_stopped() -> Vec<(f32, Act)> {
                         to: "ab12".into(),
                         to_name: "dent-linux".into(),
                         out: None,
+                        run: 0,
                         stopped: Some(dent_client_core::carry::Ended::Stopped {
                             side: dent_client_core::carry::Side::To,
                             why: "dent-linux didn't answer".into(),

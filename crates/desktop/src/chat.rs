@@ -1565,10 +1565,7 @@ impl Dent {
         let Some((to, Some(there), dent_protocol::MoveState::Departed)) = &s.moving else {
             return None;
         };
-        let machine = self.machine_by_name(to);
-        let key = machine
-            .as_deref()
-            .map(|m| dent_client_core::fleet::qualify(m, there));
+        let key = self.moved_to(to, there);
         let short = crate::data::machine_short(to);
         let open = key.map(|key| {
             button("open-moved", format!("Open on {short}"), true, &t)
