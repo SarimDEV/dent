@@ -16,6 +16,7 @@ mod agent;
 mod bring;
 mod claude;
 mod daemon;
+mod doctor;
 mod env;
 mod escapes;
 mod git;
@@ -28,6 +29,7 @@ mod plan_tool;
 mod power;
 mod projects;
 mod remote;
+mod scopes;
 mod secrets;
 mod server;
 mod service;
@@ -50,6 +52,7 @@ const USAGE: &str = "usage: dent-daemon [--state DIR]   run the daemon
        dent-daemon install [--allow-downgrade]   run this build as the machine's service
        dent-daemon uninstall            stop the service and remove it (sessions stay)
        dent-daemon status               how the service stands
+       dent-daemon doctor               check what dent needs here, and say how to fix what isn't right
        dent-daemon update DIR           update the service to the build in DIR";
 
 fn main() -> Result<()> {
@@ -97,6 +100,7 @@ fn main() -> Result<()> {
         }
         Some("uninstall") => return service::uninstall(&paths),
         Some("status") => return service::status(&paths),
+        Some("doctor") => return doctor::run(&paths),
         Some("update") => {
             let dir = args
                 .get(1)

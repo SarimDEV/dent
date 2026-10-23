@@ -513,6 +513,31 @@ pub fn update(paths: &Paths, from: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The service's file, and whether it runs, if it's installed.
+pub fn installed() -> Option<(PathBuf, bool)> {
+    let m = Manager::here().ok()?;
+    m.installed().then(|| (m.file(), m.running()))
+}
+
+/// How to start the service by hand.
+pub fn start_hint() -> String {
+    if cfg!(target_os = "macos") {
+        format!("Run: launchctl kickstart gui/{}/{LABEL}", uid())
+    } else {
+        format!("Run: systemctl --user start {UNIT}")
+    }
+}
+
+/// Where the service's log is, here.
+pub fn log_hint_here(state: &Path) -> String {
+    let m = if cfg!(target_os = "macos") {
+        Manager::Launchd
+    } else {
+        Manager::Systemd
+    };
+    format!("See its log: {}", log_hint(m, state))
+}
+
 /// `dent-daemon uninstall`: stop the service and remove it. Sessions and
 /// settings stay in the state folder.
 pub fn uninstall(paths: &Paths) -> Result<()> {
@@ -522,6 +547,10 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
         return Ok(());
     }
     manager.remove()?;
+    // Without its launcher the folder no longer reads as run by a service,
+    // so the app starts a daemon for it again. Versions and the record
+    // stay, for an install later.
+    let _ = std::fs::remove_file(launcher_path(&paths.state));
     println!(
         "dent's service is removed. Your sessions stay in {}; agents still running finish their turn and stop.",
         paths.state.display()

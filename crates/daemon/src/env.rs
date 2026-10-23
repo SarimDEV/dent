@@ -51,9 +51,15 @@ fn passed(service: bool) -> Vec<&'static str> {
 }
 
 impl AgentEnv {
+    /// What agents of this daemon get: as a service when the launcher runs it.
     pub fn detect() -> Self {
+        Self::detect_as(crate::launcher::get().is_some())
+    }
+
+    /// What agents would get run as a service, or not (for `doctor`, run
+    /// from a terminal about the service).
+    pub fn detect_as(service: bool) -> Self {
         let shell = login_shell();
-        let service = crate::launcher::get().is_some();
         match login_env(&shell) {
             Some(env) => {
                 let path = env

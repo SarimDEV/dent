@@ -131,6 +131,9 @@ struct Proc {
     stopping: bool,
     /// It was started to carry on an earlier conversation.
     resumed: bool,
+    /// The agents' slice's out-of-memory kills when it started (under
+    /// systemd), to tell running out of memory from a plain kill.
+    ooms: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -541,6 +544,7 @@ impl Session {
                 err_off: alive.map(|p| p.err).unwrap_or(0),
                 stopping: false,
                 resumed: true,
+                ooms: crate::scopes::oom_kills(),
             });
             let now = Instant::now();
             if !self.in_turn {
@@ -1261,6 +1265,8 @@ impl Session {
                 asks: &asks,
             },
         );
+        let ooms = crate::scopes::oom_kills();
+        let argv = crate::scopes::agent(argv);
         h.spawn(&proc, argv, Some(self.cwd.clone().into()), env.vars.clone())
             .await?;
         self.resume_at = None;
@@ -1273,6 +1279,7 @@ impl Session {
             err_off: 0,
             stopping: false,
             resumed,
+            ooms,
         });
         self.start_by = Some(Instant::now() + start_limit());
         self.control(Ctl::Initialize).await?;
@@ -2336,7 +2343,13 @@ impl Session {
             self.start_over().await;
             return;
         }
+        // Killed, and the kernel killed something for memory meanwhile.
+        let starved = signal == Some(libc::SIGKILL)
+            && p.ooms
+                .zip(crate::scopes::oom_kills())
+                .is_some_and(|(was, now)| now > was);
         let why = match (code, signal) {
+            _ if starved => "the machine ran out of memory".into(),
             (_, Some(s)) => format!("signal {s}"),
             (Some(c), _) => format!("exit code {c}"),
             _ => "no exit status".into(),
