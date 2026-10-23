@@ -8,6 +8,7 @@
 //!
 //! [spike 07]: ../../docs/spikes/07-client-core.md
 
+pub mod carry;
 pub mod fleet;
 pub mod machine;
 pub mod timeline;

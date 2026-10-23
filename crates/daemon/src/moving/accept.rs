@@ -73,6 +73,17 @@ pub fn begin(state: &Path, m: &MoveManifest) -> Result<Vec<(String, u64)>, Strin
             std::fs::rename(&tmp, &file).map_err(|e| e.to_string())?;
         }
     }
+    // An empty part has nothing to send: it's made here, whole, so it
+    // verifies like any other.
+    for p in m.parts.iter().filter(|p| p.bytes == 0) {
+        let path = dir.join("parts").join(&p.name);
+        if let Some(d) = path.parent() {
+            std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+        }
+        if !path.exists() {
+            std::fs::File::create(&path).map_err(|e| e.to_string())?;
+        }
+    }
     Ok(have(state, m))
 }
 
@@ -251,6 +262,22 @@ mod tests {
             ..m.clone()
         };
         assert!(begin(&state, &other).is_err());
+        // An empty part (a file saved with nothing in it) needs no bytes
+        // sent to be whole.
+        let empty = MoveManifest {
+            id: "m3".into(),
+            parts: vec![dent_protocol::MovePart {
+                name: "files/empty.txt".into(),
+                bytes: 0,
+                sha256: {
+                    use sha2::Digest;
+                    hex::encode(sha2::Sha256::digest(b""))
+                },
+            }],
+            ..m.clone()
+        };
+        begin(&state, &empty).unwrap();
+        verify(&state, &empty).unwrap();
         // A part named to leave the folder is refused up front.
         let bad = MoveManifest {
             id: "m2".into(),

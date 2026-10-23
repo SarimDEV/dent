@@ -3793,9 +3793,10 @@ fn reply(out: Result<Out, String>) -> Result<dent_protocol::Reply, String> {
 }
 
 /// Carry move `id` of `session` from `a` to `b`, `chunk` bytes at a time,
-/// as `dent move` does; `stop_after` chunks, it stops (an interruption;
-/// `usize::MAX` stops once everything's sent, before asking to accept).
-/// Returns the session it became, or why it wasn't taken.
+/// with the carrier `dent move` and the desktop use; `stop_after` chunks,
+/// it stops (an interruption; `usize::MAX` stops once everything's sent,
+/// before asking to accept). Returns the session it became, or why it
+/// wasn't taken.
 fn carry(
     a: &mut Client,
     b: &mut Client,
@@ -3804,91 +3805,52 @@ fn carry(
     chunk: u32,
     stop_after: Option<usize>,
 ) -> Result<Result<String, String>, String> {
-    use dent_protocol::Reply as R;
-    let pack = |have: Option<Vec<String>>| Request::MovePack {
-        session: session.into(),
-        id: id.into(),
-        to: "b".into(),
-        have,
-    };
-    let R::MoveRemotes { remotes } = reply(a.call(pack(None)))? else {
-        return Err("no remotes".into());
-    };
-    let R::MoveHave { tips, .. } = reply(b.call(Request::MoveHave { remotes }))? else {
-        return Err("no have".into());
-    };
-    let manifest = loop {
-        match reply(a.call(pack(Some(tips.clone()))))? {
-            R::MovePacked { manifest } => break manifest,
-            R::MoveWaiting => std::thread::sleep(Duration::from_millis(200)),
-            o => return Err(format!("{o:?}")),
-        }
-    };
-    let mut sent = 0;
-    match reply(b.call(Request::MoveIn {
-        manifest: manifest.clone(),
-    }))? {
-        R::Created { session } => return Ok(Ok(session)),
-        R::MoveParts { have } => {
-            for p in &manifest.parts {
-                let mut at = have
-                    .iter()
-                    .find(|(n, _)| *n == p.name)
-                    .map_or(0, |(_, n)| *n);
-                while at < p.bytes {
-                    if stop_after.is_some_and(|n| sent >= n) {
-                        return Err("stopped".into());
-                    }
-                    let R::MoveBytes {
-                        bytes_b64, offset, ..
-                    } = reply(a.call(Request::MoveRead {
-                        id: id.into(),
-                        part: p.name.clone(),
-                        offset: at,
-                        len: chunk,
-                    }))?
-                    else {
-                        return Err("no bytes".into());
-                    };
-                    let R::MoveWrote { have } = reply(b.call(Request::MoveWrite {
-                        id: id.into(),
-                        part: p.name.clone(),
-                        offset,
-                        bytes_b64,
-                    }))?
-                    else {
-                        return Err("not written".into());
-                    };
-                    at = have;
-                    sent += 1;
-                }
+    carry_then(a, b, session, id, chunk, stop_after, || {})
+}
+
+/// [`carry`], with `before_accept` run just before it asks to accept.
+fn carry_then(
+    a: &mut Client,
+    b: &mut Client,
+    session: &str,
+    id: &str,
+    chunk: u32,
+    stop_after: Option<usize>,
+    mut before_accept: impl FnMut(),
+) -> Result<Result<String, String>, String> {
+    use dent_client_core::carry::{Carrier, Ended, Side, Step};
+    let mut c = Carrier::new(session, id, "b").with_chunk(chunk);
+    let mut step = c.start();
+    let mut reads = 0;
+    loop {
+        let (side, req) = match step {
+            Step::Done(Ok(s)) => return Ok(Ok(s)),
+            Step::Done(Err(Ended::NotAccepted(why))) => return Ok(Err(why)),
+            Step::Done(Err(e)) => return Err(format!("{e:?}")),
+            Step::Ask(side, req) => (side, req),
+            Step::Wait(_, side, req) => {
+                std::thread::sleep(Duration::from_millis(200));
+                (side, req)
             }
+        };
+        match &req {
+            Request::MoveRead { .. } => {
+                if stop_after.is_some_and(|n| reads >= n) {
+                    return Err("stopped".into());
+                }
+                reads += 1;
+            }
+            Request::MoveAccept { .. } if stop_after == Some(usize::MAX) => {
+                return Err("all sent".into());
+            }
+            Request::MoveAccept { .. } => before_accept(),
+            _ => {}
         }
-        o => return Err(format!("{o:?}")),
-    }
-    if stop_after == Some(usize::MAX) {
-        return Err("all sent".into());
-    }
-    match reply(b.call(Request::MoveAccept { id: id.into() }))? {
-        R::Created { session: s } => {
-            reply(a.call(Request::MoveEnded {
-                session: session.into(),
-                id: id.into(),
-                to_session: Some(s.clone()),
-                not_accepted: None,
-            }))?;
-            Ok(Ok(s))
-        }
-        R::MoveNotAccepted { why } => {
-            reply(a.call(Request::MoveEnded {
-                session: session.into(),
-                id: id.into(),
-                to_session: None,
-                not_accepted: Some(why.clone()),
-            }))?;
-            Ok(Err(why))
-        }
-        o => Err(format!("{o:?}")),
+        let answer = match side {
+            Side::From => reply(a.call(req)),
+            Side::To => reply(b.call(req)),
+        };
+        step = c.answer(side, answer);
     }
 }
 
@@ -4035,13 +3997,72 @@ fn a_move_the_other_machine_cant_take_leaves_the_session_working_here() {
         "hello there",
     );
     a.wait_turns(&s, 1);
-    let why = carry(&mut a, &mut b, &s, "mv3", 4096, None)
-        .unwrap()
-        .unwrap_err();
-    assert!(why.contains("doesn't have the project"), "{why}");
-    // Not taken: it works here again, as it was.
+    // Found out before anything is packed: nothing fenced, nothing to undo.
+    assert_eq!(
+        carry(&mut a, &mut b, &s, "mv3", 4096, None).unwrap_err(),
+        "NoProject"
+    );
+    assert!(!a.events(&s).iter().any(|e| matches!(e, Body::Move { .. })));
     a.say(&s, "again", "and again", false);
     a.wait_turns(&s, 2);
+}
+
+#[test]
+fn a_project_gone_there_before_it_arrives_leaves_the_session_working_here() {
+    let m = Moves::new("gone", true);
+    let mut a = m.a.client();
+    let mut b = m.b.client();
+    a.subscribe(0);
+    b.call(Request::AddProject {
+        path: m.on_b.display().to_string(),
+        create: false,
+    })
+    .unwrap();
+    let s = a.create(
+        &m.on_a.display().to_string(),
+        Permission::Full,
+        "hello there",
+    );
+    a.wait_turns(&s, 1);
+    // Everything sent; then the project goes there before it's accepted.
+    assert_eq!(
+        carry(&mut a, &mut b, &s, "mv3", 4096, Some(usize::MAX)).unwrap_err(),
+        "all sent"
+    );
+    let kept = m.on_b.with_extension("kept");
+    std::process::Command::new("cp")
+        .arg("-R")
+        .arg(&m.on_b)
+        .arg(&kept)
+        .status()
+        .unwrap();
+    std::fs::remove_dir_all(&m.on_b).unwrap();
+    // Picked up again, the carrier finds it gone there. Everything was
+    // sent, so it isn't called off behind your back: you're told to keep
+    // it here or retry, and Continue here brings it back.
+    let why = carry(&mut a, &mut b, &s, "mv3", 4096, None).unwrap_err();
+    assert!(why.contains("Continue here"), "{why}");
+    a.call(Request::MoveStop {
+        session: s.clone(),
+        id: "mv3".into(),
+        continue_here: true,
+    })
+    .unwrap();
+    a.say(&s, "again", "and again", false);
+    a.wait_turns(&s, 2);
+    // Gone in the moment between everything arriving and taking it: the
+    // machine it goes to refuses it itself.
+    std::fs::rename(&kept, &m.on_b).unwrap();
+    let on_b = m.on_b.clone();
+    let why = carry_then(&mut a, &mut b, &s, "mv4", 4096, None, || {
+        let _ = std::fs::remove_dir_all(&on_b);
+    })
+    .unwrap()
+    .unwrap_err();
+    assert!(why.contains("doesn't have the project"), "{why}");
+    // Not taken: it works here again, as it was.
+    a.say(&s, "again2", "and again", false);
+    a.wait_turns(&s, 3);
     assert!(a.events(&s).iter().any(|e| matches!(
         e,
         Body::Move {
