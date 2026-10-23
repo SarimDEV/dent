@@ -1339,15 +1339,36 @@ impl Session {
         self.retire_proc().await;
         self.agent_started = false;
         self.resume_at = Some(None);
+        // What was said, from dent's own record, goes in first: the new
+        // conversation starts knowing it, as text.
+        let events = self.d.store().session_events(&self.id).unwrap_or_default();
+        let now = self.last.as_ref().map(|(id, ..)| id.clone());
+        let said = recap(&events, RECAP_MAX, now.as_deref());
         self.log(Body::Notice {
-            text: format!(
-                "{} no longer had this conversation's history, so it started a new one. It \
-                 won't remember what was said before.",
-                self.agent.name()
-            ),
+            text: if said.is_empty() {
+                format!(
+                    "{} no longer had this conversation's history, so it started a new one.",
+                    self.agent.name()
+                )
+            } else {
+                format!(
+                    "{} no longer had this conversation's history, so it started a new one, \
+                     given what was said so far as text. Tool calls and their results aren't in it.",
+                    self.agent.name()
+                )
+            },
         });
         match self.last.clone() {
             Some((_, text, attachments)) => {
+                let text = if said.is_empty() {
+                    text
+                } else {
+                    format!(
+                        "[dent: your earlier history in this conversation was lost. Here is what was \
+                         said, as text; tool calls and their results aren't in it.]\n\n{said}\n\n\
+                         [dent: the conversation so far ends here. The newest message follows.]\n\n{text}"
+                    )
+                };
                 let _ = self.hand_over(&text, false, &attachments).await;
             }
             None => self.end_turn(Outcome::Interrupted { reason: None }),
@@ -2865,6 +2886,114 @@ fn nothing_back(body: &Body) -> bool {
 /// may have done its work already), the place before can't be known, or
 /// background work is running in the agent, which going back (a new
 /// process) would end.
+/// Longest recap handed to a conversation that lost its history, in bytes:
+/// the newest of it is kept.
+const RECAP_MAX: usize = 24 * 1024;
+
+/// What was said in a session, as text, newest kept within `max` bytes:
+/// for an agent that lost the conversation (a transcript gone, one that
+/// didn't move). As the agent had it: turns taken back or rewound away
+/// aren't in it, a held message is where it was delivered, and what dent
+/// sent by itself (carrying on) isn't the person's. `now` (the message
+/// being sent with it) isn't in it either.
+fn recap(events: &[dent_protocol::Event], max: usize, now: Option<&str>) -> String {
+    let gone = withdrawn_ids(events);
+    let taken_back = withdrawn_turns(events);
+    let by_dent =
+        |t: &str| t == RESUME_TEXT || t.starts_with("You were cut off before the turn finished.");
+    // (message id, for rewinds; what was said)
+    let mut turns: Vec<(Option<String>, String)> = Vec::new();
+    let mut held: HashMap<String, String> = HashMap::new();
+    for (i, e) in events.iter().enumerate() {
+        if taken_back.iter().any(|r| r.contains(&i)) {
+            continue;
+        }
+        match &e.body {
+            Body::User {
+                id, text, queued, ..
+            } => {
+                if gone.contains(id)
+                    || Some(id.as_str()) == now
+                    || by_dent(text)
+                    || text.trim().is_empty()
+                {
+                    continue;
+                }
+                if *queued {
+                    held.insert(id.clone(), text.clone());
+                } else {
+                    turns.push((
+                        Some(id.clone()),
+                        format!("The person said:\n{}", text.trim()),
+                    ));
+                }
+            }
+            Body::Delivered { id } => {
+                if let Some(text) = held.remove(id)
+                    && Some(id.as_str()) != now
+                {
+                    turns.push((
+                        Some(id.clone()),
+                        format!("The person said:\n{}", text.trim()),
+                    ));
+                }
+            }
+            Body::Unqueued { id, .. } => {
+                held.remove(id);
+            }
+            // Back to just before message `to`: what came after is gone.
+            Body::Rewound { to, .. } => {
+                if let Some(at) = turns.iter().position(|(id, _)| id.as_deref() == Some(to)) {
+                    turns.truncate(at);
+                }
+            }
+            Body::Assistant {
+                parent: None,
+                blocks,
+                ..
+            } => {
+                let words: String = blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        dent_protocol::Block::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !words.trim().is_empty() {
+                    turns.push((None, format!("You replied:\n{}", words.trim())));
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut kept: Vec<String> = Vec::new();
+    let mut size = 0;
+    for (_, t) in turns.iter().rev() {
+        if size + t.len() > max {
+            // The newest alone is too long: its start, cut where a
+            // character ends, rather than nothing at all.
+            if kept.is_empty() {
+                let mut end = max.saturating_sub(16);
+                while !t.is_char_boundary(end) {
+                    end -= 1;
+                }
+                kept.push(format!("{} (cut short)", &t[..end]));
+            }
+            break;
+        }
+        size += t.len() + 2;
+        kept.push(t.clone());
+    }
+    let left_out = kept.len() < turns.len();
+    kept.reverse();
+    let mut out = kept.join("\n\n");
+    if left_out && !out.is_empty() {
+        out.insert_str(0, "(Earlier parts left out.)\n\n");
+    }
+    out
+}
+
 fn unanswered(events: &[dent_protocol::Event]) -> Option<(Vec<String>, Option<String>)> {
     let working = events.iter().rev().find_map(|e| match &e.body {
         Body::Background { tasks } => Some(!tasks.is_empty()),
@@ -3007,6 +3136,90 @@ mod requeue_tests {
 mod withdraw_tests {
     use super::*;
     use dent_protocol::{Block, Event};
+
+    #[test]
+    fn a_recap_is_what_was_said_newest_first_kept_without_the_message_now() {
+        let reply = |t: &str| Body::Assistant {
+            parent: None,
+            blocks: vec![dent_protocol::Block::Text { text: t.into() }],
+            uuid: None,
+        };
+        let events = log(vec![
+            user("1", "add a login page"),
+            reply("Done: login.tsx"),
+            user("2", "now the tests"),
+            reply("Added 4 tests."),
+            user("3", "what next?"),
+        ]);
+        let all = recap(&events, 10_000, Some("3"));
+        assert!(
+            all.starts_with("The person said:\nadd a login page"),
+            "{all}"
+        );
+        assert!(all.ends_with("You replied:\nAdded 4 tests."), "{all}");
+        assert!(
+            !all.contains("what next?"),
+            "the message now goes on its own"
+        );
+        // Too much: the newest kept, and said that some was left out.
+        let some = recap(&events, 60, Some("3"));
+        assert!(some.starts_with("(Earlier parts left out.)"), "{some}");
+        assert!(
+            some.contains("Added 4 tests.") && !some.contains("login page"),
+            "{some}"
+        );
+        assert_eq!(recap(&log(vec![user("1", "hi")]), 100, Some("1")), "");
+        // One turn alone too long: its start, not nothing.
+        let long = log(vec![user("1", &"é".repeat(100)), user("2", "now")]);
+        let cut = recap(&long, 50, Some("2"));
+        assert!(cut.ends_with("(cut short)") && cut.contains('é'), "{cut}");
+        // Taken back, rewound away, sent by dent, or never delivered: not
+        // what the agent had.
+        let mut e = vec![
+            user("1", "keep this"),
+            reply("kept reply"),
+            Body::TurnEnded {
+                outcome: Outcome::Done,
+            },
+            user("2", "taken back"),
+            Body::Withdrawn {
+                ids: vec!["2".into()],
+            },
+            Body::TurnEnded {
+                outcome: Outcome::Interrupted { reason: None },
+            },
+            user("3", "rewound away"),
+            reply("gone reply"),
+            Body::Rewound {
+                to: "3".into(),
+                files: false,
+            },
+            user("4", RESUME_TEXT),
+            reply("carried on"),
+        ];
+        e.push(Body::User {
+            id: "5".into(),
+            text: "still waiting".into(),
+            queued: true,
+            steer: false,
+            attachments: Vec::new(),
+        });
+        e.push(user("6", "now"));
+        let r = recap(&log(e), 10_000, Some("6"));
+        for missing in [
+            "taken back",
+            "rewound away",
+            "gone reply",
+            "usage limit",
+            "still waiting",
+            "now",
+        ] {
+            assert!(!r.contains(missing), "{missing} in {r}");
+        }
+        for kept in ["keep this", "kept reply", "carried on"] {
+            assert!(r.contains(kept), "{kept} not in {r}");
+        }
+    }
 
     fn log(bodies: Vec<Body>) -> Vec<Event> {
         bodies
