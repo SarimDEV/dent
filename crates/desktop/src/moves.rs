@@ -61,6 +61,9 @@ pub struct Probe {
 /// How long an answer may take before the move counts as stopped: packing
 /// a big repository, or making the session there, takes a while; a chunk
 /// or a question doesn't.
+/// How long the machine menu waits to hear what each machine has.
+const PROBE_PATIENCE: Duration = Duration::from_secs(6);
+
 fn patience(req: &Request) -> Duration {
     Duration::from_secs(match req {
         Request::MovePack { have: Some(_), .. } | Request::MoveAccept { .. } => 600,
@@ -304,20 +307,28 @@ impl Dent {
 
     /// Call the move off (only before anything was sent), or keep the
     /// session here whatever was sent (`continue_here`).
+    /// One this device isn't carrying (begun before this app restarted,
+    /// or by another device) is stopped by the id the session gives it.
     pub fn stop_move(&mut self, id: &str, continue_here: bool, cx: &mut Context<Self>) {
-        let Some(run) = self.moves.remove(id) else {
-            return;
+        let (from, plain) = fleet::split(id);
+        let (from, move_id) = match self.moves.remove(id) {
+            Some(run) => {
+                // Its step out now is forgotten: the answer has nowhere to go.
+                if let Some(n) = run.out {
+                    self.waiting_remove(n);
+                }
+                (run.from, run.carrier.id().to_string())
+            }
+            None => match self.live_move(id) {
+                Some((_, m, _)) => (from.to_string(), m),
+                None => return,
+            },
         };
-        // Its step out now is forgotten: the answer has nowhere to go.
-        if let Some(n) = run.out {
-            self.waiting_remove(n);
-        }
-        let (_, plain) = fleet::split(id);
         let n = self.live.send_to(
-            &run.from,
+            &from,
             Request::MoveStop {
                 session: plain.to_string(),
-                id: run.carrier.id().to_string(),
+                id: move_id,
                 continue_here,
             },
         );
@@ -326,7 +337,32 @@ impl Dent {
     }
 
     /// As the machine menu opens: ask what the other machines have of
-    /// this session's project.
+    /// this session's project. Whatever hasn't answered in a few seconds
+    /// (a machine online but hung) is offered as online, unsure.
+    pub fn probe_machines_then(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.probe_machines(id);
+        let id = id.to_string();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PROBE_PATIENCE).await;
+            let _ = this.update(cx, |this, cx| {
+                let machines: Vec<String> = this.online_machines();
+                let Some(p) = this.move_probe.as_mut().filter(|p| p.session == id) else {
+                    return;
+                };
+                if p.remotes.is_none() {
+                    p.unsure.insert(String::new());
+                }
+                for m in machines {
+                    if !p.has.contains_key(&m) {
+                        p.unsure.insert(m);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub fn probe_machines(&mut self, id: &str) {
         let (from, plain) = fleet::split(id);
         self.move_probe = Some(Probe {
@@ -459,9 +495,13 @@ impl Dent {
         let unsure = |m: &str| probe.is_some_and(|p| p.unsure.contains("") || p.unsure.contains(m));
         // Under way already: only where it's going, and that's not chosen
         // again (its banner carries it).
+        // A stopped run counts only while the session says the move is
+        // under way: one that ended there since holds nothing.
+        let live = self.live_move(&id).is_some();
         let going = self
             .moves
             .get(&id)
+            .filter(|r| r.stopped.is_none() || live)
             .map(|r| (r.to_name.clone(), Some(r.to.clone()), r.stopped.is_none()))
             .or_else(|| {
                 self.live_move(&id)

@@ -84,7 +84,11 @@ fn fill(s: &Session<'_>, id: &str, have: &[String], out: &Path) -> Result<MoveMa
                 _ => None,
             })
             .collect();
-        let mut r = super::git::pack(&root, id, have, &checkpoints, &out.join("git.bundle"))?;
+        // Sessions of one repository packed at once take turns: packing
+        // reads its index, which git locks.
+        let mut r = crate::workspace::one_at_a_time(&root, || {
+            super::git::pack(&root, id, have, &checkpoints, &out.join("git.bundle"))
+        })?;
         r.remotes = super::git::remotes(&root);
         r.subdir = subdir;
         Some(r)

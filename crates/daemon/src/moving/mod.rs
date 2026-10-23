@@ -381,19 +381,26 @@ impl Daemon {
                 let new = crate::workspace::worktrees_root()
                     .join(&name)
                     .join(landing_name(&leaf, id));
-                // One an accept cut short made is this move's: made again.
+                // One an accept cut short made is this move's, wherever it
+                // was put (an older daemon named it otherwise): made again.
                 let landing = accept::inbox(&state, id).join("landing");
-                if std::fs::read_to_string(&landing).ok().as_deref()
-                    == Some(&new.display().to_string())
-                    && new.exists()
+                if let Some(made) = std::fs::read_to_string(&landing)
+                    .ok()
+                    .map(PathBuf::from)
+                    // Only ever one of dent's own folders.
+                    .filter(|p| p.starts_with(crate::workspace::worktrees_root()) && p.exists())
                 {
-                    let _ = crate::workspace::one_at_a_time(&root, || {
-                        crate::workspace::run(
-                            &root,
-                            &["worktree", "remove", "--force", &new.display().to_string()],
-                        )
-                    });
-                    let _ = std::fs::remove_dir_all(&new);
+                    let root2 = root.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let _ = crate::workspace::one_at_a_time(&root2, || {
+                            crate::workspace::run(
+                                &root2,
+                                &["worktree", "remove", "--force", &made.display().to_string()],
+                            )
+                        });
+                        let _ = std::fs::remove_dir_all(&made);
+                    })
+                    .await?;
                 }
                 if let Some(p) = new.parent() {
                     std::fs::create_dir_all(p)?;

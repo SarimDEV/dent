@@ -5918,7 +5918,7 @@ impl Dent {
             Menu::Project => self.open_project_picker(window, cx),
             Menu::SessionMachine => {
                 if let Some(id) = self.selected.clone() {
-                    self.probe_machines(&id);
+                    self.probe_machines_then(&id, cx);
                 }
             }
             Menu::Base => self.branch_query.update(cx, |f, cx| {

@@ -104,7 +104,7 @@ pub fn pack(
         refs: vec![snap_ref.clone(), index_ref.clone()],
         dir: None,
     };
-    let tmp = tempdir(root)?;
+    let tmp = tempdir(root, id)?;
     cleanup.dir = Some(tmp.clone());
     let idx = tmp.join("index");
     let real = PathBuf::from(git(root, &["rev-parse", "--git-path", "index"], &[])?);
@@ -231,10 +231,14 @@ impl Drop for Cleanup {
     }
 }
 
-/// A folder of our own beside the repository's metadata.
-fn tempdir(root: &Path) -> Result<PathBuf, String> {
+/// A folder of our own beside the repository's metadata, for move `id`
+/// alone: sessions of one repository can be packed at once, and each
+/// takes its folder away when done.
+fn tempdir(root: &Path, id: &str) -> Result<PathBuf, String> {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let git_dir = PathBuf::from(git(root, &["rev-parse", "--absolute-git-dir"], &[])?);
-    let t = git_dir.join(format!("dent-move-{}", std::process::id()));
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let t = git_dir.join(format!("dent-move-{}-{id}-{n}", std::process::id()));
     std::fs::create_dir_all(&t).map_err(|e| e.to_string())?;
     Ok(t)
 }

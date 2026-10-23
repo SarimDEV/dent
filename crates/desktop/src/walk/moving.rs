@@ -403,6 +403,53 @@ pub(super) fn move_limits() -> Vec<(f32, Act)> {
                 let Some(id) = current(d).map(|s| s.id.clone()) else {
                     return;
                 };
+                // Stopped here, then ended there (a message sent, or
+                // Continue here on another device): it holds nothing.
+                d.moves.insert(
+                    id.clone(),
+                    crate::moves::Run {
+                        carrier: dent_client_core::carry::Carrier::new(&id, "m4", "studio"),
+                        from: String::new(),
+                        to: "aa03".into(),
+                        to_name: "studio".into(),
+                        out: None,
+                        run: 0,
+                        stopped: Some(dent_client_core::carry::Ended::Stopped {
+                            side: dent_client_core::carry::Side::To,
+                            why: "studio didn't answer".into(),
+                        }),
+                    },
+                );
+                if let Some(v) = d.core.list.get_mut(&id) {
+                    v.moving = None;
+                }
+                d.rebuild(&id);
+                cx.notify();
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "a stopped move that ended there since blocks no other machine",
+                |d, _| {
+                    d.move_entries()
+                        .iter()
+                        .any(|e| e.key == "move-aa01" && e.choosable())
+                },
+                2.,
+            ),
+        ),
+        (0.1, Call(|d, _, _| {
+            if let Some(id) = current(d).map(|s| s.id.clone()) {
+                d.moves.remove(&id);
+            }
+        })),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                let Some(id) = current(d).map(|s| s.id.clone()) else {
+                    return;
+                };
                 d.moves.remove(&id);
                 if let Some(v) = d.core.list.get_mut(&id) {
                     v.moving = Some((
