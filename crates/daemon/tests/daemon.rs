@@ -5506,3 +5506,50 @@ fn a_turn_ended_just_before_a_restart_ends_once() {
     c.say(&s, "n", "next", false);
     c.wait_turns(&s, 2);
 }
+
+/// A first turn stopped before any reply is taken back; the daemon gone
+/// before saying so reads as interrupted after, not Working for good.
+#[test]
+fn a_first_turn_taken_back_just_before_a_restart_is_interrupted() {
+    let mut w = World::new(&[
+        ("FAKE_CLAUDE_SPEED", "0.5"),
+        ("DENT_TEST_DIE_AFTER_TURN_ENDED", "1"),
+    ]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Full, "a long answer please");
+    c.wait(&s, "the turn to start", |b| matches!(b, Body::TurnStarted));
+    // Stopped before anything came back: taken back, and gone at the gap.
+    c.send_req(Request::Interrupt {
+        session: s.clone(),
+        by: None,
+    });
+    let until = Instant::now() + Duration::from_secs(20);
+    while w
+        .daemon
+        .as_mut()
+        .is_some_and(|d| d.try_wait().unwrap().is_none())
+    {
+        assert!(Instant::now() < until, "it didn't stop where asked");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    drop(c);
+    w.env.retain(|(k, _)| k != "DENT_TEST_DIE_AFTER_TURN_ENDED");
+    w.start();
+    let mut c = w.client();
+    c.subscribe(0);
+    c.pump_for(Duration::from_secs(2));
+    assert!(
+        c.events(&s)
+            .iter()
+            .any(|b| matches!(b, Body::Withdrawn { .. })),
+        "{:#?}",
+        c.events(&s)
+    );
+    assert_eq!(
+        c.status(&s),
+        Some(Status::Interrupted),
+        "{:#?}",
+        c.events(&s)
+    );
+}

@@ -615,7 +615,13 @@ impl Session {
                     ended = true;
                     if !std::mem::take(&mut quiet_end) {
                         self.settled = settled(&outcome);
-                    } else if self.settled == Status::New {
+                    } else if matches!(
+                        self.settled,
+                        Status::New | Status::Working | Status::NeedsYou | Status::Background
+                    ) {
+                        // A turn taken back leaves what came before it;
+                        // a busy status (the row's, from a daemon gone
+                        // before saying the end) isn't that.
                         self.settled = Status::Interrupted;
                     }
                 }
@@ -2619,6 +2625,9 @@ impl Session {
             match end {
                 Some(off) => self.log_from(body, off),
                 None => self.log(body),
+            }
+            if std::env::var_os("DENT_TEST_DIE_AFTER_TURN_ENDED").is_some() {
+                std::process::exit(9);
             }
             if self.proc.is_some() {
                 self.idle_at = Some(Instant::now() + idle());
