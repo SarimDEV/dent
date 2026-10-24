@@ -1068,6 +1068,17 @@ pub(super) fn move_hiccup_live() -> Vec<(f32, Act)> {
                     .spawn();
             }),
         ),
+        (
+            0.1,
+            Until(
+                "its service really restarted",
+                |_, _| {
+                    std::fs::read_to_string("/tmp/hiccup.log")
+                        .is_ok_and(|l| l.lines().last() == Some("exit 0"))
+                },
+                30.,
+            ),
+        ),
         (1.0, Shot("hiccup-during")),
         (
             0.1,
@@ -1084,3 +1095,75 @@ pub(super) fn move_hiccup_live() -> Vec<(f32, Act)> {
         (0.8, Shot("hiccup-arrived")),
     ]
 }
+
+/// Three sessions moved at once from this window to a machine really
+/// saved (`DENT_CLIENT_STATE`): each carried over the one link, none
+/// crossed with another, all arriving.
+pub(super) fn move_many_live() -> Vec<(f32, Act)> {
+    let mut v = vec![(
+        0.1,
+        Until(
+            "a saved machine comes online",
+            |d, _| d.machines.iter().any(|m| m.rtt.is_some()),
+            30.,
+        ),
+    )];
+    for text in ["say: many one", "say: many two", "say: many three"] {
+        v.extend([
+            (0.3, Key("cmd-n")),
+            (0.2, Type(Field::Starter, text)),
+            (0.2, Click("start")),
+            (0.1, Until("it answers here", |d, _| answered(d), 30.)),
+        ]);
+    }
+    v.extend([
+        (
+            0.2,
+            Call(|d, _, cx| {
+                let to = d
+                    .machines
+                    .iter()
+                    .find(|m| m.rtt.is_some())
+                    .map(|m| m.id.clone())
+                    .unwrap_or_default();
+                let ids: Vec<String> = d
+                    .sessions
+                    .iter()
+                    .filter(|s| !s.id.contains('/') && s.title.contains("many"))
+                    .map(|s| s.id.clone())
+                    .collect();
+                for id in ids {
+                    d.start_move(&id, &to, cx);
+                }
+                AT_ONCE.store(d.moves.len(), std::sync::atomic::Ordering::Relaxed);
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "all three carried at once",
+                |_, _| AT_ONCE.load(std::sync::atomic::Ordering::Relaxed) == 3,
+                1.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "each arrives there, as itself",
+                |d, _| {
+                    ["many one", "many two", "many three"].iter().all(|t| {
+                        d.sessions.iter().any(|s| {
+                            s.id.contains('/') && s.title.contains(t) && s.moving.is_none()
+                        })
+                    }) && d.moves.is_empty()
+                },
+                180.,
+            ),
+        ),
+        (0.8, Shot("many-arrived")),
+    ]);
+    v
+}
+
+/// How many moves [`move_many_live`] had under way at once.
+static AT_ONCE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

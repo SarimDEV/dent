@@ -47,6 +47,9 @@ pub struct CloneDraft {
     pub dir: String,
     pub pack: Option<Result<Pack, String>>,
     pub files: crate::bring::FileChoice,
+    /// The request its list went out as: a timer for an earlier one never
+    /// reaches this one.
+    pub asked: u64,
 }
 
 /// Counts runs.
@@ -680,8 +683,10 @@ impl Dent {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(PACK_PATIENCE).await;
             let _ = this.update(cx, |this, cx| {
-                let why = format!("{} didn't answer", this.machine_name(&from));
-                this.clone_pack_came(&sid, &tid, Err(why), cx);
+                if this.move_clone.as_ref().is_some_and(|c| c.asked == n) {
+                    let why = format!("{} didn't answer", this.machine_name(&from));
+                    this.clone_pack_came(&sid, &tid, Err(why), cx);
+                }
             });
         })
         .detach();
@@ -691,6 +696,7 @@ impl Dent {
             dir,
             pack: None,
             files: Default::default(),
+            asked: n,
         });
         self.menu_ix = None;
         cx.notify();

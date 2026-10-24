@@ -264,6 +264,7 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("move-clone-live", &[move_clone_live]),
     ("move-beside-live", &[move_beside_live]),
     ("move-hiccup-live", &[move_hiccup_live]),
+    ("move-many-live", &[move_many_live]),
     ("kept-live", &[kept_live]),
     ("files-live", &[files_live]),
     ("break-live", &[break_live]),

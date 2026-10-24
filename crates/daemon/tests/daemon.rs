@@ -5142,7 +5142,9 @@ fn a_clone_that_fails_stops_the_move_and_leaves_nothing() {
         "remember fig",
     );
     a.wait_turns(&s, 1);
-    for id in ["mvf1", "mvf2"] {
+    // The same move twice, as Retry: it fails the same way, not waiting
+    // on a clone that's over.
+    for id in ["mvf1", "mvf1"] {
         let mut c = clone_of(&m, &[".env"]);
         c.bring.remotes[0].url = format!("file://{}/nowhere.git", m.root.display());
         let r = drive(
@@ -5298,14 +5300,9 @@ fn a_session_moved_back_and_forth_keeps_everything() {
             cwd.display()
         );
     }
-    assert!(
-        branches.iter().all(|b| b.starts_with("work-moved")),
-        "{branches:?}"
-    );
-    assert!(
-        !branches.iter().any(|b| b.contains("moved-moved")),
-        "{branches:?}"
-    );
+    // There, beside the person's work; back, its own (a hasn't one by
+    // that name); there again, beside the first hop's, still out: numbered.
+    assert_eq!(branches, ["work-moved", "work-moved", "work-moved-2"]);
     assert_eq!(git_in(&m.on_b, &["rev-parse", "HEAD"]), b_head);
     assert_eq!(git_in(&m.on_a, &["rev-parse", "HEAD"]), a_head);
     let n = b.turns_done(&here);
