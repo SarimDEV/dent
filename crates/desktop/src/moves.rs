@@ -75,6 +75,9 @@ pub struct Probe {
 /// How long an answer may take before the move counts as stopped: packing
 /// a big repository, or making the session there, takes a while; a chunk
 /// or a question doesn't.
+/// How long cloning's list of files may take to come.
+const PACK_PATIENCE: Duration = Duration::from_secs(15);
+
 /// How long the machine menu waits to hear what each machine has.
 const PROBE_PATIENCE: Duration = Duration::from_secs(6);
 
@@ -672,6 +675,16 @@ impl Dent {
         let (from, _) = fleet::split(id);
         let n = self.live.send_to(from, Request::Pack { dir: dir.clone() });
         self.waiting_insert(n, Waiting::MoveClonePack(id.to_string(), to.to_string()));
+        // Its machine hung: said, rather than "Looking…" for good.
+        let (sid, tid, from) = (id.to_string(), to.to_string(), from.to_string());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PACK_PATIENCE).await;
+            let _ = this.update(cx, |this, cx| {
+                let why = format!("{} didn't answer", this.machine_name(&from));
+                this.clone_pack_came(&sid, &tid, Err(why), cx);
+            });
+        })
+        .detach();
         self.move_clone = Some(CloneDraft {
             session: id.to_string(),
             to: to.to_string(),

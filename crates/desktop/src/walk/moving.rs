@@ -842,7 +842,7 @@ pub(super) fn move_beside_live() -> Vec<(f32, Act)> {
 }
 
 /// The clone's list for a monorepo as people have them
-/// (`/tmp/rtscripts/envstress.sh` makes it): hundreds of environment
+/// (`scripts/stress/monorepo.sh` makes it): hundreds of environment
 /// files, packages' own inside node_modules and .venv, junk, files too big
 /// to tick, and more than may go at once.
 pub(super) fn move_clone_many() -> Vec<(f32, Act)> {
@@ -979,4 +979,108 @@ fn choose(d: &mut Dent, key: &str, w: &mut Window, cx: &mut Context<Dent>) {
     if let Some(e) = d.move_entries().into_iter().find(|e| e.key == key) {
         d.choose_entry(&e, w, cx);
     }
+}
+
+/// A move with 30 MB of work not committed, its machine's service
+/// restarted while it sends (`DENT_CLIENT_STATE`, a real machine): the link
+/// comes back, what was unanswered goes again, and it arrives without
+/// Retry.
+pub(super) fn move_hiccup_live() -> Vec<(f32, Act)> {
+    vec![
+        (
+            0.1,
+            Until(
+                "a saved machine comes online",
+                |d, _| d.machines.iter().any(|m| m.rtt.is_some()),
+                30.,
+            ),
+        ),
+        (0.3, Key("cmd-n")),
+        (
+            0.2,
+            Call(|d, _, cx| {
+                let dir = walk_repo("https://github.com/octocat/Hello-World.git", "hic");
+                let mut big = vec![0u8; 30 << 20];
+                let mut x: u32 = 7;
+                for b in big.iter_mut() {
+                    x ^= x << 13;
+                    x ^= x >> 17;
+                    x ^= x << 5;
+                    *b = x as u8;
+                }
+                let _ = std::fs::write(std::path::Path::new(&dir).join("big.bin"), big);
+                d.set_project(Some(dir));
+                cx.notify();
+            }),
+        ),
+        (0.2, Type(Field::Starter, "say: ready for a hiccup")),
+        (0.2, Click("start")),
+        (0.1, Until("it answers here", |d, _| answered(d), 30.)),
+        (0.2, Click("chip-sessionmachine")),
+        (
+            0.1,
+            Until(
+                "the other machine has it",
+                |d, _| {
+                    d.move_entries().iter().any(|e| {
+                        e.choosable() && e.note.as_deref().is_some_and(|n| n.starts_with("Has "))
+                    })
+                },
+                15.,
+            ),
+        ),
+        (
+            0.1,
+            Call(|d, w, cx| {
+                let e = d
+                    .move_entries()
+                    .into_iter()
+                    .find(|e| e.note.as_deref().is_some_and(|n| n.starts_with("Has ")));
+                if let Some(e) = e {
+                    d.choose_entry(&e, w, cx);
+                }
+            }),
+        ),
+        (
+            0.05,
+            Until(
+                "it's sending",
+                |d, _| {
+                    current(d).is_some_and(|s| {
+                        d.moves.get(&s.id).is_some_and(|r| {
+                            matches!(r.phase(), dent_client_core::carry::Phase::Sending { sent, .. } if sent > 0)
+                        })
+                    })
+                },
+                60.,
+            ),
+        ),
+        (
+            0.0,
+            Call(|_, _, _| {
+                // Said where it went, so a restart that didn't happen
+                // doesn't pass for one that did.
+                let _ = std::process::Command::new("/bin/sh")
+                    .args([
+                        "-c",
+                        "date +%s > /tmp/hiccup.log; LIMA_HOME=/Users/sarimdev/.lima /opt/homebrew/bin/limactl shell dent-linux -- systemctl --user restart dent >> /tmp/hiccup.log 2>&1; echo exit $? >> /tmp/hiccup.log",
+                    ])
+                    .spawn();
+            }),
+        ),
+        (1.0, Shot("hiccup-during")),
+        (
+            0.1,
+            Until(
+                "it arrives there anyway, without Retry",
+                |d, _| {
+                    current(d).is_some_and(|s| {
+                        s.id.contains('/') && s.title.contains("ready for a hiccup")
+                    })
+                },
+                240.,
+            ),
+        ),
+        (0.8, Shot("hiccup-arrived")),
+    ]
 }
