@@ -392,6 +392,8 @@ pub fn start(d: Arc<Daemon>, row: Row, held: Vec<HeldProc>) {
     }
     tokio::spawn(async move {
         s.reattach(&row, &held).await;
+        // A status the last daemon went before saying is said now.
+        s.update_status();
         s.run(rx).await;
     });
 }
@@ -515,6 +517,7 @@ impl Session {
         // A waiting message handed to the agent whose turn hadn't started:
         // the last daemon went in between, so that turn is still owed.
         let mut handed = false;
+        let mut ended = false;
         for (ix, e) in events.iter().cloned().enumerate() {
             match &e.body {
                 Body::Delivered { .. } => handed = true,
@@ -580,6 +583,7 @@ impl Session {
                     self.reports.answered(&tool);
                 }
                 Body::TurnStarted => {
+                    ended = false;
                     self.in_turn = true;
                     self.said = false;
                     self.agent_started = true;
@@ -608,6 +612,7 @@ impl Session {
                 }
                 Body::TurnEnded { outcome } => {
                     self.in_turn = false;
+                    ended = true;
                     if !std::mem::take(&mut quiet_end) {
                         self.settled = settled(&outcome);
                     } else if self.settled == Status::New {
@@ -626,7 +631,9 @@ impl Session {
                 _ => {}
             }
         }
-        if matches!(self.status, Status::Working | Status::NeedsYou) || handed {
+        // Its last turn ended, whatever status the last daemon got to say
+        // after (it may have gone in between): over, never ended again.
+        if (matches!(self.status, Status::Working | Status::NeedsYou) && !ended) || handed {
             self.in_turn = true;
         }
         self.owed = handed;
@@ -2651,6 +2658,10 @@ impl Session {
             Some(off) => self.log_from(body, off),
             None if was || self.status != self.settled => self.log(body),
             None => {}
+        }
+        // Tests stop here: the turn's end logged, its status not yet.
+        if std::env::var_os("DENT_TEST_DIE_AFTER_TURN_ENDED").is_some() {
+            std::process::exit(9);
         }
         // After its first turn, a session is titled from what it's about;
         // after any, a branch the agent switched to is noted.

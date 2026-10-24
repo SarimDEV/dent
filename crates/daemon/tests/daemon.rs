@@ -115,7 +115,9 @@ impl World {
             .stderr(Stdio::null());
         self.daemon = Some(c.spawn().unwrap());
         let sock = dent_protocol::daemon_socket(&self.state);
-        let until = Instant::now() + Duration::from_secs(10);
+        // Generous: a machine running many suites at once is slow, and
+        // only a broken daemon takes it all.
+        let until = Instant::now() + Duration::from_secs(30);
         while UnixStream::connect(&sock).is_err() {
             assert!(Instant::now() < until, "daemon didn't start");
             std::thread::sleep(Duration::from_millis(10));
@@ -207,7 +209,7 @@ impl Client {
     /// Send a request and wait for its reply.
     fn call(&mut self, r: Request) -> Result<Out, String> {
         let id = self.send_req(r);
-        let until = Instant::now() + Duration::from_secs(10);
+        let until = Instant::now() + Duration::from_secs(30);
         loop {
             if let Some(out) = self.replies.remove(&id) {
                 return match out {
@@ -1394,7 +1396,10 @@ fn approvals_allow_deny_and_questions() {
 
 #[test]
 fn messages_sent_while_working_wait_unless_steered() {
-    let w = World::new(&[]);
+    // Slow enough that the turn it steers is still going when the steer
+    // comes, however busy the machine (a steer with nothing running is
+    // simply a message).
+    let w = World::new(&[("FAKE_CLAUDE_SPEED", "0.5")]);
     let mut c = w.client();
     c.subscribe(0);
     let s = c.create(&w.cwd(), Permission::Ask, "a long answer please");
@@ -1419,8 +1424,11 @@ fn messages_sent_while_working_wait_unless_steered() {
     // Steering goes into the running turn: no interruption is reported.
     c.say(&s, "l2", "another long one", false);
     let started = c.count(&s, |b| matches!(b, Body::TurnStarted));
-    let until = Instant::now() + Duration::from_secs(10);
-    while c.count(&s, |b| matches!(b, Body::TurnStarted)) == started && Instant::now() < until {
+    // Its turn really under way before the steer, however busy the
+    // machine: a steer with nothing running is simply a message.
+    let until = Instant::now() + Duration::from_secs(30);
+    while c.count(&s, |b| matches!(b, Body::TurnStarted)) == started {
+        assert!(Instant::now() < until, "the long turn never started");
         c.pump(Duration::from_millis(20));
     }
     c.say(&s, "st", "actually do the steer thing", true);
@@ -1683,8 +1691,13 @@ fn a_turn_a_reboot_cut_off_carries_on_by_itself_once() {
     );
     c.wait_turns(&s, 1);
     c.pump_for(Duration::from_secs(6));
-    assert_eq!(carry_ons(&c, &s), 1);
-    assert_eq!(interruptions(&c, &s), 1);
+    let said: Vec<String> = c
+        .events(&s)
+        .iter()
+        .map(|e| format!("{e:?}").chars().take(140).collect())
+        .collect();
+    assert_eq!(carry_ons(&c, &s), 1, "{said:#?}");
+    assert_eq!(interruptions(&c, &s), 1, "{said:#?}");
 }
 
 #[test]
@@ -5460,4 +5473,36 @@ fn six_moves_through_a_crash_mid_clone_all_arrive_and_clone_once() {
             }
         )));
     }
+}
+
+/// The daemon gone between a turn's end and its status: the next one
+/// finds the turn over, ending it once, not again as "restarted before
+/// the agent started".
+#[test]
+fn a_turn_ended_just_before_a_restart_ends_once() {
+    let mut w = World::new(&[("DENT_TEST_DIE_AFTER_TURN_ENDED", "1")]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Full, "hello there");
+    let until = Instant::now() + Duration::from_secs(20);
+    while w
+        .daemon
+        .as_mut()
+        .is_some_and(|d| d.try_wait().unwrap().is_none())
+    {
+        assert!(Instant::now() < until, "it didn't stop where asked");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    drop(c);
+    w.env.retain(|(k, _)| k != "DENT_TEST_DIE_AFTER_TURN_ENDED");
+    w.start();
+    let mut c = w.client();
+    c.subscribe(0);
+    c.pump_for(Duration::from_secs(2));
+    let ended = c.count(&s, |b| matches!(b, Body::TurnEnded { .. }));
+    assert_eq!(ended, 1, "{:#?}", c.events(&s));
+    assert_eq!(c.status(&s), Some(Status::Done));
+    // And it works on.
+    c.say(&s, "n", "next", false);
+    c.wait_turns(&s, 2);
 }
