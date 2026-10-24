@@ -842,7 +842,7 @@ pub(super) fn move_beside_live() -> Vec<(f32, Act)> {
 }
 
 /// The clone's list for a monorepo as people have them
-/// (`/tmp/rtscripts/envstress.sh` makes it): hundreds of environment
+/// (`scripts/stress/monorepo.sh` makes it): hundreds of environment
 /// files, packages' own inside node_modules and .venv, junk, files too big
 /// to tick, and more than may go at once.
 pub(super) fn move_clone_many() -> Vec<(f32, Act)> {
@@ -980,3 +980,190 @@ fn choose(d: &mut Dent, key: &str, w: &mut Window, cx: &mut Context<Dent>) {
         d.choose_entry(&e, w, cx);
     }
 }
+
+/// A move with 30 MB of work not committed, its machine's service
+/// restarted while it sends (`DENT_CLIENT_STATE`, a real machine): the link
+/// comes back, what was unanswered goes again, and it arrives without
+/// Retry.
+pub(super) fn move_hiccup_live() -> Vec<(f32, Act)> {
+    vec![
+        (
+            0.1,
+            Until(
+                "a saved machine comes online",
+                |d, _| d.machines.iter().any(|m| m.rtt.is_some()),
+                30.,
+            ),
+        ),
+        (0.3, Key("cmd-n")),
+        (
+            0.2,
+            Call(|d, _, cx| {
+                let dir = walk_repo("https://github.com/octocat/Hello-World.git", "hic");
+                let mut big = vec![0u8; 30 << 20];
+                let mut x: u32 = 7;
+                for b in big.iter_mut() {
+                    x ^= x << 13;
+                    x ^= x >> 17;
+                    x ^= x << 5;
+                    *b = x as u8;
+                }
+                let _ = std::fs::write(std::path::Path::new(&dir).join("big.bin"), big);
+                d.set_project(Some(dir));
+                cx.notify();
+            }),
+        ),
+        (0.2, Type(Field::Starter, "say: ready for a hiccup")),
+        (0.2, Click("start")),
+        (0.1, Until("it answers here", |d, _| answered(d), 30.)),
+        (0.2, Click("chip-sessionmachine")),
+        (
+            0.1,
+            Until(
+                "the other machine has it",
+                |d, _| {
+                    d.move_entries().iter().any(|e| {
+                        e.choosable() && e.note.as_deref().is_some_and(|n| n.starts_with("Has "))
+                    })
+                },
+                15.,
+            ),
+        ),
+        (
+            0.1,
+            Call(|d, w, cx| {
+                let e = d
+                    .move_entries()
+                    .into_iter()
+                    .find(|e| e.note.as_deref().is_some_and(|n| n.starts_with("Has ")));
+                if let Some(e) = e {
+                    d.choose_entry(&e, w, cx);
+                }
+            }),
+        ),
+        (
+            0.05,
+            Until(
+                "it's sending",
+                |d, _| {
+                    current(d).is_some_and(|s| {
+                        d.moves.get(&s.id).is_some_and(|r| {
+                            matches!(r.phase(), dent_client_core::carry::Phase::Sending { sent, .. } if sent > 0)
+                        })
+                    })
+                },
+                60.,
+            ),
+        ),
+        (
+            0.0,
+            Call(|_, _, _| {
+                // Said where it went, so a restart that didn't happen
+                // doesn't pass for one that did.
+                let _ = std::process::Command::new("/bin/sh")
+                    .args([
+                        "-c",
+                        "date +%s > /tmp/hiccup.log; LIMA_HOME=/Users/sarimdev/.lima /opt/homebrew/bin/limactl shell dent-linux -- systemctl --user restart dent >> /tmp/hiccup.log 2>&1; echo exit $? >> /tmp/hiccup.log",
+                    ])
+                    .spawn();
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "its service really restarted",
+                |_, _| {
+                    std::fs::read_to_string("/tmp/hiccup.log")
+                        .is_ok_and(|l| l.lines().last() == Some("exit 0"))
+                },
+                30.,
+            ),
+        ),
+        (1.0, Shot("hiccup-during")),
+        (
+            0.1,
+            Until(
+                "it arrives there anyway, without Retry",
+                |d, _| {
+                    current(d).is_some_and(|s| {
+                        s.id.contains('/') && s.title.contains("ready for a hiccup")
+                    })
+                },
+                240.,
+            ),
+        ),
+        (0.8, Shot("hiccup-arrived")),
+    ]
+}
+
+/// Three sessions moved at once from this window to a machine really
+/// saved (`DENT_CLIENT_STATE`): each carried over the one link, none
+/// crossed with another, all arriving.
+pub(super) fn move_many_live() -> Vec<(f32, Act)> {
+    let mut v = vec![(
+        0.1,
+        Until(
+            "a saved machine comes online",
+            |d, _| d.machines.iter().any(|m| m.rtt.is_some()),
+            30.,
+        ),
+    )];
+    for text in ["say: many one", "say: many two", "say: many three"] {
+        v.extend([
+            (0.3, Key("cmd-n")),
+            (0.2, Type(Field::Starter, text)),
+            (0.2, Click("start")),
+            (0.1, Until("it answers here", |d, _| answered(d), 30.)),
+        ]);
+    }
+    v.extend([
+        (
+            0.2,
+            Call(|d, _, cx| {
+                let to = d
+                    .machines
+                    .iter()
+                    .find(|m| m.rtt.is_some())
+                    .map(|m| m.id.clone())
+                    .unwrap_or_default();
+                let ids: Vec<String> = d
+                    .sessions
+                    .iter()
+                    .filter(|s| !s.id.contains('/') && s.title.contains("many"))
+                    .map(|s| s.id.clone())
+                    .collect();
+                for id in ids {
+                    d.start_move(&id, &to, cx);
+                }
+                AT_ONCE.store(d.moves.len(), std::sync::atomic::Ordering::Relaxed);
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "all three carried at once",
+                |_, _| AT_ONCE.load(std::sync::atomic::Ordering::Relaxed) == 3,
+                1.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "each arrives there, as itself",
+                |d, _| {
+                    ["many one", "many two", "many three"].iter().all(|t| {
+                        d.sessions.iter().any(|s| {
+                            s.id.contains('/') && s.title.contains(t) && s.moving.is_none()
+                        })
+                    }) && d.moves.is_empty()
+                },
+                180.,
+            ),
+        ),
+        (0.8, Shot("many-arrived")),
+    ]);
+    v
+}
+
+/// How many moves [`move_many_live`] had under way at once.
+static AT_ONCE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

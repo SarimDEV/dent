@@ -231,6 +231,21 @@ impl Drop for Cleanup {
     }
 }
 
+/// A branch's name without what landing beside added to it
+/// (`-moved`, `-moved-2`).
+fn moved_base(branch: &str) -> &str {
+    if let Some(b) = branch.strip_suffix("-moved") {
+        return b;
+    }
+    match branch.rsplit_once("-moved-") {
+        // As dent numbers them: 2 and on, never a year or a ticket.
+        Some((b, n)) if !b.is_empty() && n.len() <= 3 && n.parse::<u32>().is_ok_and(|n| n >= 2) => {
+            b
+        }
+        _ => branch,
+    }
+}
+
 /// A folder of our own beside the repository's metadata, for move `id`
 /// alone: sessions of one repository can be packed at once, and each
 /// takes its folder away when done.
@@ -401,8 +416,11 @@ pub fn apply(
                 list.lines()
                     .any(|l| l == format!("branch refs/heads/{name}"))
             };
+            // Moved beside before, it's numbered on, not named again:
+            // `work-moved-2`, never `work-moved-moved`.
+            let base = moved_base(&m.branch);
             let mut n = 1;
-            let mut name = format!("{}-moved", m.branch);
+            let mut name = format!("{base}-moved");
             loop {
                 let r = format!("refs/heads/{name}");
                 match git(repo, &["rev-parse", "-q", "--verify", &r], &[]) {
@@ -415,7 +433,7 @@ pub fn apply(
                     Ok(at) if at == m.tip && !out_anywhere(&name) => break,
                     Ok(_) => {
                         n += 1;
-                        name = format!("{}-moved-{n}", m.branch);
+                        name = format!("{base}-moved-{n}");
                     }
                 }
             }
@@ -690,6 +708,22 @@ mod tests {
         let a = apply(&dst, &m6, "m6", &b6, &other).unwrap();
         assert_eq!(a.instead().unwrap().0, "work-moved-2");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_moved_branch_is_numbered_on() {
+        assert_eq!(super::moved_base("work"), "work");
+        assert_eq!(super::moved_base("work-moved"), "work");
+        assert_eq!(super::moved_base("work-moved-3"), "work");
+        assert_eq!(super::moved_base("feat/x-moved-12"), "feat/x");
+        assert_eq!(super::moved_base("-moved"), "");
+        assert_eq!(super::moved_base("unmoved-moved-x"), "unmoved-moved-x");
+        assert_eq!(super::moved_base("moved-moved-2"), "moved");
+        assert_eq!(
+            super::moved_base("release-moved-2024"),
+            "release-moved-2024"
+        );
+        assert_eq!(super::moved_base("fix-moved-0"), "fix-moved-0");
     }
 
     #[test]

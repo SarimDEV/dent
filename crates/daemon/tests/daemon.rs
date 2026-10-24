@@ -5092,3 +5092,372 @@ fn a_move_onto_a_branch_checked_out_there_lands_beside_it() {
     b.wait_turns(&to, n + 1);
     assert!(b.text(&to).contains("remember the word plum"));
 }
+
+/// What a clone of `m`'s project there takes, ticking `paths`.
+fn clone_of(m: &Moves, paths: &[&str]) -> dent_client_core::carry::CloneThere {
+    let url = git_in(&m.on_a, &["remote", "get-url", "origin"]);
+    dent_client_core::carry::CloneThere {
+        dir: m.on_a.display().to_string(),
+        paths: paths.iter().map(|p| p.to_string()).collect(),
+        bring: dent_protocol::Bring {
+            name: "app".into(),
+            remotes: vec![dent_protocol::GitRemote {
+                name: "origin".into(),
+                url: url.trim().to_string(),
+            }],
+            branch: Some("work".into()),
+            files: Vec::new(),
+        },
+    }
+}
+
+/// The projects folder there, as names.
+fn projects_on(home: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(home.join("dent/projects"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+/// A clone that can't be had (no such repository): the move stops saying
+/// why, nothing is left there, the session works where it was, and trying
+/// again fails the same way rather than waiting on a clone forever.
+#[test]
+fn a_clone_that_fails_stops_the_move_and_leaves_nothing() {
+    use dent_client_core::carry::Carrier;
+    let m = Moves::new("clonefail", false);
+    std::fs::write(m.on_a.join(".gitignore"), ".env\n").unwrap();
+    std::fs::write(m.on_a.join(".env"), "K=1\n").unwrap();
+    let mut a = m.a.client();
+    let mut b = m.b.client();
+    a.subscribe(0);
+    b.subscribe(0);
+    let s = a.create(
+        &m.on_a.display().to_string(),
+        Permission::Full,
+        "remember fig",
+    );
+    a.wait_turns(&s, 1);
+    // The same move twice, as Retry: it fails the same way, not waiting
+    // on a clone that's over.
+    for id in ["mvf1", "mvf1"] {
+        let mut c = clone_of(&m, &[".env"]);
+        c.bring.remotes[0].url = format!("file://{}/nowhere.git", m.root.display());
+        let r = drive(
+            &mut a,
+            &mut b,
+            Carrier::new(&s, id, "b").clone_there(c),
+            None,
+            || {},
+        );
+        let why = r.unwrap_err();
+        assert!(why.contains("couldn't clone"), "{why}");
+    }
+    assert!(
+        projects_on(&m.root.join("home-b")).is_empty(),
+        "{:?}",
+        projects_on(&m.root.join("home-b"))
+    );
+    assert!(
+        std::fs::read_dir(m.b.state.join("bring"))
+            .map(|d| d.count())
+            .unwrap_or(0)
+            == 0,
+        "staged files left"
+    );
+    // Not fenced: it carries on here.
+    let n = a.turns_done(&s);
+    a.say(&s, "r", "recall", false);
+    a.wait_turns(&s, n + 1);
+}
+
+/// The machine it goes to restarts mid-clone: asked again with the same
+/// move, it clones again in the same folder (no `app-2`), and the move
+/// then goes as usual.
+#[test]
+fn a_restart_mid_clone_clones_again_in_the_same_place() {
+    use dent_client_core::carry::Carrier;
+    let mut m = Moves::new("clonerestart", false);
+    m.b.kill();
+    m.b.env.push(("DENT_TEST_SLOW_CLONE".into(), "1".into()));
+    m.b.start();
+    let mut a = m.a.client();
+    a.subscribe(0);
+    let s = a.create(
+        &m.on_a.display().to_string(),
+        Permission::Full,
+        "remember kiwi",
+    );
+    a.wait_turns(&s, 1);
+    let mut b = m.b.client();
+    let bring = clone_of(&m, &[]).bring;
+    let ask = |b: &mut Client, with: bool| {
+        reply(b.call(Request::BringProject {
+            id: "mvr1".into(),
+            bring: with.then(|| bring.clone()),
+        }))
+    };
+    assert_eq!(ask(&mut b, true), Ok(dent_protocol::Reply::Cloning));
+    // Gone while it held the clone open.
+    m.b.kill();
+    m.b.env.retain(|(k, _)| k != "DENT_TEST_SLOW_CLONE");
+    m.b.start();
+    let mut b = m.b.client();
+    b.subscribe(0);
+    let forgot = ask(&mut b, false).unwrap_err();
+    assert!(forgot.contains("no such clone"), "{forgot}");
+    let c = Carrier::new(&s, "mvr1", "b").clone_there(clone_of(&m, &[]));
+    let to = drive(&mut a, &mut b, c, None, || {}).unwrap().unwrap();
+    assert_eq!(projects_on(&m.root.join("home-b")), ["app"]);
+    b.pump_for(Duration::from_millis(300));
+    let n = b.turns_done(&to);
+    b.say(&to, "r", "recall", false);
+    b.wait_turns(&to, n + 1);
+    assert!(b.text(&to).contains("remember kiwi"));
+}
+
+/// A ticked file gone by the time it's read: the move stops before any
+/// clone, saying which.
+#[test]
+fn a_ticked_file_gone_stops_the_move_before_any_clone() {
+    use dent_client_core::carry::Carrier;
+    let m = Moves::new("filegone", false);
+    std::fs::write(m.on_a.join(".gitignore"), ".env*\n").unwrap();
+    std::fs::write(m.on_a.join(".env"), "K=1\n").unwrap();
+    let mut a = m.a.client();
+    let mut b = m.b.client();
+    a.subscribe(0);
+    let s = a.create(&m.on_a.display().to_string(), Permission::Full, "hello");
+    a.wait_turns(&s, 1);
+    let c = Carrier::new(&s, "mvg1", "b").clone_there(clone_of(&m, &[".env", ".env.gone"]));
+    let why = drive(&mut a, &mut b, c, None, || {}).unwrap_err();
+    assert!(why.contains(".env.gone"), "{why}");
+    assert!(projects_on(&m.root.join("home-b")).is_empty());
+}
+
+/// Back and forth three times, its branch checked out on both machines:
+/// every hop's work arrives, nothing of either checkout moves, the branch
+/// it lands on doesn't grow a name per hop, and it remembers.
+#[test]
+fn a_session_moved_back_and_forth_keeps_everything() {
+    let m = Moves::new("pingpong", true);
+    git_in(&m.on_b, &["checkout", "-q", "work"]);
+    let (b_head, a_head) = (
+        git_in(&m.on_b, &["rev-parse", "HEAD"]),
+        git_in(&m.on_a, &["rev-parse", "HEAD"]),
+    );
+    let mut a = m.a.client();
+    let mut b = m.b.client();
+    a.subscribe(0);
+    b.subscribe(0);
+    b.call(Request::AddProject {
+        path: m.on_b.display().to_string(),
+        create: false,
+    })
+    .unwrap();
+    std::fs::write(m.on_a.join("hop0.txt"), "0\n").unwrap();
+    git_in(&m.on_a, &["add", "hop0.txt"]);
+    git_in(&m.on_a, &["commit", "-qm", "hop 0"]);
+    let a_head = {
+        let _ = a_head;
+        git_in(&m.on_a, &["rev-parse", "HEAD"])
+    };
+    let s = a.create(
+        &m.on_a.display().to_string(),
+        Permission::Full,
+        "remember the word quince",
+    );
+    a.wait_turns(&s, 1);
+    let mut here = s.clone();
+    let mut branches = Vec::new();
+    for hop in 1..=3 {
+        let (from, to): (&mut Client, &mut Client) = if hop % 2 == 1 {
+            (&mut a, &mut b)
+        } else {
+            (&mut b, &mut a)
+        };
+        let next = carry(from, to, &here, &format!("pp{hop}"), 4096, None)
+            .unwrap()
+            .unwrap();
+        to.pump_for(Duration::from_millis(300));
+        let cwd = cwd_of(to, &next);
+        branches.push(git_in(&cwd, &["rev-parse", "--abbrev-ref", "HEAD"]));
+        // Work there, not committed, for the next hop to carry.
+        std::fs::write(cwd.join(format!("hop{hop}.txt")), format!("{hop}\n")).unwrap();
+        here = next;
+    }
+    // It ended on b, with every hop's work.
+    let cwd = cwd_of(&b, &here);
+    for hop in 0..=3 {
+        assert_eq!(
+            std::fs::read_to_string(cwd.join(format!("hop{hop}.txt"))).unwrap(),
+            format!("{hop}\n"),
+            "hop {hop} in {}",
+            cwd.display()
+        );
+    }
+    // There, beside the person's work; back, its own (a hasn't one by
+    // that name); there again, beside the first hop's, still out: numbered.
+    assert_eq!(branches, ["work-moved", "work-moved", "work-moved-2"]);
+    assert_eq!(git_in(&m.on_b, &["rev-parse", "HEAD"]), b_head);
+    assert_eq!(git_in(&m.on_a, &["rev-parse", "HEAD"]), a_head);
+    let n = b.turns_done(&here);
+    b.say(&here, "r", "recall", false);
+    b.wait_turns(&here, n + 1);
+    assert!(b.text(&here).contains("remember the word quince"));
+}
+
+/// A branch with a slash, checked out there; and a session working in a
+/// subfolder, moved with a clone: each lands where it should.
+#[test]
+fn slashed_branches_and_subfolders_land_where_they_should() {
+    use dent_client_core::carry::Carrier;
+    let m = Moves::new("slash", false);
+    git_in(&m.on_a, &["checkout", "-q", "-b", "feat/login-fix"]);
+    std::fs::create_dir_all(m.on_a.join("web/src")).unwrap();
+    std::fs::write(m.on_a.join("web/src/a.ts"), "x\n").unwrap();
+    git_in(&m.on_a, &["add", "."]);
+    git_in(&m.on_a, &["commit", "-qm", "web"]);
+    git_in(&m.on_a, &["push", "-q", "origin", "feat/login-fix"]);
+    git_in(
+        &m.root,
+        &[
+            "--git-dir",
+            "origin.git",
+            "symbolic-ref",
+            "HEAD",
+            "refs/heads/feat/login-fix",
+        ],
+    );
+    std::fs::write(m.on_a.join("web/src/b.ts"), "unpushed\n").unwrap();
+    git_in(&m.on_a, &["add", "."]);
+    git_in(&m.on_a, &["commit", "-qm", "not pushed"]);
+    let mut a = m.a.client();
+    let mut b = m.b.client();
+    a.subscribe(0);
+    b.subscribe(0);
+    let sub = m.on_a.join("web");
+    let s = a.create(&sub.display().to_string(), Permission::Full, "hello");
+    a.wait_turns(&s, 1);
+    let mut c = clone_of(&m, &[]);
+    c.bring.branch = Some("feat/login-fix".into());
+    let to = drive(
+        &mut a,
+        &mut b,
+        Carrier::new(&s, "mvs1", "b").clone_there(c),
+        None,
+        || {},
+    )
+    .unwrap()
+    .unwrap();
+    b.pump_for(Duration::from_millis(300));
+    let cwd = cwd_of(&b, &to);
+    assert!(cwd.ends_with("web"), "{}", cwd.display());
+    assert_eq!(
+        std::fs::read_to_string(cwd.join("src/b.ts")).unwrap(),
+        "unpushed\n"
+    );
+    assert_eq!(
+        git_in(&cwd, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "feat/login-fix"
+    );
+}
+
+/// Six sessions of one repository moved at once to a machine without it,
+/// cloning it on the way, that machine killed partway and started again:
+/// each carrier tries again with its move, as Retry does, and every
+/// session arrives whole, the project cloned once.
+#[test]
+fn six_moves_through_a_crash_mid_clone_all_arrive_and_clone_once() {
+    use dent_client_core::carry::Carrier;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    const N: usize = 6;
+    let mut m = Moves::new("crash6", false);
+    m.b.kill();
+    m.b.env.push(("DENT_TEST_SLOW_CLONE".into(), "1".into()));
+    m.b.start();
+    let mut a = m.a.client();
+    a.subscribe(0);
+    let sessions: Vec<String> = (0..N)
+        .map(|i| {
+            let s = a.create(
+                &m.on_a.display().to_string(),
+                Permission::Full,
+                &format!("remember the number {i}"),
+            );
+            a.wait_turns(&s, 1);
+            s
+        })
+        .collect();
+    let (sock_a, sock_b) = (
+        dent_protocol::daemon_socket(&m.a.state),
+        dent_protocol::daemon_socket(&m.b.state),
+    );
+    let clone = clone_of(&m, &[]);
+    static TRIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let handles: Vec<_> = sessions
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let (s, sa, sb, clone) = (s.clone(), sock_a.clone(), sock_b.clone(), clone.clone());
+            std::thread::spawn(move || {
+                let until = Instant::now() + Duration::from_secs(90);
+                loop {
+                    assert!(Instant::now() < until, "{s} never arrived");
+                    if std::os::unix::net::UnixStream::connect(&sb).is_err() {
+                        std::thread::sleep(Duration::from_millis(200));
+                        continue;
+                    }
+                    TRIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let got = catch_unwind(AssertUnwindSafe(|| {
+                        let (mut a, mut b) = (Client::connect(&sa), Client::connect(&sb));
+                        let c =
+                            Carrier::new(&s, &format!("mvc{i}"), "b").clone_there(clone.clone());
+                        drive(&mut a, &mut b, c, None, || {})
+                    }));
+                    match got {
+                        Ok(Ok(Ok(to))) => return to,
+                        // Stopped, or the link went with the machine: again.
+                        _ => std::thread::sleep(Duration::from_millis(300)),
+                    }
+                }
+            })
+        })
+        .collect();
+    // Killed while it holds the clone open, and back at once.
+    std::thread::sleep(Duration::from_millis(400));
+    m.b.kill();
+    m.b.env.retain(|(k, _)| k != "DENT_TEST_SLOW_CLONE");
+    m.b.start();
+    let arrived: Vec<String> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let distinct: std::collections::HashSet<_> = arrived.iter().collect();
+    assert_eq!(distinct.len(), N, "{arrived:?}");
+    // The crash did cut some short: they tried again.
+    assert!(TRIES.load(std::sync::atomic::Ordering::Relaxed) > N);
+    assert_eq!(projects_on(&m.root.join("home-b")), ["app"]);
+    let mut b = m.b.client();
+    b.subscribe(0);
+    b.pump_for(Duration::from_millis(500));
+    for (i, to) in arrived.iter().enumerate() {
+        let n = b.turns_done(to);
+        b.say(to, "r", "recall", false);
+        b.wait_turns(to, n + 1);
+        let text = b.text(to);
+        assert!(text.contains(&format!("remember the number {i}")), "{text}");
+    }
+    // Every one left a, as a record pointing there.
+    a.pump_for(Duration::from_millis(300));
+    for s in &sessions {
+        assert!(a.events(s).iter().any(|e| matches!(
+            e,
+            Body::Move {
+                state: dent_protocol::MoveState::Departed,
+                ..
+            }
+        )));
+    }
+}
