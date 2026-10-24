@@ -238,7 +238,8 @@ fn moved_base(branch: &str) -> &str {
         return b;
     }
     match branch.rsplit_once("-moved-") {
-        Some((b, n)) if !b.is_empty() && !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()) => {
+        // As dent numbers them: 2 and on, never a year or a ticket.
+        Some((b, n)) if !b.is_empty() && n.len() <= 3 && n.parse::<u32>().is_ok_and(|n| n >= 2) => {
             b
         }
         _ => branch,
@@ -718,6 +719,11 @@ mod tests {
         assert_eq!(super::moved_base("-moved"), "");
         assert_eq!(super::moved_base("unmoved-moved-x"), "unmoved-moved-x");
         assert_eq!(super::moved_base("moved-moved-2"), "moved");
+        assert_eq!(
+            super::moved_base("release-moved-2024"),
+            "release-moved-2024"
+        );
+        assert_eq!(super::moved_base("fix-moved-0"), "fix-moved-0");
     }
 
     #[test]
