@@ -185,7 +185,7 @@ impl Dent {
         let mut used = width(&all, false);
         let mut shown: Vec<String> = Vec::new();
         for (i, m) in ids.iter().enumerate() {
-            let w = width(&crate::data::machine_short(&self.machine_name(m)), true);
+            let w = width(&self.tab_name(m, ids), true);
             let rest = ids.len() - i - 1;
             if used + w + if rest > 0 { more_w } else { 0. } > room {
                 break;
@@ -252,7 +252,7 @@ impl Dent {
             None,
         )];
         for m in &shown {
-            let name = crate::data::machine_short(&self.machine_name(m));
+            let name = self.tab_name(m, ids);
             row.push(tab(
                 format!("agents-tab-{}", if m.is_empty() { "here" } else { m }),
                 name,
@@ -285,6 +285,19 @@ impl Dent {
             .into_any_element()
     }
 
+    /// A machine's name for its tab, told apart from another of the same
+    /// name: "This Mac" for this one, a bit of its id for the rest.
+    fn tab_name(&self, m: &str, ids: &[String]) -> String {
+        let name = self.machine_name(m);
+        let twins = ids.iter().filter(|x| self.machine_name(x) == name).count();
+        let short = crate::data::machine_short(&name);
+        match (twins > 1, m.is_empty()) {
+            (false, _) => short,
+            (true, true) => format!("{short} · this Mac"),
+            (true, false) => format!("{short} · {}", m.chars().take(4).collect::<String>()),
+        }
+    }
+
     /// "N more": the machines without a tab, each with what stands out.
     pub fn more_machine_entries(&self, cx: &App) -> Vec<Entry> {
         let q = self.menu_query.read(cx).value().trim().to_lowercase();
@@ -301,7 +314,6 @@ impl Dent {
                 }
             })
             .map(|m| {
-                let name = self.machine_name(&m);
                 let standing = self
                     .machines
                     .iter()
@@ -316,7 +328,7 @@ impl Dent {
                 let to = m.clone();
                 Entry::row(
                     format!("agents-more-{}", if m.is_empty() { "here" } else { &m }),
-                    &crate::data::machine_short(&name),
+                    &self.tab_name(&m, &self.machine_ids()),
                     (!note.is_empty()).then_some(note),
                     self.agents_tab.as_deref() == Some(m.as_str()),
                     Some(std::rc::Rc::new(
@@ -417,15 +429,11 @@ impl Dent {
             lines.push(line);
         }
         let note = (unheard > 0).then(|| {
-            format!(
-                "{unheard} {} not said yet, or {} too old to keep defaults.",
-                if unheard == 1 {
-                    "machine hasn't"
-                } else {
-                    "machines haven't"
-                },
-                if unheard == 1 { "is" } else { "are" }
-            )
+            if unheard == 1 {
+                "1 machine hasn't said yet, or is too old to keep defaults.".to_string()
+            } else {
+                format!("{unheard} machines haven't said yet, or are too old to keep defaults.")
+            }
         });
         let mut agents = Vec::new();
         let mut by_agent: std::collections::BTreeMap<String, (String, usize, usize)> =

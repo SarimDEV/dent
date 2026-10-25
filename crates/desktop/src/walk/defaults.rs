@@ -433,3 +433,88 @@ pub(super) fn settings_one() -> Vec<(f32, Act)> {
         (0.4, Shot("settings-general")),
     ]
 }
+
+/// Settings › Agents against a machine really saved (`DENT_CLIENT_STATE`):
+/// it says how new sessions start there; one set on its tab is kept on
+/// it, and set back. Not in `checks`: it needs another machine.
+pub(super) fn settings_live() -> Vec<(f32, Act)> {
+    vec![
+        (
+            0.1,
+            Until(
+                "a saved machine comes online and says its defaults",
+                |d, _| {
+                    d.machines.iter().any(|m| {
+                        m.rtt.is_some() && d.setups.get(&m.id).is_some_and(|s| s.defaults.is_some())
+                    })
+                },
+                30.,
+            ),
+        ),
+        (0.3, Key("cmd-,")),
+        (0.2, Click("settings-tab-agents")),
+        (0.6, Shot("live-all")),
+        (
+            0.2,
+            Call(|d, _, cx| {
+                let Some(m) = d
+                    .machines
+                    .iter()
+                    .find(|m| m.rtt.is_some())
+                    .map(|m| m.id.clone())
+                else {
+                    return;
+                };
+                LIVE_WAS
+                    .with(|w| *w.borrow_mut() = d.setups.get(&m).and_then(|s| s.defaults.clone()));
+                d.agents_tab = Some(m.clone());
+                let value = dent_protocol::Defaults {
+                    effort: Some("high".into()),
+                    ..Default::default()
+                };
+                d.set_field(crate::defaults::Field::Effort, &value, Some(&m), cx);
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "set on its tab, the machine itself keeps it",
+                |d, _| {
+                    d.pending_defaults.is_empty()
+                        && d.machines.iter().filter(|m| m.rtt.is_some()).any(|m| {
+                            d.setups
+                                .get(&m.id)
+                                .and_then(|s| s.defaults.as_ref())
+                                .is_some_and(|x| x.effort.as_deref() == Some("high"))
+                        })
+                },
+                15.,
+            ),
+        ),
+        (0.6, Shot("live-machine")),
+        // Put back as it was.
+        (
+            0.2,
+            Call(|d, _, cx| {
+                let Some(m) = d.agents_tab.clone() else {
+                    return;
+                };
+                let was = LIVE_WAS.with(|w| w.borrow().clone()).unwrap_or_default();
+                d.put_defaults(&m, None, was, cx);
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "and back as it was",
+                |d, _| d.pending_defaults.is_empty(),
+                15.,
+            ),
+        ),
+    ]
+}
+
+thread_local! {
+    /// The machine's defaults before [`settings_live`] changed them.
+    static LIVE_WAS: std::cell::RefCell<Option<dent_protocol::Defaults>> = const { std::cell::RefCell::new(None) };
+}
