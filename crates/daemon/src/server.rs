@@ -697,6 +697,14 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
                 machine: d.machine().await,
             }
         }
+        Request::SetGitUser { name, email } => {
+            let path = d.env().path.clone();
+            tokio::task::spawn_blocking(move || crate::machine::set_git_user(&path, &name, &email))
+                .await??;
+            Reply::Machine {
+                machine: d.machine().await,
+            }
+        }
         Request::Models { agent } => Reply::Models {
             models: d.models(crate::agent::named(agent.as_deref())?.id()),
         },

@@ -50,7 +50,7 @@ pub enum Field {
 
 impl Field {
     /// `to` with this choice as `from` has it.
-    fn take(self, to: &mut Defaults, from: &Defaults) {
+    pub(crate) fn take(self, to: &mut Defaults, from: &Defaults) {
         match self {
             Field::Agent => to.agent = from.agent.clone(),
             Field::Model => to.model = from.model.clone(),
@@ -145,7 +145,7 @@ impl Dent {
     }
 
     /// A project's own there.
-    fn project_defaults(&self, machine: &str, project: &str) -> Defaults {
+    pub(crate) fn project_defaults(&self, machine: &str, project: &str) -> Defaults {
         let kept = self
             .setups
             .get(machine)

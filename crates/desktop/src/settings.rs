@@ -65,6 +65,8 @@ pub(crate) struct Line {
     /// Under it, a value and who has it, a row each (a setting that
     /// differs between machines).
     groups: Vec<(String, String)>,
+    /// Under the line before, as one of its own (a project's choices).
+    indent: bool,
 }
 
 impl Line {
@@ -77,7 +79,13 @@ impl Line {
             value: None,
             controls: Vec::new(),
             groups: Vec::new(),
+            indent: false,
         }
+    }
+
+    pub(crate) fn indent(mut self) -> Self {
+        self.indent = true;
+        self
     }
 
     pub(crate) fn group(mut self, value: impl Into<String>, who: impl Into<String>) -> Self {
@@ -131,6 +139,9 @@ impl Dent {
 
     pub fn close_pane(&mut self, cx: &mut Context<Self>) -> bool {
         let was = self.pane.take();
+        // Half-typed there, it isn't saved behind your back.
+        self.git_user_edit = None;
+        self.agents_project = None;
         if was == Some(Pane::Welcome) {
             // Seen once is enough; the banner keeps saying what's missing.
             self.onboarded = true;
@@ -465,14 +476,7 @@ impl Dent {
                 .under("Not installed there. Worktrees, checkpoints and commits need it."),
         });
         if m.git.is_some() {
-            lines.push(match &m.git_user {
-                Some(who) => Line::new("git-user", "Commits by").value(who.clone()),
-                None => Line::new("git-user", "Commits by")
-                    .mark(Some(Mark::Attention))
-                    .under("Git has no name and email for commits, so committing fails")
-                    .code("git config --global user.name \"Your Name\"")
-                    .code("git config --global user.email you@example.com"),
-            });
+            lines.push(self.git_user_line(machine, &m, cx));
         }
         lines.push(match &m.gh {
             Gh::SignedIn { user } => Line::new("gh", "GitHub CLI").value(match user {
@@ -506,6 +510,63 @@ impl Dent {
         lines.push(self.login_line(machine, &m, cx));
         lines.push(self.lan_line(machine, &m, cx));
         lines
+    }
+
+    /// Who commits are by, changed in place: the field holds until the
+    /// machine says it's saved.
+    fn git_user_line(&mut self, machine: &str, m: &Machine, cx: &mut Context<Self>) -> Line {
+        let line = Line::new("git-user", "Commits by");
+        let editing = self.git_user_edit.as_ref().filter(|e| e.machine == machine);
+        if let Some(e) = editing {
+            let (saving, error) = (e.sent.is_some(), e.error.clone());
+            let line = match error {
+                Some(why) => line.mark(Some(Mark::Bad)).under(why),
+                None if saving => line.under("Saving…"),
+                None => line.under("As Git writes it: Name <email>. Return saves, Esc cancels"),
+            };
+            return line
+                .control(
+                    self.field(&self.git_user_input, false)
+                        .w(px(300.))
+                        .h(px(crate::ds::size::CONTROL_SM)),
+                )
+                .control(
+                    self.small_button("git-user-save", "Save", cx, |this, _, cx| {
+                        this.save_git_user(cx)
+                    }),
+                );
+        }
+        // A daemon from before it could be changed from here: Git's lines.
+        if !m.git_user_settable {
+            let line = match &m.git_user {
+                Some(who) => line.value(who.clone()),
+                None => line
+                    .mark(Some(Mark::Attention))
+                    .under("Git has no name and email for commits, so committing fails"),
+            };
+            return line
+                .under(if machine.is_empty() {
+                    "Restart dent to change it from here, or run:"
+                } else {
+                    "Update dent there to change it from here, or run on it:"
+                })
+                .code("git config --global user.name \"Your Name\"")
+                .code("git config --global user.email you@example.com");
+        }
+        let (now, there) = (m.git_user.clone(), machine.to_string());
+        let change = self.small_button(
+            "git-user-change",
+            if now.is_some() { "Change" } else { "Set" },
+            cx,
+            move |this, window, cx| this.edit_git_user(&there, now.clone(), window, cx),
+        );
+        match &m.git_user {
+            Some(who) => line.under(who.clone()).control(change),
+            None => line
+                .mark(Some(Mark::Attention))
+                .under("Git has no name and email for commits, so committing fails")
+                .control(change),
+        }
     }
 
     fn login_line(&mut self, machine: &str, m: &Machine, cx: &mut Context<Self>) -> Line {
@@ -777,6 +838,7 @@ impl Dent {
             .items_start()
             .gap(px(space::S3))
             .py(px(space::S1H))
+            .when(l.indent, |d| d.pl(px(space::S4)))
             .ty(UI)
             .children(
                 l.mark
@@ -996,6 +1058,10 @@ impl Dent {
 
     /// Show a page of Settings; each asks again how things stand.
     pub fn open_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        if tab != self.settings_tab {
+            self.git_user_edit = None;
+            self.agents_project = None;
+        }
         self.settings_tab = tab;
         if tab == Tab::Machines {
             self.ask(Request::Devices, Waiting::Devices);

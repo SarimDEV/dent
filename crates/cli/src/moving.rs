@@ -1,5 +1,7 @@
-//! `dent move MACHINE SESSION --to MACHINE [--id ID]`: carry a session from
-//! one machine to another ([decision 0064]). This device is trusted by
+//! `dent move MACHINE SESSION --to MACHINE [--id ID] [--clone]`: carry a
+//! session from one machine to another ([decision 0064]). With `--clone`,
+//! a machine without the project clones it first, with the environment
+//! files (`.env`) the app would tick. This device is trusted by
 //! both; the machines never talk to each other. Every step asks each side
 //! where it stands, so the same command (with the same id) picks up after
 //! any interruption, on either machine, the link or here.
@@ -9,7 +11,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use dent_client_core::carry::{Carrier, Ended, Phase, Side, Step};
+use dent_client_core::carry::{Carrier, CloneThere, Ended, Phase, Side, Step};
 use dent_protocol::{Out, Reply, Request};
 use dent_remote::remote::{Event, Remote};
 use tokio::sync::mpsc;
@@ -68,13 +70,17 @@ impl Asker {
 }
 
 pub async fn run(args: &[String]) -> Result<()> {
-    let usage = "dent move MACHINE SESSION --to MACHINE [--id ID]";
+    let usage = "dent move MACHINE SESSION --to MACHINE [--id ID] [--clone]";
     let to_name = super::flag(args, "--to").context(usage)?;
     let id = super::flag(args, "--id").unwrap_or_else(new_id);
+    let clone = args.iter().any(|a| a == "--clone");
+    // `--to` and `--id` take a value; `--clone` doesn't.
     let plain: Vec<&String> = args
         .iter()
         .enumerate()
-        .filter(|(i, a)| !a.starts_with("--") && (*i == 0 || !args[i - 1].starts_with("--")))
+        .filter(|(i, a)| {
+            !a.starts_with("--") && (*i == 0 || !matches!(args[i - 1].as_str(), "--to" | "--id"))
+        })
         .map(|(_, a)| a)
         .collect();
     let [from_name, session] = plain[..] else {
@@ -89,6 +95,18 @@ pub async fn run(args: &[String]) -> Result<()> {
     // it leaves says it went to.
     let target = super::saved(&to_name)?.name;
     let mut carrier = Carrier::new(session, &id, &target);
+    // What cloning takes is asked before anyone knows whether it's
+    // needed: what stops a clone doesn't stop a move that needs none.
+    let mut no_clone = None;
+    if clone {
+        match clone_there(&mut from, session).await {
+            Ok(c) => carrier = carrier.clone_there(c),
+            Err(why) => {
+                eprintln!("  can't clone it there if needed: {why:#}");
+                no_clone = Some(format!("{why:#}"));
+            }
+        }
+    }
     let mut step = carrier.start();
     let mut said = None;
     let outcome = loop {
@@ -111,6 +129,7 @@ pub async fn run(args: &[String]) -> Result<()> {
         let now = match carrier.phase() {
             Phase::Waiting => Some(format!("waiting for the turn on {from_name} to end…")),
             Phase::Sending { total, .. } => Some(format!("sending {} KB", total.div_ceil(1024))),
+            Phase::Cloning => Some(format!("cloning it on {to_name}…")),
             Phase::Arriving => Some(format!("arriving on {to_name}…")),
             _ => None,
         };
@@ -126,9 +145,14 @@ pub async fn run(args: &[String]) -> Result<()> {
             println!("moved: {to_name} {s}");
             Ok(())
         }
-        Err(Ended::NoProject) => bail!(
-            "{to_name} doesn't have this project; bring it there first, then move the session"
-        ),
+        Err(Ended::NoProject) => match no_clone {
+            Some(why) => {
+                bail!("{to_name} doesn't have this project, and it can't be cloned: {why}")
+            }
+            None => bail!(
+                "{to_name} doesn't have this project: move it with --clone to clone it there first"
+            ),
+        },
         Err(Ended::NotAccepted(why)) => {
             bail!("{to_name} didn't take it: {why}; it works on {from_name} again")
         }
@@ -144,6 +168,63 @@ pub async fn run(args: &[String]) -> Result<()> {
             bail!("{name}: {why} (run again with --id {id} to pick up)")
         }
     }
+}
+
+/// What cloning the session's project takes, asked of its machine: where
+/// it is, its remotes, and its environment files, ticked as the app ticks
+/// them. Asked whether or not the other machine has it; it clones only if
+/// not.
+async fn clone_there(from: &mut Asker, session: &str) -> Result<CloneThere> {
+    let Reply::MoveRemotes { root, branch, .. } = from
+        .ask(
+            Request::MovePack {
+                session: session.to_string(),
+                id: "probe".into(),
+                to: String::new(),
+                to_machine: String::new(),
+                have: None,
+            },
+            60,
+        )
+        .await?
+    else {
+        bail!("{}: unexpected answer", from.name);
+    };
+    if root.is_empty() {
+        bail!(
+            "{}: the session isn't in a Git repository there (or that dent is too old to say)",
+            from.name
+        );
+    }
+    let Reply::Pack { pack } = from.ask(Request::Pack { dir: root.clone() }, 120).await? else {
+        bail!("{}: unexpected answer", from.name);
+    };
+    let pack = pack.with_context(|| format!("{root} isn't a Git repository"))?;
+    if pack.remotes.is_empty() {
+        bail!("{root} has no remote another machine can clone from: push it somewhere first");
+    }
+    let ticked: Vec<&dent_protocol::Ignored> = pack.ignored.iter().filter(|i| i.carry).collect();
+    let bytes: u64 = ticked.iter().map(|i| i.size).sum();
+    if bytes > dent_protocol::CARRIED_MAX as u64 {
+        bail!(
+            "its environment files come to {} KB, more than the {} KB that can go along",
+            bytes.div_ceil(1024),
+            dent_protocol::CARRIED_MAX / 1024
+        );
+    }
+    for i in &ticked {
+        eprintln!("  bringing {} if it's cloned", i.path);
+    }
+    Ok(CloneThere {
+        dir: root,
+        paths: ticked.iter().map(|i| i.path.clone()).collect(),
+        bring: dent_protocol::Bring {
+            name: pack.name,
+            remotes: pack.remotes,
+            branch,
+            files: Vec::new(),
+        },
+    })
 }
 
 /// How long an answer may take: packing a big repository, or making the

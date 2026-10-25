@@ -259,19 +259,29 @@ impl Daemon {
         }
         let Some(have) = have else {
             let row = self.store().session(session)?.context("no such session")?;
-            let remotes = tokio::task::spawn_blocking(move || {
+            let (remotes, root, branch) = tokio::task::spawn_blocking(move || {
                 // dent's scratch folder moves as no repository, as packing
                 // treats it, even where it sits inside a checkout.
                 let cwd = Path::new(&row.cwd);
                 if cwd.starts_with(scratch()) {
-                    return Vec::new();
+                    return (Vec::new(), String::new(), None);
                 }
+                // Named by its main checkout, where its ignored files are,
+                // as the app names a session's project.
                 git::repo_of(cwd)
-                    .map(|(root, _)| git::remotes(&root))
+                    .map(|(root, _)| {
+                        let main = crate::workspace::main_checkout(&root).unwrap_or(root.clone());
+                        let branch = crate::workspace::branch(cwd);
+                        (git::remotes(&root), main.display().to_string(), branch)
+                    })
                     .unwrap_or_default()
             })
             .await?;
-            return Ok(Reply::MoveRemotes { remotes });
+            return Ok(Reply::MoveRemotes {
+                remotes,
+                root,
+                branch,
+            });
         };
         self.command(
             session,

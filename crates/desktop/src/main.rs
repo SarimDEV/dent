@@ -25,6 +25,7 @@ mod draft;
 mod ds;
 mod files;
 mod find;
+mod git_user;
 mod gitbar;
 mod github;
 mod glyph;
@@ -54,6 +55,7 @@ mod rows;
 mod select;
 mod settings;
 mod settings_agents;
+mod settings_projects;
 mod shell;
 mod sidebar;
 mod skills;
@@ -745,6 +747,7 @@ impl Render for Dent {
                     // the project picker steps back first.
                     || this.project_back(window, cx)
                     || this.menu.take().is_some()
+                    || this.cancel_git_user(cx)
                     || std::mem::take(&mut this.keys_open)
                     || this.escape_adding(window, cx)
                     || this.close_pane(cx)

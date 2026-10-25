@@ -240,6 +240,38 @@ struct Node {
     x: f32,
     y: f32,
     caption: String,
+    /// How wide its name may run, in pixels; `None` up to the next column.
+    name_w: Option<f32>,
+}
+
+/// Where the connected machines' rows sit, top to bottom by preference:
+/// two far apart first, then the two between.
+const LANES: [f32; 4] = [54., 136., 96., 172.];
+
+/// How tall a machine and its words stand on the map.
+const NODE_H: f32 = NODE;
+
+/// A lane for each connected machine, in the order given (which keeps
+/// first): each `(x, w)` its holder's centre and how far right its words
+/// run, in pixels. One takes the first lane where it touches nothing
+/// already placed; one that fits nowhere isn't drawn (`None`), and is
+/// counted instead.
+fn pack(nodes: &[(f32, f32)]) -> Vec<Option<f32>> {
+    let mut placed: Vec<(f32, f32, f32)> = Vec::new();
+    nodes
+        .iter()
+        .map(|&(x, w)| {
+            let (l, r) = (x - NODE / 2. - space::S2, x + NODE / 2. + w);
+            let free = |y: f32| {
+                placed
+                    .iter()
+                    .all(|&(pl, pr, py)| (y - py).abs() >= NODE_H || r <= pl || l >= pr)
+            };
+            let y = LANES.into_iter().find(|&y| free(y))?;
+            placed.push((l, r, y));
+            Some(y)
+        })
+        .collect()
 }
 
 /// A shape for every machine: this one (`local`, its id) and each remote
@@ -618,7 +650,7 @@ impl Dent {
         let home_y = STRIP_H / 2. - 12.;
         let home_shape = shapes.get("").copied().unwrap_or(Shape::Circle);
         let mut nodes: Vec<Node> = Vec::new();
-        let (mut near, mut far) = (0usize, 0usize);
+        let mut far = 0usize;
         let far_n = self
             .machines
             .iter()
@@ -629,6 +661,45 @@ impl Dent {
         // rows below list every one).
         let more = far_n.saturating_sub(FAR_MAX);
         let far_n = far_n.min(FAR_MAX);
+        // How wide the map was last drawn, for what fits beside what.
+        let strip_w = self
+            .probes
+            .borrow()
+            .get("machines-strip")
+            .map_or(900., |b| b.size.width.as_f32());
+        // The connected ones each where they fit, their names as wide as
+        // the room; those that fit nowhere are counted (the rows below
+        // list every one).
+        let words_w = |name: &str, ms: u64| {
+            let name = name.chars().count() as f32 * 7.5;
+            let caption = format!("{ms} ms").len() as f32 * 7.;
+            space::S3 + name.max(caption).clamp(48., NAME_MAX)
+        };
+        let connected: Vec<&MachineView> = self
+            .machines
+            .iter()
+            .filter(|m| Standing::of(m).connected())
+            .collect();
+        let lanes = pack(
+            &connected
+                .iter()
+                .map(|m| {
+                    let ms = m.rtt.unwrap_or(1);
+                    let x = axis_x(ms) * strip_w;
+                    let room = (AWAY_X * strip_w - x - NODE / 2.).max(48.);
+                    (
+                        x,
+                        words_w(&crate::data::machine_short(m.name()), ms).min(room),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+        let lane_of: HashMap<&str, Option<f32>> = connected
+            .iter()
+            .zip(&lanes)
+            .map(|(m, y)| (m.id.as_str(), *y))
+            .collect();
+        let hidden = lanes.iter().filter(|y| y.is_none()).count();
         for m in &self.machines {
             let st = Standing::of(m);
             if !st.connected() && far >= FAR_MAX {
@@ -637,8 +708,9 @@ impl Dent {
             let shape = shapes.get(&m.id).copied().unwrap_or(Shape::Circle);
             let (x, y, caption) = if st.connected() {
                 let ms = m.rtt.unwrap_or(1);
-                let y = [54., 136., 96., 172.][near % 4];
-                near += 1;
+                let Some(y) = lane_of.get(m.id.as_str()).copied().flatten() else {
+                    continue;
+                };
                 (axis_x(ms), y, format!("{ms} ms"))
             } else {
                 let step = ((STRIP_H - 110.) / far_n as f32).min(64.);
@@ -653,13 +725,19 @@ impl Dent {
                 };
                 (AWAY_X + 0.045, y, words.to_string())
             };
+            let name = crate::data::machine_short(m.name());
+            let name_w = st.connected().then(|| {
+                let room = (AWAY_X - x) * strip_w - NODE / 2.;
+                words_w(&name, m.rtt.unwrap_or(1)).min(room) - space::S3
+            });
             nodes.push(Node {
-                name: crate::data::machine_short(m.name()),
+                name,
                 shape,
                 standing: st,
                 x,
                 y,
                 caption,
+                name_w,
             });
         }
         let lines: Vec<(f32, f32, Standing)> =
@@ -749,13 +827,6 @@ impl Dent {
                 .whitespace_nowrap()
                 .child(text)
         };
-        // How wide the map was last drawn: a name stops before the next
-        // column (connected machines) or the map's edge (the rest).
-        let strip_w = self
-            .probes
-            .borrow()
-            .get("machines-strip")
-            .map_or(900., |b| b.size.width.as_f32());
         let node_el = |n: &Node, size: f32, below: bool, i: usize| {
             let limit = if n.standing.connected() { AWAY_X } else { 1. };
             let room = (limit - n.x) * strip_w - size / 2. - space::S3 - space::S3;
@@ -773,7 +844,7 @@ impl Dent {
                         .max_w(px(if below {
                             size * 2. + 24.
                         } else {
-                            room.clamp(48., NAME_MAX)
+                            n.name_w.unwrap_or(room).clamp(48., NAME_MAX)
                         }))
                         .truncate()
                         .text_color(if faded { t.quiet } else { t.ink })
@@ -815,6 +886,7 @@ impl Dent {
             x: HOME_X,
             y: home_y,
             caption: "This Mac".into(),
+            name_w: None,
         };
         let ticks = (!first).then(|| {
             div()
@@ -832,6 +904,18 @@ impl Dent {
                             .child(label(format!("{ms} ms"), true)),
                     )
                 }))
+                .when(hidden > 0, |d| {
+                    d.child(
+                        div().absolute().left(relative(AWAY_X)).child(
+                            div()
+                                .ml(px(-140.))
+                                .w(px(128.))
+                                .flex()
+                                .justify_end()
+                                .child(label(format!("{hidden} more below"), false)),
+                        ),
+                    )
+                })
                 .child(
                     div().absolute().left(relative(AXIS.0)).child(
                         div()
@@ -1810,7 +1894,11 @@ impl Dent {
             .into_any_element()
     }
 
-    fn field(&self, f: &Entity<gpui_kit::base::input::TextareaState>, mono: bool) -> Div {
+    pub(crate) fn field(
+        &self,
+        f: &Entity<gpui_kit::base::input::TextareaState>,
+        mono: bool,
+    ) -> Div {
         let t = self.t;
         div()
             .flex_1()
@@ -2046,7 +2134,8 @@ const LINE_H: f32 = 24.;
 mod tests {
     // Not a glob: GPUI's prelude has a `test` of its own.
     use super::{
-        AXIS, axis_x, last_update, peers_from, route_kind, shapes_for, version_word, with_version,
+        AXIS, NODE, NODE_H, axis_x, last_update, pack, peers_from, route_kind, shapes_for,
+        version_word, with_version,
     };
     use crate::machines::MachineView;
 
@@ -2151,6 +2240,28 @@ mod tests {
             "LAN",
             "outside the tailnet's range"
         );
+    }
+
+    #[test]
+    fn machines_on_the_map_never_overlap_and_the_rest_are_counted() {
+        // Seventeen answering within a few ms of each other.
+        let nodes: Vec<(f32, f32)> = (0..17).map(|i| (400. + i as f32 * 6., 120.)).collect();
+        let lanes = pack(&nodes);
+        let placed: Vec<(f32, f32, f32)> = nodes
+            .iter()
+            .zip(&lanes)
+            .filter_map(|(&(x, w), y)| y.map(|y| (x - NODE / 2., x + NODE / 2. + w, y)))
+            .collect();
+        for (i, a) in placed.iter().enumerate() {
+            for b in &placed[i + 1..] {
+                let apart = (a.2 - b.2).abs() >= NODE_H || a.1 <= b.0 || b.1 <= a.0;
+                assert!(apart, "{a:?} overlaps {b:?}");
+            }
+        }
+        assert_eq!(placed.len(), 2, "two lanes far enough apart take two");
+        // Spread out, they all fit.
+        let spread: Vec<(f32, f32)> = (0..4).map(|i| (200. + i as f32 * 200., 120.)).collect();
+        assert!(pack(&spread).iter().all(Option::is_some));
     }
 
     #[test]

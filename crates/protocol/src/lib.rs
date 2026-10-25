@@ -993,6 +993,9 @@ pub struct Machine {
     /// no name or email to use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_user: Option<String>,
+    /// It takes `SetGitUser` (older daemons leave this out).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub git_user_settable: bool,
     pub gh: Gh,
     /// The daemon starts at login.
     pub login_item: bool,
@@ -1632,6 +1635,12 @@ pub enum Request {
     SetLoginItem {
         on: bool,
     },
+    /// Who commits are by there: Git's global name and email; replies
+    /// with the machine.
+    SetGitUser {
+        name: String,
+        email: String,
+    },
     /// An agent's models (none: the default agent's).
     Models {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2005,6 +2014,14 @@ pub enum Reply {
     },
     MoveRemotes {
         remotes: Vec<GitRemote>,
+        /// The repository's folder there, for a client to ask what cloning
+        /// it elsewhere takes (`Pack`); empty outside a repository, and
+        /// from older daemons.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        root: String,
+        /// The session's branch, which a clone made there lets go of.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
     },
     MoveWaiting,
     /// A project being cloned for a move ([`Request::BringProject`]).
@@ -2186,6 +2203,7 @@ impl Request {
             | R::Machine
             | R::SetLan { .. }
             | R::SetLoginItem { .. }
+            | R::SetGitUser { .. }
             | R::SetDefaults { .. }
             | R::Models { .. }
             | R::Usage { .. }

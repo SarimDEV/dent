@@ -402,6 +402,22 @@ pub(super) fn settings_many() -> Vec<(f32, Act)> {
             ),
         ),
         (0.5, Shot("settings-made-all")),
+        // Twenty machines on their page: every shape used, solid then
+        // outlined, before any comes again.
+        (0.2, Click("settings-tab-machines")),
+        (
+            0.1,
+            Until(
+                "all twelve shapes are used before any repeats",
+                |d, _| {
+                    let shapes = d.shapes();
+                    let used: std::collections::HashSet<_> = shapes.values().collect();
+                    shapes.len() >= 20 && used.len() == 12
+                },
+                3.,
+            ),
+        ),
+        (0.6, Shot("settings-machines-shapes")),
     ]
 }
 
@@ -517,4 +533,235 @@ pub(super) fn settings_live() -> Vec<(f32, Act)> {
 thread_local! {
     /// The machine's defaults before [`settings_live`] changed them.
     static LIVE_WAS: std::cell::RefCell<Option<dent_protocol::Defaults>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The walk's project, as the daemon names it.
+fn walk_proj() -> String {
+    let p = std::env::var("DENT_WALK_PROJECT").unwrap_or_default();
+    std::fs::canonicalize(&p)
+        .map(|p| p.display().to_string())
+        .unwrap_or(p)
+}
+
+/// A project given its own defaults in Settings › Agents: found in the
+/// machine's projects, a choice set and kept there, the machine's shown
+/// for the rest, then taken off again.
+pub(super) fn settings_projects() -> Vec<(f32, Act)> {
+    vec![
+        (
+            0.1,
+            Call(|d, _, _| {
+                d.live.send(dent_protocol::Request::AddProject {
+                    path: walk_proj(),
+                    create: false,
+                });
+            }),
+        ),
+        (0.3, Key("cmd-,")),
+        (0.2, Click("settings-tab-agents")),
+        (
+            0.1,
+            Until(
+                "a machine keeping defaults offers to give a project its own",
+                |d, _| drawn(d, "row-proj-add").is_some(),
+                5.,
+            ),
+        ),
+        (0.2, Click("chip-keepproject")),
+        (
+            0.1,
+            Until(
+                "its projects are listed",
+                |d, cx| {
+                    d.menu == Some(crate::app::Menu::KeepProject)
+                        && d.keep_project_entries(cx)
+                            .iter()
+                            .any(|e| e.key == format!("keep-{}", walk_proj()))
+                },
+                5.,
+            ),
+        ),
+        (0.4, Shot("projects-choose")),
+        (0.3, Keys("zzz-none")),
+        (
+            0.1,
+            Until(
+                "searched for nothing, it says so",
+                |d, cx| d.keep_project_entries(cx).iter().all(|e| !e.choosable()),
+                3.,
+            ),
+        ),
+        (
+            0.1,
+            Call(|d, w, cx| {
+                d.menu_query
+                    .update(cx, |f, cx| crate::app::put(f, "", w, cx));
+                if let Some(e) = d
+                    .keep_project_entries(cx)
+                    .into_iter()
+                    .find(|e| e.key == format!("keep-{}", walk_proj()))
+                {
+                    d.choose_entry(&e, w, cx);
+                }
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "chosen, it opens with each choice as the machine's",
+                |d, _| {
+                    drawn(d, "row-proj-permission").is_some()
+                        && drawn(d, "chip-setprojectdefault(permission)").is_some()
+                },
+                3.,
+            ),
+        ),
+        (0.4, Shot("projects-open")),
+        (0.2, Click("chip-setprojectdefault(permission)")),
+        (
+            0.1,
+            Until(
+                "its menu offers the machine's or one of its own",
+                |d, _| {
+                    d.menu
+                        == Some(crate::app::Menu::SetProjectDefault(
+                            crate::defaults::Field::Permission,
+                        ))
+                },
+                3.,
+            ),
+        ),
+        (
+            0.1,
+            Call(|d, w, cx| {
+                let f = crate::defaults::Field::Permission;
+                if let Some(e) = d
+                    .menu_entries(crate::app::Menu::SetProjectDefault(f), cx)
+                    .into_iter()
+                    .find(|e| e.choosable() && !e.on && !e.key.ends_with("-machine"))
+                {
+                    d.choose_entry(&e, w, cx);
+                }
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "set, the machine keeps it for that project alone",
+                |d, _| {
+                    let s = d.setups.get("");
+                    s.and_then(|s| s.project_defaults.get(&walk_proj()))
+                        .is_some_and(|p| p.permission.is_some() && p.worktree.is_none())
+                        && d.pending_defaults.is_empty()
+                },
+                5.,
+            ),
+        ),
+        (0.4, Shot("projects-set")),
+        (0.2, Click("proj-done")),
+        (
+            0.1,
+            Until(
+                "closed, it says what it sets, to change or remove",
+                |d, _| {
+                    drawn(d, &format!("proj-remove-{}", walk_proj())).is_some()
+                        && drawn(d, "row-proj-permission").is_none()
+                },
+                3.,
+            ),
+        ),
+        (0.4, Shot("projects-closed")),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                d.put_defaults("", Some(walk_proj()), Default::default(), cx);
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "removed, it's gone from the machine and the page",
+                |d, _| {
+                    d.setups
+                        .get("")
+                        .is_some_and(|s| !s.project_defaults.contains_key(&walk_proj()))
+                        && drawn(d, &format!("proj-remove-{}", walk_proj())).is_none()
+                },
+                5.,
+            ),
+        ),
+    ]
+}
+
+/// Who commits are by, changed on this Mac's row: something that isn't a
+/// name and address is refused there, then a real one is saved. Walked
+/// with a Git settings file of its own (see walk.sh).
+pub(super) fn git_user() -> Vec<(f32, Act)> {
+    // It saves who commits are by for real: only with walk.sh's own Git
+    // settings file, never yours.
+    let own = std::env::var("GIT_CONFIG_GLOBAL").is_ok_and(|p| p.contains("dent-walk."));
+    if !own {
+        return vec![(
+            0.,
+            Until(
+                "walked by walk.sh, with a Git settings file of its own",
+                |_, _| false,
+                0.1,
+            ),
+        )];
+    }
+    vec![
+        (0.3, Key("cmd-,")),
+        (0.2, Click("settings-tab-agents")),
+        (
+            0.1,
+            Until(
+                "Commits by can be changed",
+                |d, _| drawn(d, "git-user-change").is_some(),
+                5.,
+            ),
+        ),
+        (0.2, Click("git-user-change")),
+        (0.3, Keys("just a name")),
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until(
+                "not a name and address: said on the row, the field kept",
+                |d, _| {
+                    d.git_user_edit
+                        .as_ref()
+                        .is_some_and(|e| e.error.is_some() && e.sent.is_none())
+                },
+                3.,
+            ),
+        ),
+        (0.4, Shot("git-user-bad")),
+        (0.1, Key("cmd-a")),
+        (0.3, Keys("Ada Lovelace <ada@example.com>")),
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until(
+                "saved there, the field closes and the row says who",
+                |d, _| {
+                    d.git_user_edit.is_none()
+                        && d.setups.get("").and_then(|s| s.git_user.as_deref())
+                            == Some("Ada Lovelace <ada@example.com>")
+                },
+                8.,
+            ),
+        ),
+        (0.4, Shot("git-user-saved")),
+        (0.2, Click("git-user-change")),
+        (0.1, Key("escape")),
+        (
+            0.1,
+            Until(
+                "Esc closes it unsaved",
+                |d, _| d.git_user_edit.is_none(),
+                3.,
+            ),
+        ),
+    ]
 }

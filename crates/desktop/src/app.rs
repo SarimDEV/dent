@@ -366,13 +366,20 @@ pub enum Menu {
     SetDefault(crate::defaults::Field),
     /// The machines without a tab in Settings › Agents, to find one.
     SettingsMachines,
+    /// A choice of the project open on a machine's tab.
+    SetProjectDefault(crate::defaults::Field),
+    /// The tab's machine's projects, to give one its own defaults.
+    KeepProject,
 }
 
 impl Menu {
     /// Menus with a field to type in: the project picker, and the
     /// branches a worktree can start from.
     pub fn searches(self) -> bool {
-        matches!(self, Menu::Project | Menu::Base | Menu::SettingsMachines)
+        matches!(
+            self,
+            Menu::Project | Menu::Base | Menu::SettingsMachines | Menu::KeepProject
+        )
     }
 
     /// Menus with longer rows: paths, session titles.
@@ -699,6 +706,10 @@ pub enum Waiting {
     MachineAgents(String),
     /// How a machine is set up, its defaults among it (decision 0076).
     MachineSetup(String),
+    /// Who commits are by, saved on a machine (its id), and the request.
+    GitUser(String, u64),
+    /// A machine's projects, for Settings › Agents.
+    TabProjects(String),
     /// A change to a machine's defaults, sent.
     SetDefaults(crate::defaults::Pending),
     Machine,
@@ -921,6 +932,11 @@ pub struct Dent {
     pub settings_tab: crate::settings::Tab,
     /// The machine whose tab Settings › Agents shows; `None` is All.
     pub agents_tab: Option<String>,
+    /// The project open on a machine's tab (the machine, the project),
+    /// its choices a line each.
+    pub agents_project: Option<(String, String)>,
+    /// Each machine's projects, as it last said, for giving one its own.
+    pub tab_projects: HashMap<String, Result<Vec<dent_protocol::Project>, String>>,
     /// The machines Settings › Agents had no room to give a tab, as last
     /// drawn: "N more" lists them.
     pub agents_hidden: Vec<String>,
@@ -937,6 +953,9 @@ pub struct Dent {
     pub adding: Option<crate::machines_page::Adding>,
     pub machine_addr: Entity<TextareaState>,
     pub machine_code: Entity<TextareaState>,
+    /// Who commits are by, as typed on a machine's row in Settings.
+    pub git_user_input: Entity<TextareaState>,
+    pub git_user_edit: Option<crate::git_user::GitUserEdit>,
     /// This machine's name, once connected; why not, when not.
     pub machine: String,
     pub connection: Result<(), String>,
@@ -1406,6 +1425,23 @@ impl Dent {
             })
             .detach();
         }
+        let git_user_input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 1)
+                .placeholder("Name <email>")
+                .submit_on_enter(true)
+        });
+        single_line(&git_user_input, window, cx);
+        cx.subscribe_in(
+            &git_user_input,
+            window,
+            |this, _, ev: &InputEvent, _, cx| {
+                if let InputEvent::PressEnter { .. } = ev {
+                    this.save_git_user(cx);
+                }
+            },
+        )
+        .detach();
         let rename_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 1)
@@ -1505,6 +1541,13 @@ impl Dent {
                         .position(|e| e.choosable());
                     this.menu_scroll.scroll_to_item(0);
                     cx.notify();
+                } else if this.menu == Some(Menu::KeepProject) {
+                    this.menu_ix = this
+                        .keep_project_entries(cx)
+                        .iter()
+                        .position(|e| e.choosable());
+                    this.menu_scroll.scroll_to_item(0);
+                    cx.notify();
                 } else {
                     this.project_query_changed(cx);
                 }
@@ -1575,6 +1618,7 @@ impl Dent {
             &find_input,
             &machine_addr,
             &machine_code,
+            &git_user_input,
         ] {
             cx.subscribe(field, |_, _, ev: &InputEvent, _| {
                 if let InputEvent::Focus = ev {
@@ -1860,6 +1904,8 @@ impl Dent {
             machine_update: None,
             settings_tab: crate::settings::Tab::General,
             agents_tab: None,
+            agents_project: None,
+            tab_projects: HashMap::new(),
             agents_hidden: Vec::new(),
             devices: Vec::new(),
             pairing: None,
@@ -1868,6 +1914,8 @@ impl Dent {
             adding: None,
             machine_addr: machine_addr.clone(),
             machine_code: machine_code.clone(),
+            git_user_input: git_user_input.clone(),
+            git_user_edit: None,
             machine: String::new(),
             connection: Err("Starting dent…".into()),
             drops: 0,
@@ -3567,7 +3615,7 @@ impl Dent {
             (
                 Waiting::MoveRemotes(id),
                 Out::Reply {
-                    reply: Reply::MoveRemotes { remotes },
+                    reply: Reply::MoveRemotes { remotes, .. },
                 },
             ) => self.probe_remotes(&id, remotes),
             (
@@ -3938,6 +3986,26 @@ impl Dent {
                 self.toast(ToastAction::Info, message);
             }
             (Waiting::MachineSetup(_), _) => {}
+            (
+                Waiting::GitUser(machine, n),
+                Out::Reply {
+                    reply: Reply::Machine { machine: m },
+                },
+            ) => self.git_user_came(&machine, n, Ok(m), cx),
+            (Waiting::GitUser(machine, n), Out::Error { message }) => {
+                self.git_user_came(&machine, n, Err(message), cx)
+            }
+            (Waiting::GitUser(..), _) => {}
+            (
+                Waiting::TabProjects(machine),
+                Out::Reply {
+                    reply: Reply::Projects { projects },
+                },
+            ) => self.tab_projects_came(machine, Ok(projects), cx),
+            (Waiting::TabProjects(machine), Out::Error { message }) => {
+                self.tab_projects_came(machine, Err(message), cx)
+            }
+            (Waiting::TabProjects(_), _) => {}
             (
                 Waiting::SetDefaults(sent),
                 Out::Reply {
@@ -5185,7 +5253,7 @@ impl Dent {
     }
 
     /// Every text field, for what touches them all (the theme's colours).
-    pub fn fields(&self) -> [&Entity<TextareaState>; 11] {
+    pub fn fields(&self) -> [&Entity<TextareaState>; 12] {
         [
             &self.composer,
             &self.starter,
@@ -5198,6 +5266,7 @@ impl Dent {
             &self.find_input,
             &self.machine_addr,
             &self.machine_code,
+            &self.git_user_input,
         ]
     }
 
@@ -5970,6 +6039,11 @@ impl Dent {
         self.waiting.insert(n, w);
     }
 
+    /// Still waiting for the reply to request `n`.
+    pub fn is_waiting(&self, n: u64) -> bool {
+        self.waiting.contains_key(&n)
+    }
+
     /// Stop waiting for the reply to request `n`.
     pub fn waiting_remove(&mut self, n: u64) {
         self.waiting.remove(&n);
@@ -6045,6 +6119,14 @@ impl Dent {
                 f.set_placeholder("Find a machine", window, cx);
                 f.focus_field(window, cx);
             }),
+            Menu::KeepProject => {
+                self.ask_tab_projects(cx);
+                self.menu_query.update(cx, |f, cx| {
+                    put(f, "", window, cx);
+                    f.set_placeholder("Find a project", window, cx);
+                    f.focus_field(window, cx);
+                })
+            }
             _ => {}
         }
         self.menu_ix = self.menu_entries(which, cx).iter().position(|e| e.on);

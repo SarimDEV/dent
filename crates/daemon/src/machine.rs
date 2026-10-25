@@ -20,12 +20,11 @@ pub fn check(path: &str) -> Machine {
     };
     let git = env_run("git", &["--version"]).filter(|v| !v.is_empty());
     let git_user = git.as_ref().and_then(|_| {
-        // As a commit would take it: the environment first, then config.
-        let pick = |var: &str, key: &str| {
-            std::env::var(var)
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .or_else(|| env_run("git", &["config", key]).filter(|v| !v.is_empty()))
+        // As a commit would take it: the environment first, even set to
+        // nothing (which Git refuses to commit with), then config.
+        let pick = |var: &str, key: &str| match std::env::var(var) {
+            Ok(v) => Some(v).filter(|v| !v.trim().is_empty()),
+            Err(_) => env_run("git", &["config", key]).filter(|v| !v.is_empty()),
         };
         identity(
             pick("GIT_AUTHOR_NAME", "user.name"),
@@ -57,6 +56,7 @@ pub fn check(path: &str) -> Machine {
     Machine {
         git,
         git_user,
+        git_user_settable: true,
         gh,
         login_item: crate::login::is_on(),
         login_item_blocked: crate::login::blocked(),
@@ -66,6 +66,69 @@ pub fn check(path: &str) -> Machine {
         defaults_set: false,
         project_defaults: Default::default(),
     }
+}
+
+/// Make `name <email>` who commits here are by, in Git's global settings.
+/// Refused when dent's environment names someone, which commits would take
+/// instead.
+pub fn set_git_user(path: &str, name: &str, email: &str) -> anyhow::Result<()> {
+    let (name, email) = (name.trim(), email.trim());
+    if name.is_empty() {
+        anyhow::bail!("a name is needed");
+    }
+    if !looks_like_email(email) {
+        anyhow::bail!("{email:?} isn't an email address");
+    }
+    // Git takes these as the bounds of the address.
+    if [name, email]
+        .iter()
+        .any(|v| v.contains(['<', '>', '\n', '\r']))
+    {
+        anyhow::bail!("a name or email can't have < > or line breaks");
+    }
+    for var in ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"] {
+        if std::env::var_os(var).is_some() {
+            anyhow::bail!("dent runs with {var} set there, which commits take instead");
+        }
+    }
+    let git = |args: &[&str]| {
+        std::process::Command::new("/usr/bin/env")
+            .arg(format!("PATH={path}"))
+            .arg("git")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()
+    };
+    // Both or neither: a name saved with the old address is someone else.
+    let was = git(&["config", "--global", "user.name"])?;
+    let was = was
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&was.stdout).trim().to_string());
+    let failed = |out: &std::process::Output| {
+        anyhow::anyhow!(
+            "git couldn't save it: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
+    };
+    let out = git(&["config", "--global", "user.name", name])?;
+    if !out.status.success() {
+        return Err(failed(&out));
+    }
+    let out = git(&["config", "--global", "user.email", email])?;
+    if !out.status.success() {
+        let _ = match &was {
+            Some(old) => git(&["config", "--global", "user.name", old]),
+            None => git(&["config", "--global", "--unset", "user.name"]),
+        };
+        return Err(failed(&out));
+    }
+    Ok(())
+}
+
+fn looks_like_email(s: &str) -> bool {
+    s.split_once('@')
+        .is_some_and(|(a, b)| !a.is_empty() && !b.is_empty() && !s.contains(char::is_whitespace))
 }
 
 /// "Ada <ada@example.com>", from what Git would use; `None` when either is

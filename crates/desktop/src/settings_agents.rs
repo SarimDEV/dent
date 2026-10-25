@@ -152,12 +152,31 @@ impl Dent {
     /// The Settings › Agents page: tabs when there's more than one machine.
     pub fn agents_body(&mut self, room: f32, cx: &mut Context<Self>) -> AnyElement {
         let ids = self.machine_ids();
-        if ids.len() == 1 {
-            return self.machine_body("", cx);
-        }
         // A machine gone since is no tab to be on.
         if self.agents_tab.as_ref().is_some_and(|m| !ids.contains(m)) {
             self.agents_tab = None;
+        }
+        // What's open on a machine not shown now closes: Esc, a menu or a
+        // reply never lands on a page out of sight.
+        let shown = (ids.len() == 1 || self.agents_tab.is_some()).then(|| self.tab_machine());
+        if self
+            .git_user_edit
+            .as_ref()
+            .map(|e| Some(&e.machine))
+            .is_some_and(|m| m != shown.as_ref())
+        {
+            self.git_user_edit = None;
+        }
+        if self
+            .agents_project
+            .as_ref()
+            .map(|(m, _)| Some(m))
+            .is_some_and(|m| m != shown.as_ref())
+        {
+            self.agents_project = None;
+        }
+        if ids.len() == 1 {
+            return self.machine_body("", cx);
         }
         let tabs = self.agents_tabs(room, &ids, cx);
         let body = match self.agents_tab.clone() {
@@ -171,6 +190,15 @@ impl Dent {
             .child(div().h(px(space::S4)))
             .child(body)
             .into_any_element()
+    }
+
+    /// The machine whose page is open in Settings › Agents: with one
+    /// machine, this one whatever tab was last open; on All, "" too.
+    pub fn tab_machine(&self) -> String {
+        if self.machine_ids().len() == 1 {
+            return String::new();
+        }
+        self.agents_tab.clone().unwrap_or_default()
     }
 
     /// All machines, then the machines that fit, then "N more".
@@ -582,33 +610,7 @@ impl Dent {
             ),
             Some(true) => None,
         };
-        // Projects with their own.
-        let projects: Vec<(String, Defaults)> = self
-            .setups
-            .get(m)
-            .map(|s| s.project_defaults.clone().into_iter().collect())
-            .unwrap_or_default();
-        let mut own = Vec::new();
-        for (p, d) in projects {
-            let said: Vec<String> = FIELDS
-                .iter()
-                .filter(|f| !Field::is_unset(**f, &d))
-                .map(|f| self.field_words(*f, &d, m))
-                .collect();
-            let (to, path) = (m.to_string(), p.clone());
-            own.push(
-                Line::new(format!("proj-{p}"), Dent::project_name(&p))
-                    .under(said.join(" · "))
-                    .control(self.small_button(
-                        &format!("proj-remove-{p}"),
-                        "Remove",
-                        cx,
-                        move |this, _, cx| {
-                            this.put_defaults(&to, Some(path.clone()), Defaults::default(), cx)
-                        },
-                    )),
-            );
-        }
+        let own = self.project_lines(m, cx);
         let agents = self.agent_lines(m, cx);
         let machine = self.machine_lines(m, cx);
         let here = m.is_empty();
@@ -616,7 +618,7 @@ impl Dent {
             .flex()
             .flex_col()
             .child(self.section("New sessions", note, lines, true))
-            .when(!own.is_empty(), |d| {
+            .when(keeps == Some(true), |d| {
                 d.child(self.section("Projects with their own", None, own, false))
             })
             .child(self.section("Agents", None, agents, false))
@@ -696,7 +698,7 @@ impl Dent {
 
     /// Choice `f`'s values to offer, in words and as a default, for
     /// `machine`'s agent.
-    fn field_values(&self, f: Field, machine: &str) -> Vec<(String, Defaults)> {
+    pub(crate) fn field_values(&self, f: Field, machine: &str) -> Vec<(String, Defaults)> {
         let one = |d: Defaults| (self.field_words(f, &d, machine), d);
         match f {
             Field::Model => {
@@ -776,7 +778,7 @@ impl Dent {
 }
 
 /// A choice's name in Settings.
-fn field_title(f: Field) -> &'static str {
+pub(crate) fn field_title(f: Field) -> &'static str {
     match f {
         Field::Agent => "Agent",
         Field::Model => "Model",

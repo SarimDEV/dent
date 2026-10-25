@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: dent machine add HOST:PORT [--code CODE] | dent machines | dent machine remove NAME | dent watch [NAME...] [--secs N] | dent ask NAME TEXT [--file PATH]... [--cwd DIR | --bring DIR] | dent wake NAME | dent call NAME JSON | dent get NAME SESSION PATH [OUT] | dent move NAME SESSION --to NAME [--id ID]"
+                "usage: dent machine add HOST:PORT [--code CODE] | dent machines | dent machine remove NAME | dent watch [NAME...] [--secs N] | dent ask NAME TEXT [--file PATH]... [--cwd DIR | --bring DIR] | dent wake NAME | dent call NAME JSON | dent get NAME SESSION PATH [OUT] | dent move NAME SESSION --to NAME [--id ID] [--clone]"
             );
             Ok(())
         }

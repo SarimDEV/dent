@@ -108,7 +108,12 @@ impl World {
         let mut c = Command::new(env!("CARGO_BIN_EXE_dent-daemon"));
         c.arg("--state").arg(&self.state);
         for (k, v) in &self.env {
-            c.env(k, v);
+            // Named with no value: not set at all.
+            if v.is_empty() {
+                c.env_remove(k);
+            } else {
+                c.env(k, v);
+            }
         }
         c.stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -5231,6 +5236,115 @@ fn a_restart_mid_clone_clones_again_in_the_same_place() {
     b.say(&to, "r", "recall", false);
     b.wait_turns(&to, n + 1);
     assert!(b.text(&to).contains("remember kiwi"));
+}
+
+/// Who commits are by, set from a device: saved in Git's settings there
+/// and said back; a bad address or an identity dent's environment forces
+/// is refused, saying why.
+#[test]
+fn who_commits_are_by_is_set_from_a_device() {
+    let home = std::env::temp_dir().join(format!("dent-gituser-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let config = home.join(".gitconfig");
+    let (h, c) = (home.display().to_string(), config.display().to_string());
+    // Not set at all, so Git's settings are what commits take.
+    let w = World::new(&[
+        ("HOME", &h),
+        ("GIT_CONFIG_GLOBAL", &c),
+        ("GIT_AUTHOR_NAME", ""),
+        ("GIT_AUTHOR_EMAIL", ""),
+    ]);
+    let mut a = w.client();
+    let set = |a: &mut Client, name: &str, email: &str| {
+        reply(a.call(Request::SetGitUser {
+            name: name.into(),
+            email: email.into(),
+        }))
+    };
+    let Ok(dent_protocol::Reply::Machine { machine }) =
+        set(&mut a, " Ada Lovelace ", "ada@example.com")
+    else {
+        panic!()
+    };
+    assert_eq!(
+        machine.git_user.as_deref(),
+        Some("Ada Lovelace <ada@example.com>")
+    );
+    let saved = std::fs::read_to_string(&config).unwrap();
+    assert!(
+        saved.contains("Ada Lovelace") && saved.contains("ada@example.com"),
+        "{saved}"
+    );
+    for (name, email, why) in [
+        ("Ada", "not an address", "isn't an email"),
+        ("", "ada@example.com", "name is needed"),
+        ("Ada <x>", "ada@example.com", "can't have"),
+        ("Ada\nEvil", "ada@example.com", "can't have"),
+    ] {
+        let e = set(&mut a, name, email).unwrap_err();
+        assert!(e.contains(why), "{name:?} {email:?}: {e}");
+    }
+    // Refused, nothing changed.
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), saved);
+    drop(a);
+    drop(w);
+    let w = World::new(&[
+        ("HOME", &h),
+        ("GIT_CONFIG_GLOBAL", &c),
+        ("GIT_AUTHOR_NAME", "walk"),
+        ("GIT_AUTHOR_EMAIL", "walk@example.com"),
+    ]);
+    let mut a = w.client();
+    let e = set(&mut a, "Grace", "grace@example.com").unwrap_err();
+    assert!(e.contains("GIT_AUTHOR_NAME"), "{e}");
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), saved);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Asked before a move, the session's machine names its project by the
+/// main checkout (where its ignored files are), even from a worktree, and
+/// its branch: what `dent move --clone` asks to clone.
+#[test]
+fn move_remotes_name_the_main_checkout_and_branch() {
+    let m = Moves::new("remroot", false);
+    let wt = m.root.join("home-a/app-wt");
+    git_in(
+        &m.on_a,
+        &["worktree", "add", "-q", "-b", "side", wt.to_str().unwrap()],
+    );
+    let mut a = m.a.client();
+    a.subscribe(0);
+    let main = std::fs::canonicalize(&m.on_a)
+        .unwrap()
+        .display()
+        .to_string();
+    for (dir, branch) in [
+        (&m.on_a, git_in(&m.on_a, &["branch", "--show-current"])),
+        (&wt, "side".into()),
+    ] {
+        // Its text names it: one per folder.
+        let s = a.create(&dir.display().to_string(), Permission::Full, &branch);
+        a.wait_turns(&s, 1);
+        let r = reply(a.call(Request::MovePack {
+            session: s.clone(),
+            id: "probe".into(),
+            to: String::new(),
+            to_machine: String::new(),
+            have: None,
+        }));
+        let Ok(dent_protocol::Reply::MoveRemotes {
+            remotes,
+            root,
+            branch: b,
+        }) = r
+        else {
+            panic!("{r:?}")
+        };
+        assert_eq!(remotes.len(), 1);
+        assert_eq!(root, main);
+        assert_eq!(b.as_deref(), Some(branch.trim()));
+    }
 }
 
 /// A ticked file gone by the time it's read: the move stops before any
