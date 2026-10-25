@@ -1553,6 +1553,9 @@ impl Dent {
     }
 
     fn remove_machine(&mut self, id: &str, cx: &mut Context<Self>) {
+        // What was kept for it goes with it.
+        self.pending_defaults.retain(|p| p.machine != id);
+        self.setups.remove(id);
         self.live.stop(id, true);
         // Its files' copies go with it.
         crate::files::forget(id);

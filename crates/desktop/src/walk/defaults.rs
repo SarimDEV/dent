@@ -103,6 +103,95 @@ pub(super) fn defaults() -> Vec<(f32, Act)> {
             ),
         ),
         (0.5, Shot("defaults-is")),
+        (0.1, Key("escape")),
+        // Set from another device meanwhile: what arrives takes the place
+        // of what the composer has, where nothing's been picked.
+        (
+            0.1,
+            Call(|d, _, cx| {
+                let mut m = d.setups.get("").cloned().unwrap_or_default();
+                m.defaults = Some(dent_protocol::Defaults {
+                    permission: Some(dent_protocol::Permission::Plan),
+                    ..Default::default()
+                });
+                m.defaults_set = true;
+                d.setup_came(String::new(), m, cx);
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "defaults set elsewhere reach the composer",
+                |d, _| d.defaults.permission == dent_protocol::Permission::Plan,
+                2.,
+            ),
+        ),
+        // Made the default everywhere while a machine was never heard
+        // from: only that goes there, over what it has.
+        (
+            0.1,
+            Call(|d, w, cx| {
+                d.defaults.effort = Some("high".into());
+                let mut v = crate::machines::MachineView::saved(dent_remote::store::Saved {
+                    id: "zz01".into(),
+                    name: "far-away".into(),
+                    ..Default::default()
+                });
+                v.state = dent_client_core::machine::State::Unreachable { why: "off".into() };
+                d.machines.push(v);
+                if let Some(e) = d
+                    .menu_entries(crate::app::Menu::Effort, cx)
+                    .into_iter()
+                    .find(|e| e.key == "make-default-all")
+                {
+                    d.choose_entry(&e, w, cx);
+                }
+                let m = dent_protocol::Machine {
+                    defaults: Some(dent_protocol::Defaults {
+                        model: Some("opus".into()),
+                        permission: Some(dent_protocol::Permission::Ask),
+                        ..Default::default()
+                    }),
+                    defaults_set: true,
+                    ..Default::default()
+                };
+                d.setup_came("zz01".into(), m, cx);
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "a machine not heard from keeps what it had, with only that over it",
+                |d, _| {
+                    let x = d.defaults_for("zz01", None);
+                    x.model.as_deref() == Some("opus")
+                        && x.permission == Some(dent_protocol::Permission::Ask)
+                        && x.effort.as_deref() == Some("high")
+                },
+                2.,
+            ),
+        ),
+        // Cleared on purpose: not taken for a machine never set up.
+        (
+            0.1,
+            Call(|d, _, cx| {
+                let m = dent_protocol::Machine {
+                    defaults: Some(Default::default()),
+                    defaults_set: true,
+                    ..Default::default()
+                };
+                d.pending_defaults.retain(|p| p.machine != "zz02");
+                d.setup_came("zz02".into(), m, cx);
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "defaults cleared on purpose aren't filled in from this device",
+                |d, _| !d.pending_defaults.iter().any(|p| p.machine == "zz02"),
+                1.,
+            ),
+        ),
     ]
 }
 

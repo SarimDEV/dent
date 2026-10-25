@@ -63,6 +63,7 @@ pub fn check(path: &str) -> Machine {
         // The daemon says these.
         lan: false,
         defaults: None,
+        defaults_set: false,
         project_defaults: Default::default(),
     }
 }

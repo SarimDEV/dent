@@ -1827,7 +1827,15 @@ impl Dent {
                 effort: prefs.effort.clone(),
                 worktree: Some(prefs.worktree),
             },
-            applied: Default::default(),
+            // What the composer starts with is the last used, put there:
+            // a machine's defaults take its place as they come.
+            applied: dent_protocol::Defaults {
+                agent: prefs.agent.clone(),
+                model: prefs.model.clone(),
+                permission: Some(prefs.permission),
+                effort: prefs.effort.clone(),
+                worktree: Some(prefs.worktree),
+            },
             machine_version: String::new(),
             machine_update: None,
             settings_tab: crate::settings::Tab::General,
@@ -3178,7 +3186,6 @@ impl Dent {
                     self.machine_update = update;
                     self.connection = Ok(());
                     self.ask_setup("");
-                    self.send_pending("");
                     // What each agent is (names, what it can do) from the
                     // welcome; how it stands comes with the Agents reply.
                     let what = |a: &dent_protocol::AgentInfo| {
@@ -3247,7 +3254,6 @@ impl Dent {
                         // and changes kept for it while it was away.
                         if welcome {
                             self.ask_setup(&id);
-                            self.send_pending(&id);
                         }
                         // Its agents as they stand there, and their models.
                         if welcome {
@@ -6446,13 +6452,13 @@ impl Dent {
         };
         let p = crate::prefs::Prefs {
             version: crate::prefs::VERSION,
-            agent: self.defaults.agent.clone(),
+            agent: self.last_used.agent.clone(),
             onboarded: self.onboarded,
             project: self.defaults.project.clone(),
-            model: self.defaults.model.clone(),
-            permission: self.defaults.permission,
-            effort: self.defaults.effort.clone(),
-            worktree: self.defaults.worktree,
+            model: self.last_used.model.clone(),
+            permission: self.last_used.permission.unwrap_or(Permission::Full),
+            effort: self.last_used.effort.clone(),
+            worktree: self.last_used.worktree.unwrap_or(false),
             panel_width: Some(self.panel_width),
             sidebar_width: Some(self.sidebar_w),
             sidebar_off: self.sidebar_off,

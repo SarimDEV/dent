@@ -327,6 +327,7 @@ impl Daemon {
             .unwrap_or_default();
         m.lan = self.net.lan.load(std::sync::atomic::Ordering::Relaxed);
         m.defaults = Some(self.read_json(DEFAULTS).unwrap_or_default());
+        m.defaults_set = self.store().get(DEFAULTS).ok().flatten().is_some();
         m.project_defaults = self.read_json(PROJECT_DEFAULTS).unwrap_or_default();
         m
     }

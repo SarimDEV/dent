@@ -1009,6 +1009,10 @@ pub struct Machine {
     /// older than that.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defaults: Option<Defaults>,
+    /// They were ever set here (set to nothing on purpose counts): a
+    /// machine without is offered what a device used last.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub defaults_set: bool,
     /// A project's own, set on purpose, over those: by its folder here.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub project_defaults: std::collections::BTreeMap<String, Defaults>,
