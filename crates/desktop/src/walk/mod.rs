@@ -263,6 +263,7 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("defaults", &[defaults]),
     ("settings-many", &[settings_many]),
     ("settings-one", &[settings_one]),
+    ("settings-live", &[settings_live]),
     ("move-clone", &[move_clone]),
     ("move-clone-many", &[move_clone_many]),
     ("move-clone-live", &[move_clone_live]),
