@@ -52,7 +52,7 @@ const GIT_URL: &str = "https://git-scm.com/downloads";
 const GH_URL: &str = "https://cli.github.com";
 
 /// One row, before it's drawn.
-struct Line {
+pub(crate) struct Line {
     id: String,
     mark: Option<Mark>,
     label: String,
@@ -62,10 +62,13 @@ struct Line {
     /// With no controls, how it stands, at the row's end.
     value: Option<String>,
     controls: Vec<AnyElement>,
+    /// Under it, a value and who has it, a row each (a setting that
+    /// differs between machines).
+    groups: Vec<(String, String)>,
 }
 
 impl Line {
-    fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
+    pub(crate) fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             mark: None,
@@ -73,15 +76,21 @@ impl Line {
             under: Vec::new(),
             value: None,
             controls: Vec::new(),
+            groups: Vec::new(),
         }
     }
 
-    fn mark(mut self, m: Option<Mark>) -> Self {
+    pub(crate) fn group(mut self, value: impl Into<String>, who: impl Into<String>) -> Self {
+        self.groups.push((value.into(), who.into()));
+        self
+    }
+
+    pub(crate) fn mark(mut self, m: Option<Mark>) -> Self {
         self.mark = m;
         self
     }
 
-    fn under(mut self, text: impl Into<String>) -> Self {
+    pub(crate) fn under(mut self, text: impl Into<String>) -> Self {
         let text = text.into();
         if !text.is_empty() {
             self.under.push((text, false));
@@ -89,17 +98,17 @@ impl Line {
         self
     }
 
-    fn code(mut self, text: impl Into<String>) -> Self {
+    pub(crate) fn code(mut self, text: impl Into<String>) -> Self {
         self.under.push((text.into(), true));
         self
     }
 
-    fn value(mut self, text: impl Into<String>) -> Self {
+    pub(crate) fn value(mut self, text: impl Into<String>) -> Self {
         self.value = Some(text.into());
         self
     }
 
-    fn control(mut self, el: impl IntoElement) -> Self {
+    pub(crate) fn control(mut self, el: impl IntoElement) -> Self {
         self.controls.push(el.into_any_element());
         self
     }
@@ -263,7 +272,7 @@ impl Dent {
     }
 
     /// An outlined button at a row's end.
-    fn small_button(
+    pub(crate) fn small_button(
         &self,
         id: &str,
         label: &str,
@@ -311,19 +320,31 @@ impl Dent {
 
     /// The agents' section: each one's version, account and command, and
     /// what to do when it can't work yet.
-    fn agent_lines(&mut self, cx: &mut Context<Self>) -> Vec<Line> {
-        let agents = if self.agents.is_empty() {
+    pub(crate) fn agent_lines(&mut self, machine: &str, cx: &mut Context<Self>) -> Vec<Line> {
+        let here = machine.is_empty();
+        let (agents, known) = if here {
+            (self.agents.clone(), self.agents_known)
+        } else {
+            self.machines
+                .iter()
+                .find(|m| m.id == machine)
+                .map_or((Vec::new(), false), |m| (m.agents.clone(), m.agents_known))
+        };
+        let agents = if agents.is_empty() {
             vec![crate::bridge::agent_info(&[], "")]
         } else {
-            self.agents.clone()
+            agents
         };
         let several = agents.iter().filter(|a| a.installed).count() > 1;
-        // This Mac's agents: the one chosen, while this Mac drives it.
-        let chosen = self.agent_id(self.new_agent_on("").as_deref());
+        // The one new sessions there run: its default.
+        let chosen = self
+            .defaults_for(machine, None)
+            .agent
+            .unwrap_or_else(|| self.agent_id(self.new_agent_on(machine).as_deref()));
+        let owner = machine.to_string();
         agents
             .iter()
             .map(|a| {
-                let known = self.agents_known;
                 let st = standing(a);
                 let mut line = Line::new(format!("agent-{}", a.id), a.name.clone())
                     .mark(match (known, &st) {
@@ -341,7 +362,7 @@ impl Dent {
                     .under(crate::agents::account_line(a))
                     // A path keeps its end, the part that says what it is.
                     .code(crate::cards::elide_start(&a.command, 64));
-                if known && st == Standing::Missing {
+                if known && st == Standing::Missing && here {
                     let url = a.install_url.clone();
                     line = line.control(self.small_button(
                         &format!("install-{}", a.id),
@@ -351,6 +372,12 @@ impl Dent {
                     ));
                 }
                 if known
+                    && st == Standing::SignedOut
+                    && !here
+                    && let Some(sign_in) = a.sign_in.clone()
+                {
+                    line = line.under("To sign in, run this on it:").code(sign_in);
+                } else if known
                     && st == Standing::SignedOut
                     && let Some(sign_in) = a.sign_in.clone()
                 {
@@ -367,16 +394,32 @@ impl Dent {
                         line = line.value("New sessions");
                     } else {
                         let id = a.id.clone();
+                        let owner = owner.clone();
                         line = line.control(self.small_button(
                             &format!("use-{}", a.id),
                             "Use for new sessions",
                             cx,
                             move |this, _, cx| {
-                                this.defaults.agent = Some(id.clone());
-                                // Its own models, so the model chosen is one it has.
-                                this.defaults.model = None;
-                                this.prefs_changed();
-                                cx.notify();
+                                // Its own models, so the model is one it has.
+                                if this
+                                    .setups
+                                    .get(&owner)
+                                    .is_some_and(|s| s.defaults.is_some())
+                                {
+                                    let mut d = this.defaults_for(&owner, None);
+                                    d.agent = Some(id.clone());
+                                    d.model = None;
+                                    this.put_defaults(&owner, None, d, cx);
+                                } else {
+                                    // Keeps none (older, or not said yet):
+                                    // this device's next sessions, as before.
+                                    this.defaults.agent = Some(id.clone());
+                                    this.defaults.model = None;
+                                    this.last_used.agent = Some(id.clone());
+                                    this.last_used.model = None;
+                                    this.prefs_changed();
+                                    cx.notify();
+                                }
                             },
                         ));
                     }
@@ -388,10 +431,18 @@ impl Dent {
 
     /// This Mac: Git, who commits, the GitHub CLI, starting at login and
     /// notifications.
-    fn machine_lines(&mut self, cx: &mut Context<Self>) -> Vec<Line> {
-        let Some(m) = self.machine_check.clone() else {
+    pub(crate) fn machine_lines(&mut self, machine: &str, cx: &mut Context<Self>) -> Vec<Line> {
+        let here = machine.is_empty();
+        let known = if here {
+            self.machine_check
+                .clone()
+                .or_else(|| self.setups.get("").cloned())
+        } else {
+            self.setups.get(machine).cloned()
+        };
+        let Some(m) = known else {
             return vec![
-                Line::new("machine-checking", "This Mac")
+                Line::new("machine-checking", self.machine_name(machine))
                     .mark(Some(Mark::Waiting))
                     .under("Checking…"),
             ];
@@ -401,7 +452,7 @@ impl Dent {
             Some(v) => {
                 Line::new("git", "Git").value(v.trim_start_matches("git version ").to_string())
             }
-            None => Line::new("git", "Git")
+            None if here => Line::new("git", "Git")
                 .mark(Some(Mark::Bad))
                 .under("Not installed. Worktrees, checkpoints and commits need it.")
                 .control(
@@ -409,6 +460,9 @@ impl Dent {
                         this.open_outside(GIT_URL, cx)
                     }),
                 ),
+            None => Line::new("git", "Git")
+                .mark(Some(Mark::Bad))
+                .under("Not installed there. Worktrees, checkpoints and commits need it."),
         });
         if m.git.is_some() {
             lines.push(match &m.git_user {
@@ -425,7 +479,7 @@ impl Dent {
                 Some(u) => format!("Signed in as {u}"),
                 None => "Signed in".into(),
             }),
-            Gh::SignedOut => Line::new("gh", "GitHub CLI")
+            Gh::SignedOut if here => Line::new("gh", "GitHub CLI")
                 .mark(Some(Mark::Attention))
                 .under("Signed out. Pull requests and their checks need it.")
                 .control(
@@ -433,7 +487,11 @@ impl Dent {
                         this.run_in_terminal("gh auth login", cx)
                     }),
                 ),
-            Gh::Missing => Line::new("gh", "GitHub CLI")
+            Gh::SignedOut => Line::new("gh", "GitHub CLI")
+                .mark(Some(Mark::Attention))
+                .under("Signed out there. To sign in, run this on it:")
+                .code("gh auth login"),
+            Gh::Missing if here => Line::new("gh", "GitHub CLI")
                 .mark(Some(Mark::Off))
                 .under("Not installed. Pull requests and their checks need it.")
                 .control(
@@ -441,14 +499,17 @@ impl Dent {
                         this.open_outside(GH_URL, cx)
                     }),
                 ),
+            Gh::Missing => Line::new("gh", "GitHub CLI")
+                .mark(Some(Mark::Off))
+                .under("Not installed there. Pull requests and their checks need it."),
         });
-        lines.push(self.login_line(&m, cx));
-        lines.push(self.lan_line(&m, cx));
-        lines.push(self.notification_line(cx));
+        lines.push(self.login_line(machine, &m, cx));
+        lines.push(self.lan_line(machine, &m, cx));
         lines
     }
 
-    fn login_line(&mut self, m: &Machine, cx: &mut Context<Self>) -> Line {
+    fn login_line(&mut self, machine: &str, m: &Machine, cx: &mut Context<Self>) -> Line {
+        let machine = machine.to_string();
         let line = Line::new("login-item", "Start at login")
             .under("Sessions carry on after a restart without opening dent");
         match &m.login_item_blocked {
@@ -465,37 +526,57 @@ impl Dent {
                     },
                     cx,
                     move |this, _, _| {
-                        this.ask(Request::SetLoginItem { on: !on }, Waiting::Machine);
+                        this.ask_machine(&machine, Request::SetLoginItem { on: !on });
                     },
                 ))
             }
         }
     }
 
-    fn lan_line(&mut self, m: &Machine, cx: &mut Context<Self>) -> Line {
+    fn lan_line(&mut self, machine: &str, m: &Machine, cx: &mut Context<Self>) -> Line {
         let on = m.lan;
-        Line::new("lan", "Devices on this network")
-            .under(if on {
-                "Can reach this Mac without Tailscale, to pair with a code"
+        let here = machine.is_empty();
+        let machine = machine.to_string();
+        Line::new(
+            "lan",
+            if here {
+                "Devices on this network"
             } else {
-                "Only over Tailscale, unless already paired"
-            })
-            .control(self.switch_for(
-                "lan-switch",
-                on,
-                if on {
-                    "Only over Tailscale"
-                } else {
-                    "Let devices on this network pair"
-                },
-                cx,
-                move |this, _, _| {
-                    this.ask(Request::SetLan { on: !on }, Waiting::Machine);
-                },
-            ))
+                "Devices on its network"
+            },
+        )
+        .under(if on {
+            "Can reach it without Tailscale, to pair with a code"
+        } else {
+            "Only over Tailscale, unless already paired"
+        })
+        .control(self.switch_for(
+            "lan-switch",
+            on,
+            if on {
+                "Only over Tailscale"
+            } else {
+                "Let devices on this network pair"
+            },
+            cx,
+            move |this, _, _| {
+                this.ask_machine(&machine, Request::SetLan { on: !on });
+            },
+        ))
     }
 
-    fn notification_line(&mut self, cx: &mut Context<Self>) -> Line {
+    /// Ask `machine` to change how it's set up; its answer says how it is
+    /// now.
+    pub(crate) fn ask_machine(&mut self, machine: &str, r: Request) {
+        if machine.is_empty() {
+            self.ask(r, Waiting::Machine);
+        } else {
+            let n = self.live.send_to(machine, r);
+            self.waiting_insert(n, Waiting::MachineSetup(machine.to_string()));
+        }
+    }
+
+    pub(crate) fn notification_line(&mut self, cx: &mut Context<Self>) -> Line {
         let line = Line::new("notifications", "Notifications");
         match crate::notify::allowed() {
             Some(true) => line.value("Allowed"),
@@ -627,6 +708,24 @@ impl Dent {
                 .child(text);
             if code { d.ty(CODE) } else { d }
         };
+        let group = |(value, who): (String, String)| {
+            div()
+                .mt(px(space::S1))
+                .flex()
+                .gap(px(space::S3))
+                .text_size(px(crate::cards::SMALL))
+                .line_height(px(crate::cards::SMALL_LINE))
+                .child(
+                    div()
+                        .w(px(112.))
+                        .flex_none()
+                        .truncate()
+                        .text_color(t.ink)
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(value),
+                )
+                .child(div().flex_1().min_w_0().text_color(t.quiet).child(who))
+        };
         let words = div()
             .flex_1()
             .min_w_0()
@@ -634,6 +733,14 @@ impl Dent {
             .flex_col()
             .child(div().min_w_0().truncate().text_color(t.ink).child(l.label))
             .children(l.under.into_iter().map(small));
+        // Under the whole row, so a narrow window's controls don't squeeze
+        // the machines' names to a sliver.
+        let groups = (!l.groups.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .children(l.groups.into_iter().map(group))
+        });
         let trailing = if !l.controls.is_empty() {
             Some(
                 div()
@@ -688,10 +795,24 @@ impl Dent {
             .child(words)
             .children(trailing.map(on_line))
             .child(probe(&self.probes, format!("row-{}", l.id)))
-            .into_any_element()
+            .map(|row| match groups {
+                Some(g) => div()
+                    .flex()
+                    .flex_col()
+                    .child(row)
+                    .child(div().pb(px(space::S1H)).child(g))
+                    .into_any_element(),
+                None => row.into_any_element(),
+            })
     }
 
-    fn section(&self, title: &str, note: Option<&str>, lines: Vec<Line>, first: bool) -> Div {
+    pub(crate) fn section(
+        &self,
+        title: &str,
+        note: Option<&str>,
+        lines: Vec<Line>,
+        first: bool,
+    ) -> Div {
         let t = self.t;
         div()
             .flex()
@@ -797,19 +918,14 @@ impl Dent {
             }));
         let body: AnyElement = match tab {
             Tab::General => {
-                let machine = self.machine_lines(cx);
-                let general = self.general_lines(cx);
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(self.section("This Mac", None, machine, true))
-                    .child(self.section("dent", None, general, false))
+                let mut general = vec![self.notification_line(cx)];
+                general.extend(self.general_lines(cx));
+                self.section("This app", None, general, true)
                     .into_any_element()
             }
             Tab::Agents => {
-                let agents = self.agent_lines(cx);
-                self.section("Agents", None, agents, true)
-                    .into_any_element()
+                let room = window.viewport_size().width.as_f32() - 220. - space::S12 * 2.;
+                self.agents_body(room.min(900. - space::S12 * 2.), cx)
             }
             Tab::Machines => self.machines_tab(window, cx),
         };
@@ -893,8 +1009,9 @@ impl Dent {
     pub fn pane_view(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let pane = self.pane.filter(|p| *p == Pane::Welcome)?;
         let t = self.t;
-        let agents = self.agent_lines(cx);
-        let machine = self.machine_lines(cx);
+        let agents = self.agent_lines("", cx);
+        let mut machine = self.machine_lines("", cx);
+        machine.push(self.notification_line(cx));
         let (title, intro) = match pane {
             Pane::Settings => ("Settings", None),
             Pane::Welcome => (

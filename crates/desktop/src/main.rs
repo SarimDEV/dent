@@ -53,9 +53,11 @@ mod prefs;
 mod rows;
 mod select;
 mod settings;
+mod settings_agents;
 mod shell;
 mod sidebar;
 mod skills;
+mod spread;
 mod swipe;
 mod switcher;
 mod theme;
@@ -739,6 +741,10 @@ impl Render for Dent {
                 // Esc backs out one thing at a time; with nothing open it moves
                 // to the inbox, where arrows move and Enter opens.
                 if this.switch_cancel(cx)
+                    // A menu is on top of whatever it's over (Settings, say):
+                    // the project picker steps back first.
+                    || this.project_back(window, cx)
+                    || this.menu.take().is_some()
                     || std::mem::take(&mut this.keys_open)
                     || this.escape_adding(window, cx)
                     || this.close_pane(cx)
@@ -749,8 +755,6 @@ impl Render for Dent {
                 } else if this.palette.is_some() {
                     this.close_palette(window, cx);
                 } else if this.close_find(window, cx)
-                    || this.project_back(window, cx)
-                    || this.menu.take().is_some()
                     || std::mem::take(&mut this.meter_open)
                     || this.dismiss_completion(cx)
                     || select::clear(window)

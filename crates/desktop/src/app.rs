@@ -362,13 +362,17 @@ pub enum Menu {
     Machine,
     /// The machine the open session runs on: another one moves it there.
     SessionMachine,
+    /// A default's values, in Settings › Agents (for the open tab).
+    SetDefault(crate::defaults::Field),
+    /// The machines without a tab in Settings › Agents, to find one.
+    SettingsMachines,
 }
 
 impl Menu {
     /// Menus with a field to type in: the project picker, and the
     /// branches a worktree can start from.
     pub fn searches(self) -> bool {
-        matches!(self, Menu::Project | Menu::Base)
+        matches!(self, Menu::Project | Menu::Base | Menu::SettingsMachines)
     }
 
     /// Menus with longer rows: paths, session titles.
@@ -915,6 +919,11 @@ pub struct Dent {
     pub machine_update: Option<dent_protocol::UpdateOutcome>,
     /// The page of Settings showing.
     pub settings_tab: crate::settings::Tab,
+    /// The machine whose tab Settings › Agents shows; `None` is All.
+    pub agents_tab: Option<String>,
+    /// The machines Settings › Agents had no room to give a tab, as last
+    /// drawn: "N more" lists them.
+    pub agents_hidden: Vec<String>,
     /// The devices this machine trusts, as its daemon last said.
     pub devices: Vec<dent_protocol::Device>,
     /// The pairing code showing on this machine, and when it stops working
@@ -1487,7 +1496,18 @@ impl Dent {
         });
         cx.subscribe_in(&menu_query, window, |this, _, ev: &InputEvent, _, cx| {
             if let InputEvent::Change = ev {
-                this.project_query_changed(cx);
+                // The field is the project picker's, and the machines' in
+                // Settings: each hears its own.
+                if this.menu == Some(Menu::SettingsMachines) {
+                    this.menu_ix = this
+                        .more_machine_entries(cx)
+                        .iter()
+                        .position(|e| e.choosable());
+                    this.menu_scroll.scroll_to_item(0);
+                    cx.notify();
+                } else {
+                    this.project_query_changed(cx);
+                }
             }
         })
         .detach();
@@ -1839,6 +1859,8 @@ impl Dent {
             machine_version: String::new(),
             machine_update: None,
             settings_tab: crate::settings::Tab::General,
+            agents_tab: None,
+            agents_hidden: Vec::new(),
             devices: Vec::new(),
             pairing: None,
             machine_open: None,
@@ -3911,6 +3933,10 @@ impl Dent {
                     reply: Reply::Machine { machine },
                 },
             ) => self.setup_came(id, machine, cx),
+            // Refused there (it can't start at login, say): said.
+            (Waiting::MachineSetup(_), Out::Error { message }) => {
+                self.toast(ToastAction::Info, message);
+            }
             (Waiting::MachineSetup(_), _) => {}
             (
                 Waiting::SetDefaults(sent),
@@ -4767,6 +4793,16 @@ impl Dent {
             && let Some(f) = field
             && self.field_entity(f).read(cx).selected_range().is_empty()
         {
+            return true;
+        }
+        // Esc puts an open menu away, whatever has focus (over Settings,
+        // nothing may).
+        // (One that searches has its field focused, where Esc's own action
+        // does the same, going back a step in the project picker first.)
+        if plain && k.key == "escape" && self.menu.is_some_and(|m| !m.searches()) {
+            self.menu = None;
+            self.menu_ix = None;
+            cx.notify();
             return true;
         }
         // A menu that searches: Tab goes into the lit folder, ⌘1–⌘9 choose
@@ -6002,6 +6038,11 @@ impl Dent {
             }
             Menu::Base => self.branch_query.update(cx, |f, cx| {
                 put(f, "", window, cx);
+                f.focus_field(window, cx);
+            }),
+            Menu::SettingsMachines => self.menu_query.update(cx, |f, cx| {
+                put(f, "", window, cx);
+                f.set_placeholder("Find a machine", window, cx);
                 f.focus_field(window, cx);
             }),
             _ => {}

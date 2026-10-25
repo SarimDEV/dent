@@ -60,6 +60,11 @@ impl Field {
         }
     }
 
+    /// `d` leaves this choice to what's under it.
+    pub fn is_unset(self, d: &Defaults) -> bool {
+        self.of(d).is_empty()
+    }
+
     /// Only this choice of `d`.
     fn of(self, d: &Defaults) -> Defaults {
         let mut v = Defaults::default();
@@ -69,7 +74,7 @@ impl Field {
 
     /// Only this choice of `d`, as it reads with what's unset left to
     /// what's under it.
-    fn effective(self, d: &Defaults) -> Defaults {
+    pub fn effective(self, d: &Defaults) -> Defaults {
         let mut e = self.of(d);
         if self == Field::Permission && e.permission.is_none() {
             e.permission = Some(Permission::Full);
@@ -284,9 +289,14 @@ impl Dent {
         cx: &mut Context<Self>,
     ) {
         let keeps = setup.defaults.is_some();
+        // A merge made before it said doesn't count: it goes over what
+        // this device used.
         let fresh = keeps
             && !setup.defaults_set
-            && !self.pending_defaults.iter().any(|p| p.machine == machine);
+            && !self
+                .pending_defaults
+                .iter()
+                .any(|p| p.machine == machine && !(p.merge && p.project.is_none()));
         self.setups.insert(machine.clone(), setup);
         if !keeps {
             // Too old to keep defaults: what was kept for it can't go.
@@ -302,7 +312,14 @@ impl Dent {
                 self.prefs_changed();
             }
         } else if fresh && !self.last_used.is_empty() {
-            let d = self.last_used.clone();
+            let mut d = self.last_used.clone();
+            for p in self
+                .pending_defaults
+                .iter()
+                .filter(|p| p.machine == machine && p.merge && p.project.is_none())
+            {
+                d = d.under(&p.defaults);
+            }
             self.put_defaults(&machine, None, d, cx);
         } else {
             self.send_pending(&machine);
@@ -330,6 +347,26 @@ impl Dent {
             self.prefs_changed();
         }
         cx.notify();
+    }
+
+    /// Set choice `f` on `machine` to what `value` has: over what it has,
+    /// or, not heard from yet, merged over it when it says.
+    pub fn set_field_on(
+        &mut self,
+        f: Field,
+        value: &Defaults,
+        machine: &str,
+        cx: &mut Context<Self>,
+    ) {
+        match self.setups.get(machine) {
+            None => self.put_change(machine, None, f.of(value), true, cx),
+            Some(s) if s.defaults.is_none() => {}
+            Some(_) => {
+                let mut d = self.machine_defaults(machine);
+                f.take(&mut d, value);
+                self.put_defaults(machine, None, d, cx);
+            }
+        }
     }
 
     /// The new session's choices as defaults (all of them set).

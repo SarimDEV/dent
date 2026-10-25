@@ -209,3 +209,227 @@ fn other_permission_key() -> &'static str {
         "m-full"
     }
 }
+
+/// Settings › Agents with twenty machines (some asleep, long names, three
+/// set otherwise), to see it stays clean: tabs that fit and "N more",
+/// Mixed grouped by value, a machine's tab, the value menu.
+pub(super) fn settings_many() -> Vec<(f32, Act)> {
+    vec![
+        (
+            0.2,
+            Call(|d, _, cx| {
+                let names = [
+                    "dent-linux",
+                    "gpu-box",
+                    "mac-mini",
+                    "gpu-2",
+                    "build-box",
+                    "studio",
+                    "sarims-work-laptop-2024",
+                    "ci-runner-east-1",
+                    "ci-runner-east-2",
+                    "ci-runner-west-1",
+                    "homelab-nas",
+                    "raspberrypi",
+                    "office-imac",
+                    "staging-api",
+                    "staging-worker",
+                    "prod-shadow",
+                    "old-thinkpad",
+                    "designer-mac",
+                    "research-gpu-cluster-node-07",
+                ];
+                let asleep = ["mac-mini", "old-thinkpad", "designer-mac"];
+                for (i, n) in names.iter().enumerate() {
+                    let id = format!("m{i:02}");
+                    let mut v = crate::machines::MachineView::saved(dent_remote::store::Saved {
+                        id: id.clone(),
+                        name: (*n).into(),
+                        ..Default::default()
+                    });
+                    v.state = if asleep.contains(n) {
+                        dent_client_core::machine::State::Away(dent_link::Goodbye::Sleep)
+                    } else {
+                        dent_client_core::machine::State::Online
+                    };
+                    v.rtt = (!asleep.contains(n)).then_some(4 + i as u64);
+                    v.agents = d.agents.clone();
+                    v.agents_known = true;
+                    d.machines.push(v);
+                    let ask = ["gpu-box", "gpu-2", "build-box"].contains(n);
+                    let worktree =
+                        n.starts_with("ci-") || n.starts_with("staging") || *n == "gpu-box";
+                    d.setups.insert(
+                        id,
+                        dent_protocol::Machine {
+                            git_user: Some(if n.starts_with("ci-") {
+                                "ci-bot <ci@example.com>".into()
+                            } else {
+                                "Sarim Malik <sarim@example.com>".into()
+                            }),
+                            login_item: true,
+                            defaults: Some(dent_protocol::Defaults {
+                                permission: Some(if ask {
+                                    dent_protocol::Permission::Ask
+                                } else {
+                                    dent_protocol::Permission::Full
+                                }),
+                                worktree: Some(worktree),
+                                ..Default::default()
+                            }),
+                            defaults_set: true,
+                            ..Default::default()
+                        },
+                    );
+                }
+                if let Some(s) = d.setups.get_mut("") {
+                    s.defaults = Some(dent_protocol::Defaults {
+                        permission: Some(dent_protocol::Permission::Full),
+                        worktree: Some(false),
+                        ..Default::default()
+                    });
+                }
+                cx.notify();
+            }),
+        ),
+        (0.3, Key("cmd-,")),
+        (0.2, Click("settings-tab-agents")),
+        (
+            0.1,
+            Until(
+                "All machines lists the twenty, the rest behind more",
+                |d, _| {
+                    drawn(d, "agents-tab-all").is_some()
+                        && drawn(d, "chip-settingsmachines").is_some()
+                },
+                5.,
+            ),
+        ),
+        (0.6, Shot("settings-all")),
+        (0.2, Click("chip-settingsmachines")),
+        (
+            0.1,
+            Until(
+                "the others are listed",
+                |d, _| d.menu == Some(crate::app::Menu::SettingsMachines),
+                3.,
+            ),
+        ),
+        (0.5, Shot("settings-more")),
+        (
+            0.1,
+            Call(|d, w, cx| {
+                if let Some(e) = d
+                    .menu_entries(crate::app::Menu::SettingsMachines, cx)
+                    .into_iter()
+                    .find(|e| e.key == "agents-more-m04")
+                {
+                    d.choose_entry(&e, w, cx);
+                }
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "chosen from more, it takes a tab, and says what differs",
+                |d, _| {
+                    d.agents_tab.as_deref() == Some("m04") && drawn(d, "agents-tab-m04").is_some()
+                },
+                3.,
+            ),
+        ),
+        (0.6, Shot("settings-machine")),
+        (0.2, Click("agents-tab-all")),
+        (0.2, Click("chip-setdefault(permission)")),
+        (
+            0.1,
+            Until("its values, set on all", |d, _| d.menu.is_some(), 3.),
+        ),
+        (0.5, Shot("settings-set-all")),
+        (0.1, Key("escape")),
+        // Searched, the machine lit is one of those found, and Return opens it.
+        (0.2, Click("chip-settingsmachines")),
+        (
+            0.1,
+            Until(
+                "the list opens",
+                |d, _| d.menu == Some(crate::app::Menu::SettingsMachines),
+                3.,
+            ),
+        ),
+        (0.4, Keys("gpu-b")),
+        (
+            0.1,
+            Until(
+                "typed, a machine found is lit",
+                |d, _| d.menu == Some(crate::app::Menu::SettingsMachines) && d.menu_ix == Some(0),
+                3.,
+            ),
+        ),
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until(
+                "and Return opens it",
+                |d, _| d.agents_tab.as_deref() == Some("m01"),
+                3.,
+            ),
+        ),
+        // One set like most others says nothing differs.
+        (0.2, Click("agents-tab-m00")),
+        (
+            0.1,
+            Until(
+                "a machine like the others is marked nowhere",
+                |d, _| {
+                    drawn(d, "row-tab-permission").is_some() && drawn(d, "use-permission").is_none()
+                },
+                3.,
+            ),
+        ),
+        // Make all: every machine the same, those away taking it when back.
+        (0.2, Click("agents-tab-all")),
+        (0.2, Click("make-all-permission")),
+        (
+            0.1,
+            Until(
+                "Make all makes them one",
+                |d, _| {
+                    drawn(d, "make-all-permission").is_none()
+                        && drawn(d, "row-all-permission").is_some()
+                },
+                3.,
+            ),
+        ),
+        (0.5, Shot("settings-made-all")),
+    ]
+}
+
+/// Settings › Agents with only this Mac: no tabs, its page as it is.
+pub(super) fn settings_one() -> Vec<(f32, Act)> {
+    vec![
+        (0.3, Key("cmd-,")),
+        (0.2, Click("settings-tab-agents")),
+        (
+            0.1,
+            Until(
+                "one machine: its own settings, no tabs",
+                |d, _| {
+                    drawn(d, "agents-tab-all").is_none() && drawn(d, "row-tab-permission").is_some()
+                },
+                5.,
+            ),
+        ),
+        (0.5, Shot("settings-one")),
+        (0.2, Click("settings-tab-general")),
+        (
+            0.1,
+            Until(
+                "General holds this app's own",
+                |d, _| drawn(d, "row-notifications").is_some() && drawn(d, "row-git").is_none(),
+                3.,
+            ),
+        ),
+        (0.4, Shot("settings-general")),
+    ]
+}

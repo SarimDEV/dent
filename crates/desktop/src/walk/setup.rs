@@ -37,7 +37,7 @@ pub(super) fn settings() -> Vec<(f32, Act)> {
                 15.,
             ),
         ),
-        (0.1, Click("settings-tab-general")),
+        // This Mac's own settings sit on its Agents page.
         (
             0.1,
             Until(
@@ -66,6 +66,7 @@ pub(super) fn settings() -> Vec<(f32, Act)> {
                 2.,
             ),
         ),
+        (0.1, Click("settings-tab-general")),
     ];
     both_themes(&mut v, "settings");
     v.extend([
