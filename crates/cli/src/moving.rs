@@ -97,10 +97,14 @@ pub async fn run(args: &[String]) -> Result<()> {
     let mut carrier = Carrier::new(session, &id, &target);
     // What cloning takes is asked before anyone knows whether it's
     // needed: what stops a clone doesn't stop a move that needs none.
+    let mut no_clone = None;
     if clone {
         match clone_there(&mut from, session).await {
             Ok(c) => carrier = carrier.clone_there(c),
-            Err(why) => eprintln!("  can't clone it there if needed: {why:#}"),
+            Err(why) => {
+                eprintln!("  can't clone it there if needed: {why:#}");
+                no_clone = Some(format!("{why:#}"));
+            }
         }
     }
     let mut step = carrier.start();
@@ -141,9 +145,14 @@ pub async fn run(args: &[String]) -> Result<()> {
             println!("moved: {to_name} {s}");
             Ok(())
         }
-        Err(Ended::NoProject) => bail!(
-            "{to_name} doesn't have this project: move it with --clone to clone it there first"
-        ),
+        Err(Ended::NoProject) => match no_clone {
+            Some(why) => {
+                bail!("{to_name} doesn't have this project, and it can't be cloned: {why}")
+            }
+            None => bail!(
+                "{to_name} doesn't have this project: move it with --clone to clone it there first"
+            ),
+        },
         Err(Ended::NotAccepted(why)) => {
             bail!("{to_name} didn't take it: {why}; it works on {from_name} again")
         }

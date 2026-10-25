@@ -141,6 +141,10 @@ impl Dent {
     /// Ask the open tab's machine which projects it has, for the menu.
     pub fn ask_tab_projects(&mut self, cx: &mut Context<Self>) {
         let m = self.tab_machine();
+        // What it failed to say last time is asked anew, not repeated.
+        if self.tab_projects.get(&m).is_some_and(Result::is_err) {
+            self.tab_projects.remove(&m);
+        }
         let n = self.live.send_to(&m, Request::Projects);
         self.waiting_insert(n, Waiting::TabProjects(m.clone()));
         // Asked again each time the menu opens: what it said last stands
@@ -148,13 +152,12 @@ impl Dent {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(PROJECTS_PATIENCE).await;
             let _ = this.update(cx, |this, cx| {
-                if this.is_waiting(n) {
-                    this.waiting_remove(n);
-                    if !this.tab_projects.contains_key(&m) {
-                        let why = format!("{} didn't answer", this.machine_name(&m));
-                        this.tab_projects.insert(m.clone(), Err(why));
-                        cx.notify();
-                    }
+                // Still awaited: said not to have answered, while an answer
+                // that comes later still lands.
+                if this.is_waiting(n) && !this.tab_projects.contains_key(&m) {
+                    let why = format!("{} didn't answer", this.machine_name(&m));
+                    this.tab_projects.insert(m.clone(), Err(why));
+                    cx.notify();
                 }
             });
         })

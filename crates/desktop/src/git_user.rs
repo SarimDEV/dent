@@ -138,6 +138,14 @@ impl Dent {
 
     /// Esc: the field closes, unsaved. Whether one was open.
     pub fn cancel_git_user(&mut self, cx: &mut Context<Self>) -> bool {
+        // Only where it's drawn: anywhere else, Esc does what it does there.
+        if !matches!(
+            self.pane,
+            Some(crate::settings::Pane::Settings | crate::settings::Pane::Welcome)
+        ) {
+            self.git_user_edit = None;
+            return false;
+        }
         let open = self.git_user_edit.take().is_some();
         if open {
             cx.notify();
