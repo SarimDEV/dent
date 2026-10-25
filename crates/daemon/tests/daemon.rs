@@ -3461,7 +3461,10 @@ fn bb_brings_of_one_project_at_once_never_share_a_folder() {
         assert!(here.join("README.md").is_file(), "{:?}", notices(&c, s));
         assert_eq!(
             std::fs::read_to_string(here.join(".env")).unwrap(),
-            format!("N={i}\n")
+            format!("N={i}\n"),
+            "bring {i} in {} (all: {:?})",
+            here.display(),
+            sessions.iter().map(|s| cwd_of(&c, s)).collect::<Vec<_>>()
         );
     }
     assert_eq!(

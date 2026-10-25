@@ -105,8 +105,12 @@ fn free(root: &Path, name: &str) -> Result<PathBuf> {
         } else {
             root.join(format!("{name}-{n}"))
         };
-        if !p.exists() {
-            return Ok(p);
+        // Claimed by making it: two asking at once (two brings of one
+        // project) never get the same folder, as looking first would.
+        match std::fs::create_dir(&p) {
+            Ok(()) => return Ok(p),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("couldn't make {}", p.display())),
         }
     }
     bail!("no free folder for {name} in {}", root.display())
@@ -146,7 +150,6 @@ pub fn create(name: &str) -> Result<(PathBuf, Option<String>)> {
     let root = root();
     std::fs::create_dir_all(&root)?;
     let dir = free(&root, &slug)?;
-    std::fs::create_dir(&dir)?;
     std::fs::write(dir.join("README.md"), format!("# {}\n", name.trim()))?;
     if let Err(e) = run(&dir, &["init", "-q"]) {
         return Ok((dir, Some(format!("Not a Git repository: {e}"))));
@@ -177,7 +180,7 @@ fn repo_name(url: &str) -> String {
 }
 
 /// A folder no one has yet in the projects folder, named `name` (`-2`,
-/// `-3` when taken).
+/// `-3` when taken), made empty for the caller alone.
 pub fn free_in_root(name: &str) -> Result<PathBuf> {
     let name = if name.is_empty() { "project" } else { name };
     let root = root();
@@ -264,6 +267,28 @@ pub fn folders(partial: &str) -> Result<(String, Vec<String>)> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Asked at once for one name, each gets a folder of its own.
+    #[test]
+    fn folders_asked_for_at_once_are_each_their_own() {
+        let root = std::env::temp_dir().join(format!("dent-free-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("app")).unwrap();
+        let got: Vec<std::path::PathBuf> = (0..16)
+            .map(|_| {
+                let r = root.clone();
+                std::thread::spawn(move || super::free(&r, "app").unwrap())
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .collect();
+        let apart: std::collections::HashSet<_> = got.iter().collect();
+        assert_eq!(apart.len(), 16, "{got:?}");
+        assert!(got.iter().all(|p| p.is_dir() && p != &root.join("app")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     use super::*;
 
     #[test]

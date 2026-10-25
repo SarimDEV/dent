@@ -212,6 +212,11 @@ impl Daemon {
         .await
         .unwrap_or_else(|e| Err(e.to_string()));
         let _ = std::fs::remove_dir_all(&staging);
+        // A clone that failed leaves nothing: not even the empty folder
+        // kept for it (a retry makes it again).
+        if got.is_err() {
+            let _ = std::fs::remove_dir(&dest);
+        }
         let (_, notes) = got?;
         let path = dest.display().to_string();
         crate::server::remember_project(self, &path).map_err(|e| format!("{e:#}"))?;
