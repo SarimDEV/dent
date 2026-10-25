@@ -100,11 +100,11 @@ pub async fn run(args: &[String]) -> Result<()> {
     let mut no_clone = None;
     if clone {
         match clone_there(&mut from, session).await {
-            Ok(c) => carrier = carrier.clone_there(c),
-            Err(why) => {
-                eprintln!("  can't clone it there if needed: {why:#}");
-                no_clone = Some(format!("{why:#}"));
-            }
+            Ok(Some(c)) => carrier = carrier.clone_there(c),
+            // Not in a repository: nothing to clone, and nothing to say.
+            Ok(None) => {}
+            // Said only if a clone turns out to be needed.
+            Err(why) => no_clone = Some(format!("{why:#}")),
         }
     }
     let mut step = carrier.start();
@@ -161,11 +161,17 @@ pub async fn run(args: &[String]) -> Result<()> {
                 Side::From => from_name.as_str(),
                 Side::To => to_name.as_str(),
             };
-            // A move that ended can't be picked up: it's moved again anew.
-            if why.contains("that move ended") {
-                bail!("{name}: {why}")
+            // What a machine said comes named already.
+            let why = why
+                .strip_prefix(&format!("{name}: "))
+                .unwrap_or(&why)
+                .to_string();
+            // Only a move cut short by the link picks up where it was; one
+            // a machine refused is refused again.
+            if transient(&why) {
+                bail!("{name}: {why} (run again with --id {id} to pick up)")
             }
-            bail!("{name}: {why} (run again with --id {id} to pick up)")
+            bail!("{name}: {why}")
         }
     }
 }
@@ -174,7 +180,7 @@ pub async fn run(args: &[String]) -> Result<()> {
 /// it is, its remotes, and its environment files, ticked as the app ticks
 /// them. Asked whether or not the other machine has it; it clones only if
 /// not.
-async fn clone_there(from: &mut Asker, session: &str) -> Result<CloneThere> {
+async fn clone_there(from: &mut Asker, session: &str) -> Result<Option<CloneThere>> {
     let Reply::MoveRemotes { root, branch, .. } = from
         .ask(
             Request::MovePack {
@@ -190,11 +196,10 @@ async fn clone_there(from: &mut Asker, session: &str) -> Result<CloneThere> {
     else {
         bail!("{}: unexpected answer", from.name);
     };
+    // Outside a repository (dent's scratch folder, say), or a dent too old
+    // to say where: nothing to clone.
     if root.is_empty() {
-        bail!(
-            "{}: the session isn't in a Git repository there (or that dent is too old to say)",
-            from.name
-        );
+        return Ok(None);
     }
     let Reply::Pack { pack } = from.ask(Request::Pack { dir: root.clone() }, 120).await? else {
         bail!("{}: unexpected answer", from.name);
@@ -207,15 +212,34 @@ async fn clone_there(from: &mut Asker, session: &str) -> Result<CloneThere> {
     let bytes: u64 = ticked.iter().map(|i| i.size).sum();
     if bytes > dent_protocol::CARRIED_MAX as u64 {
         bail!(
-            "its environment files come to {} KB, more than the {} KB that can go along",
-            bytes.div_ceil(1024),
-            dent_protocol::CARRIED_MAX / 1024
+            "its environment files come to {:.1} MB, more than the {} MB that can go along",
+            bytes as f64 / (1 << 20) as f64,
+            dent_protocol::CARRIED_MAX >> 20
         );
     }
-    for i in &ticked {
-        eprintln!("  bringing {} if it's cloned", i.path);
+    if !ticked.is_empty() {
+        eprintln!(
+            "  bringing {} if it's cloned ({} KB): {}",
+            files(ticked.len()),
+            bytes.div_ceil(1024),
+            some(ticked.iter().map(|i| i.path.as_str()))
+        );
     }
-    Ok(CloneThere {
+    let left: Vec<&str> = pack
+        .ignored
+        .iter()
+        .filter(|i| i.env && !i.carry)
+        .map(|i| i.path.as_str())
+        .collect();
+    if !left.is_empty() {
+        eprintln!(
+            "  leaving {} here, over 1 MB{}: {}",
+            files(left.len()),
+            if left.len() == 1 { "" } else { " each" },
+            some(left.iter().copied())
+        );
+    }
+    Ok(Some(CloneThere {
         dir: root,
         paths: ticked.iter().map(|i| i.path.clone()).collect(),
         bring: dent_protocol::Bring {
@@ -224,7 +248,32 @@ async fn clone_there(from: &mut Asker, session: &str) -> Result<CloneThere> {
             branch,
             files: Vec::new(),
         },
-    })
+    }))
+}
+
+/// "1 environment file", "300 environment files".
+fn files(n: usize) -> String {
+    match n {
+        1 => "1 environment file".into(),
+        n => format!("{n} environment files"),
+    }
+}
+
+/// The first few, then how many more.
+fn some<'a>(paths: impl Iterator<Item = &'a str>) -> String {
+    let all: Vec<&str> = paths.collect();
+    let shown = all.iter().take(4).copied().collect::<Vec<_>>().join(", ");
+    match all.len().saturating_sub(4) {
+        0 => shown,
+        more => format!("{shown} and {more} more"),
+    }
+}
+
+/// An error from the link rather than from a machine: worth picking up.
+fn transient(why: &str) -> bool {
+    ["didn't answer", "the link to", "unexpected answer"]
+        .iter()
+        .any(|w| why.contains(w))
 }
 
 /// How long an answer may take: packing a big repository, or making the

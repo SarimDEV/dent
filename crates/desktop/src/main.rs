@@ -703,7 +703,8 @@ impl Render for Dent {
                 // Esc acts once too: one held to stop a turn would otherwise
                 // run on past it and throw the keyboard out of the reply box.
                 if k.key == "escape" && !k.modifiers.modified() {
-                    if !e.is_held {
+                    // Already used on a menu: one press, one thing put away.
+                    if !e.is_held && !std::mem::take(&mut this.escape_used) {
                         window.dispatch_action(Box::new(Escape), cx);
                     }
                     cx.stop_propagation();

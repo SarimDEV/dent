@@ -12,6 +12,9 @@ use crate::defaults::Field;
 use crate::settings::Line;
 use crate::settings_agents::field_title;
 
+/// Projects with their own shown before "Show all".
+const PROJECTS_SHOWN: usize = 8;
+
 /// How long a machine has to say its projects.
 const PROJECTS_PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -67,74 +70,111 @@ impl Dent {
     /// The lines for `m`'s projects: each with what it sets, the open one
     /// a choice a line, then a way to give another its own.
     pub fn project_lines(&mut self, m: &str, cx: &mut Context<Self>) -> Vec<Line> {
-        let mut lines = Vec::new();
-        for p in self.own_projects(m) {
+        // Giving another its own comes first: below a long list it's
+        // out of reach.
+        let mut lines = vec![
+            Line::new("proj-add", "Give a project its own")
+                .under("New sessions in it start differently from the rest of the machine")
+                .chip(self.chip(Menu::KeepProject, "", "Choose a project", true, cx)),
+        ];
+        let all = self.own_projects(m);
+        // Past a few, the rest behind "Show all"; the open one always shows.
+        let shown: Vec<String> = if self.projects_all_shown || all.len() <= PROJECTS_SHOWN + 1 {
+            all.clone()
+        } else {
+            all.iter()
+                .enumerate()
+                .filter(|(i, p)| *i < PROJECTS_SHOWN || self.open_project(m) == Some(p.as_str()))
+                .map(|(_, p)| p.clone())
+                .collect()
+        };
+        let hidden = all.len() - shown.len();
+        // Two of one name (~/a/app, ~/b/app) say where each is, under it.
+        let twin = |p: &str| {
+            let name = Dent::project_name(p);
+            all.iter().filter(|x| Dent::project_name(x) == name).count() > 1
+        };
+        for p in shown {
             let own = self.project_own(m, &p);
-            let name = Dent::project_name(&p);
-            if self.open_project(m) == Some(p.as_str()) {
-                lines.push(
-                    Line::new(format!("proj-{p}"), name)
-                        .under("New sessions in it start with these; the rest as the machine")
-                        .control(self.small_button("proj-done", "Done", cx, |this, _, cx| {
-                            this.agents_project = None;
-                            cx.notify();
-                        })),
-                );
+            let open = self.open_project(m) == Some(p.as_str());
+            let said: Vec<String> = FIELDS
+                .iter()
+                .filter(|f| !f.is_unset(&own))
+                .map(|f| self.field_words(*f, &own, m))
+                .collect();
+            let mut line = Line::new(format!("proj-{p}"), Dent::project_name(&p));
+            if twin(&p) {
+                line = line.under(crate::picker::tilde(&p));
+            }
+            line = line.under(if said.is_empty() {
+                "Nothing of its own yet: as the machine".to_string()
+            } else {
+                said.join(" · ")
+            });
+            let (to, at) = (m.to_string(), p.clone());
+            line = line.opens(open, cx, move |this, _, cx| {
+                this.agents_project = if open {
+                    None
+                } else {
+                    Some((to.clone(), at.clone()))
+                };
+                cx.notify();
+            });
+            if open {
                 let base = self.defaults_for(m, None);
+                let mut inner = Vec::new();
                 for f in FIELDS {
                     let words = if f.is_unset(&own) {
                         format!("As the machine · {}", self.field_words(f, &base, m))
                     } else {
                         self.field_words(f, &base.under(&own), m)
                     };
-                    lines.push(
-                        Line::new(format!("proj-{f:?}").to_lowercase(), field_title(f))
-                            .indent()
-                            .control(self.chip(
-                                Menu::SetProjectDefault(f),
-                                "",
-                                &words,
-                                f.is_unset(&own),
+                    let chip =
+                        self.chip(Menu::SetProjectDefault(f), "", &words, f.is_unset(&own), cx);
+                    inner.push(
+                        Line::new(format!("proj-{f:?}").to_lowercase(), field_title(f)).chip(chip),
+                    );
+                }
+                if !said.is_empty() {
+                    let (to, path) = (m.to_string(), p.clone());
+                    inner.push(
+                        Line::new("proj-clear", "Start as the machine again")
+                            .under("Its own choices go; new sessions in it start like the rest")
+                            .control(self.small_button(
+                                &format!("proj-remove-{p}"),
+                                "Remove",
                                 cx,
+                                move |this, _, cx| {
+                                    this.put_defaults(
+                                        &to,
+                                        Some(path.clone()),
+                                        Defaults::default(),
+                                        cx,
+                                    );
+                                    this.agents_project = None;
+                                },
                             )),
                     );
                 }
-                continue;
+                line = line.holding(inner);
             }
-            let said: Vec<String> = FIELDS
-                .iter()
-                .filter(|f| !f.is_unset(&own))
-                .map(|f| self.field_words(*f, &own, m))
-                .collect();
-            let (to, path) = (m.to_string(), p.clone());
-            let (open, to2) = (p.clone(), m.to_string());
+            lines.push(line);
+        }
+        if hidden > 0 {
             lines.push(
-                Line::new(format!("proj-{p}"), name)
-                    .under(said.join(" · "))
-                    .control(self.small_button(
-                        &format!("proj-change-{p}"),
-                        "Change",
+                Line::new("proj-more", format!("{hidden} more with their own")).control(
+                    self.small_button(
+                        "proj-show-all",
+                        &format!("Show all {}", all.len()),
                         cx,
-                        move |this, _, cx| {
-                            this.agents_project = Some((to2.clone(), open.clone()));
+                        |this, _, cx| {
+                            this.projects_all_shown = true;
                             cx.notify();
                         },
-                    ))
-                    .control(self.small_button(
-                        &format!("proj-remove-{p}"),
-                        "Remove",
-                        cx,
-                        move |this, _, cx| {
-                            this.put_defaults(&to, Some(path.clone()), Defaults::default(), cx)
-                        },
-                    )),
+                    ),
+                ),
             );
         }
-        lines.push(
-            Line::new("proj-add", "Give a project its own")
-                .under("New sessions in it start differently from the rest of the machine")
-                .control(self.chip(Menu::KeepProject, "", "Choose a project", true, cx)),
-        );
         lines
     }
 

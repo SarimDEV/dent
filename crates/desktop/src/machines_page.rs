@@ -244,32 +244,40 @@ struct Node {
     name_w: Option<f32>,
 }
 
-/// Where the connected machines' rows sit, top to bottom by preference:
-/// two far apart first, then the two between.
-const LANES: [f32; 4] = [54., 136., 96., 172.];
+/// Where the connected machines' rows sit, by preference: top, bottom,
+/// then the middle, each clear of the others, so three at one round trip
+/// all show.
+const LANES: [f32; 3] = [54., 166., 110.];
 
 /// How tall a machine and its words stand on the map.
 const NODE_H: f32 = NODE;
 
-/// A lane for each connected machine, in the order given (which keeps
+/// How far right of its round trip a machine may sit to find room: a
+/// little, so where it sits still says how fast it answers.
+const NUDGE_MAX: f32 = 120.;
+
+/// A place for each connected machine, in the order given (which keeps
 /// first): each `(x, w)` its holder's centre and how far right its words
-/// run, in pixels. One takes the first lane where it touches nothing
-/// already placed; one that fits nowhere isn't drawn (`None`), and is
-/// counted instead.
-fn pack(nodes: &[(f32, f32)]) -> Vec<Option<f32>> {
+/// run, in pixels, `right` the edge none may pass. One takes the first lane
+/// where it touches nothing already placed, at its x or a little right of
+/// it; one that fits nowhere isn't drawn (`None`), and is counted instead.
+fn pack(nodes: &[(f32, f32)], right: f32) -> Vec<Option<(f32, f32)>> {
     let mut placed: Vec<(f32, f32, f32)> = Vec::new();
     nodes
         .iter()
-        .map(|&(x, w)| {
-            let (l, r) = (x - NODE / 2. - space::S2, x + NODE / 2. + w);
-            let free = |y: f32| {
-                placed
-                    .iter()
-                    .all(|&(pl, pr, py)| (y - py).abs() >= NODE_H || r <= pl || l >= pr)
+        .map(|&(x0, w)| {
+            let free = |x: f32, y: f32| {
+                let (l, r) = (x - NODE / 2. - space::S2, x + NODE / 2. + w);
+                r <= right
+                    && placed
+                        .iter()
+                        .all(|&(pl, pr, py)| (y - py).abs() >= NODE_H || r <= pl || l >= pr)
             };
-            let y = LANES.into_iter().find(|&y| free(y))?;
-            placed.push((l, r, y));
-            Some(y)
+            let (x, y) = (0..=(NUDGE_MAX / space::S6) as usize)
+                .map(|k| x0 + k as f32 * space::S6)
+                .find_map(|x| LANES.into_iter().find(|&y| free(x, y)).map(|y| (x, y)))?;
+            placed.push((x - NODE / 2. - space::S2, x + NODE / 2. + w, y));
+            Some((x, y))
         })
         .collect()
 }
@@ -659,6 +667,14 @@ impl Dent {
             .max(1);
         // The column holds two whole; more are counted in its heading (the
         // rows below list every one).
+        // None away: no heading over an empty column.
+        let away = self
+            .machines
+            .iter()
+            .filter(|m| !Standing::of(m).connected())
+            .count();
+        // With none away, the connected ones have the whole map.
+        let edge = if away == 0 { 1. - 0.02 } else { AWAY_X };
         let more = far_n.saturating_sub(FAR_MAX);
         let far_n = far_n.min(FAR_MAX);
         // How wide the map was last drawn, for what fits beside what.
@@ -686,15 +702,16 @@ impl Dent {
                 .map(|m| {
                     let ms = m.rtt.unwrap_or(1);
                     let x = axis_x(ms) * strip_w;
-                    let room = (AWAY_X * strip_w - x - NODE / 2.).max(48.);
+                    let room = (edge * strip_w - x - NODE / 2.).max(48.);
                     (
                         x,
                         words_w(&crate::data::machine_short(m.name()), ms).min(room),
                     )
                 })
                 .collect::<Vec<_>>(),
+            edge * strip_w,
         );
-        let lane_of: HashMap<&str, Option<f32>> = connected
+        let lane_of: HashMap<&str, Option<(f32, f32)>> = connected
             .iter()
             .zip(&lanes)
             .map(|(m, y)| (m.id.as_str(), *y))
@@ -708,10 +725,10 @@ impl Dent {
             let shape = shapes.get(&m.id).copied().unwrap_or(Shape::Circle);
             let (x, y, caption) = if st.connected() {
                 let ms = m.rtt.unwrap_or(1);
-                let Some(y) = lane_of.get(m.id.as_str()).copied().flatten() else {
+                let Some((x, y)) = lane_of.get(m.id.as_str()).copied().flatten() else {
                     continue;
                 };
-                (axis_x(ms), y, format!("{ms} ms"))
+                (x / strip_w, y, format!("{ms} ms"))
             } else {
                 let step = ((STRIP_H - 110.) / far_n as f32).min(64.);
                 let y = 82. + step * far as f32;
@@ -727,7 +744,7 @@ impl Dent {
             };
             let name = crate::data::machine_short(m.name());
             let name_w = st.connected().then(|| {
-                let room = (AWAY_X - x) * strip_w - NODE / 2.;
+                let room = (edge - x) * strip_w - NODE / 2.;
                 words_w(&name, m.rtt.unwrap_or(1)).min(room) - space::S3
             });
             nodes.push(Node {
@@ -766,11 +783,13 @@ impl Dent {
                         }
                     }
                 }
-                let mut p = PathBuilder::stroke(px(1.));
-                p.move_to(at(AWAY_X * w, 18.));
-                p.line_to(at(AWAY_X * w, STRIP_H - 16.));
-                if let Ok(p) = p.build() {
-                    window.paint_path(p, hair);
+                if away > 0 {
+                    let mut p = PathBuilder::stroke(px(1.));
+                    p.move_to(at(AWAY_X * w, 18.));
+                    p.line_to(at(AWAY_X * w, STRIP_H - 16.));
+                    if let Ok(p) = p.build() {
+                        window.paint_path(p, hair);
+                    }
                 }
                 let home = (HOME_X * w, home_y);
                 let phase = (crate::cards::now_ms() % 1800) as f32 / 1800.;
@@ -828,12 +847,18 @@ impl Dent {
                 .child(text)
         };
         let node_el = |n: &Node, size: f32, below: bool, i: usize| {
-            let limit = if n.standing.connected() { AWAY_X } else { 1. };
+            let limit = if n.standing.connected() { edge } else { 1. };
             let room = (limit - n.x) * strip_w - size / 2. - space::S3 - space::S3;
             let faded = matches!(n.standing, Standing::Unreachable | Standing::Blocked);
+            // On the page's own colour: a link to a machine further on
+            // passes behind the words, never through them.
             let words = div()
                 .flex()
                 .flex_col()
+                .bg(t.surface)
+                .rounded(px(radius::SM))
+                .px(px(space::S1))
+                .ml(px(-space::S1))
                 .child(
                     div()
                         .ty(UI)
@@ -904,18 +929,6 @@ impl Dent {
                             .child(label(format!("{ms} ms"), true)),
                     )
                 }))
-                .when(hidden > 0, |d| {
-                    d.child(
-                        div().absolute().left(relative(AWAY_X)).child(
-                            div()
-                                .ml(px(-140.))
-                                .w(px(128.))
-                                .flex()
-                                .justify_end()
-                                .child(label(format!("{hidden} more below"), false)),
-                        ),
-                    )
-                })
                 .child(
                     div().absolute().left(relative(AXIS.0)).child(
                         div()
@@ -976,16 +989,37 @@ impl Dent {
                     .left(relative(AWAY_X))
                     .top(px(22.))
                     .pl(px(space::S4))
-                    .child(ui::section_label(
-                        &if more > 0 {
-                            format!("Not connected · {more} more")
-                        } else {
-                            "Not connected".to_string()
-                        },
-                        None,
-                        &t,
-                    )),
+                    .when(away > 0, |d| {
+                        d.child(ui::section_label(
+                            &if more > 0 {
+                                format!("Not connected · {more} more")
+                            } else {
+                                "Not connected".to_string()
+                            },
+                            None,
+                            &t,
+                        ))
+                    }),
             )
+            // Over the connected ones, as over the rest: what's beyond the
+            // map is counted (the rows below list every one).
+            .when(!first, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .left(px(space::S6))
+                        .top(px(22.))
+                        .child(ui::section_label(
+                            &if hidden > 0 {
+                                format!("Connected · {hidden} more")
+                            } else {
+                                "Connected".to_string()
+                            },
+                            None,
+                            &t,
+                        )),
+                )
+            })
             .child(node_el(&home, HOME_NODE, true, 0))
             .children(
                 nodes
@@ -2246,22 +2280,35 @@ mod tests {
     fn machines_on_the_map_never_overlap_and_the_rest_are_counted() {
         // Seventeen answering within a few ms of each other.
         let nodes: Vec<(f32, f32)> = (0..17).map(|i| (400. + i as f32 * 6., 120.)).collect();
-        let lanes = pack(&nodes);
+        let lanes = pack(&nodes, 1200.);
         let placed: Vec<(f32, f32, f32)> = nodes
             .iter()
             .zip(&lanes)
-            .filter_map(|(&(x, w), y)| y.map(|y| (x - NODE / 2., x + NODE / 2. + w, y)))
+            .filter_map(|(&(_, w), p)| p.map(|(x, y)| (x - NODE / 2., x + NODE / 2. + w, y)))
             .collect();
+        // None goes past the edge, nor far from its round trip.
+        for (&(x0, w), p) in nodes.iter().zip(&lanes) {
+            if let Some((x, _)) = p {
+                assert!(x + NODE / 2. + w <= 1200.);
+                assert!(*x >= x0 && *x - x0 <= super::NUDGE_MAX);
+            }
+        }
         for (i, a) in placed.iter().enumerate() {
             for b in &placed[i + 1..] {
                 let apart = (a.2 - b.2).abs() >= NODE_H || a.1 <= b.0 || b.1 <= a.0;
                 assert!(apart, "{a:?} overlaps {b:?}");
             }
         }
-        assert_eq!(placed.len(), 2, "two lanes far enough apart take two");
-        // Spread out, they all fit.
+        // Nudged a little right, more fit than two lanes would hold.
+        assert!(placed.len() > 2, "{}", placed.len());
+        // Spread out, they all fit, where they are.
         let spread: Vec<(f32, f32)> = (0..4).map(|i| (200. + i as f32 * 200., 120.)).collect();
-        assert!(pack(&spread).iter().all(Option::is_some));
+        let at = pack(&spread, 1200.);
+        assert!(
+            at.iter()
+                .zip(&spread)
+                .all(|(p, s)| p.is_some_and(|(x, _)| x == s.0))
+        );
     }
 
     #[test]

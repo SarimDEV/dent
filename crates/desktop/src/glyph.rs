@@ -85,10 +85,13 @@ pub fn assign_kept<'a>(
     ids.dedup();
     let mut out = HashMap::new();
     let mut taken = [false; SHAPES.len()];
+    // More machines than shapes: some share one already, and each keeps
+    // its own rather than move when another comes.
+    let crowded = ids.len() > SHAPES.len();
     for id in &ids {
         if let Some(sh) = kept.get(*id)
             && let Some(ix) = SHAPES.iter().position(|s| s == sh)
-            && !taken[ix]
+            && (!taken[ix] || crowded)
         {
             taken[ix] = true;
             out.insert(id.to_string(), *sh);
@@ -238,6 +241,15 @@ mod tests {
         assert_eq!(seen.len(), 12, "{first:?}");
         // Past twelve they repeat, and nothing breaks.
         assert_eq!(kept.len(), 14);
+        // Nor does a machine there change shape as more come.
+        for n in 15..=40 {
+            let ids: Vec<String> = (0..n).map(|i| format!("{i:x}9e{}", i * 7)).collect();
+            let after = assign_kept(ids.iter().map(String::as_str), &kept);
+            for (id, sh) in &kept {
+                assert_eq!(after[id], *sh, "{id} moved when machine {n} came");
+            }
+            kept = after;
+        }
     }
 
     #[test]

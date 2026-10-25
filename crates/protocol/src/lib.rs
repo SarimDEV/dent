@@ -1912,6 +1912,16 @@ pub enum Out {
         #[serde(default)]
         agent: String,
     },
+    /// How new sessions start there changed, from any device (decision
+    /// 0076): every device starts them alike from then on.
+    Defaults {
+        defaults: Defaults,
+        /// Ever set there (else what a device used goes in first).
+        #[serde(default)]
+        set: bool,
+        #[serde(default)]
+        projects: std::collections::BTreeMap<String, Defaults>,
+    },
     /// Catch-up is over; what follows is live.
     CaughtUp {
         seq: u64,
@@ -2287,9 +2297,11 @@ impl Out {
                 | Reply::MoveWrote { .. }
                 | Reply::MoveNotAccepted { .. } => Vec::new(),
             },
-            Out::Resync { .. } | Out::Error { .. } | Out::Models { .. } | Out::CaughtUp { .. } => {
-                Vec::new()
-            }
+            Out::Resync { .. }
+            | Out::Error { .. }
+            | Out::Models { .. }
+            | Out::Defaults { .. }
+            | Out::CaughtUp { .. } => Vec::new(),
         }
     }
 }

@@ -935,6 +935,8 @@ pub struct Dent {
     /// The project open on a machine's tab (the machine, the project),
     /// its choices a line each.
     pub agents_project: Option<(String, String)>,
+    /// Every project with its own shown on a machine's tab, not the first few.
+    pub projects_all_shown: bool,
     /// Each machine's projects, as it last said, for giving one its own.
     pub tab_projects: HashMap<String, Result<Vec<dent_protocol::Project>, String>>,
     /// The machines Settings › Agents had no room to give a tab, as last
@@ -956,6 +958,8 @@ pub struct Dent {
     /// Who commits are by, as typed on a machine's row in Settings.
     pub git_user_input: Entity<TextareaState>,
     pub git_user_edit: Option<crate::git_user::GitUserEdit>,
+    /// This press of Esc already put something away (see `intercept`).
+    pub escape_used: bool,
     /// This machine's name, once connected; why not, when not.
     pub machine: String,
     pub connection: Result<(), String>,
@@ -1883,7 +1887,7 @@ impl Dent {
                 .collect(),
             machine_id: String::new(),
             setups: HashMap::new(),
-            pending_defaults: prefs.pending_defaults.clone(),
+            pending_defaults: crate::defaults::folded(prefs.pending_defaults.clone()),
             last_used: dent_protocol::Defaults {
                 agent: prefs.agent.clone(),
                 model: prefs.model.clone(),
@@ -1905,6 +1909,7 @@ impl Dent {
             settings_tab: crate::settings::Tab::General,
             agents_tab: None,
             agents_project: None,
+            projects_all_shown: false,
             tab_projects: HashMap::new(),
             agents_hidden: Vec::new(),
             devices: Vec::new(),
@@ -1916,6 +1921,7 @@ impl Dent {
             machine_code: machine_code.clone(),
             git_user_input: git_user_input.clone(),
             git_user_edit: None,
+            escape_used: false,
             machine: String::new(),
             connection: Err("Starting dent…".into()),
             drops: 0,
@@ -3500,6 +3506,14 @@ impl Dent {
         {
             self.acted(session, command, act, url.as_deref(), error.as_deref(), cx);
         }
+        if let Out::Defaults {
+            defaults,
+            set,
+            projects,
+        } = &out
+        {
+            self.defaults_changed_there(machine, defaults, *set, projects, cx);
+        }
         if let Out::Models { models, agent } = &out {
             let key = self.model_key(machine, Some(agent));
             self.models.insert(key, models.clone());
@@ -4867,9 +4881,15 @@ impl Dent {
         // nothing may).
         // (One that searches has its field focused, where Esc's own action
         // does the same, going back a step in the project picker first.)
+        if k.key == "escape" {
+            // Each press is used once: whatever puts a menu away here, the
+            // Escape action that follows for the same press does nothing.
+            self.escape_used = false;
+        }
         if plain && k.key == "escape" && self.menu.is_some_and(|m| !m.searches()) {
             self.menu = None;
             self.menu_ix = None;
+            self.escape_used = true;
             cx.notify();
             return true;
         }

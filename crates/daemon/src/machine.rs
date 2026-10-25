@@ -73,31 +73,34 @@ pub fn check(path: &str) -> Machine {
 /// instead.
 pub fn set_git_user(path: &str, name: &str, email: &str) -> anyhow::Result<()> {
     let (name, email) = (name.trim(), email.trim());
-    if name.is_empty() {
-        anyhow::bail!("a name is needed");
-    }
-    if !looks_like_email(email) {
-        anyhow::bail!("{email:?} isn't an email address");
-    }
-    // Git takes these as the bounds of the address.
-    if [name, email]
-        .iter()
-        .any(|v| v.contains(['<', '>', '\n', '\r']))
-    {
-        anyhow::bail!("a name or email can't have < > or line breaks");
-    }
+    check_git_user(name, email)?;
     for var in ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"] {
         if std::env::var_os(var).is_some() {
             anyhow::bail!("dent runs with {var} set there, which commits take instead");
         }
     }
+    // One at a time: two devices saving at once would leave one's name
+    // with the other's address.
+    static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = SAVING.lock().unwrap_or_else(|e| e.into_inner());
+    // Another program writing Git's settings holds its lock a moment:
+    // tried again, briefly.
     let git = |args: &[&str]| {
-        std::process::Command::new("/usr/bin/env")
-            .arg(format!("PATH={path}"))
-            .arg("git")
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .output()
+        let mut tries = 0;
+        loop {
+            let out = std::process::Command::new("/usr/bin/env")
+                .arg(format!("PATH={path}"))
+                .arg("git")
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .output()?;
+            tries += 1;
+            let locked = String::from_utf8_lossy(&out.stderr).contains("could not lock");
+            if !locked || tries == 10 {
+                return std::io::Result::Ok(out);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     };
     // Both or neither: a name saved with the old address is someone else.
     let was = git(&["config", "--global", "user.name"])?;
@@ -126,9 +129,39 @@ pub fn set_git_user(path: &str, name: &str, email: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The longest name, and address (as mail allows), Git is given.
+const NAME_MAX: usize = 200;
+const EMAIL_MAX: usize = 254;
+
+/// Whether `name <email>` is fit for commits, and why not.
+fn check_git_user(name: &str, email: &str) -> anyhow::Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("a name is needed");
+    }
+    if name.chars().count() > NAME_MAX {
+        anyhow::bail!("a name can be at most {NAME_MAX} characters");
+    }
+    if email.chars().count() > EMAIL_MAX {
+        anyhow::bail!("an email can be at most {EMAIL_MAX} characters");
+    }
+    // Git takes < and > as the bounds of the address; control characters
+    // (line breaks, tabs, terminal colours) would show up in every log.
+    if [name, email]
+        .iter()
+        .any(|v| v.contains(['<', '>']) || v.chars().any(char::is_control))
+    {
+        anyhow::bail!("a name or email can't have < >, line breaks or other control characters");
+    }
+    if !looks_like_email(email) {
+        anyhow::bail!("“{email}” isn't an email address");
+    }
+    Ok(())
+}
+
 fn looks_like_email(s: &str) -> bool {
-    s.split_once('@')
-        .is_some_and(|(a, b)| !a.is_empty() && !b.is_empty() && !s.contains(char::is_whitespace))
+    s.split_once('@').is_some_and(|(a, b)| {
+        !a.is_empty() && !b.is_empty() && !b.contains('@') && !s.contains(char::is_whitespace)
+    })
 }
 
 /// "Ada <ada@example.com>", from what Git would use; `None` when either is
@@ -171,5 +204,47 @@ mod tests {
         let old = "github.com\n  ✓ Logged in to github.com as ada (oauth_token)";
         assert_eq!(gh_user(old).as_deref(), Some("ada"));
         assert_eq!(gh_user("You are not logged into any GitHub hosts."), None);
+    }
+}
+
+#[cfg(test)]
+mod git_user_tests {
+    use super::check_git_user;
+
+    #[test]
+    fn only_a_name_and_address_fit_for_commits_go_in() {
+        for (name, email) in [
+            ("Ada Lovelace", "ada@example.com"),
+            ("Zoë Ångström 李小龙", "zoe@exämple.com"),
+            ("🦀 Crab", "a+tag@sub.example.co.uk"),
+            ("O'Brien \"The\" \\", "ob@example.com"),
+            (
+                &"N".repeat(200),
+                &format!("{}@example.com", "a".repeat(242)),
+            ),
+        ] {
+            assert!(check_git_user(name, email).is_ok(), "{name:?} {email:?}");
+        }
+        for (name, email, why) in [
+            ("", "a@example.com", "name is needed"),
+            (&"N".repeat(201), "a@example.com", "at most 200"),
+            (
+                "A",
+                &format!("{}@example.com", "a".repeat(243)),
+                "at most 254",
+            ),
+            ("A\tB", "a@example.com", "control"),
+            ("A\u{1b}[31mB", "a@example.com", "control"),
+            ("A\0B", "a@example.com", "control"),
+            ("A\nB", "a@example.com", "control"),
+            ("A <b>", "a@example.com", "< >"),
+            ("A", "a@b@example.com", "isn't an email"),
+            ("A", "a b@example.com", "isn't an email"),
+            ("A", "@example.com", "isn't an email"),
+            ("A", "a@", "isn't an email"),
+        ] {
+            let e = check_git_user(name, email).unwrap_err().to_string();
+            assert!(e.contains(why), "{name:?} {email:?}: {e}");
+        }
     }
 }
