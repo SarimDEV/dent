@@ -65,31 +65,66 @@ impl Dent {
     }
 
     /// How choice `f` stands across the machines that keep defaults: by
-    /// the value itself, said in the words of a machine that knows them
-    /// best (one that's said its models names a model).
+    /// the value itself, in the best words any machine has for it.
     fn field_spread(&self, f: Field) -> Spread {
-        let keeping = self.keeping();
-        let key = |m: &String| {
-            serde_json::to_string(&f.effective(&self.defaults_for(m, None))).unwrap_or_default()
-        };
         let mut words: std::collections::HashMap<String, String> = Default::default();
-        for m in &keeping {
-            let w = self.field_words(f, &self.defaults_for(m, None), m);
-            let e = words.entry(key(m)).or_insert_with(|| w.clone());
-            if w.len() > e.len() {
-                *e = w;
-            }
-        }
-        let values: Vec<(String, String)> = keeping
+        let values: Vec<(String, String)> = self
+            .keeping()
             .iter()
             .map(|m| {
-                (
-                    self.machine_name(m),
-                    words.get(&key(m)).cloned().unwrap_or_default(),
-                )
+                let w = words
+                    .entry(self.field_key(f, m))
+                    .or_insert_with(|| self.words_for(f, m))
+                    .clone();
+                (self.machine_name(m), w)
             })
             .collect();
         spread(&values)
+    }
+
+    /// The value of `f` most of `among` have, as (its key, a machine that
+    /// has it): the same every time, ties going to the first key.
+    fn most_of(&self, f: Field, among: &[String]) -> Option<(String, String)> {
+        let mut count: std::collections::BTreeMap<String, (usize, String)> = Default::default();
+        for m in among {
+            count
+                .entry(self.field_key(f, m))
+                .or_insert((0, m.clone()))
+                .0 += 1;
+        }
+        let best = count.values().map(|(n, _)| *n).max()?;
+        count
+            .into_iter()
+            .find(|(_, (n, _))| *n == best)
+            .map(|(k, (_, m))| (k, m))
+    }
+
+    /// Choice `f` as `machine` has it, alone: what Make all and Use set.
+    fn value_on(&self, f: Field, machine: &str) -> Defaults {
+        f.effective(&self.defaults_for(machine, None))
+    }
+
+    /// The best words for the value `machine` has: a machine with the same
+    /// value whose agent has said its models names a model.
+    fn words_for(&self, f: Field, machine: &str) -> String {
+        let key = self.field_key(f, machine);
+        self.keeping()
+            .iter()
+            .filter(|m| self.field_key(f, m) == key)
+            .map(|m| self.field_words(f, &self.defaults_for(m, None), m))
+            .max_by_key(|w| w.len())
+            .unwrap_or_else(|| self.field_words(f, &self.defaults_for(machine, None), machine))
+    }
+
+    /// The machines' default agents aren't all one: no one model fits them
+    /// all.
+    fn agents_differ(&self) -> bool {
+        self.keeping()
+            .iter()
+            .map(|m| self.defaults_for(m, None).agent)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            > 1
     }
 
     /// Set choice `f` to what `value` has on every machine that can keep
@@ -253,6 +288,7 @@ impl Dent {
     /// "N more": the machines without a tab, each with what stands out.
     pub fn more_machine_entries(&self, cx: &App) -> Vec<Entry> {
         let q = self.menu_query.read(cx).value().trim().to_lowercase();
+        let most = self.most_keys();
         // The ones without a tab; searched, any.
         let mut v: Vec<Entry> = self
             .machine_ids()
@@ -271,7 +307,7 @@ impl Dent {
                     .iter()
                     .find(|x| x.id == m)
                     .map(crate::machines_page::Standing::of);
-                let differs = self.differs(&m);
+                let differs = self.differs(&m, &most);
                 let note = match standing {
                     Some(crate::machines_page::Standing::Asleep) => "Asleep".to_string(),
                     _ if differs => "Differs".to_string(),
@@ -304,23 +340,31 @@ impl Dent {
         serde_json::to_string(&f.effective(&self.defaults_for(machine, None))).unwrap_or_default()
     }
 
-    /// `machine` has a default the most machines don't.
-    fn differs(&self, machine: &str) -> bool {
+    /// `machine` has a default most machines don't (`most`: each choice's
+    /// most common value, by key).
+    fn differs(&self, machine: &str, most: &[(Field, Option<String>)]) -> bool {
+        self.setups
+            .get(machine)
+            .is_some_and(|s| s.defaults.is_some())
+            && most.iter().any(|(f, k)| {
+                k.as_ref()
+                    .is_some_and(|k| *k != self.field_key(*f, machine))
+            })
+    }
+
+    /// Each choice's most common value, by key (none with fewer than two
+    /// machines to compare).
+    fn most_keys(&self) -> Vec<(Field, Option<String>)> {
         let keeping = self.keeping();
-        if keeping.len() < 2 || !keeping.iter().any(|m| m == machine) {
-            return false;
-        }
-        FIELDS.iter().any(|f| {
-            let mut count: std::collections::HashMap<String, usize> = Default::default();
-            for m in &keeping {
-                *count.entry(self.field_key(*f, m)).or_default() += 1;
-            }
-            let most = count
-                .iter()
-                .max_by_key(|(_, n)| **n)
-                .map(|(k, _)| k.clone());
-            most.is_some_and(|k| k != self.field_key(*f, machine))
-        })
+        FIELDS
+            .iter()
+            .map(|f| {
+                let k = (keeping.len() > 1)
+                    .then(|| self.most_of(*f, &keeping).map(|(k, _)| k))
+                    .flatten();
+                (*f, k)
+            })
+            .collect()
     }
 
     /// All machines: each setting once.
@@ -351,22 +395,23 @@ impl Dent {
                     if away == 1 { "it's" } else { "they're" }
                 ));
             }
+            // Different agents: no one model fits them all.
+            if f == Field::Model && self.agents_differ() {
+                lines.push(line.under("Their agents differ: set it on each machine's tab"));
+                continue;
+            }
             let chip_label = match &s {
                 Spread::Mixed(_) => "Mixed".to_string(),
                 _ => s.most().unwrap_or("…").to_string(),
             };
             line = line.control(self.chip(Menu::SetDefault(f), "", &chip_label, false, cx));
-            if let (Spread::Mixed(_), Some(most)) = (&s, s.most().map(str::to_string)) {
-                let value = self.value_named(f, &most);
+            if let (Spread::Mixed(_), Some((_, from))) = (&s, self.most_of(f, &self.keeping())) {
+                let (value, most) = (self.value_on(f, &from), self.words_for(f, &from));
                 line = line.control(self.small_button(
                     &format!("make-all-{f:?}").to_lowercase(),
                     &format!("Make all {most}"),
                     cx,
-                    move |this, _, cx| {
-                        if let Some(v) = value.clone() {
-                            this.set_field(f, &v, None, cx);
-                        }
-                    },
+                    move |this, _, cx| this.set_field(f, &value, None, cx),
                 ));
             }
             lines.push(line);
@@ -479,40 +524,41 @@ impl Dent {
         let mut lines = Vec::new();
         let several = self.keeping().len() > 1;
         for f in FIELDS {
-            let d = self.defaults_for(m, None);
-            let words = self.field_words(f, &d, m);
+            let words = self.words_for(f, m);
             let mut line = Line::new(format!("tab-{f:?}").to_lowercase(), field_title(f));
             // Against the rest: what differs, with one click to match.
-            let others: Vec<(String, String)> = self
+            // Against the rest, by value: what differs, with one click to
+            // match.
+            let others: Vec<String> = self
                 .keeping()
-                .iter()
+                .into_iter()
                 .filter(|x| x.as_str() != m)
-                .map(|x| {
-                    (
-                        self.machine_name(x),
-                        self.field_words(f, &self.defaults_for(x, None), x),
-                    )
-                })
                 .collect();
-            let rest = spread(&others);
-            match (rest.most().map(str::to_string), keeps) {
-                (Some(value), Some(true)) if several && value != words => {
-                    let most = match &rest {
-                        Spread::Same { .. } => "the others use",
-                        _ => "most others use",
-                    };
-                    line = line.under(format!("Differs: {most} {value}"));
-                    if let Some(v) = self.value_named(f, &value) {
-                        let to = m.to_string();
-                        line = line.control(self.small_button(
-                            &format!("use-{f:?}").to_lowercase(),
-                            &format!("Use {value}"),
-                            cx,
-                            move |this, _, cx| this.set_field(f, &v, Some(&to), cx),
-                        ));
-                    }
-                }
-                _ => {}
+            let all_one = others
+                .iter()
+                .map(|x| self.field_key(f, x))
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                == 1;
+            if let (Some((key, from)), Some(true)) = (self.most_of(f, &others), keeps)
+                && several
+                && key != self.field_key(f, m)
+                && !(f == Field::Model && self.agents_differ())
+            {
+                let value = self.words_for(f, &from);
+                let most = if all_one {
+                    "the others use"
+                } else {
+                    "most others use"
+                };
+                line = line.under(format!("Differs: {most} {value}"));
+                let (v, to) = (self.value_on(f, &from), m.to_string());
+                line = line.control(self.small_button(
+                    &format!("use-{f:?}").to_lowercase(),
+                    &format!("Use {value}"),
+                    cx,
+                    move |this, _, cx| this.set_field(f, &v, Some(&to), cx),
+                ));
             }
             if keeps == Some(true) {
                 line = line.control(self.chip(Menu::SetDefault(f), "", &words, false, cx));
@@ -586,8 +632,19 @@ impl Dent {
         } else {
             only
         };
-        let at = only.clone().unwrap_or_default();
-        let now = self.field_words(f, &self.defaults_for(&at, None), &at);
+        // On All, the values as a machine whose agent has said its models
+        // has them.
+        let at = only.clone().unwrap_or_else(|| {
+            self.keeping()
+                .into_iter()
+                .find(|m| {
+                    !self
+                        .models_on(m, self.defaults_for(m, None).agent.as_deref())
+                        .is_empty()
+                })
+                .unwrap_or_default()
+        });
+        let now = self.field_key(f, &at);
         let mixed = only.is_none() && matches!(self.field_spread(f), Spread::Mixed(_));
         let mut v = Vec::new();
         if only.is_none() {
@@ -602,7 +659,7 @@ impl Dent {
                 format!("set-{f:?}-{words}").to_lowercase(),
                 &words,
                 None,
-                !mixed && words == now,
+                !mixed && serde_json::to_string(&f.effective(&value)).unwrap_or_default() == now,
                 Some(std::rc::Rc::new(
                     move |this: &mut Dent, _: &mut Window, cx: &mut Context<Dent>| {
                         this.set_field(f, &value, only.as_deref(), cx);
@@ -679,15 +736,6 @@ impl Dent {
                 .collect(),
             Field::Agent => Vec::new(),
         }
-    }
-
-    /// The value of `f` that reads as `words` (on this Mac's agent).
-    fn value_named(&self, f: Field, words: &str) -> Option<Defaults> {
-        let at = self.keeping().first().cloned().unwrap_or_default();
-        self.field_values(f, &at)
-            .into_iter()
-            .find(|(w, _)| w == words)
-            .map(|(_, d)| d)
     }
 
     /// `machine`'s agents as it last said.

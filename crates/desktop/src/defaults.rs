@@ -289,9 +289,14 @@ impl Dent {
         cx: &mut Context<Self>,
     ) {
         let keeps = setup.defaults.is_some();
+        // A merge made before it said doesn't count: it goes over what
+        // this device used.
         let fresh = keeps
             && !setup.defaults_set
-            && !self.pending_defaults.iter().any(|p| p.machine == machine);
+            && !self
+                .pending_defaults
+                .iter()
+                .any(|p| p.machine == machine && !(p.merge && p.project.is_none()));
         self.setups.insert(machine.clone(), setup);
         if !keeps {
             // Too old to keep defaults: what was kept for it can't go.
@@ -307,7 +312,14 @@ impl Dent {
                 self.prefs_changed();
             }
         } else if fresh && !self.last_used.is_empty() {
-            let d = self.last_used.clone();
+            let mut d = self.last_used.clone();
+            for p in self
+                .pending_defaults
+                .iter()
+                .filter(|p| p.machine == machine && p.merge && p.project.is_none())
+            {
+                d = d.under(&p.defaults);
+            }
             self.put_defaults(&machine, None, d, cx);
         } else {
             self.send_pending(&machine);

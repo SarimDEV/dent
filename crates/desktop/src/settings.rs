@@ -401,10 +401,25 @@ impl Dent {
                             cx,
                             move |this, _, cx| {
                                 // Its own models, so the model is one it has.
-                                let mut d = this.defaults_for(&owner, None);
-                                d.agent = Some(id.clone());
-                                d.model = None;
-                                this.put_defaults(&owner, None, d, cx);
+                                if this
+                                    .setups
+                                    .get(&owner)
+                                    .is_some_and(|s| s.defaults.is_some())
+                                {
+                                    let mut d = this.defaults_for(&owner, None);
+                                    d.agent = Some(id.clone());
+                                    d.model = None;
+                                    this.put_defaults(&owner, None, d, cx);
+                                } else {
+                                    // Keeps none (older, or not said yet):
+                                    // this device's next sessions, as before.
+                                    this.defaults.agent = Some(id.clone());
+                                    this.defaults.model = None;
+                                    this.last_used.agent = Some(id.clone());
+                                    this.last_used.model = None;
+                                    this.prefs_changed();
+                                    cx.notify();
+                                }
                             },
                         ));
                     }
@@ -995,7 +1010,8 @@ impl Dent {
         let pane = self.pane.filter(|p| *p == Pane::Welcome)?;
         let t = self.t;
         let agents = self.agent_lines("", cx);
-        let machine = self.machine_lines("", cx);
+        let mut machine = self.machine_lines("", cx);
+        machine.push(self.notification_line(cx));
         let (title, intro) = match pane {
             Pane::Settings => ("Settings", None),
             Pane::Welcome => (

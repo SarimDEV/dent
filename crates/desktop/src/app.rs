@@ -1496,7 +1496,18 @@ impl Dent {
         });
         cx.subscribe_in(&menu_query, window, |this, _, ev: &InputEvent, _, cx| {
             if let InputEvent::Change = ev {
-                this.project_query_changed(cx);
+                // The field is the project picker's, and the machines' in
+                // Settings: each hears its own.
+                if this.menu == Some(Menu::SettingsMachines) {
+                    this.menu_ix = this
+                        .more_machine_entries(cx)
+                        .iter()
+                        .position(|e| e.choosable());
+                    this.menu_scroll.scroll_to_item(0);
+                    cx.notify();
+                } else {
+                    this.project_query_changed(cx);
+                }
             }
         })
         .detach();
@@ -3922,6 +3933,10 @@ impl Dent {
                     reply: Reply::Machine { machine },
                 },
             ) => self.setup_came(id, machine, cx),
+            // Refused there (it can't start at login, say): said.
+            (Waiting::MachineSetup(_), Out::Error { message }) => {
+                self.toast(ToastAction::Info, message);
+            }
             (Waiting::MachineSetup(_), _) => {}
             (
                 Waiting::SetDefaults(sent),
@@ -4778,6 +4793,16 @@ impl Dent {
             && let Some(f) = field
             && self.field_entity(f).read(cx).selected_range().is_empty()
         {
+            return true;
+        }
+        // Esc puts an open menu away, whatever has focus (over Settings,
+        // nothing may).
+        // (One that searches has its field focused, where Esc's own action
+        // does the same, going back a step in the project picker first.)
+        if plain && k.key == "escape" && self.menu.is_some_and(|m| !m.searches()) {
+            self.menu = None;
+            self.menu_ix = None;
+            cx.notify();
             return true;
         }
         // A menu that searches: Tab goes into the lit folder, ⌘1–⌘9 choose

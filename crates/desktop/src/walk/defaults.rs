@@ -347,6 +347,61 @@ pub(super) fn settings_many() -> Vec<(f32, Act)> {
         ),
         (0.5, Shot("settings-set-all")),
         (0.1, Key("escape")),
+        // Searched, the machine lit is one of those found, and Return opens it.
+        (0.2, Click("chip-settingsmachines")),
+        (
+            0.1,
+            Until(
+                "the list opens",
+                |d, _| d.menu == Some(crate::app::Menu::SettingsMachines),
+                3.,
+            ),
+        ),
+        (0.4, Keys("gpu-b")),
+        (
+            0.1,
+            Until(
+                "typed, a machine found is lit",
+                |d, _| d.menu == Some(crate::app::Menu::SettingsMachines) && d.menu_ix == Some(0),
+                3.,
+            ),
+        ),
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until(
+                "and Return opens it",
+                |d, _| d.agents_tab.as_deref() == Some("m01"),
+                3.,
+            ),
+        ),
+        // One set like most others says nothing differs.
+        (0.2, Click("agents-tab-m00")),
+        (
+            0.1,
+            Until(
+                "a machine like the others is marked nowhere",
+                |d, _| {
+                    drawn(d, "row-tab-permission").is_some() && drawn(d, "use-permission").is_none()
+                },
+                3.,
+            ),
+        ),
+        // Make all: every machine the same, those away taking it when back.
+        (0.2, Click("agents-tab-all")),
+        (0.2, Click("make-all-permission")),
+        (
+            0.1,
+            Until(
+                "Make all makes them one",
+                |d, _| {
+                    drawn(d, "make-all-permission").is_none()
+                        && drawn(d, "row-all-permission").is_some()
+                },
+                3.,
+            ),
+        ),
+        (0.5, Shot("settings-made-all")),
     ]
 }
 
