@@ -51,7 +51,7 @@ Each file in a repository's `.dent/actions/` is a script: its name is the file's
 
 ## Defaults per project
 
-Each project remembers what its last new session started with (model, permissions, effort, new worktree or not), and brings it back when chosen; one never started in keeps what's chosen ([0054](decisions/0054-project-defaults-prs-and-scripts.md)).
+A project can have its own defaults for new sessions (model, permissions, effort, new worktree or not) over its machine's, set on purpose from the composer's menus (**Only for _project_**) and kept on that machine ([0076](decisions/0076-defaults-on-machines.md), replacing 0054's remembering what the last session started with).
 - While the agent's turn runs, the button is off: it may be halfway through a file.
 - Where the branch stands is read with a fetch from `origin` at most every two minutes per repository, so a branch behind its remote offers Pull. The fetch never prompts: one that needs a password or passphrase is skipped.
 

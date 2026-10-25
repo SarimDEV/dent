@@ -5553,3 +5553,57 @@ fn a_first_turn_taken_back_just_before_a_restart_is_interrupted() {
         c.events(&s)
     );
 }
+
+/// How new sessions start is kept on the machine, across restarts; a
+/// project's own over it, and gone when set to nothing.
+#[test]
+fn defaults_are_kept_on_the_machine() {
+    use dent_protocol::Defaults;
+    let mut w = World::new(&[]);
+    let mut c = w.client();
+    let machine = |c: &mut Client| match reply(c.call(Request::Machine)).unwrap() {
+        dent_protocol::Reply::Machine { machine } => machine,
+        r => panic!("{r:?}"),
+    };
+    // Nothing set yet: said as nothing, not as missing.
+    assert_eq!(machine(&mut c).defaults, Some(Defaults::default()));
+    let mine = Defaults {
+        model: Some("sonnet".into()),
+        permission: Some(Permission::Ask),
+        ..Defaults::default()
+    };
+    reply(c.call(Request::SetDefaults {
+        project: None,
+        defaults: mine.clone(),
+    }))
+    .unwrap();
+    let theirs = Defaults {
+        worktree: Some(true),
+        ..Defaults::default()
+    };
+    reply(c.call(Request::SetDefaults {
+        project: Some(w.cwd()),
+        defaults: theirs.clone(),
+    }))
+    .unwrap();
+    w.kill();
+    drop(c);
+    w.start();
+    let mut c = w.client();
+    let m = machine(&mut c);
+    assert_eq!(m.defaults, Some(mine.clone()));
+    assert_eq!(m.project_defaults.get(&w.cwd()), Some(&theirs));
+    assert_eq!(
+        mine.under(&theirs),
+        Defaults {
+            worktree: Some(true),
+            ..mine.clone()
+        }
+    );
+    reply(c.call(Request::SetDefaults {
+        project: Some(w.cwd()),
+        defaults: Defaults::default(),
+    }))
+    .unwrap();
+    assert!(machine(&mut c).project_defaults.is_empty());
+}

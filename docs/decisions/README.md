@@ -75,3 +75,4 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0073. The chat's list draws a reply a row per block](0073-a-reply-is-a-row-per-block.md)
 - [0074. What agents get from the login shell](0074-what-agents-get-from-the-login-shell.md)
 - [0075. A watch on each agent's memory](0075-agent-memory-watch.md)
+- [0076. How new sessions start is kept on each machine](0076-defaults-on-machines.md)

@@ -1,6 +1,6 @@
 # 0054. Each project keeps its own defaults; a session shows its pull request; projects have scripts
 
-Status: accepted (2026-10-19) · Builds on [0053](0053-projects-are-repos.md) · Spec: [projects.md](../projects.md), [desktop.md](../desktop.md#new-session)
+Status: accepted (2026-10-19); per-project defaults superseded by [0076](0076-defaults-on-machines.md) (2026-10-24) · Builds on [0053](0053-projects-are-repos.md) · Spec: [projects.md](../projects.md), [desktop.md](../desktop.md#new-session)
 
 ## Decision
 

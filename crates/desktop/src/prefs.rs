@@ -67,10 +67,13 @@ pub struct Prefs {
     pub pastes: std::collections::BTreeMap<u32, String>,
     /// Drafts put aside with ⌘S, oldest first.
     pub stashes: Vec<Draft>,
-    /// What each project's last new session started with, by its folder
-    /// ("" for no project): a project brings these back when chosen.
+    /// Before decision 0076: what each project's last new session started
+    /// with. Read and let go: defaults are kept on machines now.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub projects: std::collections::BTreeMap<String, ProjectPrefs>,
+    /// Changes to machines' defaults not yet heard to have taken.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_defaults: Vec<crate::defaults::Pending>,
     /// Sessions kept at the top of the sidebar, in the order pinned.
     pub pinned: Vec<String>,
     /// The ambient background on the new-session page, by id; none when unset

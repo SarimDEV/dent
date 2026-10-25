@@ -5895,6 +5895,23 @@ impl Dent {
     /// What a menu holds, as data: the mouse and the keyboard both act on
     /// these, so a row does the same thing however it's chosen.
     pub fn menu_entries(&self, which: Menu, cx: &mut Context<Self>) -> Vec<Entry> {
+        let mut v = self.base_menu_entries(which, cx);
+        // A new session's choice: made the default here, or not.
+        let field = match which {
+            Menu::Model => Some(crate::defaults::Field::Model),
+            Menu::Permission => Some(crate::defaults::Field::Permission),
+            Menu::Effort => Some(crate::defaults::Field::Effort),
+            Menu::Agent => Some(crate::defaults::Field::Agent),
+            Menu::Workspace => Some(crate::defaults::Field::Worktree),
+            _ => None,
+        };
+        if let Some(f) = field {
+            v.extend(self.default_entries(f));
+        }
+        v
+    }
+
+    fn base_menu_entries(&self, which: Menu, cx: &mut Context<Self>) -> Vec<Entry> {
         let d = self.defaults.clone();
         let act = |f: Box<ActFn>| -> Option<Act> { Some(Rc::from(f)) };
         match which {

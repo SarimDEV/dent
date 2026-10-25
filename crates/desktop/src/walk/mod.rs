@@ -27,6 +27,7 @@ mod checks;
 mod common;
 mod composing;
 mod cutoffs;
+mod defaults;
 mod demo;
 mod edges;
 mod failures;
@@ -60,10 +61,10 @@ mod worktrees;
 mod zoom;
 use {
     ambient::*, attaching::*, bench::*, changes::*, checks::*, common::*, composing::*, cutoffs::*,
-    demo::*, edges::*, failures::*, find::*, finish::*, keys::*, load::*, look::*, markdown::*,
-    motion::*, moving::*, narration::*, parity::*, pickup::*, pins::*, polish::*, prs::*, queue::*,
-    real::*, recall::*, reply::*, setup::*, stills::*, sweep::*, switching::*, takeback::*,
-    typing::*, view::*, visuals::*, worktrees::*, zoom::*,
+    defaults::*, demo::*, edges::*, failures::*, find::*, finish::*, keys::*, load::*, look::*,
+    markdown::*, motion::*, moving::*, narration::*, parity::*, pickup::*, pins::*, polish::*,
+    prs::*, queue::*, real::*, recall::*, reply::*, setup::*, stills::*, sweep::*, switching::*,
+    takeback::*, typing::*, view::*, visuals::*, worktrees::*, zoom::*,
 };
 
 type Pred = fn(&Dent, &App) -> bool;
@@ -259,6 +260,7 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("move-live", &[move_live]),
     ("move-stopped", &[move_stopped]),
     ("move-limits", &[move_limits]),
+    ("defaults", &[defaults]),
     ("move-clone", &[move_clone]),
     ("move-clone-many", &[move_clone_many]),
     ("move-clone-live", &[move_clone_live]),

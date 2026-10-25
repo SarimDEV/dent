@@ -57,6 +57,10 @@ pub enum Live {
     Out(dent_protocol::Out),
 }
 
+/// Where how new sessions start is kept (decision 0076).
+const DEFAULTS: &str = "defaults";
+const PROJECT_DEFAULTS: &str = "defaults.projects";
+
 pub struct Daemon {
     pub paths: Paths,
     /// Re-read now and then, so tools installed after dent started are found.
@@ -322,7 +326,39 @@ impl Daemon {
             .await
             .unwrap_or_default();
         m.lan = self.net.lan.load(std::sync::atomic::Ordering::Relaxed);
+        m.defaults = Some(self.read_json(DEFAULTS).unwrap_or_default());
+        m.defaults_set = self.store().get(DEFAULTS).ok().flatten().is_some();
+        m.project_defaults = self.read_json(PROJECT_DEFAULTS).unwrap_or_default();
         m
+    }
+
+    fn read_json<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T> {
+        let v = self.store().get(key).ok().flatten()?;
+        serde_json::from_str(&v).ok()
+    }
+
+    /// How new sessions start here, or in `project`, replaced whole
+    /// (decision 0076). A project's set to nothing goes.
+    pub fn set_defaults(&self, project: Option<String>, d: dent_protocol::Defaults) -> Result<()> {
+        match project {
+            None => self.store().put(DEFAULTS, &serde_json::to_string(&d)?)?,
+            Some(p) => {
+                anyhow::ensure!(
+                    !p.is_empty() && p.len() <= 4096,
+                    "that isn't a project's folder"
+                );
+                let mut all: std::collections::BTreeMap<String, dent_protocol::Defaults> =
+                    self.read_json(PROJECT_DEFAULTS).unwrap_or_default();
+                if d.is_empty() {
+                    all.remove(&p);
+                } else {
+                    all.insert(p, d);
+                }
+                self.store()
+                    .put(PROJECT_DEFAULTS, &serde_json::to_string(&all)?)?;
+            }
+        }
+        Ok(())
     }
 
     /// What no device may read, whatever it asks: this daemon's own state
