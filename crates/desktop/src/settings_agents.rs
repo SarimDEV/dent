@@ -582,33 +582,7 @@ impl Dent {
             ),
             Some(true) => None,
         };
-        // Projects with their own.
-        let projects: Vec<(String, Defaults)> = self
-            .setups
-            .get(m)
-            .map(|s| s.project_defaults.clone().into_iter().collect())
-            .unwrap_or_default();
-        let mut own = Vec::new();
-        for (p, d) in projects {
-            let said: Vec<String> = FIELDS
-                .iter()
-                .filter(|f| !Field::is_unset(**f, &d))
-                .map(|f| self.field_words(*f, &d, m))
-                .collect();
-            let (to, path) = (m.to_string(), p.clone());
-            own.push(
-                Line::new(format!("proj-{p}"), Dent::project_name(&p))
-                    .under(said.join(" · "))
-                    .control(self.small_button(
-                        &format!("proj-remove-{p}"),
-                        "Remove",
-                        cx,
-                        move |this, _, cx| {
-                            this.put_defaults(&to, Some(path.clone()), Defaults::default(), cx)
-                        },
-                    )),
-            );
-        }
+        let own = self.project_lines(m, cx);
         let agents = self.agent_lines(m, cx);
         let machine = self.machine_lines(m, cx);
         let here = m.is_empty();
@@ -616,7 +590,7 @@ impl Dent {
             .flex()
             .flex_col()
             .child(self.section("New sessions", note, lines, true))
-            .when(!own.is_empty(), |d| {
+            .when(keeps == Some(true), |d| {
                 d.child(self.section("Projects with their own", None, own, false))
             })
             .child(self.section("Agents", None, agents, false))
@@ -696,7 +670,7 @@ impl Dent {
 
     /// Choice `f`'s values to offer, in words and as a default, for
     /// `machine`'s agent.
-    fn field_values(&self, f: Field, machine: &str) -> Vec<(String, Defaults)> {
+    pub(crate) fn field_values(&self, f: Field, machine: &str) -> Vec<(String, Defaults)> {
         let one = |d: Defaults| (self.field_words(f, &d, machine), d);
         match f {
             Field::Model => {
@@ -776,7 +750,7 @@ impl Dent {
 }
 
 /// A choice's name in Settings.
-fn field_title(f: Field) -> &'static str {
+pub(crate) fn field_title(f: Field) -> &'static str {
     match f {
         Field::Agent => "Agent",
         Field::Model => "Model",

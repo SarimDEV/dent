@@ -25,6 +25,7 @@ mod draft;
 mod ds;
 mod files;
 mod find;
+mod git_user;
 mod gitbar;
 mod github;
 mod glyph;
@@ -54,6 +55,7 @@ mod rows;
 mod select;
 mod settings;
 mod settings_agents;
+mod settings_projects;
 mod shell;
 mod sidebar;
 mod skills;
@@ -741,6 +743,7 @@ impl Render for Dent {
                 // Esc backs out one thing at a time; with nothing open it moves
                 // to the inbox, where arrows move and Enter opens.
                 if this.switch_cancel(cx)
+                    || this.cancel_git_user(cx)
                     // A menu is on top of whatever it's over (Settings, say):
                     // the project picker steps back first.
                     || this.project_back(window, cx)

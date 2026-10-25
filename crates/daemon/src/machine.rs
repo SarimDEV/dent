@@ -70,6 +70,50 @@ pub fn check(path: &str) -> Machine {
 
 /// "Ada <ada@example.com>", from what Git would use; `None` when either is
 /// missing, since a commit then fails.
+/// Make `name <email>` who commits here are by, in Git's global settings.
+/// Refused when dent's environment names someone, which commits would take
+/// instead.
+pub fn set_git_user(path: &str, name: &str, email: &str) -> anyhow::Result<()> {
+    let (name, email) = (name.trim(), email.trim());
+    if name.is_empty() {
+        anyhow::bail!("a name is needed");
+    }
+    if !looks_like_email(email) {
+        anyhow::bail!("{email:?} isn't an email address");
+    }
+    // Git takes these as the bounds of the address.
+    if [name, email]
+        .iter()
+        .any(|v| v.contains(['<', '>', '\n', '\r']))
+    {
+        anyhow::bail!("a name or email can't have < > or line breaks");
+    }
+    for var in ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"] {
+        if std::env::var(var).is_ok_and(|v| !v.trim().is_empty()) {
+            anyhow::bail!("dent runs with {var} set there, which commits take instead");
+        }
+    }
+    for (key, value) in [("user.name", name), ("user.email", email)] {
+        let out = std::process::Command::new("/usr/bin/env")
+            .arg(format!("PATH={path}"))
+            .args(["git", "config", "--global", key, value])
+            .stdin(std::process::Stdio::null())
+            .output()?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "git couldn't save it: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn looks_like_email(s: &str) -> bool {
+    s.split_once('@')
+        .is_some_and(|(a, b)| !a.is_empty() && !b.is_empty() && !s.contains(char::is_whitespace))
+}
+
 fn identity(name: Option<String>, email: Option<String>) -> Option<String> {
     Some(format!("{} <{}>", name?.trim(), email?.trim()))
 }

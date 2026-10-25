@@ -253,7 +253,7 @@ pub(super) fn move_limits() -> Vec<(f32, Act)> {
                 use dent_protocol::Reply;
                 let mut c = Carrier::new(&id, "m2", "Sarim's MacBook Pro (Work, 2024 M4 Max)");
                 c.start();
-                c.answer(Side::From, Ok(Reply::MoveRemotes { remotes: vec![] }));
+                c.answer(Side::From, Ok(Reply::MoveRemotes { remotes: vec![], root: String::new(), branch: None }));
                 c.answer(Side::To, Ok(Reply::MoveHave { found: true, tips: vec![] }));
                 c.answer(
                     Side::From,

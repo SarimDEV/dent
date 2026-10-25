@@ -1810,7 +1810,11 @@ impl Dent {
             .into_any_element()
     }
 
-    fn field(&self, f: &Entity<gpui_kit::base::input::TextareaState>, mono: bool) -> Div {
+    pub(crate) fn field(
+        &self,
+        f: &Entity<gpui_kit::base::input::TextareaState>,
+        mono: bool,
+    ) -> Div {
         let t = self.t;
         div()
             .flex_1()

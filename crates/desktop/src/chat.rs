@@ -5819,6 +5819,10 @@ impl Dent {
                                 }
                                 Menu::SetDefault(_) => "How new sessions start".into(),
                                 Menu::SettingsMachines => "Your other machines".into(),
+                                Menu::SetProjectDefault(_) => {
+                                    "How new sessions in this project start".into()
+                                }
+                                Menu::KeepProject => "Projects on this machine".into(),
                             },
                             t,
                         ))
@@ -5926,6 +5930,8 @@ impl Dent {
             Menu::SessionMachine => self.move_entries(),
             Menu::SetDefault(f) => self.set_default_entries(f),
             Menu::SettingsMachines => self.more_machine_entries(cx),
+            Menu::SetProjectDefault(f) => self.project_default_entries(f),
+            Menu::KeepProject => self.keep_project_entries(cx),
             Menu::Stash => self.stash_entries(),
             Menu::Agent => {
                 let current = self.agent_id_on(&self.defaults.machine, self.new_agent().as_deref());

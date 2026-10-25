@@ -246,7 +246,7 @@ impl Carrier {
             Err(why) => return self.stop(side, why),
         };
         match (std::mem::replace(&mut self.at, At::Done), reply) {
-            (At::Remotes, Reply::MoveRemotes { remotes }) => {
+            (At::Remotes, Reply::MoveRemotes { remotes, .. }) => {
                 self.in_repo = !remotes.is_empty();
                 self.remotes = remotes.clone();
                 self.at = At::Have;
@@ -579,6 +579,8 @@ mod tests {
                     } else {
                         vec![]
                     },
+                    root: String::new(),
+                    branch: None,
                 }),
                 (Side::To, Request::MoveHave { .. }) => Ok(Reply::MoveHave {
                     found: self.found,

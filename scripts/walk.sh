@@ -115,9 +115,15 @@ case "$1 $2" in
 esac
 GH
 chmod +x "$root/gh"
+# Who commits are by is set for real there: Git's own settings, in a file of
+# the walk's, and nothing in the environment to win over them.
+author=(GIT_AUTHOR_NAME=walk GIT_AUTHOR_EMAIL=walk@example.com)
+if [[ "$name" == git-user ]]; then
+  author=(GIT_AUTHOR_NAME= GIT_AUTHOR_EMAIL= GIT_CONFIG_GLOBAL="$root/home/.gitconfig")
+fi
+env "${author[@]}" \
 HOME="$root/home" \
 DENT_GH="$root/gh" DENT_WALK_GH_STATE="$root/gh-state.json" DENT_PR_EVERY=2 \
-GIT_AUTHOR_NAME=walk GIT_AUTHOR_EMAIL=walk@example.com \
 GIT_COMMITTER_NAME=walk GIT_COMMITTER_EMAIL=walk@example.com \
 DENT_STATE="$root/state" \
 DENT_HOLDER_ORPHAN_MS=10000 \
