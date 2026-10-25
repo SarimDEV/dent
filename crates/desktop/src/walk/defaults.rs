@@ -658,13 +658,20 @@ pub(super) fn settings_projects() -> Vec<(f32, Act)> {
             ),
         ),
         (0.4, Shot("projects-set")),
-        (0.2, Click("proj-done")),
+        // Pressed again, the row closes.
+        (
+            0.1,
+            Call(|d, _, cx| {
+                d.agents_project = None;
+                cx.notify();
+            }),
+        ),
         (
             0.1,
             Until(
-                "closed, it says what it sets, to change or remove",
+                "closed, it says what it sets, to open again",
                 |d, _| {
-                    drawn(d, &format!("proj-remove-{}", walk_proj())).is_some()
+                    drawn(d, &format!("row-proj-{}", walk_proj())).is_some()
                         && drawn(d, "row-proj-permission").is_none()
                 },
                 3.,
@@ -685,7 +692,7 @@ pub(super) fn settings_projects() -> Vec<(f32, Act)> {
                     d.setups
                         .get("")
                         .is_some_and(|s| !s.project_defaults.contains_key(&walk_proj()))
-                        && drawn(d, &format!("proj-remove-{}", walk_proj())).is_none()
+                        && drawn(d, &format!("row-proj-{}", walk_proj())).is_none()
                 },
                 5.,
             ),
@@ -959,4 +966,152 @@ pub(super) fn settings_limits() -> Vec<(f32, Act)> {
         (0.2, Wheel("pane-settings", -6000.)),
         (0.5, Shot("limits-machine-end")),
     ]
+}
+
+/// Every Settings page and state in turn, for looking over how they sit
+/// together: the limits' machines (see [`settings_limits`]), each page
+/// top to bottom, a project open, Commits by being changed, wrong and
+/// saving, and each menu.
+pub(super) fn settings_audit() -> Vec<(f32, Act)> {
+    let mut v = settings_limits().into_iter().take(1).collect::<Vec<_>>();
+    v.extend([
+        (0.3, Key("cmd-,")),
+        (0.2, Click("settings-tab-general")),
+        (0.5, Shot("a01-general")),
+        (0.2, Click("settings-tab-agents")),
+        (0.5, Shot("a02-all")),
+        (0.2, Wheel("pane-settings", -6000.)),
+        (0.5, Shot("a03-all-end")),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                d.agents_tab = Some("l0".into());
+                cx.notify();
+            }),
+        ),
+        (0.2, Wheel("pane-settings", 6000.)),
+        (0.5, Shot("a04-machine")),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                d.agents_project = Some(("l0".into(), "/Users/ada/work/app".into()));
+                cx.notify();
+            }),
+        ),
+        (0.5, Shot("a05-project-open")),
+        (
+            0.2,
+            Call(|d, w, cx| {
+                d.open_menu(
+                    crate::app::Menu::SetProjectDefault(crate::defaults::Field::Permission),
+                    w,
+                    cx,
+                )
+            }),
+        ),
+        (0.5, Shot("a06-project-menu")),
+        (0.1, Key("escape")),
+        (
+            0.2,
+            Call(|d, w, cx| {
+                d.open_menu(
+                    crate::app::Menu::SetDefault(crate::defaults::Field::Permission),
+                    w,
+                    cx,
+                )
+            }),
+        ),
+        (0.5, Shot("a07-default-menu")),
+        (0.1, Key("escape")),
+        (0.2, Wheel("pane-settings", -6000.)),
+        (0.5, Shot("a08-machine-end")),
+        (
+            0.2,
+            Call(|d, w, cx| {
+                let now = d.setups.get("l0").and_then(|s| s.git_user.clone());
+                d.edit_git_user("l0", now, w, cx)
+            }),
+        ),
+        (0.5, Shot("a09-git-editing")),
+        (0.3, Keys("nope")),
+        (0.1, Key("enter")),
+        (0.5, Shot("a10-git-wrong")),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                d.cancel_git_user(cx);
+            }),
+        ),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                d.agents_tab = Some(String::new());
+                cx.notify();
+            }),
+        ),
+        (0.2, Wheel("pane-settings", 6000.)),
+        (0.5, Shot("a11-this-mac")),
+        (0.2, Wheel("pane-settings", -6000.)),
+        (0.5, Shot("a12-this-mac-end")),
+        (0.2, Click("settings-tab-machines")),
+        (0.6, Shot("a13-machines")),
+        (0.2, Wheel("pane-settings", -6000.)),
+        (0.5, Shot("a14-machines-end")),
+    ]);
+    v
+}
+
+/// Esc over Settings with a menu open puts away the menu, never Settings.
+pub(super) fn settings_escape() -> Vec<(f32, Act)> {
+    let mut v = settings_limits().into_iter().take(1).collect::<Vec<_>>();
+    v.extend([
+        (0.3, Key("cmd-,")),
+        (0.2, Click("settings-tab-agents")),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                d.agents_tab = Some("l0".into());
+                d.agents_project = Some(("l0".into(), "/Users/ada/work/app".into()));
+                cx.notify();
+            }),
+        ),
+        (0.3, Click("chip-setprojectdefault(permission)")),
+        (
+            0.2,
+            Until("clicked, the menu opens", |d, _| d.menu.is_some(), 2.),
+        ),
+        (0.1, Key("escape")),
+        (
+            0.2,
+            Until(
+                "Esc: the menu goes, Settings stays",
+                |d, _| d.menu.is_none() && d.pane == Some(crate::settings::Pane::Settings),
+                2.,
+            ),
+        ),
+        (
+            0.2,
+            Call(|d, w, cx| {
+                d.open_menu(
+                    crate::app::Menu::SetProjectDefault(crate::defaults::Field::Permission),
+                    w,
+                    cx,
+                )
+            }),
+        ),
+        (
+            0.2,
+            Until("opened, the menu is up", |d, _| d.menu.is_some(), 2.),
+        ),
+        (0.1, Key("escape")),
+        (
+            0.2,
+            Until(
+                "Esc again: only the menu goes",
+                |d, _| d.menu.is_none() && d.pane == Some(crate::settings::Pane::Settings),
+                2.,
+            ),
+        ),
+    ]);
+    v
 }

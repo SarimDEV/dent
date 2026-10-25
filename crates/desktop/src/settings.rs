@@ -65,9 +65,16 @@ pub(crate) struct Line {
     /// Under it, a value and who has it, a row each (a setting that
     /// differs between machines).
     groups: Vec<(String, String)>,
-    /// Under the line before, as one of its own (a project's choices).
-    indent: bool,
+    /// The whole row opens or closes what it holds (`Some(open)`).
+    opens: Option<(bool, Act)>,
+    /// What it holds, open: lines of its own on a card under it.
+    inner: Vec<Line>,
+    /// Under the whole row, as wide as the page: a field being typed in.
+    below: Option<AnyElement>,
 }
+
+/// What pressing a row does, as a listener on the app.
+pub(crate) type Act = std::rc::Rc<dyn Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App)>;
 
 impl Line {
     pub(crate) fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
@@ -79,12 +86,47 @@ impl Line {
             value: None,
             controls: Vec::new(),
             groups: Vec::new(),
-            indent: false,
+            opens: None,
+            inner: Vec::new(),
+            below: None,
         }
     }
 
-    pub(crate) fn indent(mut self) -> Self {
-        self.indent = true;
+    /// Something as wide as the page under the row (a field to type in).
+    pub(crate) fn below(mut self, el: impl IntoElement) -> Self {
+        self.below = Some(el.into_any_element());
+        self
+    }
+
+    /// A chip at the row's end: its words line up with every other row's
+    /// end, its hover running past it.
+    pub(crate) fn chip(mut self, el: AnyElement) -> Self {
+        // Its padding, and the chevron's own room inside its box.
+        self.controls.push(
+            div()
+                .mr(px(-(space::S2 + space::HALF)))
+                .child(el)
+                .into_any_element(),
+        );
+        self
+    }
+
+    /// The whole row opens (or closes) what it holds.
+    pub(crate) fn opens(
+        mut self,
+        open: bool,
+        cx: &mut Context<Dent>,
+        press: impl Fn(&mut Dent, &mut Window, &mut Context<Dent>) + 'static,
+    ) -> Self {
+        let l =
+            cx.listener(move |this, _: &gpui_kit::ClickEvent, window, cx| press(this, window, cx));
+        self.opens = Some((open, std::rc::Rc::new(l)));
+        self
+    }
+
+    /// Lines it holds, shown on a card under it while open.
+    pub(crate) fn holding(mut self, lines: Vec<Line>) -> Self {
+        self.inner = lines;
         self
     }
 
@@ -528,17 +570,22 @@ impl Dent {
                 None if saving => line.under("Saving…"),
                 None => line.under("As Git writes it: Name <email>. Return saves, Esc cancels"),
             };
-            return line
-                .control(
-                    self.field(&self.git_user_input, false)
-                        .w(px(300.))
-                        .h(px(crate::ds::size::CONTROL_SM)),
-                )
-                .control(
-                    self.small_button("git-user-save", "Save", cx, |this, _, cx| {
-                        this.save_git_user(cx)
-                    }),
-                );
+            // The field under the row, as wide as the page: a long name
+            // fits, and a narrow window keeps the label.
+            let save = self.small_button("git-user-save", "Save", cx, |this, _, cx| {
+                this.save_git_user(cx)
+            });
+            return line.below(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S2))
+                    .child(
+                        self.field(&self.git_user_input, false)
+                            .h(px(crate::ds::size::CONTROL_SM)),
+                    )
+                    .child(save),
+            );
         }
         // A daemon from before it could be changed from here: Git's lines.
         if !m.git_user_settable {
@@ -826,6 +873,28 @@ impl Dent {
                     .into_any_element()
             })
         };
+        // A row that opens ends in which way it points.
+        let trailing = match (&l.opens, trailing) {
+            (Some((open, _)), t0) => Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S2))
+                    .children(t0)
+                    // The chevron's own room inside its box, taken back.
+                    .child(div().mr(px(-space::S1)).child(ui::icon(
+                        if *open {
+                            "chevron-down"
+                        } else {
+                            "chevron-right"
+                        },
+                        13.,
+                        t.quiet,
+                    )))
+                    .into_any_element(),
+            ),
+            (None, t0) => t0,
+        };
         let line_h = crate::ds::size::LINE;
         let on_line = |d: AnyElement| {
             div()
@@ -842,7 +911,6 @@ impl Dent {
             .items_start()
             .gap(px(space::S3))
             .py(px(space::S1H))
-            .when(l.indent, |d| d.pl(px(space::S4)))
             .ty(UI)
             .children(
                 l.mark
@@ -861,14 +929,53 @@ impl Dent {
             .child(words)
             .children(trailing.map(on_line))
             .child(probe(&self.probes, format!("row-{}", l.id)))
-            .map(|row| match groups {
-                Some(g) => div()
+            // A row that opens is pressed anywhere: its hover runs a little
+            // past the text either side, which stays in line with the rest.
+            .when_some(l.opens.clone(), |d, (_, press)| {
+                d.mx(px(-space::S2))
+                    .px(px(space::S2))
+                    .rounded(px(radius::MD))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.hover()))
+                    .on_press(move |e, w, cx| press(e, w, cx))
+            })
+            .map(|row| {
+                let inner = (!l.inner.is_empty()).then(|| {
+                    div()
+                        .mt(px(space::S1))
+                        .mb(px(space::S2))
+                        .px(px(space::S3))
+                        .py(px(space::S1))
+                        .rounded(px(radius::LG))
+                        .border_1()
+                        .border_color(t.hairline)
+                        .bg(t.raised)
+                        .flex()
+                        .flex_col()
+                        .children(l.inner.into_iter().map(|i| self.draw_line(i)))
+                });
+                if groups.is_none() && inner.is_none() && l.below.is_none() {
+                    return row.into_any_element();
+                }
+                div()
                     .flex()
                     .flex_col()
                     .child(row)
-                    .child(div().pb(px(space::S1H)).child(g))
-                    .into_any_element(),
-                None => row.into_any_element(),
+                    // Who has what, under the setting they differ on: set in
+                    // by a hairline, so they read as its own.
+                    .children(groups.map(|g| {
+                        div()
+                            .mb(px(space::S2))
+                            .ml(px(space::HALF))
+                            .pl(px(space::S3))
+                            .pb(px(space::S1))
+                            .border_l_1()
+                            .border_color(t.hairline)
+                            .child(g)
+                    }))
+                    .children(inner)
+                    .children(l.below.map(|b| div().pb(px(space::S2)).child(b)))
+                    .into_any_element()
             })
     }
 
@@ -883,7 +990,9 @@ impl Dent {
         div()
             .flex()
             .flex_col()
-            .when(!first, |d| d.mt(px(space::S4)))
+            // Sections stand apart more than rows do: the page reads as its
+            // groups first.
+            .when(!first, |d| d.mt(px(space::S8)))
             .child(ui::section_label(title, None, &t))
             .when_some(note, |d, n| {
                 d.child(
@@ -996,7 +1105,9 @@ impl Dent {
             Tab::Machines => self.machines_tab(window, cx),
         };
         let again = (tab != Tab::Machines).then(|| {
+            // Its words end where the page's rows do, its padding past them.
             div()
+                .mr(px(-space::S2))
                 .flex()
                 .items_center()
                 .gap(px(space::S2))

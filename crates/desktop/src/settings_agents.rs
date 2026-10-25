@@ -454,7 +454,7 @@ impl Dent {
                 Spread::Mixed(_) => "Mixed".to_string(),
                 _ => s.most().unwrap_or("…").to_string(),
             };
-            line = line.control(self.chip(Menu::SetDefault(f), "", &chip_label, false, cx));
+            line = line.chip(self.chip(Menu::SetDefault(f), "", &chip_label, false, cx));
             if let (Spread::Mixed(_), Some((_, from))) = (&s, self.most_of(f, &self.keeping())) {
                 let (value, most) = (self.value_on(f, &from), self.words_for(f, &from));
                 line = line.control(self.small_button(
@@ -609,7 +609,7 @@ impl Dent {
                 ));
             }
             if keeps == Some(true) {
-                line = line.control(self.chip(Menu::SetDefault(f), "", &words, false, cx));
+                line = line.chip(self.chip(Menu::SetDefault(f), "", &words, false, cx));
             }
             lines.push(line);
         }
