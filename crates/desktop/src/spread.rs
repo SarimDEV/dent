@@ -84,12 +84,14 @@ impl Spread {
             return Vec::new();
         };
         let n = groups.len();
+        // Two as common as each other: no "the other", which says most.
+        let tied = n > 1 && groups[n - 2].names.len() == groups[n - 1].names.len();
         groups
             .iter()
             .enumerate()
             .map(|(i, g)| {
                 let last = i + 1 == n;
-                let who = if last && n > 1 && g.names.len() > NAMED {
+                let who = if last && n > 1 && !tied && g.names.len() > NAMED {
                     format!("the other {}", g.names.len())
                 } else {
                     named(&g.names)
@@ -190,6 +192,19 @@ mod tests {
         assert_eq!(s.brief(), "9 of 20 differ");
         assert_eq!(s.lines()[0].1, "ci-0, ci-1, ci-2, ci-3, ci-4 and 4 more");
         assert_eq!(s.lines()[1].1, "the other 11");
+        // Six and six: neither side is "the other six".
+        let mut even: Vec<(String, String)> =
+            (0..6).map(|i| (format!("a{i}"), "Ask".into())).collect();
+        even.extend((0..6).map(|i| (format!("f{i}"), "Full".into())));
+        let s = spread(&even);
+        assert_eq!(s.brief(), "Not the same on all 12");
+        assert!(
+            s.lines()
+                .iter()
+                .all(|(_, who)| !who.starts_with("the other")),
+            "{:?}",
+            s.lines()
+        );
         // One each: neither is the odd one out.
         let s = spread(&of(&[("a", "Full"), ("b", "Ask")]));
         assert_eq!(s.brief(), "Not the same on all 2");

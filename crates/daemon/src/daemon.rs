@@ -326,11 +326,18 @@ impl Daemon {
     /// How this machine stands for Git, GitHub and starting at login.
     pub async fn machine(self: &Arc<Self>) -> dent_protocol::Machine {
         let path = self.env().path.clone();
-        let m = tokio::task::spawn_blocking(move || crate::machine::check(&path))
+        let began = std::time::Instant::now();
+        let mut m = tokio::task::spawn_blocking(move || crate::machine::check(&path))
             .await
             .unwrap_or_default();
+        // Kept by when it began: a slow look that began before a change
+        // (who commits are by) never stands over one taken after it, and
+        // says the newer one instead.
         if let Ok(mut c) = self.checked.lock() {
-            *c = Some((std::time::Instant::now(), m.clone()));
+            match c.as_ref() {
+                Some((at, newer)) if *at > began => m = newer.clone(),
+                _ => *c = Some((began, m.clone())),
+            }
         }
         self.with_own(m)
     }
@@ -382,14 +389,17 @@ impl Daemon {
         }
         match project {
             None => self.store().put(DEFAULTS, &serde_json::to_string(&d)?)?,
-            Some(p) => {
+            Some(raw) => {
                 // One folder, one key: "/a/app/" is "/a/app".
-                let p = match p.trim_end_matches('/') {
-                    "" => p,
+                let p = match raw.trim_end_matches('/') {
+                    "" => raw.clone(),
                     trimmed => trimmed.to_string(),
                 };
+                // Taking one away is always allowed, under the name it was
+                // kept by (older builds kept any).
                 anyhow::ensure!(
-                    p.starts_with('/') && p.len() <= 4096 && !p.contains(char::is_control),
+                    d.is_empty()
+                        || (p.starts_with('/') && p.len() <= 4096 && !p.contains(char::is_control)),
                     "that isn't a project's folder"
                 );
                 // One change at a time, read to written: two devices setting
@@ -408,6 +418,7 @@ impl Daemon {
                     };
                 if d.is_empty() {
                     all.remove(&p);
+                    all.remove(&raw);
                 } else {
                     all.insert(p, d);
                 }

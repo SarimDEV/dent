@@ -103,6 +103,36 @@ fn agent_alone(f: Field, d: &mut Defaults, from: &Defaults) {
     }
 }
 
+/// Whether a machine said no to a change for what it is, rather than
+/// failing to keep it just then.
+fn refused(why: &str) -> bool {
+    [
+        "isn't a project's folder",
+        "isn't a",
+        "newer dent",
+        "bad request",
+    ]
+    .iter()
+    .any(|w| why.contains(w))
+}
+
+/// The changes waiting, one for each machine and project: what an older
+/// build kept as several, folded in order.
+pub fn folded(all: Vec<Pending>) -> Vec<Pending> {
+    let mut out: Vec<Pending> = Vec::new();
+    for p in all {
+        let had = out
+            .iter()
+            .position(|o| o.machine == p.machine && o.project == p.project)
+            .map(|i| out.remove(i));
+        out.push(match had {
+            Some(old) if p.merge => fold(Some(old), p),
+            _ => p,
+        });
+    }
+    out
+}
+
 /// Numbers changes, from the clock, so ones kept across a restart stay
 /// apart.
 fn next_id() -> u64 {
@@ -475,9 +505,10 @@ impl Dent {
                 self.prefs_changed();
             }
             // Refused there: sent again it's refused again, so it goes,
-            // and you hear why.
+            // and you hear why. Anything else (its database busy, say)
+            // waits to be sent again.
             Err(why) => {
-                if self.pending_defaults.iter().any(|p| p.id == sent.id) {
+                if refused(&why) && self.pending_defaults.iter().any(|p| p.id == sent.id) {
                     self.pending_defaults.retain(|p| p.id != sent.id);
                     let name = self.machine_name(&sent.machine);
                     self.toast(
@@ -697,6 +728,34 @@ mod tests {
             fold(Some(one), d).over(&has).permission,
             Some(Permission::Full)
         );
+    }
+
+    #[test]
+    fn changes_an_older_build_kept_apart_are_folded_into_one() {
+        let model = merge(
+            Defaults {
+                model: Some("sonnet".into()),
+                ..Default::default()
+            },
+            &[],
+        );
+        let effort = merge(
+            Defaults {
+                effort: Some("low".into()),
+                ..Default::default()
+            },
+            &[],
+        );
+        let other = Pending {
+            machine: "n".into(),
+            ..model.clone()
+        };
+        let one = super::folded(vec![model, other, effort]);
+        assert_eq!(one.len(), 2);
+        let m = one.iter().find(|p| p.machine == "m").unwrap();
+        let now = m.over(&Defaults::default());
+        assert_eq!(now.model.as_deref(), Some("sonnet"));
+        assert_eq!(now.effort.as_deref(), Some("low"));
     }
 
     #[test]

@@ -119,6 +119,7 @@ pub async fn session(
 ) -> Result<()> {
     let mut hello = false;
     let mine = Arc::new(tokio::sync::Semaphore::new(FILE_READS_EACH));
+    let looks = Arc::new(tokio::sync::Semaphore::new(2));
     // Reads still running end with the session.
     let mut reads = tokio::task::JoinSet::new();
     // Ends with the session, even one aborted mid-request.
@@ -161,10 +162,15 @@ pub async fn session(
         // take seconds: answered alongside, so a message sent meanwhile
         // isn't held up behind it. (Neither changes what another request
         // reads in order.)
-        if matches!(env.body, Request::Machine | Request::SetGitUser { .. }) {
-            let (d, tx) = (d.clone(), tx.clone());
+        // (Only the look: a change, like who commits are by, stays in order.)
+        if matches!(env.body, Request::Machine) {
+            let (d, tx, looks) = (d.clone(), tx.clone(), looks.clone());
             let body = env.body;
             tokio::spawn(async move {
+                // A few at once from one client, never a pile of git and gh.
+                let Ok(_one) = looks.acquire().await else {
+                    return;
+                };
                 let msg = match handle(&d, body).await {
                     Ok(reply) => Out::Reply { reply },
                     Err(e) => Out::Error {

@@ -1887,7 +1887,7 @@ impl Dent {
                 .collect(),
             machine_id: String::new(),
             setups: HashMap::new(),
-            pending_defaults: prefs.pending_defaults.clone(),
+            pending_defaults: crate::defaults::folded(prefs.pending_defaults.clone()),
             last_used: dent_protocol::Defaults {
                 agent: prefs.agent.clone(),
                 model: prefs.model.clone(),
