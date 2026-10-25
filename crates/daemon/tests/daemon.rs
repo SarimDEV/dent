@@ -171,6 +171,8 @@ struct Client {
     events: Arc<Mutex<Vec<Event>>>,
     partial: HashMap<String, String>,
     replies: HashMap<u64, Out>,
+    /// What came unasked, besides events and streaming text.
+    pushed: Vec<Out>,
 }
 
 impl Client {
@@ -196,6 +198,7 @@ impl Client {
             events: Arc::default(),
             partial: HashMap::new(),
             replies: HashMap::new(),
+            pushed: Vec::new(),
         };
         c.call(Request::Hello {
             proto: dent_protocol::PROTOCOL,
@@ -269,7 +272,7 @@ impl Client {
             o if req != 0 => {
                 self.replies.insert(req, o);
             }
-            _ => {}
+            o => self.pushed.push(o),
         }
     }
 
@@ -5300,6 +5303,121 @@ fn who_commits_are_by_is_set_from_a_device() {
     assert!(e.contains("GIT_AUTHOR_NAME"), "{e}");
     assert_eq!(std::fs::read_to_string(&config).unwrap(), saved);
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Two devices saving who commits are by at once: each save is whole,
+/// never one's name with the other's address.
+#[test]
+fn who_commits_are_by_is_never_half_one_and_half_another() {
+    let home = std::env::temp_dir().join(format!("dent-gitrace-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let config = home.join(".gitconfig");
+    let (h, c) = (home.display().to_string(), config.display().to_string());
+    let w = World::new(&[
+        ("HOME", &h),
+        ("GIT_CONFIG_GLOBAL", &c),
+        ("GIT_AUTHOR_NAME", ""),
+        ("GIT_AUTHOR_EMAIL", ""),
+    ]);
+    let get = |k: &str| {
+        git_in(&home, &["config", "--file", &c, k])
+            .trim()
+            .to_string()
+    };
+    for round in 0..5 {
+        let threads: Vec<_> = (0..6)
+            .map(|i| {
+                let mut a = w.client();
+                std::thread::spawn(move || {
+                    a.call(Request::SetGitUser {
+                        name: format!("User{i}"),
+                        email: format!("user{i}@example.com"),
+                    })
+                })
+            })
+            .collect();
+        for t in threads {
+            assert!(t.join().unwrap().is_ok(), "round {round}");
+        }
+        assert_eq!(
+            format!("{}@example.com", get("user.name").to_lowercase()),
+            get("user.email"),
+            "round {round}"
+        );
+    }
+    drop(w);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A request this daemon can't read (a value it doesn't know, from a newer
+/// device) is refused under its own number, not left unanswered.
+#[test]
+fn a_request_it_cant_read_is_refused_not_ignored() {
+    let w = World::new(&[]);
+    let mut a = w.client();
+    a.w.write_all(
+        br#"{"req":77,"op":"set_defaults","project":null,"defaults":{"permission":"someday"}}"#,
+    )
+    .unwrap();
+    a.w.write_all(b"\n").unwrap();
+    let until = Instant::now() + Duration::from_secs(10);
+    while !a.replies.contains_key(&77) {
+        assert!(Instant::now() < until, "no answer");
+        a.pump(Duration::from_millis(50));
+    }
+    let Some(Out::Error { message }) = a.replies.remove(&77) else {
+        panic!()
+    };
+    assert!(message.contains("someday"), "{message}");
+}
+
+/// A change to how sessions start is said to every device connected, and
+/// project keys are folders: one way of writing each.
+#[test]
+fn defaults_changed_are_told_to_every_device() {
+    let w = World::new(&[]);
+    let (mut a, mut b) = (w.client(), w.client());
+    b.subscribe(0);
+    reply(a.call(Request::SetDefaults {
+        project: Some("/work/app/".into()),
+        defaults: dent_protocol::Defaults {
+            permission: Some(Permission::Ask),
+            ..Default::default()
+        },
+    }))
+    .unwrap();
+    let until = Instant::now() + Duration::from_secs(10);
+    let told = loop {
+        b.pump(Duration::from_millis(50));
+        if let Some(Out::Defaults { projects, .. }) =
+            b.pushed.iter().find(|o| matches!(o, Out::Defaults { .. }))
+        {
+            break projects.clone();
+        }
+        assert!(Instant::now() < until, "b wasn't told");
+    };
+    assert_eq!(told.keys().collect::<Vec<_>>(), ["/work/app"]);
+    for bad in ["", "work/app", "/work/a\nb"] {
+        let e = reply(a.call(Request::SetDefaults {
+            project: Some(bad.into()),
+            defaults: dent_protocol::Defaults {
+                permission: Some(Permission::Ask),
+                ..Default::default()
+            },
+        }))
+        .unwrap_err();
+        assert!(e.contains("isn't a project's folder"), "{bad:?}: {e}");
+    }
+    let e = reply(a.call(Request::SetDefaults {
+        project: None,
+        defaults: dent_protocol::Defaults {
+            model: Some("m".repeat(201)),
+            ..Default::default()
+        },
+    }))
+    .unwrap_err();
+    assert!(e.contains("isn't a model name"), "{e}");
 }
 
 /// Asked before a move, the session's machine names its project by the

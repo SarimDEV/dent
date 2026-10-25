@@ -93,6 +93,11 @@ impl Dent {
                 .0 += 1;
         }
         let best = count.values().map(|(n, _)| *n).max()?;
+        // Two as common as each other: there's no "most", and no one
+        // value to make the rest match.
+        if count.values().filter(|(n, _)| *n == best).count() > 1 {
+            return None;
+        }
         count
             .into_iter()
             .find(|(_, (n, _))| *n == best)
@@ -119,9 +124,14 @@ impl Dent {
     /// The machines' default agents aren't all one: no one model fits them
     /// all.
     fn agents_differ(&self) -> bool {
+        // None set is the machine's first agent: the same as naming it.
         self.keeping()
             .iter()
-            .map(|m| self.defaults_for(m, None).agent)
+            .map(|m| {
+                self.defaults_for(m, None)
+                    .agent
+                    .or_else(|| self.agents_on(m).first().map(|a| a.id.clone()))
+            })
             .collect::<std::collections::BTreeSet<_>>()
             .len()
             > 1
@@ -424,7 +434,7 @@ impl Dent {
             let away = self
                 .pending_defaults
                 .iter()
-                .filter(|p| p.project.is_none() && !self.reachable(&p.machine))
+                .filter(|p| p.project.is_none() && !self.reachable(&p.machine) && p.touches(f))
                 .map(|p| p.machine.clone())
                 .collect::<std::collections::BTreeSet<_>>()
                 .len();
@@ -582,7 +592,9 @@ impl Dent {
                 && !(f == Field::Model && self.agents_differ())
             {
                 let value = self.words_for(f, &from);
-                let most = if all_one {
+                let most = if others.len() == 1 {
+                    "the other uses"
+                } else if all_one {
                     "the others use"
                 } else {
                     "most others use"

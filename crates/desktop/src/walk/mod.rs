@@ -266,6 +266,7 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("settings-live", &[settings_live]),
     ("settings-projects", &[settings_projects]),
     ("git-user", &[git_user]),
+    ("settings-limits", &[settings_limits]),
     ("move-clone", &[move_clone]),
     ("move-clone-many", &[move_clone_many]),
     ("move-clone-live", &[move_clone_live]),

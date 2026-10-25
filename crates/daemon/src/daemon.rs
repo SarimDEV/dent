@@ -63,6 +63,9 @@ const PROJECT_DEFAULTS: &str = "defaults.projects";
 
 pub struct Daemon {
     pub paths: Paths,
+    /// The last look at how this machine is set up, and when, for replies
+    /// that change nothing it looks at (see [`Daemon::machine_after`]).
+    checked: std::sync::Mutex<Option<(std::time::Instant, dent_protocol::Machine)>>,
     /// Re-read now and then, so tools installed after dent started are found.
     env: Mutex<Arc<AgentEnv>>,
     pub version: String,
@@ -148,6 +151,7 @@ impl Daemon {
         Arc::new(Self {
             net,
             paths,
+            checked: std::sync::Mutex::new(None),
             env: Mutex::new(Arc::new(env)),
             version: env!("CARGO_PKG_VERSION").into(),
             build: std::env::current_exe()
@@ -322,9 +326,32 @@ impl Daemon {
     /// How this machine stands for Git, GitHub and starting at login.
     pub async fn machine(self: &Arc<Self>) -> dent_protocol::Machine {
         let path = self.env().path.clone();
-        let mut m = tokio::task::spawn_blocking(move || crate::machine::check(&path))
+        let m = tokio::task::spawn_blocking(move || crate::machine::check(&path))
             .await
             .unwrap_or_default();
+        if let Ok(mut c) = self.checked.lock() {
+            *c = Some((std::time::Instant::now(), m.clone()));
+        }
+        self.with_own(m)
+    }
+
+    /// [`Daemon::machine`] after a change it doesn't look at (defaults,
+    /// pairing on the network): the last look, if recent, rather than
+    /// asking Git and the GitHub CLI again for every click.
+    pub async fn machine_after(self: &Arc<Self>) -> dent_protocol::Machine {
+        let recent = self.checked.lock().ok().and_then(|c| {
+            c.as_ref()
+                .filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(600))
+                .map(|(_, m)| m.clone())
+        });
+        match recent {
+            Some(m) => self.with_own(m),
+            None => self.machine().await,
+        }
+    }
+
+    /// What the daemon itself says of the machine, over what it looked at.
+    fn with_own(&self, mut m: dent_protocol::Machine) -> dent_protocol::Machine {
         m.lan = self.net.lan.load(std::sync::atomic::Ordering::Relaxed);
         m.defaults = Some(self.read_json(DEFAULTS).unwrap_or_default());
         m.defaults_set = self.store().get(DEFAULTS).ok().flatten().is_some();
@@ -340,15 +367,45 @@ impl Daemon {
     /// How new sessions start here, or in `project`, replaced whole
     /// (decision 0076). A project's set to nothing goes.
     pub fn set_defaults(&self, project: Option<String>, d: dent_protocol::Defaults) -> Result<()> {
+        // Names, as agents and models have them: short, on one line.
+        for (what, v) in [
+            ("an agent", &d.agent),
+            ("a model", &d.model),
+            ("an effort", &d.effort),
+        ] {
+            if let Some(v) = v {
+                anyhow::ensure!(
+                    !v.is_empty() && v.len() <= 200 && !v.contains(char::is_control),
+                    "that isn't {what} name"
+                );
+            }
+        }
         match project {
             None => self.store().put(DEFAULTS, &serde_json::to_string(&d)?)?,
             Some(p) => {
+                // One folder, one key: "/a/app/" is "/a/app".
+                let p = match p.trim_end_matches('/') {
+                    "" => p,
+                    trimmed => trimmed.to_string(),
+                };
                 anyhow::ensure!(
-                    !p.is_empty() && p.len() <= 4096,
+                    p.starts_with('/') && p.len() <= 4096 && !p.contains(char::is_control),
                     "that isn't a project's folder"
                 );
+                // One change at a time, read to written: two devices setting
+                // two projects at once both stand.
+                static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+                let _one = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+                // What it can't read (a newer dent's, say) isn't written over.
                 let mut all: std::collections::BTreeMap<String, dent_protocol::Defaults> =
-                    self.read_json(PROJECT_DEFAULTS).unwrap_or_default();
+                    match self.store().get(PROJECT_DEFAULTS)? {
+                        None => Default::default(),
+                        Some(v) => serde_json::from_str(&v).map_err(|_| {
+                            anyhow::anyhow!(
+                                "the projects' defaults kept here are from a newer dent: update dent here to change them"
+                            )
+                        })?,
+                    };
                 if d.is_empty() {
                     all.remove(&p);
                 } else {
@@ -358,6 +415,16 @@ impl Daemon {
                     .put(PROJECT_DEFAULTS, &serde_json::to_string(&all)?)?;
             }
         }
+        // Said to every device, so one connected all along doesn't start
+        // sessions the old way, or put back what another just changed.
+        let m = self.with_own(dent_protocol::Machine::default());
+        let _ = self
+            .live
+            .send(Arc::new(Live::Out(dent_protocol::Out::Defaults {
+                defaults: m.defaults.unwrap_or_default(),
+                set: m.defaults_set,
+                projects: m.project_defaults,
+            })));
         Ok(())
     }
 

@@ -935,6 +935,8 @@ pub struct Dent {
     /// The project open on a machine's tab (the machine, the project),
     /// its choices a line each.
     pub agents_project: Option<(String, String)>,
+    /// Every project with its own shown on a machine's tab, not the first few.
+    pub projects_all_shown: bool,
     /// Each machine's projects, as it last said, for giving one its own.
     pub tab_projects: HashMap<String, Result<Vec<dent_protocol::Project>, String>>,
     /// The machines Settings › Agents had no room to give a tab, as last
@@ -1905,6 +1907,7 @@ impl Dent {
             settings_tab: crate::settings::Tab::General,
             agents_tab: None,
             agents_project: None,
+            projects_all_shown: false,
             tab_projects: HashMap::new(),
             agents_hidden: Vec::new(),
             devices: Vec::new(),
@@ -3499,6 +3502,14 @@ impl Dent {
         } = &out
         {
             self.acted(session, command, act, url.as_deref(), error.as_deref(), cx);
+        }
+        if let Out::Defaults {
+            defaults,
+            set,
+            projects,
+        } = &out
+        {
+            self.defaults_changed_there(machine, defaults, *set, projects, cx);
         }
         if let Out::Models { models, agent } = &out {
             let key = self.model_key(machine, Some(agent));

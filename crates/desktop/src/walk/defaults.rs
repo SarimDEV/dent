@@ -765,3 +765,198 @@ pub(super) fn git_user() -> Vec<(f32, Act)> {
         ),
     ]
 }
+
+/// Settings at its limits: a machine with a name too long for its tab,
+/// sixty projects with their own (two of one name, one with a path past
+/// any width), five hundred projects to find one in, someone committing
+/// under a 200-character name, and machines split evenly. Walked at any
+/// size, light or dark, for the stills.
+pub(super) fn settings_limits() -> Vec<(f32, Act)> {
+    vec![
+        (
+            0.2,
+            Call(|d, _, cx| {
+                use dent_protocol::{Defaults, Permission};
+                let long = "research-gpu-cluster-node-07-in-the-basement-rack-b-left";
+                for (i, n) in [long, "gpu-box", "mac-mini", "ci-runner", "ci-runner-2"]
+                    .iter()
+                    .enumerate()
+                {
+                    let id = format!("l{i}");
+                    let mut v = crate::machines::MachineView::saved(dent_remote::store::Saved {
+                        id: id.clone(),
+                        name: (*n).into(),
+                        ..Default::default()
+                    });
+                    v.state = dent_client_core::machine::State::Online;
+                    v.rtt = Some(3 + i as u64);
+                    v.agents = d.agents.clone();
+                    v.agents_known = true;
+                    d.machines.push(v);
+                    let mut projects = std::collections::BTreeMap::new();
+                    if i == 0 {
+                        for k in 0..60 {
+                            let path = match k {
+                                0 => "/Users/ada/work/app".to_string(),
+                                1 => "/Users/ada/personal/app".to_string(),
+                                2 => format!(
+                                    "/Users/ada/{}/deep",
+                                    "very-long-folder-name/".repeat(12)
+                                ),
+                                k => {
+                                    format!("/Users/ada/src/project-{k:02}-{}", "x".repeat(k % 30))
+                                }
+                            };
+                            projects.insert(
+                                path,
+                                Defaults {
+                                    permission: Some(if k % 2 == 0 {
+                                        Permission::Ask
+                                    } else {
+                                        Permission::Full
+                                    }),
+                                    worktree: (k % 3 == 0).then_some(true),
+                                    effort: (k % 5 == 0).then(|| "high".to_string()),
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                    }
+                    d.setups.insert(
+                        id.clone(),
+                        dent_protocol::Machine {
+                            git: Some("git version 2.50.1".into()),
+                            git_user: Some(format!(
+                                "{} <{}@example.com>",
+                                "Bartholomew-Maximilian ".repeat(9).trim(),
+                                "b".repeat(40)
+                            )),
+                            git_user_settable: true,
+                            login_item: true,
+                            // With this Mac's Supervised, three and three.
+                            defaults: Some(Defaults {
+                                permission: Some(if i == 0 || i == 4 {
+                                    Permission::Ask
+                                } else {
+                                    Permission::Full
+                                }),
+                                ..Default::default()
+                            }),
+                            defaults_set: true,
+                            project_defaults: projects,
+                            ..Default::default()
+                        },
+                    );
+                    if i == 0 {
+                        let all: Vec<dent_protocol::Project> = (0..500)
+                            .map(|k| dent_protocol::Project {
+                                path: format!(
+                                    "/Users/ada/src/{}/repo-{k:03}",
+                                    "nested/".repeat(k % 7)
+                                ),
+                                name: format!("repo-{k:03}"),
+                                last_used: 0,
+                            })
+                            .collect();
+                        d.tab_projects.insert(id, Ok(all));
+                    }
+                }
+                cx.notify();
+            }),
+        ),
+        (0.3, Key("cmd-,")),
+        (0.2, Click("settings-tab-agents")),
+        (
+            0.1,
+            Until(
+                "split evenly, none is called the odd one out",
+                |d, _| {
+                    drawn(d, "row-all-permission").is_some()
+                        && drawn(d, "make-all-permission").is_none()
+                },
+                5.,
+            ),
+        ),
+        (0.5, Shot("limits-all")),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                d.agents_tab = Some("l0".into());
+                cx.notify();
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "sixty projects with their own, two of one name told apart",
+                |d, _| {
+                    drawn(d, "row-proj-/Users/ada/work/app").is_some()
+                        && drawn(d, "row-proj-add").is_some()
+                },
+                5.,
+            ),
+        ),
+        (0.5, Shot("limits-machine")),
+        (0.2, Click("chip-keepproject")),
+        (
+            0.1,
+            Until(
+                "five hundred to choose from",
+                |d, cx| d.keep_project_entries(cx).len() >= 400,
+                3.,
+            ),
+        ),
+        (0.4, Shot("limits-choose")),
+        (0.3, Keys("repo-49")),
+        (
+            0.1,
+            Until(
+                "found by name among them",
+                |d, cx| {
+                    let e = d.keep_project_entries(cx);
+                    !e.is_empty()
+                        && e.len() < 20
+                        && e.iter()
+                            .all(|e| !e.choosable() || e.key.contains("repo-49"))
+                },
+                3.,
+            ),
+        ),
+        (0.4, Shot("limits-found")),
+        (0.1, Key("escape")),
+        (
+            0.1,
+            Call(|d, w, cx| {
+                d.edit_git_user("l0", Some("x".repeat(400)), w, cx);
+            }),
+        ),
+        (0.1, Key("enter")),
+        (
+            0.1,
+            Until(
+                "a 400-character entry is refused on the row",
+                |d, _| d.git_user_edit.as_ref().is_some_and(|e| e.error.is_some()),
+                3.,
+            ),
+        ),
+        (0.4, Shot("limits-git-user")),
+        (0.1, Key("escape")),
+        (
+            0.2,
+            Call(|d, _, cx| {
+                d.projects_all_shown = true;
+                cx.notify();
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "Show all shows every one",
+                |d, _| drawn(d, "row-proj-more").is_none() && d.projects_all_shown,
+                3.,
+            ),
+        ),
+        (0.2, Wheel("pane-settings", -6000.)),
+        (0.5, Shot("limits-machine-end")),
+    ]
+}

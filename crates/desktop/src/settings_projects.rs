@@ -12,6 +12,9 @@ use crate::defaults::Field;
 use crate::settings::Line;
 use crate::settings_agents::field_title;
 
+/// Projects with their own shown before "Show all".
+const PROJECTS_SHOWN: usize = 8;
+
 /// How long a machine has to say its projects.
 const PROJECTS_PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -67,10 +70,38 @@ impl Dent {
     /// The lines for `m`'s projects: each with what it sets, the open one
     /// a choice a line, then a way to give another its own.
     pub fn project_lines(&mut self, m: &str, cx: &mut Context<Self>) -> Vec<Line> {
-        let mut lines = Vec::new();
-        for p in self.own_projects(m) {
+        // Giving another its own comes first: below a long list it's
+        // out of reach.
+        let mut lines = vec![
+            Line::new("proj-add", "Give a project its own")
+                .under("New sessions in it start differently from the rest of the machine")
+                .control(self.chip(Menu::KeepProject, "", "Choose a project", true, cx)),
+        ];
+        let all = self.own_projects(m);
+        // Past a few, the rest behind "Show all"; the open one always shows.
+        let shown: Vec<String> = if self.projects_all_shown || all.len() <= PROJECTS_SHOWN + 1 {
+            all.clone()
+        } else {
+            all.iter()
+                .enumerate()
+                .filter(|(i, p)| *i < PROJECTS_SHOWN || self.open_project(m) == Some(p.as_str()))
+                .map(|(_, p)| p.clone())
+                .collect()
+        };
+        let hidden = all.len() - shown.len();
+        // Two of one name (~/a/app, ~/b/app) say where each is.
+        let named = |p: &str| {
+            let name = Dent::project_name(p);
+            let twins = all.iter().filter(|x| Dent::project_name(x) == name).count();
+            if twins > 1 {
+                format!("{name} · {}", crate::picker::tilde(p))
+            } else {
+                name
+            }
+        };
+        for p in shown {
             let own = self.project_own(m, &p);
-            let name = Dent::project_name(&p);
+            let name = named(&p);
             if self.open_project(m) == Some(p.as_str()) {
                 lines.push(
                     Line::new(format!("proj-{p}"), name)
@@ -130,11 +161,21 @@ impl Dent {
                     )),
             );
         }
-        lines.push(
-            Line::new("proj-add", "Give a project its own")
-                .under("New sessions in it start differently from the rest of the machine")
-                .control(self.chip(Menu::KeepProject, "", "Choose a project", true, cx)),
-        );
+        if hidden > 0 {
+            lines.push(
+                Line::new("proj-more", format!("{hidden} more with their own")).control(
+                    self.small_button(
+                        "proj-show-all",
+                        &format!("Show all {}", all.len()),
+                        cx,
+                        |this, _, cx| {
+                            this.projects_all_shown = true;
+                            cx.notify();
+                        },
+                    ),
+                ),
+            );
+        }
         lines
     }
 

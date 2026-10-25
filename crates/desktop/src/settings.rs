@@ -142,6 +142,7 @@ impl Dent {
         // Half-typed there, it isn't saved behind your back.
         self.git_user_edit = None;
         self.agents_project = None;
+        self.projects_all_shown = false;
         if was == Some(Pane::Welcome) {
             // Seen once is enough; the banner keeps saying what's missing.
             self.onboarded = true;
@@ -444,10 +445,13 @@ impl Dent {
     /// notifications.
     pub(crate) fn machine_lines(&mut self, machine: &str, cx: &mut Context<Self>) -> Vec<Line> {
         let here = machine.is_empty();
+        // The newest word from this Mac: what it said as it connected, or
+        // since (a change, Check again), which both keep up to date.
         let known = if here {
-            self.machine_check
-                .clone()
-                .or_else(|| self.setups.get("").cloned())
+            self.setups
+                .get("")
+                .cloned()
+                .or_else(|| self.machine_check.clone())
         } else {
             self.setups.get(machine).cloned()
         };

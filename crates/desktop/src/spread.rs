@@ -66,7 +66,13 @@ impl Spread {
             Spread::Mixed(groups) => {
                 let all: usize = groups.iter().map(|g| g.names.len()).sum();
                 let most = groups.last().map_or(0, |g| g.names.len());
-                format!("{} of {all} differ", all - most)
+                // Two as common as each other: none is the odd one out.
+                let tied = groups.len() > 1 && groups[groups.len() - 2].names.len() == most;
+                if tied {
+                    format!("Not the same on all {all}")
+                } else {
+                    format!("{} of {all} differ", all - most)
+                }
             }
         }
     }
@@ -184,8 +190,9 @@ mod tests {
         assert_eq!(s.brief(), "9 of 20 differ");
         assert_eq!(s.lines()[0].1, "ci-0, ci-1, ci-2, ci-3, ci-4 and 4 more");
         assert_eq!(s.lines()[1].1, "the other 11");
+        // One each: neither is the odd one out.
         let s = spread(&of(&[("a", "Full"), ("b", "Ask")]));
-        assert_eq!(s.brief(), "1 of 2 differ");
+        assert_eq!(s.brief(), "Not the same on all 2");
         // Few: everyone named, no "the other".
         assert_eq!(s.lines()[1].1, "a");
         let long = spread(&of(&[

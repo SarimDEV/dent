@@ -26,6 +26,81 @@ pub struct Pending {
     /// over what it has, rather than replacing it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub merge: bool,
+    /// For a merge: the choices it sets back to the default, which
+    /// `defaults` can't say (there, nothing means "leave it").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unset: Vec<String>,
+}
+
+impl Pending {
+    /// Whether it changes choice `f`: a merge only what it names; a whole
+    /// set, what it's said to replace.
+    pub fn touches(&self, f: Field) -> bool {
+        !self.merge || !f.is_unset(&self.defaults) || self.unset.iter().any(|k| k == f.name())
+    }
+
+    /// What `base` becomes with this over it.
+    fn over(&self, base: &Defaults) -> Defaults {
+        if !self.merge {
+            return self.defaults.clone();
+        }
+        let mut d = base.under(&self.defaults);
+        for f in self.unset.iter().filter_map(|k| Field::named(k)) {
+            f.take(&mut d, &Defaults::default());
+        }
+        d
+    }
+}
+
+/// A change made while `had` still waits for the same machine and project,
+/// folded into one: a whole set takes the change into it; two merges make
+/// one, the later choice winning.
+fn fold(had: Option<Pending>, new: Pending) -> Pending {
+    match had {
+        Some(old) if new.merge => {
+            let sets: Vec<&str> = Field::ALL
+                .into_iter()
+                .filter(|f| !f.is_unset(&new.defaults))
+                .map(Field::name)
+                .collect();
+            let mut unset: Vec<String> = old
+                .unset
+                .iter()
+                .filter(|k| !sets.contains(&k.as_str()))
+                .cloned()
+                .collect();
+            for k in &new.unset {
+                if !unset.contains(k) {
+                    unset.push(k.clone());
+                }
+            }
+            Pending {
+                // Over a whole set, still a whole set.
+                defaults: if old.merge {
+                    let mut d = old.defaults.under(&new.defaults);
+                    for f in new.unset.iter().filter_map(|k| Field::named(k)) {
+                        f.take(&mut d, &Defaults::default());
+                    }
+                    d
+                } else {
+                    new.over(&old.defaults)
+                },
+                merge: old.merge,
+                unset: if old.merge { unset } else { Vec::new() },
+                ..new
+            }
+        }
+        _ => new,
+    }
+}
+
+/// Another agent made the default brings its own model and effort, as
+/// `from` has them: another agent's never go with it.
+fn agent_alone(f: Field, d: &mut Defaults, from: &Defaults) {
+    if f == Field::Agent {
+        Field::Model.take(d, from);
+        Field::Effort.take(d, from);
+    }
 }
 
 /// Numbers changes, from the clock, so ones kept across a restart stay
@@ -49,14 +124,47 @@ pub enum Field {
 }
 
 impl Field {
-    /// `to` with this choice as `from` has it.
+    const ALL: [Field; 5] = [
+        Field::Agent,
+        Field::Model,
+        Field::Permission,
+        Field::Effort,
+        Field::Worktree,
+    ];
+
+    /// Its name, as a waiting change keeps it.
+    fn name(self) -> &'static str {
+        match self {
+            Field::Agent => "agent",
+            Field::Model => "model",
+            Field::Permission => "permission",
+            Field::Effort => "effort",
+            Field::Worktree => "worktree",
+        }
+    }
+
+    fn named(name: &str) -> Option<Field> {
+        Field::ALL.into_iter().find(|f| f.name() == name)
+    }
+
+    /// `to` with this choice as `from` has it. The model picked as
+    /// "Default" is no model set, so the two never read as different.
     pub(crate) fn take(self, to: &mut Defaults, from: &Defaults) {
         match self {
             Field::Agent => to.agent = from.agent.clone(),
-            Field::Model => to.model = from.model.clone(),
+            Field::Model => to.model = from.model.clone().filter(|m| m != "default"),
             Field::Permission => to.permission = from.permission,
             Field::Effort => to.effort = from.effort.clone(),
             Field::Worktree => to.worktree = from.worktree,
+        }
+    }
+
+    /// As a merge must say it: `d` sets this choice back to the default.
+    fn unsets(self, d: &Defaults) -> Vec<String> {
+        if self.is_unset(d) {
+            vec![self.name().to_string()]
+        } else {
+            Vec::new()
         }
     }
 
@@ -125,13 +233,7 @@ impl Dent {
         self.pending_defaults
             .iter()
             .filter(|p| p.machine == machine && p.project.as_deref() == project)
-            .fold(kept, |d, p| {
-                if p.merge {
-                    d.under(&p.defaults)
-                } else {
-                    p.defaults.clone()
-                }
-            })
+            .fold(kept, |d, p| p.over(&d))
     }
 
     /// A machine's own defaults (not a project's).
@@ -190,7 +292,7 @@ impl Dent {
         defaults: Defaults,
         cx: &mut Context<Self>,
     ) {
-        self.put_change(machine, project, defaults, false, cx);
+        self.put_change(machine, project, defaults, false, Vec::new(), cx);
     }
 
     /// [`Dent::put_defaults`], or with `merge`, what's set going over what
@@ -201,20 +303,26 @@ impl Dent {
         project: Option<String>,
         defaults: Defaults,
         merge: bool,
+        unset: Vec<String>,
         cx: &mut Context<Self>,
     ) {
-        // A whole set replaces what was waiting; a merge goes after it.
-        if !merge {
-            self.pending_defaults
-                .retain(|p| !(p.machine == machine && p.project == project));
-        }
-        self.pending_defaults.push(Pending {
+        // One change waits for each machine and project, what came since
+        // folded into it: sent whole, none undoes another.
+        let had = self
+            .pending_defaults
+            .iter()
+            .position(|p| p.machine == machine && p.project == project)
+            .map(|i| self.pending_defaults.remove(i));
+        let new = Pending {
             id: next_id(),
             machine: machine.to_string(),
             project,
             defaults,
             merge,
-        });
+            unset,
+        };
+        let new = fold(had, new);
+        self.pending_defaults.push(new);
         self.send_pending(machine);
         self.apply_defaults(false);
         self.prefs_changed();
@@ -253,15 +361,11 @@ impl Dent {
             .collect();
         for p in out {
             // A merge goes as a whole set: what it has, with this over it.
-            let whole = if p.merge {
-                let has = match &p.project {
-                    None => kept.clone(),
-                    Some(pr) => setup.project_defaults.get(pr).cloned().unwrap_or_default(),
-                };
-                has.under(&p.defaults)
-            } else {
-                p.defaults.clone()
+            let has = match &p.project {
+                None => kept.clone(),
+                Some(pr) => setup.project_defaults.get(pr).cloned().unwrap_or_default(),
             };
+            let whole = p.over(&has);
             let n = self.live.send_to(
                 machine,
                 Request::SetDefaults {
@@ -289,14 +393,14 @@ impl Dent {
         cx: &mut Context<Self>,
     ) {
         let keeps = setup.defaults.is_some();
-        // A merge made before it said doesn't count: it goes over what
-        // this device used.
+        // Only a whole set of its own made meanwhile counts: a merge goes
+        // over what this device used, and a project's is the project's.
         let fresh = keeps
             && !setup.defaults_set
             && !self
                 .pending_defaults
                 .iter()
-                .any(|p| p.machine == machine && !(p.merge && p.project.is_none()));
+                .any(|p| p.machine == machine && p.project.is_none() && !p.merge);
         self.setups.insert(machine.clone(), setup);
         if !keeps {
             // Too old to keep defaults: what was kept for it can't go.
@@ -318,12 +422,35 @@ impl Dent {
                 .iter()
                 .filter(|p| p.machine == machine && p.merge && p.project.is_none())
             {
-                d = d.under(&p.defaults);
+                d = p.over(&d);
             }
             self.put_defaults(&machine, None, d, cx);
         } else {
             self.send_pending(&machine);
         }
+        if machine == self.defaults.machine {
+            self.apply_defaults(false);
+        }
+        cx.notify();
+    }
+
+    /// How new sessions start on `machine` changed, from whichever device:
+    /// taken as it is there now.
+    pub fn defaults_changed_there(
+        &mut self,
+        machine: &str,
+        defaults: &Defaults,
+        set: bool,
+        projects: &std::collections::BTreeMap<String, Defaults>,
+        cx: &mut Context<Self>,
+    ) {
+        // Not asked yet how it's set up: what it says then has all of it.
+        let Some(s) = self.setups.get_mut(machine) else {
+            return;
+        };
+        s.defaults = Some(defaults.clone());
+        s.defaults_set = set;
+        s.project_defaults = projects.clone();
         if machine == self.defaults.machine {
             self.apply_defaults(false);
         }
@@ -338,13 +465,31 @@ impl Dent {
         answer: Result<dent_protocol::Machine, String>,
         cx: &mut Context<Self>,
     ) {
-        if let Ok(setup) = answer {
-            self.pending_defaults.retain(|p| p.id != sent.id);
-            self.setups.insert(sent.machine.clone(), setup);
-            if sent.machine == self.defaults.machine {
-                self.apply_defaults(false);
+        match answer {
+            Ok(setup) => {
+                self.pending_defaults.retain(|p| p.id != sent.id);
+                self.setups.insert(sent.machine.clone(), setup);
+                if sent.machine == self.defaults.machine {
+                    self.apply_defaults(false);
+                }
+                self.prefs_changed();
             }
-            self.prefs_changed();
+            // Refused there: sent again it's refused again, so it goes,
+            // and you hear why.
+            Err(why) => {
+                if self.pending_defaults.iter().any(|p| p.id == sent.id) {
+                    self.pending_defaults.retain(|p| p.id != sent.id);
+                    let name = self.machine_name(&sent.machine);
+                    self.toast(
+                        crate::app::ToastAction::Info,
+                        format!("{name} didn't take that change: {why}"),
+                    );
+                    if sent.machine == self.defaults.machine {
+                        self.apply_defaults(false);
+                    }
+                    self.prefs_changed();
+                }
+            }
         }
         cx.notify();
     }
@@ -359,11 +504,12 @@ impl Dent {
         cx: &mut Context<Self>,
     ) {
         match self.setups.get(machine) {
-            None => self.put_change(machine, None, f.of(value), true, cx),
+            None => self.put_change(machine, None, f.of(value), true, f.unsets(value), cx),
             Some(s) if s.defaults.is_none() => {}
             Some(_) => {
                 let mut d = self.machine_defaults(machine);
                 f.take(&mut d, value);
+                agent_alone(f, &mut d, value);
                 self.put_defaults(machine, None, d, cx);
             }
         }
@@ -393,7 +539,7 @@ impl Dent {
         let now = self.chosen();
         match self.setups.get(machine) {
             // Not heard from yet: only this goes, over whatever it has.
-            None => self.put_change(machine, project, f.of(&now), true, cx),
+            None => self.put_change(machine, project, f.of(&now), true, f.unsets(&now), cx),
             // Can't keep defaults at all.
             Some(s) if s.defaults.is_none() => {}
             Some(_) => {
@@ -402,6 +548,7 @@ impl Dent {
                     Some(p) => self.project_defaults(machine, p),
                 };
                 f.take(&mut d, &now);
+                agent_alone(f, &mut d, &now);
                 self.put_defaults(machine, project, d, cx);
             }
         }
@@ -490,5 +637,96 @@ impl Dent {
             ));
         }
         v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Pending, fold};
+    use dent_protocol::{Defaults, Permission};
+
+    fn merge(d: Defaults, unset: &[&str]) -> Pending {
+        Pending {
+            id: 0,
+            machine: "m".into(),
+            project: None,
+            defaults: d,
+            merge: true,
+            unset: unset.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn changes_made_while_a_machine_is_away_all_take() {
+        let has = Defaults {
+            model: Some("opus".into()),
+            effort: Some("high".into()),
+            permission: Some(Permission::Ask),
+            ..Default::default()
+        };
+        // Model, then effort, then permission back to the default.
+        let a = merge(
+            Defaults {
+                model: Some("sonnet".into()),
+                ..Default::default()
+            },
+            &[],
+        );
+        let b = merge(
+            Defaults {
+                effort: Some("low".into()),
+                ..Default::default()
+            },
+            &[],
+        );
+        let c = merge(Defaults::default(), &["permission"]);
+        let one = fold(Some(fold(Some(a), b)), c);
+        let now = one.over(&has);
+        assert_eq!(now.model.as_deref(), Some("sonnet"));
+        assert_eq!(now.effort.as_deref(), Some("low"));
+        assert_eq!(now.permission, None);
+        // Set back to the default, then set again: the later wins.
+        let d = merge(
+            Defaults {
+                permission: Some(Permission::Full),
+                ..Default::default()
+            },
+            &[],
+        );
+        assert_eq!(
+            fold(Some(one), d).over(&has).permission,
+            Some(Permission::Full)
+        );
+    }
+
+    #[test]
+    fn a_change_over_a_whole_set_waiting_stays_whole() {
+        let whole = Pending {
+            merge: false,
+            ..merge(
+                Defaults {
+                    model: Some("opus".into()),
+                    worktree: Some(true),
+                    ..Default::default()
+                },
+                &[],
+            )
+        };
+        let m = merge(Defaults::default(), &["model"]);
+        let one = fold(Some(whole), m);
+        assert!(!one.merge);
+        assert_eq!(
+            one.defaults,
+            Defaults {
+                worktree: Some(true),
+                ..Default::default()
+            }
+        );
+        // Whatever the machine has, a whole set is what it gets.
+        let has = Defaults {
+            effort: Some("high".into()),
+            ..Default::default()
+        };
+        assert_eq!(one.over(&has), one.defaults);
     }
 }

@@ -246,6 +246,17 @@ impl Carrier {
             Err(why) => return self.stop(side, why),
         };
         match (std::mem::replace(&mut self.at, At::Done), reply) {
+            // A repository with no remote can't be on another machine, or
+            // be cloned there: said now, before the session is fenced.
+            (At::Remotes, Reply::MoveRemotes { remotes, root, .. })
+                if remotes.is_empty() && !root.is_empty() =>
+            {
+                let name = root.rsplit('/').next().unwrap_or(&root).to_string();
+                self.stop(
+                    Side::From,
+                    format!("{name} has no remote another machine could have it from: push it somewhere first"),
+                )
+            }
             (At::Remotes, Reply::MoveRemotes { remotes, .. }) => {
                 self.in_repo = !remotes.is_empty();
                 self.remotes = remotes.clone();
@@ -966,5 +977,40 @@ mod tests {
         );
         // Every byte there, it reads as arriving rather than still sending.
         assert!(arriving);
+    }
+
+    #[test]
+    fn a_repository_with_no_remote_stops_before_anything_moves() {
+        let mut c = Carrier::new("s", "m1", "b");
+        c.start();
+        let step = c.answer(
+            Side::From,
+            Ok(Reply::MoveRemotes {
+                remotes: vec![],
+                root: "/home/a/app".into(),
+                branch: Some("main".into()),
+            }),
+        );
+        match step {
+            Step::Done(Err(Ended::Stopped {
+                side: Side::From,
+                why,
+            })) => {
+                assert!(why.contains("app has no remote"), "{why}")
+            }
+            other => panic!("{other:?}"),
+        }
+        // Outside a repository (dent's scratch folder), it goes on.
+        let mut c = Carrier::new("s", "m2", "b");
+        c.start();
+        let step = c.answer(
+            Side::From,
+            Ok(Reply::MoveRemotes {
+                remotes: vec![],
+                root: String::new(),
+                branch: None,
+            }),
+        );
+        assert!(!matches!(step, Step::Done(_)), "{step:?}");
     }
 }

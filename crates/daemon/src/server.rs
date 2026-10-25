@@ -127,9 +127,16 @@ pub async fn session(
         let env: Envelope<Request> = match serde_json::from_str(&line) {
             Ok(e) => e,
             Err(e) => {
+                // Answered as the request it was, when its number can be
+                // read: one this daemon doesn't know (from a newer device,
+                // say) is refused, not left unanswered.
+                let req = serde_json::from_str::<serde_json::Value>(&line)
+                    .ok()
+                    .and_then(|v| v.get("req")?.as_u64())
+                    .unwrap_or(0);
                 let _ = tx
                     .send(encode(
-                        0,
+                        req,
                         &Out::Error {
                             message: format!("bad request: {e}"),
                         },
@@ -148,6 +155,24 @@ pub async fn session(
                     },
                 ))
                 .await;
+            continue;
+        }
+        // How the machine is set up asks Git and the GitHub CLI, which can
+        // take seconds: answered alongside, so a message sent meanwhile
+        // isn't held up behind it. (Neither changes what another request
+        // reads in order.)
+        if matches!(env.body, Request::Machine | Request::SetGitUser { .. }) {
+            let (d, tx) = (d.clone(), tx.clone());
+            let body = env.body;
+            tokio::spawn(async move {
+                let msg = match handle(&d, body).await {
+                    Ok(reply) => Out::Reply { reply },
+                    Err(e) => Out::Error {
+                        message: format!("{e:#}"),
+                    },
+                };
+                let _ = tx.send(encode(req, &msg)).await;
+            });
             continue;
         }
         if reads_files(&env.body) {
@@ -678,13 +703,13 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
         Request::SetDefaults { project, defaults } => {
             d.set_defaults(project, defaults)?;
             Reply::Machine {
-                machine: d.machine().await,
+                machine: d.machine_after().await,
             }
         }
         Request::SetLan { on } => {
             d.set_lan(on)?;
             Reply::Machine {
-                machine: d.machine().await,
+                machine: d.machine_after().await,
             }
         }
         Request::SetLoginItem { on } => {
