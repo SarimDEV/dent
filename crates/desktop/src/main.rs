@@ -20,6 +20,7 @@ mod compose;
 mod context;
 mod data;
 mod defaults;
+mod spread;
 mod diagram;
 mod draft;
 mod ds;
