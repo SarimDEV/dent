@@ -244,16 +244,17 @@ struct Node {
     name_w: Option<f32>,
 }
 
-/// Where the connected machines' rows sit, top to bottom by preference:
-/// two far apart first, then the two between.
-const LANES: [f32; 4] = [54., 136., 96., 172.];
+/// Where the connected machines' rows sit, by preference: top, bottom,
+/// then the middle, each clear of the others, so three at one round trip
+/// all show.
+const LANES: [f32; 3] = [54., 166., 110.];
 
 /// How tall a machine and its words stand on the map.
 const NODE_H: f32 = NODE;
 
 /// How far right of its round trip a machine may sit to find room: a
 /// little, so where it sits still says how fast it answers.
-const NUDGE_MAX: f32 = 160.;
+const NUDGE_MAX: f32 = 120.;
 
 /// A place for each connected machine, in the order given (which keeps
 /// first): each `(x, w)` its holder's centre and how far right its words
@@ -672,6 +673,8 @@ impl Dent {
             .iter()
             .filter(|m| !Standing::of(m).connected())
             .count();
+        // With none away, the connected ones have the whole map.
+        let edge = if away == 0 { 1. - 0.02 } else { AWAY_X };
         let more = far_n.saturating_sub(FAR_MAX);
         let far_n = far_n.min(FAR_MAX);
         // How wide the map was last drawn, for what fits beside what.
@@ -699,14 +702,14 @@ impl Dent {
                 .map(|m| {
                     let ms = m.rtt.unwrap_or(1);
                     let x = axis_x(ms) * strip_w;
-                    let room = (AWAY_X * strip_w - x - NODE / 2.).max(48.);
+                    let room = (edge * strip_w - x - NODE / 2.).max(48.);
                     (
                         x,
                         words_w(&crate::data::machine_short(m.name()), ms).min(room),
                     )
                 })
                 .collect::<Vec<_>>(),
-            AWAY_X * strip_w,
+            edge * strip_w,
         );
         let lane_of: HashMap<&str, Option<(f32, f32)>> = connected
             .iter()
@@ -741,7 +744,7 @@ impl Dent {
             };
             let name = crate::data::machine_short(m.name());
             let name_w = st.connected().then(|| {
-                let room = (AWAY_X - x) * strip_w - NODE / 2.;
+                let room = (edge - x) * strip_w - NODE / 2.;
                 words_w(&name, m.rtt.unwrap_or(1)).min(room) - space::S3
             });
             nodes.push(Node {
@@ -780,11 +783,13 @@ impl Dent {
                         }
                     }
                 }
-                let mut p = PathBuilder::stroke(px(1.));
-                p.move_to(at(AWAY_X * w, 18.));
-                p.line_to(at(AWAY_X * w, STRIP_H - 16.));
-                if let Ok(p) = p.build() {
-                    window.paint_path(p, hair);
+                if away > 0 {
+                    let mut p = PathBuilder::stroke(px(1.));
+                    p.move_to(at(AWAY_X * w, 18.));
+                    p.line_to(at(AWAY_X * w, STRIP_H - 16.));
+                    if let Ok(p) = p.build() {
+                        window.paint_path(p, hair);
+                    }
                 }
                 let home = (HOME_X * w, home_y);
                 let phase = (crate::cards::now_ms() % 1800) as f32 / 1800.;
@@ -842,7 +847,7 @@ impl Dent {
                 .child(text)
         };
         let node_el = |n: &Node, size: f32, below: bool, i: usize| {
-            let limit = if n.standing.connected() { AWAY_X } else { 1. };
+            let limit = if n.standing.connected() { edge } else { 1. };
             let room = (limit - n.x) * strip_w - size / 2. - space::S3 - space::S3;
             let faded = matches!(n.standing, Standing::Unreachable | Standing::Blocked);
             // On the page's own colour: a link to a machine further on
