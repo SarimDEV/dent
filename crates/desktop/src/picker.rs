@@ -354,6 +354,8 @@ impl Dent {
         self.ask_elsewhere();
         self.menu_query.update(cx, |f, cx| {
             put(f, "", window, cx);
+            // The field is shared with the machines' search.
+            f.set_placeholder("Search projects, or type a path", window, cx);
             f.focus_field(window, cx);
         });
     }

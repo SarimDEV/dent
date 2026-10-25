@@ -46,26 +46,27 @@ pub fn spread(values: &[(String, String)]) -> Spread {
         };
     }
     // The odd ones first, by name; the most common last, counted.
-    groups.sort_by(|a, b| a.names.len().cmp(&b.names.len()).then(a.value.cmp(&b.value)));
+    groups.sort_by(|a, b| {
+        a.names
+            .len()
+            .cmp(&b.names.len())
+            .then(a.value.cmp(&b.value))
+    });
     Spread::Mixed(groups)
 }
 
 impl Spread {
-    /// The line under the setting's name: "Sonnet on all 4", "On this
-    /// Mac" (one machine), "Mixed: 3 differ".
-    pub fn summary(&self) -> String {
+    /// The line under a setting whose value shows beside it: "On all 4",
+    /// "3 of 20 differ".
+    pub fn brief(&self) -> String {
         match self {
             Spread::Unknown => "Not known yet".into(),
-            Spread::Same { value, count: 1 } => value.clone(),
-            Spread::Same { value, count } => format!("{value} on all {count}"),
+            Spread::Same { count: 1, .. } => String::new(),
+            Spread::Same { count, .. } => format!("On all {count}"),
             Spread::Mixed(groups) => {
-                let most = groups.last().map_or(0, |g| g.names.len());
                 let all: usize = groups.iter().map(|g| g.names.len()).sum();
-                let differ = all - most;
-                format!(
-                    "Mixed: {differ} differ{}",
-                    if differ == 1 { "s" } else { "" }
-                )
+                let most = groups.last().map_or(0, |g| g.names.len());
+                format!("{} of {all} differ", all - most)
             }
         }
     }
@@ -104,7 +105,10 @@ impl Spread {
 
 /// "gpu-box, gpu-2 and build-box"; past a few, "…, and 4 more".
 fn named(names: &[String]) -> String {
-    let short: Vec<String> = names.iter().map(|n| crate::data::machine_short(n)).collect();
+    let short: Vec<String> = names
+        .iter()
+        .map(|n| crate::data::machine_short(n))
+        .collect();
     match short.len() {
         0 => String::new(),
         1 => short[0].clone(),
@@ -118,31 +122,51 @@ mod tests {
     use super::*;
 
     fn of(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn beside_its_value_it_says_only_how_many() {
+        assert_eq!(
+            spread(&of(&[("a", "Full"), ("b", "Full")])).brief(),
+            "On all 2"
+        );
+        assert_eq!(
+            spread(&of(&[("a", "Full"), ("b", "Ask"), ("c", "Full")])).brief(),
+            "1 of 3 differ"
+        );
+        assert_eq!(spread(&of(&[("a", "Full")])).brief(), "");
     }
 
     #[test]
     fn one_value_everywhere_is_said_once() {
         let s = spread(&of(&[("a", "Full"), ("b", "Full"), ("c", "Full")]));
-        assert_eq!(s.summary(), "Full on all 3");
+        assert_eq!(s.brief(), "On all 3");
         assert!(s.lines().is_empty());
-        assert_eq!(spread(&of(&[("mac", "Full")])).summary(), "Full");
-        assert_eq!(spread(&[]).summary(), "Not known yet");
+        assert_eq!(spread(&of(&[("mac", "Full")])).brief(), "");
+        assert_eq!(spread(&[]).brief(), "Not known yet");
     }
 
     /// Twenty machines, three differ: the three by name, the rest counted.
     #[test]
     fn many_machines_name_the_odd_ones_and_count_the_rest() {
-        let mut v: Vec<(String, String)> = (0..17).map(|i| (format!("m{i}"), "Full".into())).collect();
+        let mut v: Vec<(String, String)> =
+            (0..17).map(|i| (format!("m{i}"), "Full".into())).collect();
         for n in ["gpu-box", "gpu-2", "build-box"] {
             v.push((n.into(), "Ask".into()));
         }
         let s = spread(&v);
-        assert_eq!(s.summary(), "Mixed: 3 differ");
+        assert_eq!(s.brief(), "3 of 20 differ");
         assert_eq!(
             s.lines(),
             [
-                ("Ask".to_string(), "gpu-box, gpu-2 and build-box".to_string()),
+                (
+                    "Ask".to_string(),
+                    "gpu-box, gpu-2 and build-box".to_string()
+                ),
                 ("Full".to_string(), "the other 17".to_string()),
             ]
         );
@@ -153,17 +177,22 @@ mod tests {
     /// larger counted; one machine apart says "1 differs".
     #[test]
     fn big_groups_are_cut_short() {
-        let mut v: Vec<(String, String)> = (0..9).map(|i| (format!("ci-{i}"), "On".into())).collect();
+        let mut v: Vec<(String, String)> =
+            (0..9).map(|i| (format!("ci-{i}"), "On".into())).collect();
         v.extend((0..11).map(|i| (format!("m{i}"), "Off".into())));
         let s = spread(&v);
-        assert_eq!(s.summary(), "Mixed: 9 differ");
+        assert_eq!(s.brief(), "9 of 20 differ");
         assert_eq!(s.lines()[0].1, "ci-0, ci-1, ci-2, ci-3, ci-4 and 4 more");
         assert_eq!(s.lines()[1].1, "the other 11");
         let s = spread(&of(&[("a", "Full"), ("b", "Ask")]));
-        assert_eq!(s.summary(), "Mixed: 1 differs");
+        assert_eq!(s.brief(), "1 of 2 differ");
         // Few: everyone named, no "the other".
         assert_eq!(s.lines()[1].1, "a");
-        let long = spread(&of(&[("research-gpu-cluster-node-07", "Ask"), ("b", "Full"), ("c", "Full")]));
+        let long = spread(&of(&[
+            ("research-gpu-cluster-node-07", "Ask"),
+            ("b", "Full"),
+            ("c", "Full"),
+        ]));
         assert_eq!(long.lines()[0].1, "research-gpu-c…-node-07");
     }
 }

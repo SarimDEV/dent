@@ -5700,7 +5700,7 @@ impl Dent {
     }
 
     /// One remembered choice; a click opens its menu.
-    fn chip(
+    pub fn chip(
         &mut self,
         which: Menu,
         icon_name: &str,
@@ -5817,6 +5817,8 @@ impl Dent {
                                 Menu::SessionMachine => {
                                     "Where it runs: another machine moves it there".into()
                                 }
+                                Menu::SetDefault(_) => "How new sessions start".into(),
+                                Menu::SettingsMachines => "Your other machines".into(),
                             },
                             t,
                         ))
@@ -5922,6 +5924,8 @@ impl Dent {
             Menu::Pickup => self.pickup_entries(),
             Menu::Machine => self.machine_entries(),
             Menu::SessionMachine => self.move_entries(),
+            Menu::SetDefault(f) => self.set_default_entries(f),
+            Menu::SettingsMachines => self.more_machine_entries(cx),
             Menu::Stash => self.stash_entries(),
             Menu::Agent => {
                 let current = self.agent_id_on(&self.defaults.machine, self.new_agent().as_deref());
