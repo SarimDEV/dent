@@ -17,6 +17,9 @@ pub struct GitUserEdit {
     pub machine: String,
     /// The request saving it, while it's out.
     pub sent: Option<u64>,
+    /// One that went unanswered in time but may yet: its answer still
+    /// closes the field.
+    pub late: Option<u64>,
     pub error: Option<String>,
 }
 
@@ -43,6 +46,7 @@ impl Dent {
         self.git_user_edit = Some(GitUserEdit {
             machine: machine.to_string(),
             sent: None,
+            late: None,
             error: None,
         });
         self.git_user_input.update(cx, |i, cx| {
@@ -74,8 +78,19 @@ impl Dent {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(PATIENCE).await;
             let _ = this.update(cx, |this, cx| {
-                let why = format!("{} didn't answer", this.machine_name(&machine));
-                this.waiting_remove(n);
+                if !this.is_waiting(n) {
+                    return;
+                }
+                let name = this.machine_name(&machine);
+                // Never sent (its link is down): taken back, so it can't
+                // land later behind your back. Sent: it may yet, and the
+                // row takes the answer whenever it comes.
+                let why = if !machine.is_empty() && this.live.cancel(&machine, n) {
+                    this.waiting_remove(n);
+                    format!("{name} isn't connected, so nothing was saved")
+                } else {
+                    format!("{name} hasn't answered; it may still save it")
+                };
                 this.git_user_came(&machine, n, Err(why), cx);
             });
         })
@@ -95,7 +110,8 @@ impl Dent {
         let ours = self
             .git_user_edit
             .as_ref()
-            .is_some_and(|e| e.sent == Some(n));
+            // A late one counts only while nothing newer is out.
+            .is_some_and(|e| e.sent == Some(n) || (e.sent.is_none() && e.late == Some(n)));
         if let Ok(m) = &answer {
             if machine.is_empty() {
                 self.machine_check = Some(m.clone());
@@ -108,7 +124,10 @@ impl Dent {
         match answer {
             Ok(_) => self.git_user_edit = None,
             Err(why) => {
+                let awaited = self.is_waiting(n);
                 if let Some(e) = self.git_user_edit.as_mut() {
+                    // Still awaited (it may yet save): its answer counts.
+                    e.late = (e.sent == Some(n) && awaited).then_some(n);
                     e.sent = None;
                     e.error = Some(why);
                 }

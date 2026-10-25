@@ -743,11 +743,11 @@ impl Render for Dent {
                 // Esc backs out one thing at a time; with nothing open it moves
                 // to the inbox, where arrows move and Enter opens.
                 if this.switch_cancel(cx)
-                    || this.cancel_git_user(cx)
                     // A menu is on top of whatever it's over (Settings, say):
                     // the project picker steps back first.
                     || this.project_back(window, cx)
                     || this.menu.take().is_some()
+                    || this.cancel_git_user(cx)
                     || std::mem::take(&mut this.keys_open)
                     || this.escape_adding(window, cx)
                     || this.close_pane(cx)

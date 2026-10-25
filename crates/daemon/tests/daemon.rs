@@ -108,7 +108,12 @@ impl World {
         let mut c = Command::new(env!("CARGO_BIN_EXE_dent-daemon"));
         c.arg("--state").arg(&self.state);
         for (k, v) in &self.env {
-            c.env(k, v);
+            // Named with no value: not set at all.
+            if v.is_empty() {
+                c.env_remove(k);
+            } else {
+                c.env(k, v);
+            }
         }
         c.stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -5243,6 +5248,7 @@ fn who_commits_are_by_is_set_from_a_device() {
     std::fs::create_dir_all(&home).unwrap();
     let config = home.join(".gitconfig");
     let (h, c) = (home.display().to_string(), config.display().to_string());
+    // Not set at all, so Git's settings are what commits take.
     let w = World::new(&[
         ("HOME", &h),
         ("GIT_CONFIG_GLOBAL", &c),

@@ -402,6 +402,22 @@ pub(super) fn settings_many() -> Vec<(f32, Act)> {
             ),
         ),
         (0.5, Shot("settings-made-all")),
+        // Twenty machines on their page: every shape used, solid then
+        // outlined, before any comes again.
+        (0.2, Click("settings-tab-machines")),
+        (
+            0.1,
+            Until(
+                "all twelve shapes are used before any repeats",
+                |d, _| {
+                    let shapes = d.shapes();
+                    let used: std::collections::HashSet<_> = shapes.values().collect();
+                    shapes.len() >= 20 && used.len() == 12
+                },
+                3.,
+            ),
+        ),
+        (0.6, Shot("settings-machines-shapes")),
     ]
 }
 
@@ -681,6 +697,19 @@ pub(super) fn settings_projects() -> Vec<(f32, Act)> {
 /// name and address is refused there, then a real one is saved. Walked
 /// with a Git settings file of its own (see walk.sh).
 pub(super) fn git_user() -> Vec<(f32, Act)> {
+    // It saves who commits are by for real: only with walk.sh's own Git
+    // settings file, never yours.
+    let own = std::env::var("GIT_CONFIG_GLOBAL").is_ok_and(|p| p.contains("dent-walk."));
+    if !own {
+        return vec![(
+            0.,
+            Until(
+                "walked by walk.sh, with a Git settings file of its own",
+                |_, _| false,
+                0.1,
+            ),
+        )];
+    }
     vec![
         (0.3, Key("cmd-,")),
         (0.2, Click("settings-tab-agents")),

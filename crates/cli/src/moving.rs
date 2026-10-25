@@ -95,8 +95,13 @@ pub async fn run(args: &[String]) -> Result<()> {
     // it leaves says it went to.
     let target = super::saved(&to_name)?.name;
     let mut carrier = Carrier::new(session, &id, &target);
+    // What cloning takes is asked before anyone knows whether it's
+    // needed: what stops a clone doesn't stop a move that needs none.
     if clone {
-        carrier = carrier.clone_there(clone_there(&mut from, session).await?);
+        match clone_there(&mut from, session).await {
+            Ok(c) => carrier = carrier.clone_there(c),
+            Err(why) => eprintln!("  can't clone it there if needed: {why:#}"),
+        }
     }
     let mut step = carrier.start();
     let mut said = None;

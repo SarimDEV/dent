@@ -152,12 +152,31 @@ impl Dent {
     /// The Settings › Agents page: tabs when there's more than one machine.
     pub fn agents_body(&mut self, room: f32, cx: &mut Context<Self>) -> AnyElement {
         let ids = self.machine_ids();
-        if ids.len() == 1 {
-            return self.machine_body("", cx);
-        }
         // A machine gone since is no tab to be on.
         if self.agents_tab.as_ref().is_some_and(|m| !ids.contains(m)) {
             self.agents_tab = None;
+        }
+        // What's open on a machine not shown now closes: Esc, a menu or a
+        // reply never lands on a page out of sight.
+        let shown = (ids.len() == 1 || self.agents_tab.is_some()).then(|| self.tab_machine());
+        if self
+            .git_user_edit
+            .as_ref()
+            .map(|e| Some(&e.machine))
+            .is_some_and(|m| m != shown.as_ref())
+        {
+            self.git_user_edit = None;
+        }
+        if self
+            .agents_project
+            .as_ref()
+            .map(|(m, _)| Some(m))
+            .is_some_and(|m| m != shown.as_ref())
+        {
+            self.agents_project = None;
+        }
+        if ids.len() == 1 {
+            return self.machine_body("", cx);
         }
         let tabs = self.agents_tabs(room, &ids, cx);
         let body = match self.agents_tab.clone() {
@@ -171,6 +190,15 @@ impl Dent {
             .child(div().h(px(space::S4)))
             .child(body)
             .into_any_element()
+    }
+
+    /// The machine whose page is open in Settings › Agents: with one
+    /// machine, this one whatever tab was last open; on All, "" too.
+    pub fn tab_machine(&self) -> String {
+        if self.machine_ids().len() == 1 {
+            return String::new();
+        }
+        self.agents_tab.clone().unwrap_or_default()
     }
 
     /// All machines, then the machines that fit, then "N more".

@@ -936,7 +936,7 @@ pub struct Dent {
     /// its choices a line each.
     pub agents_project: Option<(String, String)>,
     /// Each machine's projects, as it last said, for giving one its own.
-    pub tab_projects: HashMap<String, Vec<dent_protocol::Project>>,
+    pub tab_projects: HashMap<String, Result<Vec<dent_protocol::Project>, String>>,
     /// The machines Settings › Agents had no room to give a tab, as last
     /// drawn: "N more" lists them.
     pub agents_hidden: Vec<String>,
@@ -4001,7 +4001,10 @@ impl Dent {
                 Out::Reply {
                     reply: Reply::Projects { projects },
                 },
-            ) => self.tab_projects_came(machine, projects, cx),
+            ) => self.tab_projects_came(machine, Ok(projects), cx),
+            (Waiting::TabProjects(machine), Out::Error { message }) => {
+                self.tab_projects_came(machine, Err(message), cx)
+            }
             (Waiting::TabProjects(_), _) => {}
             (
                 Waiting::SetDefaults(sent),
@@ -6036,6 +6039,11 @@ impl Dent {
         self.waiting.insert(n, w);
     }
 
+    /// Still waiting for the reply to request `n`.
+    pub fn is_waiting(&self, n: u64) -> bool {
+        self.waiting.contains_key(&n)
+    }
+
     /// Stop waiting for the reply to request `n`.
     pub fn waiting_remove(&mut self, n: u64) {
         self.waiting.remove(&n);
@@ -6112,7 +6120,7 @@ impl Dent {
                 f.focus_field(window, cx);
             }),
             Menu::KeepProject => {
-                self.ask_tab_projects();
+                self.ask_tab_projects(cx);
                 self.menu_query.update(cx, |f, cx| {
                     put(f, "", window, cx);
                     f.set_placeholder("Find a project", window, cx);

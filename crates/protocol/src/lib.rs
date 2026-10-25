@@ -993,6 +993,9 @@ pub struct Machine {
     /// no name or email to use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_user: Option<String>,
+    /// It takes `SetGitUser` (older daemons leave this out).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub git_user_settable: bool,
     pub gh: Gh,
     /// The daemon starts at login.
     pub login_item: bool,

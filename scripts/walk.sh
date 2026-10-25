@@ -119,7 +119,9 @@ chmod +x "$root/gh"
 # the walk's, and nothing in the environment to win over them.
 author=(GIT_AUTHOR_NAME=walk GIT_AUTHOR_EMAIL=walk@example.com)
 if [[ "$name" == git-user ]]; then
-  author=(GIT_AUTHOR_NAME= GIT_AUTHOR_EMAIL= GIT_CONFIG_GLOBAL="$root/home/.gitconfig")
+  author=(-u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL GIT_CONFIG_GLOBAL="$root/home/.gitconfig")
+  git config --file "$root/home/.gitconfig" user.name walk
+  git config --file "$root/home/.gitconfig" user.email walk@example.com
 fi
 env "${author[@]}" \
 HOME="$root/home" \

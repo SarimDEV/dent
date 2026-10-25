@@ -139,6 +139,9 @@ impl Dent {
 
     pub fn close_pane(&mut self, cx: &mut Context<Self>) -> bool {
         let was = self.pane.take();
+        // Half-typed there, it isn't saved behind your back.
+        self.git_user_edit = None;
+        self.agents_project = None;
         if was == Some(Pane::Welcome) {
             // Seen once is enough; the banner keeps saying what's missing.
             self.onboarded = true;
@@ -532,6 +535,23 @@ impl Dent {
                         this.save_git_user(cx)
                     }),
                 );
+        }
+        // A daemon from before it could be changed from here: Git's lines.
+        if !m.git_user_settable {
+            let line = match &m.git_user {
+                Some(who) => line.value(who.clone()),
+                None => line
+                    .mark(Some(Mark::Attention))
+                    .under("Git has no name and email for commits, so committing fails"),
+            };
+            return line
+                .under(if machine.is_empty() {
+                    "Restart dent to change it from here, or run:"
+                } else {
+                    "Update dent there to change it from here, or run on it:"
+                })
+                .code("git config --global user.name \"Your Name\"")
+                .code("git config --global user.email you@example.com");
         }
         let (now, there) = (m.git_user.clone(), machine.to_string());
         let change = self.small_button(
@@ -1038,6 +1058,10 @@ impl Dent {
 
     /// Show a page of Settings; each asks again how things stand.
     pub fn open_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
+        if tab != self.settings_tab {
+            self.git_user_edit = None;
+            self.agents_project = None;
+        }
         self.settings_tab = tab;
         if tab == Tab::Machines {
             self.ask(Request::Devices, Waiting::Devices);

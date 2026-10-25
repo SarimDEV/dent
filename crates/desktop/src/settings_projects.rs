@@ -12,6 +12,9 @@ use crate::defaults::Field;
 use crate::settings::Line;
 use crate::settings_agents::field_title;
 
+/// How long a machine has to say its projects.
+const PROJECTS_PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// The choices a project can have its own of, as on the tab.
 const FIELDS: [Field; 4] = [
     Field::Model,
@@ -136,13 +139,34 @@ impl Dent {
     }
 
     /// Ask the open tab's machine which projects it has, for the menu.
-    pub fn ask_tab_projects(&mut self) {
-        let m = self.agents_tab.clone().unwrap_or_default();
+    pub fn ask_tab_projects(&mut self, cx: &mut Context<Self>) {
+        let m = self.tab_machine();
         let n = self.live.send_to(&m, Request::Projects);
-        self.waiting_insert(n, Waiting::TabProjects(m));
+        self.waiting_insert(n, Waiting::TabProjects(m.clone()));
+        // Asked again each time the menu opens: what it said last stands
+        // meanwhile, and a machine that never answers is said to.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PROJECTS_PATIENCE).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.is_waiting(n) {
+                    this.waiting_remove(n);
+                    if !this.tab_projects.contains_key(&m) {
+                        let why = format!("{} didn't answer", this.machine_name(&m));
+                        this.tab_projects.insert(m.clone(), Err(why));
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
-    pub fn tab_projects_came(&mut self, m: String, projects: Vec<Project>, cx: &mut Context<Self>) {
+    pub fn tab_projects_came(
+        &mut self,
+        m: String,
+        projects: Result<Vec<Project>, String>,
+        cx: &mut Context<Self>,
+    ) {
         self.tab_projects.insert(m, projects);
         if self.menu == Some(Menu::KeepProject) {
             self.menu_ix = self
@@ -156,9 +180,11 @@ impl Dent {
     /// The open tab's projects without their own yet, searched by name or
     /// folder.
     pub fn keep_project_entries(&self, cx: &App) -> Vec<Entry> {
-        let m = self.agents_tab.clone().unwrap_or_default();
-        let Some(all) = self.tab_projects.get(&m) else {
-            return vec![Entry::note("Asking which projects it has…")];
+        let m = self.tab_machine();
+        let all = match self.tab_projects.get(&m) {
+            None => return vec![Entry::note("Asking which projects it has…")],
+            Some(Err(why)) => return vec![Entry::note(why)],
+            Some(Ok(all)) => all,
         };
         let q = self.menu_query.read(cx).value().trim().to_lowercase();
         let own = self.own_projects(&m);
@@ -200,7 +226,7 @@ impl Dent {
     /// Choice `f` for the open project: the machine's, or a value of its
     /// own.
     pub fn project_default_entries(&self, f: Field) -> Vec<Entry> {
-        let m = self.agents_tab.clone().unwrap_or_default();
+        let m = self.tab_machine();
         let Some(p) = self.open_project(&m).map(str::to_string) else {
             return Vec::new();
         };
