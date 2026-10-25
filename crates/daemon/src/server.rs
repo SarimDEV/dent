@@ -675,6 +675,12 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
         Request::Machine => Reply::Machine {
             machine: d.machine().await,
         },
+        Request::SetDefaults { project, defaults } => {
+            d.set_defaults(project, defaults)?;
+            Reply::Machine {
+                machine: d.machine().await,
+            }
+        }
         Request::SetLan { on } => {
             d.set_lan(on)?;
             Reply::Machine {

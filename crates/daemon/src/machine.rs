@@ -60,8 +60,10 @@ pub fn check(path: &str) -> Machine {
         gh,
         login_item: crate::login::is_on(),
         login_item_blocked: crate::login::blocked(),
-        // The daemon says this one.
+        // The daemon says these.
         lan: false,
+        defaults: None,
+        project_defaults: Default::default(),
     }
 }
 

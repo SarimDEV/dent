@@ -693,6 +693,10 @@ pub enum Waiting {
     Agents,
     /// The agents another machine drives, and how each stands.
     MachineAgents(String),
+    /// How a machine is set up, its defaults among it (decision 0076).
+    MachineSetup(String),
+    /// A change to a machine's defaults, sent.
+    SetDefaults(crate::defaults::Pending),
     Machine,
     Files(String),
     Recent,
@@ -819,7 +823,6 @@ pub struct Dent {
     pub recall: Option<Recall>,
     pub defaults: Defaults,
     /// Each project's last new-session choices, by folder ("" for none).
-    pub project_prefs: std::collections::BTreeMap<String, crate::prefs::ProjectPrefs>,
     /// The new session's project as a repository: the folder asked about,
     /// and once the daemon says, what it is (`None` inside: not a repo).
     pub repo: Option<(String, Option<Option<dent_protocol::Repo>>)>,
@@ -864,6 +867,17 @@ pub struct Dent {
     /// How this Mac stands for Git, GitHub and starting at login, as the
     /// daemon last said.
     pub machine_check: Option<dent_protocol::Machine>,
+    /// How each machine is set up, as it last said, by id ("" is this one):
+    /// how new sessions start there among it.
+    pub setups: HashMap<String, dent_protocol::Machine>,
+    /// Changes to machines' defaults not yet heard to have taken.
+    pub pending_defaults: Vec<crate::defaults::Pending>,
+    /// What this device's new sessions used last: the defaults on a
+    /// machine that keeps none.
+    pub last_used: dent_protocol::Defaults,
+    /// The defaults last put in the new session's choices, to tell a
+    /// choice picked since from one still as it was put.
+    pub applied: dent_protocol::Defaults,
     /// The agents' standing has been asked and not yet answered.
     pub checking: bool,
     /// The daemon has said how its agents stand (not only what they are).
@@ -1707,7 +1721,6 @@ impl Dent {
             pastes: Rc::new(prefs.pastes.clone()),
             appearance: prefs.appearance,
             pinned: prefs.pinned.clone(),
-            project_prefs: prefs.projects.clone(),
             forced_dark: forced,
             recall: None,
             defaults: Defaults {
@@ -1805,6 +1818,16 @@ impl Dent {
                 .map(crate::machines::MachineView::saved)
                 .collect(),
             machine_id: String::new(),
+            setups: HashMap::new(),
+            pending_defaults: prefs.pending_defaults.clone(),
+            last_used: dent_protocol::Defaults {
+                agent: prefs.agent.clone(),
+                model: prefs.model.clone(),
+                permission: Some(prefs.permission),
+                effort: prefs.effort.clone(),
+                worktree: Some(prefs.worktree),
+            },
+            applied: Default::default(),
             machine_version: String::new(),
             machine_update: None,
             settings_tab: crate::settings::Tab::General,
@@ -3154,6 +3177,8 @@ impl Dent {
                     self.machine_version = version;
                     self.machine_update = update;
                     self.connection = Ok(());
+                    self.ask_setup("");
+                    self.send_pending("");
                     // What each agent is (names, what it can do) from the
                     // welcome; how it stands comes with the Agents reply.
                     let what = |a: &dent_protocol::AgentInfo| {
@@ -3217,6 +3242,12 @@ impl Dent {
                             let up =
                                 matches!(m.state, State::Online | State::Slow) && m.proto.is_some();
                             crate::files::set_online(&id, up, m.proto);
+                        }
+                        // How it's set up (how new sessions start there),
+                        // and changes kept for it while it was away.
+                        if welcome {
+                            self.ask_setup(&id);
+                            self.send_pending(&id);
                         }
                         // Its agents as they stand there, and their models.
                         if welcome {
@@ -3864,7 +3895,27 @@ impl Dent {
                 Out::Reply {
                     reply: Reply::Machine { machine },
                 },
-            ) => self.machine_check = Some(machine),
+            ) => {
+                self.machine_check = Some(machine.clone());
+                self.setup_came(String::new(), machine, cx);
+            }
+            (
+                Waiting::MachineSetup(id),
+                Out::Reply {
+                    reply: Reply::Machine { machine },
+                },
+            ) => self.setup_came(id, machine, cx),
+            (Waiting::MachineSetup(_), _) => {}
+            (
+                Waiting::SetDefaults(sent),
+                Out::Reply {
+                    reply: Reply::Machine { machine },
+                },
+            ) => self.set_defaults_came(sent, Ok(machine), cx),
+            (Waiting::SetDefaults(sent), Out::Error { message }) => {
+                self.set_defaults_came(sent, Err(message), cx)
+            }
+            (Waiting::SetDefaults(_), _) => {}
             (
                 Waiting::Repo(dir),
                 Out::Reply {
@@ -4280,16 +4331,9 @@ impl Dent {
         if self.defaults.project == project {
             return;
         }
-        if let Some(p) = self
-            .project_prefs
-            .get(project.as_deref().unwrap_or_default())
-        {
-            self.defaults.model = p.model.clone();
-            self.defaults.permission = p.permission;
-            self.defaults.effort = p.effort.clone();
-            self.defaults.worktree = p.worktree;
-        }
         self.defaults.project = project;
+        // The project's own defaults over its machine's (decision 0076).
+        self.apply_defaults(false);
     }
 
     /// Whether the next session gets a new worktree: chosen, and the
@@ -5904,6 +5948,8 @@ impl Dent {
         }
         self.defaults.machine = machine.clone();
         self.defaults.project = None;
+        // Its own defaults, where nothing's been picked.
+        self.apply_defaults(false);
         self.defaults.base = None;
         self.defaults.into = None;
         self.repo = None;
@@ -6457,7 +6503,8 @@ impl Dent {
                 .map(|(n, full)| (*n, full.clone()))
                 .collect(),
             stashes: self.stashes.iter().map(saved).collect(),
-            projects: self.project_prefs.clone(),
+            projects: Default::default(),
+            pending_defaults: self.pending_defaults.clone(),
         };
         if self.saved_prefs.as_ref() != Some(&p) {
             crate::prefs::save(&p);
@@ -6710,16 +6757,16 @@ impl Dent {
             Some(_) => (String::new(), None),
             None => d.place(d.project.clone(), self.new_worktree()),
         };
-        // The project keeps what it was started with, for next time.
-        self.project_prefs.insert(
-            d.project.clone().unwrap_or_default(),
-            crate::prefs::ProjectPrefs {
-                model: d.model.clone(),
-                permission: d.permission,
-                effort: d.effort.clone(),
-                worktree: d.worktree,
-            },
-        );
+        // What this device used: the defaults where none are kept. The
+        // next session starts from where it goes again (decision 0076).
+        self.last_used = dent_protocol::Defaults {
+            agent: d.agent.clone(),
+            model: d.model.clone(),
+            permission: Some(d.permission),
+            effort: d.effort.clone(),
+            worktree: Some(d.worktree),
+        };
+        self.apply_defaults(true);
         // An existing worktree is for this session only.
         self.defaults.into = None;
         self.attachments.clear();
@@ -8159,8 +8206,9 @@ impl Dent {
                 session: id,
                 model: model.clone(),
             });
+        } else {
+            self.defaults.model = Some(model);
         }
-        self.defaults.model = Some(model);
         cx.notify();
     }
 
@@ -8174,8 +8222,9 @@ impl Dent {
                 session: id,
                 effort: effort.clone().unwrap_or_default(),
             });
+        } else {
+            self.defaults.effort = effort;
         }
-        self.defaults.effort = effort;
         cx.notify();
     }
 
@@ -8236,8 +8285,9 @@ impl Dent {
                 session: id,
                 permission: p,
             });
+        } else {
+            self.defaults.permission = p;
         }
-        self.defaults.permission = p;
         cx.notify();
     }
 

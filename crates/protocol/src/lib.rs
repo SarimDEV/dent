@@ -1004,6 +1004,50 @@ pub struct Machine {
     /// with a code); paired ones always can.
     #[serde(default)]
     pub lan: bool,
+    /// How new sessions start here ([decision 0076](../../docs/decisions/0076-defaults-on-machines.md)),
+    /// kept here so every device starts them alike; `None` from a daemon
+    /// older than that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defaults: Option<Defaults>,
+    /// A project's own, set on purpose, over those: by its folder here.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub project_defaults: std::collections::BTreeMap<String, Defaults>,
+}
+
+/// How new sessions start: each part `None` until it's set, which leaves
+/// it to what's under it (the machine's under a project's, the agent's
+/// own under the machine's).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct Defaults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<Permission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// A new worktree for each session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<bool>,
+}
+
+impl Defaults {
+    /// Nothing set.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// These, with what `over` sets taking their place.
+    pub fn under(&self, over: &Defaults) -> Defaults {
+        Defaults {
+            agent: over.agent.clone().or_else(|| self.agent.clone()),
+            model: over.model.clone().or_else(|| self.model.clone()),
+            permission: over.permission.or(self.permission),
+            effort: over.effort.clone().or_else(|| self.effort.clone()),
+            worktree: over.worktree.or(self.worktree),
+        }
+    }
 }
 
 /// The GitHub CLI, as pull requests need it.
@@ -1677,6 +1721,14 @@ pub enum Request {
         #[serde(default)]
         continue_here: bool,
     },
+    /// How new sessions start on this machine, or (with `project`, a
+    /// folder here) in that project, replaced whole: what's `None` is
+    /// left to what's under it. Answers [`Reply::Machine`].
+    SetDefaults {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        defaults: Defaults,
+    },
     /// Under the launcher: run `version`, already staged on the machine
     /// (`dent-daemon update DIR`). It's trialled and rolled back if it
     /// fails; the answer says whether the launcher took it on.
@@ -2130,6 +2182,7 @@ impl Request {
             | R::Machine
             | R::SetLan { .. }
             | R::SetLoginItem { .. }
+            | R::SetDefaults { .. }
             | R::Models { .. }
             | R::Usage { .. }
             | R::Recent

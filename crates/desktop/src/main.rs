@@ -19,6 +19,7 @@ mod complete;
 mod compose;
 mod context;
 mod data;
+mod defaults;
 mod diagram;
 mod draft;
 mod ds;
