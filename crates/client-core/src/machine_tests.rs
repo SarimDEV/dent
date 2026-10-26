@@ -474,6 +474,20 @@ fn removal_is_final_even_after_signals() {
 }
 
 #[test]
+fn incompatible_says_which_side_is_older_and_how_to_update_it() {
+    let words = |daemon, client| refusal_words(&Refusal::Incompatible { daemon, client });
+    let machine = words((1, 1), (2, 3));
+    assert!(
+        machine.starts_with("the machine runs an older dent"),
+        "{machine}"
+    );
+    assert!(machine.contains("dent-daemon update"), "{machine}");
+    let app = words((5, 6), (2, 3));
+    assert!(app.starts_with("this app is older"), "{app}");
+    assert!(app.contains("install the latest dent"), "{app}");
+}
+
+#[test]
 fn incompatible_waits_for_a_signal_not_a_timer() {
     let mut s = Sim::new(&[("lan:7480", Addr::Up)]);
     s.trust_device();

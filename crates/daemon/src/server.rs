@@ -219,12 +219,14 @@ pub async fn session(
             continue;
         }
         let out = match env.body {
-            Request::Hello { proto, .. } => {
+            Request::Hello { proto, client } => {
                 // The client names its newest protocol; it talks this
-                // daemon's when that's within its range.
+                // daemon's when that's within its range. Below it, the
+                // client is the older side, and is told so and what to do.
                 if proto < PROTOCOL_MIN {
                     Err(anyhow::anyhow!(
-                        "this daemon speaks protocols {PROTOCOL_MIN} to {PROTOCOL}, the app {proto}; update the app"
+                        "this {client} is older than dent's daemon here (protocol {proto}; the daemon \
+                         speaks {PROTOCOL_MIN} to {PROTOCOL}): install the latest dent on this device"
                     ))
                 } else {
                     hello = true;

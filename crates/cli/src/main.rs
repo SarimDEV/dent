@@ -172,18 +172,21 @@ async fn add(args: &[String]) -> Result<()> {
                 ));
             }
             Note::State(State::Incompatible { daemon, client }) => {
-                break Err(anyhow::anyhow!(
-                    "no protocol in common: {addr} speaks {}–{}, this dent {}–{}; update {}",
-                    daemon.0,
-                    daemon.1,
-                    client.0,
-                    client.1,
-                    if daemon.1 < client.0 {
-                        "the machine"
+                let ranges = format!(
+                    "it speaks protocols {}–{}, this dent {}–{}",
+                    daemon.0, daemon.1, client.0, client.1
+                );
+                break Err(
+                    if dent_client_core::machine::machine_is_older(daemon, client) {
+                        anyhow::anyhow!(
+                            "{addr} runs an older dent ({ranges}): on it, build the latest and run `dent-daemon update` with the build's folder"
+                        )
                     } else {
-                        "this dent"
-                    }
-                ));
+                        anyhow::anyhow!(
+                            "this dent is older than {addr}'s ({ranges}): build the latest dent here"
+                        )
+                    },
+                );
             }
             Note::State(State::TrustedElsewhere { routes }) => {
                 break Err(anyhow::anyhow!(
@@ -380,6 +383,13 @@ fn local(r: Request) -> Result<Reply> {
     s.write_all(&encode(2, &r))?;
     for line in std::io::BufReader::new(s.try_clone()?).lines() {
         let env: Envelope<Out> = serde_json::from_str(&line?)?;
+        // A refused hello is why, not the "hello first" that follows it.
+        if let (1, Out::Error { message }) = (env.req, &env.body) {
+            bail!(
+                "this machine's daemon won't talk to this dent: {message}. One older than this dent \
+                 is replaced when the dent app opens; if this dent is the older, build the latest"
+            );
+        }
         if env.req != 2 {
             continue;
         }
