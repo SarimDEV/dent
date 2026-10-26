@@ -6,6 +6,7 @@
 //! a link's round trip never paces the picture.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -33,9 +34,14 @@ pub struct Blocks {
     have: HashMap<(FileKey, u64), Arc<[u8]>>,
     /// Least used first, for letting go.
     order: VecDeque<(FileKey, u64)>,
-    asked: HashSet<(FileKey, u64)>,
+    /// On their way, and since when: one never answered (its request
+    /// lost with a link) is asked again after [`ASK_EXPIRE`].
+    asked: HashMap<(FileKey, u64), Instant>,
     kept: u64,
 }
+
+/// How long a block asked for is waited on before it's asked again.
+const ASK_EXPIRE: Duration = Duration::from_secs(30);
 
 impl Blocks {
     /// The blocks to ask for so `start..=end` can be answered, and `ahead`
@@ -59,7 +65,12 @@ impl Blocks {
         let mut out = Vec::new();
         for i in first..=upto {
             let k = (file.clone(), i);
-            if !self.have.contains_key(&k) && self.asked.insert(k) {
+            let waiting = self
+                .asked
+                .get(&k)
+                .is_some_and(|at| at.elapsed() < ASK_EXPIRE);
+            if !self.have.contains_key(&k) && !waiting {
+                self.asked.insert(k, Instant::now());
                 out.push(i);
             }
         }
@@ -95,7 +106,11 @@ impl Blocks {
     /// Whether block `i` is here or on its way.
     pub fn asked_for(&self, file: &FileKey, i: u64) -> bool {
         let k = (file.clone(), i);
-        self.have.contains_key(&k) || self.asked.contains(&k)
+        self.have.contains_key(&k)
+            || self
+                .asked
+                .get(&k)
+                .is_some_and(|at| at.elapsed() < ASK_EXPIRE)
     }
 
     /// Everything of a version that's gone (the file was rewritten).
@@ -109,7 +124,7 @@ impl Blocks {
             }
         });
         self.order.retain(|(f, _)| f != file);
-        self.asked.retain(|(f, _)| f != file);
+        self.asked.retain(|(f, _), _| f != file);
     }
 
     /// What can be answered now of `start..=end`: from `start` on, as far
@@ -173,17 +188,28 @@ pub struct Hint {
 /// folder it's named from there, and the name.
 pub type Place = (String, String, String);
 
-/// A file's version, size and the folder its path is from, once known.
-pub type Known = (FileKey, u64, Option<String>);
+/// Where the bytes of a file the server plays come from, once known.
+#[derive(Clone, Debug)]
+pub enum Found {
+    /// Its machine, over the link: its version, size, and the folder its
+    /// path is from.
+    Far(FileKey, u64, Option<String>),
+    /// Its machine away: a whole copy kept here, and its size.
+    Kept(PathBuf, u64),
+}
 
 /// A file the local server plays for a page, by its token.
 struct Served {
     place: Place,
     cwd: String,
     ty: &'static str,
-    /// Its version and size, once the window has looked; `Err` once it
-    /// can't be played (gone, or rewritten).
-    file: Option<Result<Known, String>>,
+    /// Where its bytes come from, once the window has looked; `Err` while
+    /// it can't be played.
+    file: Option<Result<Found, String>>,
+    /// When `file` was last set: an answer is looked again after a while.
+    at: Instant,
+    /// Rewritten while it played: a new token plays the new version.
+    changed: bool,
 }
 
 /// What the player's thread and the window share: the blocks, what's
@@ -197,8 +223,9 @@ struct Shared {
     tokens: HashMap<Place, String>,
     /// Versions rewritten on their machine since.
     gone: HashSet<FileKey>,
-    /// The file last shown: one shown before it stops streaming.
-    current: Option<String>,
+    /// What each viewer shows (by its id): a stream for a token no viewer
+    /// shows any more stops.
+    shown: HashMap<u64, String>,
     /// Bytes fetched from its machine, by path (for walks and logs).
     fetched: HashMap<String, u64>,
 }
@@ -217,26 +244,41 @@ fn wake_window() {
     }
 }
 
-/// The token the local server plays `place` by (made once per place): a
-/// page's video points there, so the player fetches it without the
-/// window's thread between it and the bytes.
-pub fn token_for(place: Place, cwd: &str, ty: &'static str) -> String {
+/// The token the local server plays `place` by, for the viewer `view`
+/// (made once per place): a page's video points there, so the player
+/// fetches it without the window's thread between it and the bytes.
+/// `None` if no token can be made safely (the page plays through the
+/// app's own scheme then).
+pub fn token_for(place: Place, cwd: &str, ty: &'static str, view: u64) -> Option<String> {
     let mut s = shared();
-    if let Some(t) = s.tokens.get(&place).cloned() {
-        // One that can't play any more (rewritten since) is made anew.
-        if !matches!(s.served.get(&t).and_then(|v| v.file.as_ref()), Some(Err(_))) {
-            s.current = Some(t.clone());
-            return t;
+    if let Some(t) = s.tokens.get(&place).cloned()
+        && let Some(v) = s.served.get(&t)
+    {
+        // Rewritten while it played: a new token, the new version.
+        if !v.changed {
+            let shown = s.shown.values().any(|x| *x == t);
+            let stale = v.at.elapsed() > Duration::from_secs(5);
+            // Opened afresh, or what it said a while ago: looked at again,
+            // so a file rewritten since (or there now) is its new self.
+            let again = match &v.file {
+                Some(Err(_)) => stale,
+                Some(Ok(_)) => stale && !shown,
+                None => false,
+            };
+            if again && let Some(v) = s.served.get_mut(&t) {
+                v.file = None;
+                v.at = Instant::now();
+            }
+            s.shown.insert(view, t.clone());
+            return Some(t);
         }
         s.served.remove(&t);
     }
     let mut b = [0u8; 16];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = std::io::Read::read_exact(&mut f, &mut b);
-    }
+    std::io::Read::read_exact(&mut std::fs::File::open("/dev/urandom").ok()?, &mut b).ok()?;
     let t: String = b.iter().map(|x| format!("{x:02x}")).collect();
     s.tokens.insert(place.clone(), t.clone());
-    s.current = Some(t.clone());
+    s.shown.insert(view, t.clone());
     s.served.insert(
         t.clone(),
         Served {
@@ -244,9 +286,16 @@ pub fn token_for(place: Place, cwd: &str, ty: &'static str) -> String {
             cwd: cwd.to_string(),
             ty,
             file: None,
+            at: Instant::now(),
+            changed: false,
         },
     );
-    t
+    Some(t)
+}
+
+/// The viewer `view` shows something else now: what it streamed stops.
+pub fn unshow(view: u64) {
+    shared().shown.remove(&view);
 }
 
 /// A block of `path` came over the link (`bytes` of it).
@@ -276,10 +325,10 @@ pub fn take_fetched(name: &str) -> u64 {
     keys.iter().filter_map(|k| s.fetched.remove(k)).sum()
 }
 
-/// Whether `token` is the file shown now: one shown before stops
-/// streaming, so it never eats the link the new one needs.
+/// Whether a viewer shows `token`'s file: one no longer shown stops
+/// streaming, so it never eats the link another needs.
 pub fn is_current(token: &str) -> bool {
-    shared().current.as_deref() == Some(token)
+    shared().shown.values().any(|t| t == token)
 }
 
 /// What the window should look up: places whose version isn't known yet
@@ -293,29 +342,30 @@ pub fn unknown() -> Vec<(String, Place, String)> {
         .collect()
 }
 
-/// The window looked: `token` is this version now, or can't be played.
-pub fn known(token: &str, file: Result<Known, String>) {
-    if let Some(s) = shared().served.get_mut(token) {
-        s.file = Some(file);
+/// The window looked: `token` plays from here now, or can't be played.
+/// A version known to be gone isn't taken: it's looked at again.
+pub fn known(token: &str, file: Result<Found, String>) {
+    let mut s = shared();
+    let old = matches!(&file, Ok(Found::Far(k, ..)) if s.gone.contains(k));
+    if !old && let Some(v) = s.served.get_mut(token) {
+        v.file = Some(file);
+        v.at = Instant::now();
     }
+    drop(s);
     CAME.notify_all();
 }
 
-/// A file the server plays, once its version is known (asking the window
-/// to look, and waiting up to `patience`).
-pub fn wait_file(
-    token: &str,
-    patience: Duration,
-) -> Result<(FileKey, u64, Option<String>, &'static str), String> {
+/// A file the server plays, once where its bytes come from is known
+/// (asking the window to look, each second, up to `patience`).
+pub fn wait_file(token: &str, patience: Duration) -> Result<(Found, &'static str), String> {
     let until = Instant::now() + patience;
     let mut s = shared();
-    let mut asked = false;
     loop {
         let Some(served) = s.served.get(token) else {
             return Err("not a file this app plays".into());
         };
         match &served.file {
-            Some(Ok((k, t, b))) => return Ok((k.clone(), *t, b.clone(), served.ty)),
+            Some(Ok(f)) => return Ok((f.clone(), served.ty)),
             Some(Err(why)) => return Err(why.clone()),
             None => {}
         }
@@ -323,13 +373,11 @@ pub fn wait_file(
         if left.is_zero() {
             return Err("its machine didn't say".into());
         }
-        if !asked {
-            asked = true;
-            drop(s);
-            wake_window();
-            s = shared();
-            continue;
-        }
+        // The window asked (again each second: it may have been busy, or
+        // not drawing at all), then waited on.
+        drop(s);
+        wake_window();
+        s = shared();
         s = CAME
             .wait_timeout(s, left.min(Duration::from_secs(1)))
             .map_or_else(|e| e.into_inner().0, |r| r.0);
@@ -349,14 +397,14 @@ pub fn wait_bytes(
 ) -> Result<Vec<u8>, String> {
     let until = Instant::now() + patience;
     let mut s = shared();
-    let mut hinted = false;
+    let mut hinted: Option<Instant> = None;
     loop {
         if let Some(b) = s.blocks.serve(file, total, start, end) {
             // Running low ahead: more asked for, without waiting on it.
             let next = start + b.len() as u64;
             if next < total
                 && s.blocks
-                    .serve(file, total, next + AHEAD / 2 * BLOCK, total - 1)
+                    .serve(file, total, next + ahead.div_ceil(2) * BLOCK, total - 1)
                     .is_none()
             {
                 s.hints.push(Hint {
@@ -378,9 +426,12 @@ pub fn wait_bytes(
         if left.is_zero() {
             return Err("its machine didn't send it in time".into());
         }
-        // Not here, nor asked for: the window is asked.
-        if !hinted || !s.blocks.asked_for(file, start / BLOCK) {
-            hinted = true;
+        // Not here, nor on its way: the window is asked, at most twice a
+        // second (a machine refusing it, or away, isn't asked in a storm),
+        // and then it's waited on.
+        let due = hinted.is_none_or(|at| at.elapsed() >= Duration::from_millis(500));
+        if due && !s.blocks.asked_for(file, start / BLOCK) {
+            hinted = Some(Instant::now());
             s.hints.push(Hint {
                 key: file.clone(),
                 total,
@@ -391,7 +442,6 @@ pub fn wait_bytes(
             drop(s);
             wake_window();
             s = shared();
-            continue;
         }
         s = CAME
             .wait_timeout(s, left.min(Duration::from_secs(1)))
@@ -476,8 +526,9 @@ pub fn gone(file: &FileKey) {
     // What plays it stops, never fed the new file's bytes after the
     // old one's start; opened again, it's a new token, the new version.
     for v in s.served.values_mut() {
-        if matches!(&v.file, Some(Ok((k, ..))) if k == file) {
+        if matches!(&v.file, Some(Ok(Found::Far(k, ..))) if k == file) {
             v.file = Some(Err("it changed on its machine".into()));
+            v.changed = true;
         }
     }
     drop(s);
@@ -610,5 +661,39 @@ mod tests {
         assert_eq!((start, all, bytes.len()), (32, total, 8));
         // Little here past it: the window is asked for more.
         assert!(take_hints().iter().any(|h| h.key == f && h.start == 40));
+    }
+
+    #[test]
+    fn two_viewers_each_keep_theirs_and_a_file_that_cant_play_keeps_its_page() {
+        let place = |n: &str| ("m/s1".to_string(), "/d".to_string(), n.to_string());
+        let a = token_for(place("a.mp4"), "/d", "video/mp4", 901).unwrap();
+        let b = token_for(place("b.mp4"), "/d", "video/mp4", 902).unwrap();
+        assert!(is_current(&a) && is_current(&b), "both shown, both stream");
+        // Asked again (each render): the same token, still shown.
+        assert_eq!(
+            token_for(place("a.mp4"), "/d", "video/mp4", 901).unwrap(),
+            a
+        );
+        unshow(902);
+        assert!(is_current(&a) && !is_current(&b));
+        // Not there: the same token (no page reload), looked at again later.
+        known(&a, Err("missing".into()));
+        assert_eq!(
+            token_for(place("a.mp4"), "/d", "video/mp4", 901).unwrap(),
+            a
+        );
+        // Rewritten while it played: a new token, for the new version.
+        let k = FileKey {
+            session: "m/s1".into(),
+            ..key("a.mp4")
+        };
+        known(&a, Ok(Found::Far(k.clone(), 10 * BLOCK, None)));
+        gone(&k);
+        let again = token_for(place("a.mp4"), "/d", "video/mp4", 901).unwrap();
+        assert_ne!(again, a);
+        // That version, gone, is never taken for it again.
+        known(&again, Ok(Found::Far(k, 10 * BLOCK, None)));
+        assert!(unknown().iter().any(|(t, ..)| *t == again));
+        unshow(901);
     }
 }

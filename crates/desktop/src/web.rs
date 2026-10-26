@@ -317,6 +317,8 @@ pub struct FarAsk {
 
 pub struct Preview {
     web: WebView,
+    /// This viewer, among those that play other machines' media.
+    view: u64,
     /// The showing page's machine, when it's another.
     far: Shared<Option<FarRoot>>,
     far_asks: Shared<Vec<FarAsk>>,
@@ -779,7 +781,9 @@ impl Preview {
             objc2_app_kit::NSApplication::sharedApplication(mtm).deactivate();
         }
 
+        static VIEWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Some(Self {
+            view: VIEWS.fetch_add(1, Ordering::Relaxed),
             web,
             far,
             far_asks,
@@ -830,6 +834,7 @@ impl Preview {
 
     /// Show a page of another machine's, its own files fetched from there.
     pub fn show_far(&mut self, name: &str, v: usize, bytes: &[u8], far: FarRoot) {
+        crate::stream::unshow(self.view);
         self.set_far(Some(far));
         self.show_page(name, v, bytes, None);
     }
@@ -840,17 +845,21 @@ impl Preview {
         // A video or a sound plays from this Mac's own media server, so the
         // player reads it without the window's thread in its way.
         let played = crate::data::media_kind(name).is_some_and(|k| k != "PDF");
-        if played && let Some(port) = crate::media_server::port() {
-            let token = crate::stream::token_for(
+        if played
+            && let Some(port) = crate::media_server::port()
+            && let Some(token) = crate::stream::token_for(
                 (far.session.clone(), far.dir.clone(), name.to_string()),
                 &far.cwd,
                 kind(name),
-            );
+                self.view,
+            )
+        {
             let url = crate::media_server::url(port, &token, name);
             self.set_far(Some(far));
             self.show_media_from(name, None, Some((token, url)));
             return;
         }
+        crate::stream::unshow(self.view);
         self.set_far(Some(far));
         self.show_media(name, None);
     }
@@ -867,6 +876,7 @@ impl Preview {
     }
 
     pub fn show(&mut self, name: &str, v: usize, bytes: &[u8], root: Option<&std::path::Path>) {
+        crate::stream::unshow(self.view);
         self.set_far(None);
         self.show_page(name, v, bytes, root);
     }
@@ -971,6 +981,7 @@ impl Preview {
 
     /// Show a dev server. Pages may navigate within its origin.
     pub fn show_server(&mut self, url: &str) {
+        crate::stream::unshow(self.view);
         let src = Source::Server(url.to_string());
         if self.showing.as_ref() == Some(&src) {
             return;

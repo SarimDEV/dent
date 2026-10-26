@@ -9,12 +9,19 @@
 //! written on as they come. A player that stops reading (a seek, the
 //! viewer closed) hangs up, and nothing more is fetched for it.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use crate::stream::{self, AHEAD, BLOCK};
+use crate::stream::{self, AHEAD, BLOCK, Found};
+
+/// Connections served at once, at most (a player opens a few).
+const CONNECTIONS_MAX: usize = 32;
+static CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+/// The longest request line or header read.
+const LINE_MAX: u64 = 8 * 1024;
 
 /// How long a player waits on its machine before hearing it won't come.
 const PATIENCE: Duration = Duration::from_secs(30);
@@ -31,9 +38,19 @@ pub fn port() -> Option<u16> {
             .name("dent-media".into())
             .spawn(move || {
                 for c in l.incoming().flatten() {
-                    let _ = std::thread::Builder::new()
+                    if CONNECTIONS.fetch_add(1, Ordering::AcqRel) >= CONNECTIONS_MAX {
+                        CONNECTIONS.fetch_sub(1, Ordering::AcqRel);
+                        continue;
+                    }
+                    let spawned = std::thread::Builder::new()
                         .name("dent-media-conn".into())
-                        .spawn(move || serve(c));
+                        .spawn(move || {
+                            serve(c);
+                            CONNECTIONS.fetch_sub(1, Ordering::AcqRel);
+                        });
+                    if spawned.is_err() {
+                        CONNECTIONS.fetch_sub(1, Ordering::AcqRel);
+                    }
                 }
             })
             .ok()?;
@@ -63,20 +80,21 @@ struct Ask {
     range: Option<String>,
 }
 
-fn read_ask(r: &mut impl BufRead) -> Option<Ask> {
+/// A line, at most [`LINE_MAX`] long; `None` at the end, or past it.
+fn line(r: &mut impl BufRead) -> Option<String> {
     let mut line = String::new();
-    if r.read_line(&mut line).ok()? == 0 {
-        return None;
-    }
-    let mut parts = line.split_whitespace();
+    let n = r.take(LINE_MAX).read_line(&mut line).ok()?;
+    (n > 0 && line.ends_with('\n')).then_some(line)
+}
+
+fn read_ask(r: &mut impl BufRead) -> Option<Ask> {
+    let first = line(r)?;
+    let mut parts = first.split_whitespace();
     let method = parts.next()?.to_string();
     let path = parts.next()?.to_string();
     let mut range = None;
     loop {
-        let mut h = String::new();
-        if r.read_line(&mut h).ok()? == 0 {
-            return None;
-        }
+        let h = line(r)?;
         let h = h.trim_end();
         if h.is_empty() {
             break;
@@ -109,6 +127,10 @@ fn plain(w: &mut TcpStream, status: &str) -> std::io::Result<()> {
 /// Answer a connection's requests in turn, until the player hangs up.
 fn serve(c: TcpStream) {
     let _ = c.set_nodelay(true);
+    // A player gone quiet lets go of its thread: an idle connection, or
+    // one that stopped reading, ends.
+    let _ = c.set_read_timeout(Some(Duration::from_secs(60)));
+    let _ = c.set_write_timeout(Some(Duration::from_secs(60)));
     // A small send buffer: what's fetched is paced by what the player
     // reads, not by how much the socket would hold.
     {
@@ -138,9 +160,12 @@ fn answer(w: &mut TcpStream, ask: Ask) -> std::io::Result<()> {
     let Some(token) = ask.token else {
         return plain(w, "404 Not Found");
     };
-    let (file, total, base, ty) = match stream::wait_file(&token, PATIENCE) {
+    let (found, ty) = match stream::wait_file(&token, PATIENCE) {
         Ok(f) => f,
         Err(_) => return plain(w, "404 Not Found"),
+    };
+    let total = match &found {
+        Found::Far(_, total, _) | Found::Kept(_, total) => *total,
     };
     let ranged = ask.range.is_some();
     let (start, end) = match ask.range.as_deref() {
@@ -168,22 +193,30 @@ fn answer(w: &mut TcpStream, ask: Ask) -> std::io::Result<()> {
         head.push_str(&format!("Content-Range: bytes {start}-{end}/{total}\r\n"));
     }
     head.push_str("\r\n");
-    // The first bytes before the head, so one that can't come is a 404,
-    // not a cut-off answer. Read ahead only as far as the player keeps
-    // reading on: one probing the container's headers costs a block.
+    // Read ahead only as far as the player keeps reading on: one probing a
+    // container's headers costs a block.
     let ahead = |sent: u64| (1 + sent / (2 * BLOCK)).min(AHEAD);
+    // A piece of it: from its machine, or the copy kept here.
+    let piece = |at: u64, upto: u64, sent: u64| -> Result<Vec<u8>, String> {
+        match &found {
+            Found::Far(file, total, base) => {
+                stream::wait_bytes(file, *total, at, upto, base, ahead(sent), PATIENCE)
+            }
+            Found::Kept(path, _) => {
+                let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+                f.seek(SeekFrom::Start(at)).map_err(|e| e.to_string())?;
+                let mut b = vec![0; (upto - at + 1) as usize];
+                f.read_exact(&mut b).map_err(|e| e.to_string())?;
+                Ok(b)
+            }
+        }
+    };
+    // The first bytes before the head, so one that can't come is a 404,
+    // not a cut-off answer.
     let first = if ask.head || len == 0 {
         Vec::new()
     } else {
-        match stream::wait_bytes(
-            &file,
-            total,
-            start,
-            end.min(start + BLOCK - 1),
-            &base,
-            ahead(0),
-            PATIENCE,
-        ) {
+        match piece(start, end.min(start + BLOCK - 1), 0) {
             Ok(b) => b,
             Err(_) => return plain(w, "404 Not Found"),
         }
@@ -195,14 +228,13 @@ fn answer(w: &mut TcpStream, ask: Ask) -> std::io::Result<()> {
     w.write_all(&first)?;
     let mut at = start + first.len() as u64;
     // On as it comes, a block at a time; a player that hangs up (the write
-    // fails) or moves to another file ends it.
+    // fails) or a file no viewer shows any more ends it.
     while at <= end {
         if !stream::is_current(&token) {
-            return Err(std::io::Error::other("another file is shown"));
+            return Err(std::io::Error::other("no viewer shows it"));
         }
         let upto = end.min(at + BLOCK - 1);
-        let b = stream::wait_bytes(&file, total, at, upto, &base, ahead(at - start), PATIENCE)
-            .map_err(std::io::Error::other)?;
+        let b = piece(at, upto, at - start).map_err(std::io::Error::other)?;
         w.write_all(&b)?;
         at += b.len() as u64;
     }

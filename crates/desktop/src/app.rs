@@ -3899,7 +3899,7 @@ impl Dent {
                 crate::files::stats_came(asks, stats);
                 self.pump_files(cx);
                 // A player waiting on how the file stands goes on now.
-                if !self.far_waiting.is_empty() {
+                if !self.far_waiting.is_empty() || !crate::stream::unknown().is_empty() {
                     self.serve_far(cx);
                 }
                 cx.notify();
@@ -3907,7 +3907,7 @@ impl Dent {
             (Waiting::FileStat(asks), Out::Error { message }) => {
                 crate::files::stats_failed(asks, &message);
                 self.pump_files(cx);
-                if !self.far_waiting.is_empty() {
+                if !self.far_waiting.is_empty() || !crate::stream::unknown().is_empty() {
                     self.serve_far(cx);
                 }
             }
@@ -8765,17 +8765,34 @@ impl Dent {
         let mut looking = false;
         for (token, (session, dir, rel), cwd) in crate::stream::unknown() {
             let ask = crate::files::Ask::new(&session, &rel, &cwd).based(Some(dir));
+            let machine = dent_client_core::fleet::split(&session).0.to_string();
+            // Its machine away: a whole copy kept here plays meanwhile.
+            if !crate::files::online(&machine) {
+                match crate::files::kept_copy(&ask) {
+                    Some(p) => {
+                        // this Mac's: the copy kept here
+                        let size = std::fs::metadata(&p).map_or(0, |m| m.len());
+                        crate::stream::known(&token, Ok(crate::stream::Found::Kept(p, size)));
+                    }
+                    None => crate::stream::known(&token, Err("its machine is away".into())),
+                }
+                continue;
+            }
             match crate::files::stat(&ask) {
-                Look::Here(FileStat::File { stamp, .. })
-                | Look::Stale(FileStat::File { stamp, .. }) => {
+                // Only as it is now: a version from before (being checked
+                // again) is waited out, never played.
+                Look::Here(FileStat::File { stamp, .. }) => {
                     let key = crate::stream::FileKey {
                         session: ask.session.clone(),
                         path: ask.path.clone(),
                         stamp,
                     };
-                    crate::stream::known(&token, Ok((key, stamp.size, ask.base.clone())));
+                    crate::stream::known(
+                        &token,
+                        Ok(crate::stream::Found::Far(key, stamp.size, ask.base.clone())),
+                    );
                 }
-                Look::Loading => looking = true,
+                Look::Loading | Look::Stale(_) => looking = true,
                 Look::Gone(g) => crate::stream::known(&token, Err(format!("{:?}", g.why))),
                 _ => crate::stream::known(&token, Err("it can't be played".into())),
             }
@@ -8938,7 +8955,15 @@ impl Dent {
         base: Option<String>,
         ahead: u64,
     ) {
+        let machine = dent_client_core::fleet::split(&file.session).0.to_string();
+        let away = !crate::files::online(&machine);
         for i in crate::stream::with_blocks(|b| b.plan(file, total, start, end, ahead)) {
+            // Its machine away: not sent to wait there and arrive stale;
+            // asked again when it's wanted and the machine is back.
+            if away {
+                crate::stream::with_blocks(|b| b.failed(file, i));
+                continue;
+            }
             // Sent by its session, so it reaches that machine by the id it
             // knows.
             let req = dent_protocol::Request::Read {
@@ -9000,6 +9025,15 @@ impl Dent {
                 reply: Reply::Bytes { bytes_b64, .. },
             } => {
                 let bytes = dent_protocol::b64::decode(&bytes_b64).unwrap_or_default();
+                // Whole or not at all: a short block would leave a hole no
+                // ask ever gets past.
+                let want = crate::stream::BLOCK
+                    .min(file.stamp.size.saturating_sub(i * crate::stream::BLOCK));
+                if bytes.len() as u64 != want {
+                    crate::stream::with_blocks(|b| b.failed(&file, i));
+                    self.serve_media();
+                    return;
+                }
                 self.far_bytes += bytes.len() as u64;
                 crate::stream::count_fetched(&file.path, bytes.len() as u64);
                 crate::stream::with_blocks(|b| b.put(&file, i, bytes.into()));

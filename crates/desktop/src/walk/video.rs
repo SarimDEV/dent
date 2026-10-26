@@ -143,7 +143,8 @@ fn one() -> Vec<(f32, Act)> {
             Until(
                 "pressed play, it plays",
                 |d, _| player(d).is_some_and(|v| num(&v, "t") > 0.05 && num(&v, "rs") >= 3.),
-                15.,
+                // 4K at 30 Mbit/s over a slower link buffers first.
+                30.,
             ),
         ),
         (
@@ -303,7 +304,100 @@ pub(super) fn video_live() -> Vec<(f32, Act)> {
             0.0,
             Call(|_, _, _| eprintln!("video big.mp4: played 20 s past a daemon restart, {} ms after it", took())),
         ),
+        // Played from what was here, that proves little: its machine back,
+        // somewhere never fetched plays too.
+        (
+            0.5,
+            Until(
+                "its machine is back online",
+                |d, _| d.machines.iter().any(|m| m.rtt.is_some()),
+                60.,
+            ),
+        ),
+        (
+            0.0,
+            Call(|d, _, _| {
+                start_clock();
+                FETCHED.with(|f| *f.borrow_mut() = 0);
+                let _ = crate::stream::take_fetched("big.mp4");
+                on_video(d, "v.currentTime=v.duration*0.45");
+            }),
+        ),
+        (
+            0.3,
+            Until(
+                "and a part never fetched plays, fetched after the restart",
+                |d, _| {
+                    fetched() > 0
+                        && player(d).is_some_and(|v| {
+                            num(&v, "t") >= num(&v, "d") * 0.44 && num(&v, "rs") >= 3. && !v["s"].as_bool().unwrap_or(true)
+                        })
+                },
+                60.,
+            ),
+        ),
+        (
+            0.0,
+            Call(|_, _, _| eprintln!("video big.mp4: after the restart, a new part plays in {} ms, {} KB fetched", took(), fetched() / 1024)),
+        ),
         (1.0, Shot("video-live")),
+    ]);
+    // Rewritten on its machine while not playing: opened again, it's the
+    // new version that plays, never the old one kept in memory.
+    fn vm(cmd: &str) {
+        let _ = std::process::Command::new("/opt/homebrew/bin/limactl")
+            .env("LIMA_HOME", "/Users/sarimdev/.lima")
+            .args(["shell", "dent-linux", "--", "bash", "-lc", cmd])
+            .status();
+    }
+    fn length(d: &Dent) -> Option<f64> {
+        local_player(d, "rw.webm")?;
+        serde_json::from_str::<serde_json::Value>(d.page_probe.as_deref()?)
+            .ok()?
+            .get("d")?
+            .as_f64()
+    }
+    v.extend([
+        (
+            0.2,
+            Call(|d, _, cx| {
+                vm("cp ~/vt/rw-a.webm ~/vt/rw.webm");
+                d.page_probe = None;
+                d.open_file("~/vt/rw.webm", cx);
+            }),
+        ),
+        (
+            0.2,
+            Until(
+                "a 20-second video opens",
+                |d, _| length(d).is_some_and(|l| l > 15.),
+                20.,
+            ),
+        ),
+        (
+            0.2,
+            Call(|d, _, cx| {
+                d.page_probe = None;
+                d.open_file("~/vt/fast.mp4", cx);
+                vm("cp ~/vt/rw-b.webm ~/vt/rw.webm");
+            }),
+        ),
+        // Long enough that what was known of it is looked at again.
+        (
+            7.0,
+            Call(|d, _, cx| {
+                d.page_probe = None;
+                d.open_file("~/vt/rw.webm", cx);
+            }),
+        ),
+        (
+            0.2,
+            Until(
+                "rewritten there, opened again: the new 8-second one plays",
+                |d, _| length(d).is_some_and(|l| l > 6. && l < 10.),
+                30.,
+            ),
+        ),
     ]);
     v
 }
@@ -373,7 +467,7 @@ pub(super) fn video_local() -> Vec<(f32, Act)> {
 fn local_player(d: &Dent, name: &str) -> Option<serde_json::Value> {
     if let Some(p) = &d.preview {
         p.borrow().script(
-            "(()=>{const v=document.querySelector('video');window.ipc.postMessage(JSON.stringify({t:'probe',msg:v?JSON.stringify({src:v.currentSrc,rs:v.readyState}):'none'}))})()",
+            "(()=>{const v=document.querySelector('video');window.ipc.postMessage(JSON.stringify({t:'probe',msg:v?JSON.stringify({src:v.currentSrc,rs:v.readyState,d:v.duration}):'none'}))})()",
         );
     }
     let v: serde_json::Value = serde_json::from_str(d.page_probe.as_deref()?).ok()?;
