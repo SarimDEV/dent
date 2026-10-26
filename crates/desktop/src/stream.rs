@@ -65,11 +65,12 @@ impl Blocks {
         let mut out = Vec::new();
         for i in first..=upto {
             let k = (file.clone(), i);
-            let waiting = self
-                .asked
-                .get(&k)
-                .is_some_and(|at| at.elapsed() < ASK_EXPIRE);
-            if !self.have.contains_key(&k) && !waiting {
+            let asked = self.asked.get(&k);
+            let waiting = asked.is_some_and(|at| at.elapsed() < ASK_EXPIRE);
+            // Long unanswered (a slow link): only what's needed now is
+            // asked again, not what was wanted ahead.
+            let expired_ahead = asked.is_some() && !waiting && i > need;
+            if !self.have.contains_key(&k) && !waiting && !expired_ahead {
                 self.asked.insert(k, Instant::now());
                 out.push(i);
             }
@@ -228,6 +229,30 @@ struct Shared {
     shown: HashMap<u64, String>,
     /// Bytes fetched from its machine, by path (for walks and logs).
     fetched: HashMap<String, u64>,
+    /// Connections streaming each token now.
+    streaming: HashMap<String, usize>,
+}
+
+/// A connection streaming a token, counted while it lives.
+pub struct Streaming(String);
+
+impl Streaming {
+    pub fn new(token: &str) -> Self {
+        *shared().streaming.entry(token.to_string()).or_default() += 1;
+        Self(token.to_string())
+    }
+}
+
+impl Drop for Streaming {
+    fn drop(&mut self) {
+        let mut s = shared();
+        if let Some(n) = s.streaming.get_mut(&self.0) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                s.streaming.remove(&self.0);
+            }
+        }
+    }
 }
 
 static SHARED: LazyLock<Mutex<Shared>> = LazyLock::new(Default::default);
@@ -256,13 +281,14 @@ pub fn token_for(place: Place, cwd: &str, ty: &'static str, view: u64) -> Option
     {
         // Rewritten while it played: a new token, the new version.
         if !v.changed {
-            let shown = s.shown.values().any(|x| *x == t);
+            // Nothing streaming it now (however its viewer went away), and
+            // what it said is a while old: looked at again, so a file
+            // rewritten since (or there now) is its new self.
+            let playing = s.streaming.get(&t).is_some_and(|n| *n > 0);
             let stale = v.at.elapsed() > Duration::from_secs(5);
-            // Opened afresh, or what it said a while ago: looked at again,
-            // so a file rewritten since (or there now) is its new self.
             let again = match &v.file {
                 Some(Err(_)) => stale,
-                Some(Ok(_)) => stale && !shown,
+                Some(Ok(_)) => stale && !playing,
                 None => false,
             };
             if again && let Some(v) = s.served.get_mut(&t) {

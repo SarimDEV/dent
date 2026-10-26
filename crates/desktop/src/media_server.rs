@@ -227,6 +227,9 @@ fn answer(w: &mut TcpStream, ask: Ask) -> std::io::Result<()> {
     }
     w.write_all(&first)?;
     let mut at = start + first.len() as u64;
+    // Counted while it streams: a file nothing streams is looked at again
+    // when it's opened.
+    let _streaming = stream::Streaming::new(&token);
     // On as it comes, a block at a time; a player that hangs up (the write
     // fails) or a file no viewer shows any more ends it.
     while at <= end {

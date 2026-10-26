@@ -304,6 +304,13 @@ pub struct FarRoot {
 pub static FAR_WAKE: std::sync::OnceLock<futures::channel::mpsc::UnboundedSender<()>> =
     std::sync::OnceLock::new();
 
+impl Drop for Preview {
+    /// Gone (a popout closed, a page let go): what it streamed stops.
+    fn drop(&mut self) {
+        crate::stream::unshow(self.view);
+    }
+}
+
 /// A file a far page asked for, waiting for the window to fetch it.
 pub struct FarAsk {
     pub far: FarRoot,
@@ -926,6 +933,7 @@ impl Preview {
     /// Show a video, a sound or a PDF from disk: a PDF as itself, the others
     /// in a page of their own that plays them. Showing it again is a no-op.
     pub fn show_file(&mut self, file: &std::path::Path) {
+        crate::stream::unshow(self.view);
         let (Some(dir), Some(name)) = (file.parent(), file.file_name()) else {
             return;
         };

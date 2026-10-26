@@ -9043,10 +9043,11 @@ impl Dent {
                 reply: Reply::FileGone { changed, .. },
             } => {
                 crate::stream::gone(&file);
-                if changed {
-                    let machine = dent_client_core::fleet::split(&file.session).0.to_string();
-                    crate::files::changed(&machine, Some(&[path.to_string()]));
-                }
+                // Rewritten or deleted alike: what's known of it is checked
+                // again, so its page settles on what's there now.
+                let _ = changed;
+                let machine = dent_client_core::fleet::split(&file.session).0.to_string();
+                crate::files::changed(&machine, Some(&[path.to_string()]));
                 let (gone, still): (Vec<_>, Vec<_>) = std::mem::take(&mut self.media_waiting)
                     .into_iter()
                     .partition(|m| m.file == file);
