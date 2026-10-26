@@ -300,6 +300,10 @@ pub struct FarRoot {
     pub dir: String,
 }
 
+/// Wakes the app the moment a page asks another machine for something.
+pub static FAR_WAKE: std::sync::OnceLock<futures::channel::mpsc::UnboundedSender<()>> =
+    std::sync::OnceLock::new();
+
 /// A file a far page asked for, waiting for the window to fetch it.
 pub struct FarAsk {
     pub far: FarRoot,
@@ -537,6 +541,34 @@ impl Preview {
                         .get(RANGE)
                         .and_then(|v| v.to_str().ok())
                         .map(str::to_string);
+                    // A playing video's next piece, here already: answered
+                    // now, from this thread, so the player never waits on
+                    // the window between one piece and the next.
+                    let rel_d = percent_decode(&rel);
+                    if let Some(r) = range.as_deref()
+                        && let Some((start, total, bytes)) =
+                            crate::stream::answer_here((&far.session, &far.dir, &rel_d), r)
+                    {
+                        let end = start + bytes.len() as u64 - 1;
+                        responder.respond(
+                            Response::builder()
+                                .status(206)
+                                .header("Accept-Ranges", "bytes")
+                                .header(CONTENT_TYPE, kind(&path))
+                                .header("Content-Length", bytes.len().to_string())
+                                .header("Content-Range", format!("bytes {start}-{end}/{total}"))
+                                .body(Cow::Owned(bytes))
+                                .unwrap_or_else(|_| Response::new(Cow::Borrowed(&[][..]))),
+                        );
+                        // Only when more is wanted ahead: the window has
+                        // nothing to do for most pieces.
+                        if crate::stream::hinted()
+                            && let Some(w) = FAR_WAKE.get()
+                        {
+                            let _ = w.unbounded_send(());
+                        }
+                        return;
+                    }
                     if let Ok(mut q) = fa.lock() {
                         q.push(FarAsk {
                             far,
@@ -547,6 +579,11 @@ impl Preview {
                         });
                     }
                     far_pending.store(true, Ordering::Release);
+                    // Sent on at once, not when the window next draws: a
+                    // player waits on every piece it asks for.
+                    if let Some(w) = FAR_WAKE.get() {
+                        let _ = w.unbounded_send(());
+                    }
                     return;
                 }
                 let respond = |r: Response<Cow<'static, [u8]>>| responder.respond(r);
@@ -800,6 +837,20 @@ impl Preview {
     /// Show a video, a sound or a PDF of another machine's, played from
     /// there a range at a time.
     pub fn show_far_file(&mut self, name: &str, far: FarRoot) {
+        // A video or a sound plays from this Mac's own media server, so the
+        // player reads it without the window's thread in its way.
+        let played = crate::data::media_kind(name).is_some_and(|k| k != "PDF");
+        if played && let Some(port) = crate::media_server::port() {
+            let token = crate::stream::token_for(
+                (far.session.clone(), far.dir.clone(), name.to_string()),
+                &far.cwd,
+                kind(name),
+            );
+            let url = crate::media_server::url(port, &token, name);
+            self.set_far(Some(far));
+            self.show_media_from(name, None, Some((token, url)));
+            return;
+        }
         self.set_far(Some(far));
         self.show_media(name, None);
     }
@@ -874,6 +925,17 @@ impl Preview {
     }
 
     fn show_media(&mut self, name: &str, root: Option<std::path::PathBuf>) {
+        self.show_media_from(name, root, None);
+    }
+
+    /// The page a video or sound plays in; `from` (a token and the address
+    /// it's played from) when it plays from elsewhere than beside the page.
+    fn show_media_from(
+        &mut self,
+        name: &str,
+        root: Option<std::path::PathBuf>,
+        from: Option<(String, String)>,
+    ) {
         let name = name.to_string();
         let moved = match self.root.lock() {
             Ok(mut r) => std::mem::replace(&mut *r, root.clone()) != root,
@@ -883,10 +945,12 @@ impl Preview {
             d.clear();
         }
         let pdf = crate::data::media_kind(&name) == Some("PDF");
-        let page = if pdf {
-            name.clone()
-        } else {
-            format!("{name}.html")
+        // Played from elsewhere, its page is named for its token: a new
+        // version (a new token) is a new page.
+        let page = match (&from, pdf) {
+            (_, true) => name.clone(),
+            (Some((token, _)), false) => format!("{name}.{}.html", &token[..8]),
+            (None, false) => format!("{name}.html"),
         };
         let src = Source::File {
             name: page.clone(),
@@ -896,7 +960,11 @@ impl Preview {
             return;
         }
         if !pdf && let Ok(mut m) = self.files.lock() {
-            m.insert(format!("0/{page}"), media_page(&name).into_bytes().into());
+            let html = match &from {
+                Some((_, url)) => media_page_at(&name, url),
+                None => media_page(&name),
+            };
+            m.insert(format!("0/{page}"), html.into_bytes().into());
         }
         self.load(src);
     }
@@ -1548,15 +1616,12 @@ fn ranged(full: &std::path::Path, range: Option<&str>, ty: &str) -> Response<Cow
 /// The page a video or a sound plays in: centred, at most its own size,
 /// on the page's own background in either theme.
 fn media_page(name: &str) -> String {
-    let src: String = name
-        .bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect();
+    media_page_at(name, &escaped(name))
+}
+
+/// The page a video or a sound plays in, from `src` (escaped already).
+fn media_page_at(name: &str, src: &str) -> String {
+    let src = src.replace('"', "%22");
     let player = if crate::data::media_kind(name) == Some("Sound") {
         format!(r#"<audio src="{src}" controls preload="metadata"></audio>"#)
     } else {
@@ -1565,6 +1630,18 @@ fn media_page(name: &str) -> String {
     format!(
         r#"<!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><style>html,body{{margin:0;height:100%;background:Canvas}}body{{display:flex;align-items:center;justify-content:center}}video{{max-width:100%;max-height:100%;outline:none}}audio{{width:min(480px,90%)}}</style></head><body>{player}</body></html>"#
     )
+}
+
+/// A file's name as one part of an address.
+fn escaped(name: &str) -> String {
+    name.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 /// `%20` and friends back to their characters, for paths in links.

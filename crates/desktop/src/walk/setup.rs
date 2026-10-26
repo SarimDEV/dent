@@ -862,8 +862,8 @@ pub(super) fn files_live() -> Vec<(f32, Act)> {
         (
             0.1,
             Until(
-                "its video plays from the VM, a range at a time",
-                |d, _| d.far_served > 0,
+                "its video plays from the VM, a block at a time",
+                |_, _| crate::stream::fetched_of("take.mp4") > 0,
                 15.,
             ),
         ),
@@ -1092,8 +1092,8 @@ pub(super) fn break_live() -> Vec<(f32, Act)> {
         (
             0.1,
             Until(
-                "a 3 GB video starts playing from there, a range at a time",
-                |d, _| d.far_served > 0,
+                "a 3 GB video starts playing from there, a block at a time",
+                |_, _| crate::stream::fetched_of(&format!("sparse-{}.mov", std::process::id())) > 0,
                 15.,
             ),
         ),

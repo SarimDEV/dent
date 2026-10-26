@@ -55,6 +55,7 @@ mod sweep;
 mod switching;
 mod takeback;
 mod typing;
+mod video;
 mod view;
 mod visuals;
 mod worktrees;
@@ -64,7 +65,7 @@ use {
     defaults::*, demo::*, edges::*, failures::*, find::*, finish::*, keys::*, load::*, look::*,
     markdown::*, motion::*, moving::*, narration::*, parity::*, pickup::*, pins::*, polish::*,
     prs::*, queue::*, real::*, recall::*, reply::*, setup::*, stills::*, sweep::*, switching::*,
-    takeback::*, typing::*, view::*, visuals::*, worktrees::*, zoom::*,
+    takeback::*, typing::*, video::*, view::*, visuals::*, worktrees::*, zoom::*,
 };
 
 type Pred = fn(&Dent, &App) -> bool;
@@ -277,6 +278,9 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("move-many-live", &[move_many_live]),
     ("kept-live", &[kept_live]),
     ("files-live", &[files_live]),
+    ("video-live", &[video_live]),
+    ("video-local", &[video_local]),
+    ("video-proto", &[video_proto]),
     ("break-live", &[break_live]),
     ("remote-happy-live", &[remote_happy_live]),
     ("resync-live", &[resync_live]),
