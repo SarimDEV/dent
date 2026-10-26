@@ -17,7 +17,7 @@ A session's file is never looked for on another machine. There is no local fallb
 
 Errors are typed: missing, refused, unreadable, too big. Each carries the path checked.
 
-No URL points at a daemon. Signed URLs would need TLS on a LAN, break through the hub, and keep working after a device is removed. Web views and the video player use the client's own `dent://` scheme, answered asynchronously from the cache and the link.
+No URL points at a daemon. Signed URLs would need TLS on a LAN, break through the hub, and keep working after a device is removed. Web views use the client's own `dent://` scheme, answered asynchronously from the cache and the link. *(Amended 2026-10-26: another machine's video and sound play from a server on the client itself, below.)*
 
 **Reads never hold up a session.** File requests run beside the request loop, not in it, with a few at a time per connection and per daemon. Their replies go out on a bulk lane behind control frames and live events. Because replies are small, the longest a live event can wait is one reply.
 
@@ -76,3 +76,19 @@ Each rule above answers one of those. The owner needs this to work over Tailscal
 - The desktop gets a persisted event log, a `Files` layer, the `dent://` scheme answered asynchronously, and a scheduler per machine. More than twenty call sites move to it. `mirror.rs` goes.
 - The daemon gets `Stat`, `Read` and `Still`, file requests off the request loop, a bulk lane in the link writer, and safe opening: no following links, regular files only, descriptors kept open for range reads.
 - The test plan covers each of T3's failure modes, each carrier and each budget. That means unit tests in the shared crate, daemon tests over a framed link with a throttled one for starvation, and walk scenes against the VM over LAN and Tailscale.
+
+## Amendment (2026-10-26): another machine's video plays from a server on this device
+
+Measured against the test VM, over Tailscale at 2.1 MB/s:
+- **Through `dent://`, opening a video took 7–16 s, while only about 100 KB moved.** The player reads a container's structure in many tiny ranges, about 130 of 8 bytes each for a `.mov`. A scheme handler only runs on the window's thread, so each read waited for the window to finish drawing: 55–70 ms whenever an agent was working.
+- **The same file, with the window's thread kept busy:** 6.6 s through `dent://`, and 0.35 s from a server on 127.0.0.1 (3 requests, because over HTTP the player asks for large ranges).
+
+So another machine's video and sound (not PDFs, nor pages) play from a small HTTP server inside the desktop app:
+- **127.0.0.1 only,** with a 128-bit random token per file. Its bytes still come over dent's own link and are never put on disk.
+- **Fetched in 256 KiB blocks kept in memory** (192 MiB in all, least used first). The player's small reads are answered from those blocks.
+- **Read-ahead grows** only while the player keeps reading in order, starting at one block. A small send buffer lets the player's reading pace the fetching.
+- **When another file is shown,** the one before stops streaming.
+- **A file rewritten mid-play stops** rather than mixing two versions. Opened again, it gets a fresh token for the new version.
+
+On the test VM, once streaming started: opening took 1.0–3.0 s (the 577 MB file with its index at the end opened in 2.3 s, fetching 1.7 MB), playback started 0.7–1.0 s after Play, and a seek to 80% took 2.0–2.4 s. A 577 MB file fetched 9 MB in all, and playback carried on through a restart of the machine's daemon. These numbers are bounded by the link; the `video-live` walk prints them each run.
+

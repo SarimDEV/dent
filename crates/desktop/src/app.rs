@@ -440,6 +440,32 @@ impl ToastAction {
     }
 }
 
+/// What a player asked of another machine's video, waiting on its blocks.
+pub struct MediaAsk {
+    pub a: crate::web::FarAsk,
+    pub file: crate::stream::FileKey,
+    pub total: u64,
+    pub start: u64,
+    pub end: u64,
+    pub at: Instant,
+}
+
+/// An answer to a player.
+fn media_answer(
+    status: u16,
+    headers: Vec<(&'static str, String)>,
+    body: Vec<u8>,
+) -> wry::http::Response<std::borrow::Cow<'static, [u8]>> {
+    let mut b = wry::http::Response::builder()
+        .status(status)
+        .header("Accept-Ranges", "bytes");
+    for (k, v) in headers {
+        b = b.header(k, v);
+    }
+    b.body(std::borrow::Cow::Owned(body))
+        .unwrap_or_else(|_| wry::http::Response::new(std::borrow::Cow::Borrowed(&[][..])))
+}
+
 #[derive(Clone)]
 pub struct Toast {
     pub text: String,
@@ -765,8 +791,9 @@ pub enum Waiting {
     FileStat(Vec<crate::files::Ask>),
     /// A range of the copy kept at a path, from `offset`.
     FileRead(std::path::PathBuf, u64),
-    /// A range another machine's video asked for ([`Dent::web_ranges`]).
-    WebRange,
+    /// A block of another machine's video: its version, which block, and
+    /// the path as asked.
+    MediaBlock(crate::stream::FileKey, u64, String),
     /// The files a project brings, read on its machine, and the machine
     /// it's for.
     BringFiles(dent_protocol::Bring, String),
@@ -991,13 +1018,16 @@ pub struct Dent {
     files_timer: bool,
     /// What another machine's pages asked for, not known yet.
     pub far_waiting: Vec<crate::web::FarAsk>,
+    /// The player's asks waiting on other machines' video blocks (kept in
+    /// memory, in [`crate::stream`]).
+    pub media_waiting: Vec<MediaAsk>,
     /// Ranges of another machine's files answered to the web view, for
     /// walkthroughs to see.
     pub far_served: u64,
+    /// Bytes a player was sent from another machine (for walks).
+    pub far_bytes: u64,
     /// And those that weren't there.
     pub far_missed: u64,
-    /// Ranges of another machine's video on their way, by request.
-    pub web_ranges: HashMap<u64, (crate::web::FarAsk, crate::files::Ask, Instant)>,
     /// Another machine's file being copied here to open in its app.
     pub outside: Option<crate::files::Ask>,
     /// Another machine's file being opened, tried again until it's here.
@@ -1678,6 +1708,21 @@ impl Dent {
             })
             .detach();
         }
+        // A page asking another machine for a file (a player's next piece)
+        // is answered as it asks, drawn or not.
+        let (wake, mut woken) = futures::channel::mpsc::unbounded::<()>();
+        let _ = crate::web::FAR_WAKE.set(wake);
+        cx.spawn(async move |this, cx| {
+            use futures::StreamExt;
+            while woken.next().await.is_some() {
+                // Several asks at once are served together.
+                while woken.try_recv().is_ok() {}
+                if this.update(cx, |this, cx| this.serve_far(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         // The daemon's feed arrives on a channel; the window applies it as
         // it comes.
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
@@ -1940,9 +1985,10 @@ impl Dent {
             opening: Vec::new(),
             outside: None,
             far_waiting: Vec::new(),
+            media_waiting: Vec::new(),
             far_served: 0,
+            far_bytes: 0,
             far_missed: 0,
-            web_ranges: HashMap::new(),
             opened_far: HashMap::new(),
             files_seen: HashMap::new(),
             waiting: HashMap::new(),
@@ -3852,11 +3898,18 @@ impl Dent {
             ) => {
                 crate::files::stats_came(asks, stats);
                 self.pump_files(cx);
+                // A player waiting on how the file stands goes on now.
+                if !self.far_waiting.is_empty() || !crate::stream::unknown().is_empty() {
+                    self.serve_far(cx);
+                }
                 cx.notify();
             }
             (Waiting::FileStat(asks), Out::Error { message }) => {
                 crate::files::stats_failed(asks, &message);
                 self.pump_files(cx);
+                if !self.far_waiting.is_empty() || !crate::stream::unknown().is_empty() {
+                    self.serve_far(cx);
+                }
             }
             (
                 Waiting::FileRead(ask, offset),
@@ -3890,7 +3943,7 @@ impl Dent {
                 self.pump_files(cx);
                 cx.notify();
             }
-            (Waiting::WebRange, out) => self.web_range_came(req, out),
+            (Waiting::MediaBlock(file, i, path), out) => self.media_block_came(file, i, &path, out),
             (Waiting::FileRead(ask, _), _) => {
                 crate::files::read_failed(ask);
                 self.pump_files(cx);
@@ -6036,8 +6089,9 @@ impl Dent {
         // so a lost answer is asked again even in an idle window, never by
         // drawing every frame meanwhile.
         let _ = came;
-        let waiting =
-            crate::files::waiting() || !self.web_ranges.is_empty() || !self.far_waiting.is_empty();
+        let waiting = crate::files::waiting()
+            || !self.media_waiting.is_empty()
+            || !self.far_waiting.is_empty();
         if waiting && !self.files_timer {
             self.files_timer = true;
             cx.spawn(async move |this, cx| {
@@ -8704,26 +8758,47 @@ impl Dent {
             asks.extend(p.borrow().take_far());
         }
         asks.extend(self.inline.borrow().take_far());
-        // A range with no answer in a long while (its link gone for good):
-        // the player hears, rather than waiting forever.
-        let late: Vec<u64> = self
-            .web_ranges
-            .iter()
-            .filter(|(_, (_, _, at))| at.elapsed() > std::time::Duration::from_secs(30))
-            .map(|(n, _)| *n)
-            .collect();
-        for n in late {
-            if let Some((a, _, _)) = self.web_ranges.remove(&n) {
-                self.waiting.remove(&n);
-                a.responder.respond(
-                    wry::http::Response::builder()
-                        .status(504)
-                        .body(std::borrow::Cow::Owned(Vec::new()))
-                        .unwrap_or_else(|_| {
-                            wry::http::Response::new(std::borrow::Cow::Borrowed(&[][..]))
-                        }),
-                );
+        // A player's ask with no answer in a long while (its link gone for
+        // good) hears so, rather than waiting forever.
+        self.serve_media();
+        // What the media server plays, looked up: its version and size.
+        let mut looking = false;
+        for (token, (session, dir, rel), cwd) in crate::stream::unknown() {
+            let ask = crate::files::Ask::new(&session, &rel, &cwd).based(Some(dir));
+            let machine = dent_client_core::fleet::split(&session).0.to_string();
+            // Its machine away: a whole copy kept here plays meanwhile.
+            if !crate::files::online(&machine) {
+                match crate::files::kept_copy(&ask) {
+                    Some(p) => {
+                        // this Mac's: the copy kept here
+                        let size = std::fs::metadata(&p).map_or(0, |m| m.len());
+                        crate::stream::known(&token, Ok(crate::stream::Found::Kept(p, size)));
+                    }
+                    None => crate::stream::known(&token, Err("its machine is away".into())),
+                }
+                continue;
             }
+            match crate::files::stat(&ask) {
+                // Only as it is now: a version from before (being checked
+                // again) is waited out, never played.
+                Look::Here(FileStat::File { stamp, .. }) => {
+                    let key = crate::stream::FileKey {
+                        session: ask.session.clone(),
+                        path: ask.path.clone(),
+                        stamp,
+                    };
+                    crate::stream::known(
+                        &token,
+                        Ok(crate::stream::Found::Far(key, stamp.size, ask.base.clone())),
+                    );
+                }
+                Look::Loading | Look::Stale(_) => looking = true,
+                Look::Gone(g) => crate::stream::known(&token, Err(format!("{:?}", g.why))),
+                _ => crate::stream::known(&token, Err("it can't be played".into())),
+            }
+        }
+        if looking {
+            self.pump_files(cx);
         }
         for a in asks {
             // Its machine away: said at once, not queued for when it's back.
@@ -8797,22 +8872,37 @@ impl Dent {
                     );
                     continue;
                 };
-                let len = (end - start + 1).min(dent_protocol::READ_MAX as u64) as u32;
-                // Sent by its session, so it reaches that machine by the id
-                // it knows.
-                let req = dent_protocol::Request::Read {
-                    file: dent_protocol::FileRef {
-                        session: ask.session.clone(),
-                        path: ask.path.clone(),
-                        base: ask.base.clone(),
-                    },
-                    offset: start,
-                    len,
-                    expect: Some(stamp),
+                // In whole blocks, kept in memory: a player's many small
+                // asks are one trip, and what follows comes ahead.
+                let file = crate::stream::FileKey {
+                    session: ask.session.clone(),
+                    path: ask.path.clone(),
+                    stamp,
                 };
-                let n = self.live.send(req);
-                self.web_ranges.insert(n, (a, ask, Instant::now()));
-                self.waiting.insert(n, Waiting::WebRange);
+                // Its next pieces answered where the player asks, from now.
+                crate::stream::note_playing(
+                    (&a.far.session, &a.far.dir, &a.rel),
+                    &file,
+                    total,
+                    ask.base.clone(),
+                );
+                self.fetch_blocks(
+                    &file,
+                    total,
+                    start,
+                    end,
+                    ask.base.clone(),
+                    crate::stream::AHEAD,
+                );
+                self.media_waiting.push(MediaAsk {
+                    a,
+                    file,
+                    total,
+                    start,
+                    end,
+                    at: Instant::now(),
+                });
+                self.serve_media();
                 continue;
             }
             match crate::files::copy(&ask, crate::files::WHOLE_MAX) {
@@ -8854,74 +8944,134 @@ impl Dent {
         }
     }
 
-    /// A video's range came from its machine, or didn't: the player hears.
-    fn web_range_came(&mut self, n: u64, out: Out) {
-        let Some((a, ask, _)) = self.web_ranges.remove(&n) else {
-            return;
-        };
-        self.far_served += 1;
-        if std::env::var_os("DENT_DEBUG_FILES").is_some() {
-            let what = match &out {
-                Out::Reply {
-                    reply: Reply::Bytes { offset, total, .. },
-                } => format!("bytes from {offset} of {total}"),
-                o => format!("{o:?}").chars().take(160).collect(),
-            };
-            eprintln!("files: page range for {} came: {what}", ask.path);
-        }
-        let answer = |status: u16, headers: Vec<(&'static str, String)>, body: Vec<u8>| {
-            let mut b = wry::http::Response::builder()
-                .status(status)
-                .header("Accept-Ranges", "bytes");
-            for (k, v) in headers {
-                b = b.header(k, v);
+    /// Ask its machine for the blocks of `file` that `start..=end` needs,
+    /// and those after it, not here or on their way already.
+    fn fetch_blocks(
+        &mut self,
+        file: &crate::stream::FileKey,
+        total: u64,
+        start: u64,
+        end: u64,
+        base: Option<String>,
+        ahead: u64,
+    ) {
+        let machine = dent_client_core::fleet::split(&file.session).0.to_string();
+        let away = !crate::files::online(&machine);
+        for i in crate::stream::with_blocks(|b| b.plan(file, total, start, end, ahead)) {
+            // Its machine away: not sent to wait there and arrive stale;
+            // asked again when it's wanted and the machine is back.
+            if away {
+                crate::stream::with_blocks(|b| b.failed(file, i));
+                continue;
             }
-            b.body(std::borrow::Cow::Owned(body))
-                .unwrap_or_else(|_| wry::http::Response::new(std::borrow::Cow::Borrowed(&[][..])))
-        };
+            // Sent by its session, so it reaches that machine by the id it
+            // knows.
+            let req = dent_protocol::Request::Read {
+                file: dent_protocol::FileRef {
+                    session: file.session.clone(),
+                    path: file.path.clone(),
+                    base: base.clone(),
+                },
+                offset: i * crate::stream::BLOCK,
+                len: crate::stream::BLOCK as u32,
+                expect: Some(file.stamp),
+            };
+            let n = self.live.send(req);
+            self.waiting
+                .insert(n, Waiting::MediaBlock(file.clone(), i, file.path.clone()));
+        }
+    }
+
+    /// Answer what the player asked of another machine's video as far as
+    /// the blocks here allow; a long-unanswered ask hears so.
+    fn serve_media(&mut self) {
+        // What the player's thread said it will want soon.
+        for h in crate::stream::take_hints() {
+            self.fetch_blocks(&h.key, h.total, h.start, h.start, h.base, h.ahead);
+        }
+        let mut still = Vec::new();
+        for m in std::mem::take(&mut self.media_waiting) {
+            match crate::stream::with_blocks(|b| b.serve(&m.file, m.total, m.start, m.end)) {
+                Some(bytes) => {
+                    self.far_served += 1;
+                    let end = m.start + bytes.len() as u64 - 1;
+                    m.a.responder.respond(media_answer(
+                        206,
+                        vec![
+                            ("Content-Type", m.a.ty.to_string()),
+                            ("Content-Length", bytes.len().to_string()),
+                            (
+                                "Content-Range",
+                                format!("bytes {}-{end}/{}", m.start, m.total),
+                            ),
+                        ],
+                        bytes,
+                    ));
+                }
+                None if m.at.elapsed() > Duration::from_secs(30) => {
+                    m.a.responder
+                        .respond(media_answer(504, Vec::new(), Vec::new()));
+                }
+                None => still.push(m),
+            }
+        }
+        self.media_waiting = still;
+    }
+
+    /// A block of another machine's video came, or didn't.
+    fn media_block_came(&mut self, file: crate::stream::FileKey, i: u64, path: &str, out: Out) {
         match out {
             Out::Reply {
-                reply:
-                    Reply::Bytes {
-                        offset,
-                        total,
-                        bytes_b64,
-                        ..
-                    },
+                reply: Reply::Bytes { bytes_b64, .. },
             } => {
                 let bytes = dent_protocol::b64::decode(&bytes_b64).unwrap_or_default();
-                if bytes.is_empty() {
-                    a.responder.respond(answer(
-                        416,
-                        vec![("Content-Range", format!("bytes */{total}"))],
-                        Vec::new(),
-                    ));
+                // Whole or not at all: a short block would leave a hole no
+                // ask ever gets past.
+                let want = crate::stream::BLOCK
+                    .min(file.stamp.size.saturating_sub(i * crate::stream::BLOCK));
+                if bytes.len() as u64 != want {
+                    crate::stream::with_blocks(|b| b.failed(&file, i));
+                    self.serve_media();
                     return;
                 }
-                let end = offset + bytes.len() as u64 - 1;
-                a.responder.respond(answer(
-                    206,
-                    vec![
-                        ("Content-Type", a.ty.to_string()),
-                        ("Content-Length", bytes.len().to_string()),
-                        ("Content-Range", format!("bytes {offset}-{end}/{total}")),
-                    ],
-                    bytes,
-                ));
+                self.far_bytes += bytes.len() as u64;
+                crate::stream::count_fetched(&file.path, bytes.len() as u64);
+                crate::stream::with_blocks(|b| b.put(&file, i, bytes.into()));
             }
+            // Rewritten since: its old bytes go, and the player stops here.
             Out::Reply {
                 reply: Reply::FileGone { changed, .. },
             } => {
-                // Rewritten while it played: asked about again; the player
-                // stops here.
-                if changed {
-                    let machine = dent_client_core::fleet::split(&ask.session).0.to_string();
-                    crate::files::changed(&machine, Some(std::slice::from_ref(&ask.path)));
+                crate::stream::gone(&file);
+                // Rewritten or deleted alike: what's known of it is checked
+                // again, so its page settles on what's there now.
+                let _ = changed;
+                let machine = dent_client_core::fleet::split(&file.session).0.to_string();
+                crate::files::changed(&machine, Some(&[path.to_string()]));
+                let (gone, still): (Vec<_>, Vec<_>) = std::mem::take(&mut self.media_waiting)
+                    .into_iter()
+                    .partition(|m| m.file == file);
+                self.media_waiting = still;
+                for m in gone {
+                    m.a.responder
+                        .respond(media_answer(404, Vec::new(), Vec::new()));
                 }
-                a.responder.respond(answer(404, Vec::new(), Vec::new()));
             }
-            _ => a.responder.respond(answer(502, Vec::new(), Vec::new())),
+            // Not read (the link went): the asks needing it hear so, and
+            // it's asked anew when next wanted.
+            _ => {
+                crate::stream::with_blocks(|b| b.failed(&file, i));
+                let (lost, still): (Vec<_>, Vec<_>) = std::mem::take(&mut self.media_waiting)
+                    .into_iter()
+                    .partition(|m| m.file == file && m.start / crate::stream::BLOCK == i);
+                self.media_waiting = still;
+                for m in lost {
+                    m.a.responder
+                        .respond(media_answer(502, Vec::new(), Vec::new()));
+                }
+            }
         }
+        self.serve_media();
     }
 
     /// What a page said, from the viewer or a page in its own window.
