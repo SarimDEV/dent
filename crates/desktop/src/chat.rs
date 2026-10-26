@@ -1657,10 +1657,9 @@ impl Dent {
                     "removed this device",
                     "This device was removed there. Pair again in Settings › Machines to use it.",
                 ),
-                dent_client_core::machine::State::Incompatible { .. } => (
-                    "needs an update",
-                    "It and this app don't speak the same version. Update dent where it's older.",
-                ),
+                &dent_client_core::machine::State::Incompatible { daemon, client } => {
+                    crate::machines_page::incompatible_words(daemon, client)
+                }
                 _ => (
                     "trusts this device only on Tailscale",
                     "Connect to it over Tailscale, or pair with a code to use this route.",

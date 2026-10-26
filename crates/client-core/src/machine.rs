@@ -1474,20 +1474,31 @@ pub fn looks_like_address(addr: &str) -> bool {
         })
 }
 
+/// Of a machine and a client with no protocol in common, whether the
+/// machine is the older side (else the client is).
+pub fn machine_is_older(daemon: (u32, u32), client: (u32, u32)) -> bool {
+    daemon.1 < client.0
+}
+
 pub fn refusal_words(r: &Refusal) -> String {
     match r {
-        Refusal::Incompatible { daemon, client } => format!(
-            "no protocol in common: the machine speaks {}–{}, this app {}–{}; update the {}",
-            daemon.0,
-            daemon.1,
-            client.0,
-            client.1,
-            if daemon.1 < client.0 {
-                "machine"
+        Refusal::Incompatible { daemon, client } => {
+            let ranges = format!(
+                "it speaks protocols {}–{}, this app {}–{}",
+                daemon.0, daemon.1, client.0, client.1
+            );
+            if machine_is_older(*daemon, *client) {
+                format!(
+                    "the machine runs an older dent ({ranges}): on it, build the latest and run \
+                     `dent-daemon update` with the build's folder"
+                )
             } else {
-                "app"
+                format!(
+                    "this app is older than dent on the machine ({ranges}): install the latest \
+                     dent on this device"
+                )
             }
-        ),
+        }
         Refusal::NotTrusted => "this device isn't paired with that machine".into(),
         Refusal::TrustedOn { routes } => format!("trusted only over {}", routes.join(", ")),
         Refusal::Removed => "this device was removed".into(),

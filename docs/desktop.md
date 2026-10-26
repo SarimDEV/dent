@@ -8,6 +8,7 @@ The desktop app is a GPUI client for macOS, Linux and Windows, built around a ch
 - **Main:** the selected session's chat, or the new-session page.
 - **Viewer:** everything the session made or changed, beside the chat (below). Toggled with Cmd+\\ and resized from its edge; can pop out into its own window.
 - **Status bar:** usage limits, machines online, and how many sessions need you (Cmd+J jumps to the next).
+- **This Mac's daemon:** the app starts the `dent-daemon` beside it when none answers. One it started earlier from an older build makes way for it on its own, agents running on in the holder: a daemon whose welcome names another build is asked to restart, and one too old to talk to this app at all (from before protocol ranges, it refuses the hello) is asked again in protocol 1, the only one it takes, and told to restart there. Requests sent meanwhile wait for the new daemon. Nothing is signalled or found by name, so other state folders' daemons are never touched. One the service runs, or one newer than the app, stays, and the status bar says which side is older and what to do (`dent-daemon update` for the service, the newer dent or `scripts/bundle.sh --install` for the app); the app asks again every 30 s.
 - **Narrow windows:** the chat keeps at least 440 pt. The viewer shrinks first, down to 360 pt; below that the sidebar folds away behind a button in the chat header, and the status bar still shows what needs you.
 
 ## Chat

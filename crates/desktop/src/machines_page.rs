@@ -1110,7 +1110,14 @@ impl Dent {
                 (Standing::Asleep, _) => "Asleep".into(),
                 (Standing::NeedsCode, _) => "Needs a code from it".into(),
                 (_, State::Removed) => "This device was removed".into(),
-                (_, State::Incompatible { .. }) => "Needs an update".into(),
+                (_, &State::Incompatible { daemon, client }) => {
+                    let older = dent_client_core::machine::machine_is_older(daemon, client);
+                    if older {
+                        "Runs an older dent · update it there".into()
+                    } else {
+                        "Runs a newer dent · update this app".into()
+                    }
+                }
                 (_, State::TrustedElsewhere { .. }) => "Trusted on Tailscale only".into(),
                 _ => "Can't reach".into(),
             };
@@ -2060,11 +2067,14 @@ impl Dent {
                     })),
                 ))
                 .into_any_element(),
-            (State::Incompatible { .. }, _) => div()
+            (&State::Incompatible { daemon, client }, _) => div()
                 .flex()
                 .flex_col()
                 .gap(px(space::S3))
-                .child(say(format!("{name} needs an update"), "It and this Mac speak different versions of dent.".into()))
+                .child({
+                    let (strong, how) = incompatible_words(daemon, client);
+                    say(format!("{name} {strong}"), how.into())
+                })
                 .child(div().flex().child(back))
                 .into_any_element(),
             (State::TrustedElsewhere { .. }, _) => div()
@@ -2096,6 +2106,22 @@ fn stagger(i: usize) -> Animation {
     Animation::new(std::time::Duration::from_millis(total as u64)).with_easing(move |t| {
         crate::anim::ease_out(((t * total - delay) / motion::BASE).clamp(0., 1.))
     })
+}
+
+/// A machine and this app with no protocol in common: which side is older,
+/// after the machine's name, and how to update it.
+pub fn incompatible_words(daemon: (u32, u32), client: (u32, u32)) -> (&'static str, &'static str) {
+    if dent_client_core::machine::machine_is_older(daemon, client) {
+        (
+            "runs an older dent than this Mac",
+            "Update dent there: on it, build the latest and run dent-daemon update with the build's folder. Its sessions keep running.",
+        )
+    } else {
+        (
+            "runs a newer dent than this app",
+            "Update this app: install the latest dent with scripts/bundle.sh --install, then open it again.",
+        )
+    }
 }
 
 fn os_name(os: &str) -> String {
