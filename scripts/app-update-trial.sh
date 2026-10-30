@@ -20,7 +20,8 @@ bundle() { # bundle N: build N as a dent.app in $work/bN
 <key>CFBundlePackageType</key><string>APPL</string>
 </dict></plist>
 PLIST
-  codesign --force --deep --sign - "$app" >/dev/null
+  # Under the hardened runtime, as builds signed for notarisation are.
+  codesign --force --deep --options runtime --sign - "$app" >/dev/null
 }
 for n in 1 2; do
   DENT_MAIN_BUILD=$n cargo build -q -p dent-desktop -p dent-daemon -p dent-session-holder
