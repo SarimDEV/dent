@@ -198,20 +198,8 @@ impl Dent {
         let old = &self.inbox_sigs;
         if old.is_empty() || sigs.is_empty() {
             self.inbox_list.reset(sigs.len());
-        } else if *old != sigs {
-            let first = old
-                .iter()
-                .zip(&sigs)
-                .position(|(a, b)| a != b)
-                .unwrap_or(old.len().min(sigs.len()));
-            let same_tail = old[first..]
-                .iter()
-                .rev()
-                .zip(sigs[first..].iter().rev())
-                .take_while(|(a, b)| a == b)
-                .count();
-            self.inbox_list
-                .splice(first..old.len() - same_tail, sigs.len() - same_tail - first);
+        } else {
+            crate::ui::sync_list(&self.inbox_list, old, &sigs);
         }
         self.inbox_sigs = sigs;
     }

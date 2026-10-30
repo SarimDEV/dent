@@ -9358,6 +9358,13 @@ impl Dent {
                 self.read_at.insert(prev, (at, following));
             }
             self.transcript.reset(sigs.len());
+            // Rows not yet drawn count for a typical row's height rather
+            // than none, so a quick scroll back through them goes as far
+            // as it was pushed instead of landing at the start.
+            let _ = self
+                .transcript
+                .clone()
+                .with_uniform_item_height(px(ROW_GUESS));
             self.row_born.clear();
             self.hover_row = None;
             match self.read_at.get(&s.id).copied() {
@@ -9372,13 +9379,7 @@ impl Dent {
                     self.transcript.scroll_to_end();
                 }
             }
-        } else if *old != sigs {
-            let first = old
-                .iter()
-                .zip(&sigs)
-                .position(|(a, b)| a != b)
-                .unwrap_or(old.len().min(sigs.len()));
-            self.transcript.splice(first..old.len(), sigs.len() - first);
+        } else if let Some(first) = crate::ui::sync_list(&self.transcript, old, &sigs) {
             // Rows from here on may be others now.
             if self.hover_row.is_some_and(|r| r >= first) {
                 self.hover_row = None;
@@ -10294,6 +10295,9 @@ fn swap_due(was_step: bool, step: bool, up: f32, still: f32) -> bool {
 
 /// More items than this landing at once (history arriving) just appear.
 const ARRIVE_AT_ONCE: usize = 3;
+
+/// A typical chat row's height, for rows not yet drawn.
+const ROW_GUESS: f32 = 48.;
 
 /// What the working line shows (see `App::live_words`).
 #[derive(Clone)]

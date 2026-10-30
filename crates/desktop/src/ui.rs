@@ -760,3 +760,100 @@ pub fn tip_owned(
             .into()
     }
 }
+
+/// Rows changed where they stand, and the one place rows came or went:
+/// the rows replaced and how many replace them.
+type ListChanges = (
+    Vec<std::ops::Range<usize>>,
+    Option<(std::ops::Range<usize>, usize)>,
+);
+
+/// What changed between a list's rows as they were and as they are, by
+/// signature.
+fn list_changes(old: &[u64], new: &[u64]) -> ListChanges {
+    let head = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let tail = old[head..]
+        .iter()
+        .rev()
+        .zip(new[head..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let (old_end, new_end) = (old.len() - tail, new.len() - tail);
+    let both = head + (old_end - head).min(new_end - head);
+    let mut changed = Vec::new();
+    let mut ix = head;
+    while ix < both {
+        if old[ix] == new[ix] {
+            ix += 1;
+            continue;
+        }
+        let end = (ix..both).find(|&j| old[j] == new[j]).unwrap_or(both);
+        changed.push(ix..end);
+        ix = end;
+    }
+    let moved = (old_end != new_end).then(|| (both..old_end, new_end - both));
+    (changed, moved)
+}
+
+/// Keep a list's measurements in step with its rows, by signature, and say
+/// where the first change is. A row changed where it stands is measured
+/// again from the height it had, and the view holds its place in it; only
+/// rows that came or went are spliced. (A splice forgets every height in
+/// its range and puts a view inside it back to the range's first row, so
+/// splicing from the first change to the end made the chat jump whenever
+/// anything at or above where you were reading changed.)
+pub fn sync_list(state: &ListState, old: &[u64], new: &[u64]) -> Option<usize> {
+    if old == new {
+        return None;
+    }
+    let first = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let (changed, moved) = list_changes(old, new);
+    for run in changed {
+        state.remeasure_items(run);
+    }
+    if let Some((range, count)) = moved {
+        state.splice(range, count);
+    }
+    Some(first)
+}
+
+#[cfg(test)]
+mod list_tests {
+    use super::list_changes;
+
+    #[test]
+    fn a_row_changed_in_place_is_remeasured_not_spliced() {
+        let (changed, moved) = list_changes(&[1, 2, 3, 4], &[1, 9, 3, 4]);
+        assert_eq!(changed, vec![1..2]);
+        assert_eq!(moved, None);
+    }
+
+    #[test]
+    fn a_block_arriving_changes_the_last_and_adds_one_before_the_tail() {
+        // The reply's last block stops being last; a new one and the
+        // working line follow.
+        let (changed, moved) = list_changes(&[1, 2, 3, 7], &[1, 2, 5, 6, 7]);
+        assert_eq!(changed, vec![2..3]);
+        assert_eq!(moved, Some((3..3, 1)));
+    }
+
+    #[test]
+    fn rows_going_are_spliced_where_they_went() {
+        let (changed, moved) = list_changes(&[1, 2, 3, 4, 5], &[1, 2, 5]);
+        assert!(changed.is_empty());
+        assert_eq!(moved, Some((2..4, 0)));
+    }
+
+    #[test]
+    fn separate_runs_stay_separate() {
+        let (changed, moved) = list_changes(&[1, 2, 3, 4, 5], &[9, 2, 8, 4, 5]);
+        assert_eq!(changed, vec![0..1, 2..3]);
+        assert_eq!(moved, None);
+    }
+
+    #[test]
+    fn from_nothing_and_to_nothing() {
+        assert_eq!(list_changes(&[], &[1, 2]), (Vec::new(), Some((0..0, 2))));
+        assert_eq!(list_changes(&[1, 2], &[]), (Vec::new(), Some((0..2, 0))));
+    }
+}
