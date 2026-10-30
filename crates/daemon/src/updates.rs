@@ -80,6 +80,11 @@ pub fn ready(
     let unpacked = dir.join(feed.build.to_string());
     let staged = dent_update::download(part, &archive)
         .and_then(|()| dent_update::unpack(&archive, &unpacked))
+        // Signed by whoever signed this daemon, or it isn't staged.
+        .and_then(|()| match std::env::current_exe() {
+            Ok(me) => dent_update::same_signer(&me, &unpacked.join("dent-daemon")),
+            Err(_) => Ok(()),
+        })
         .and_then(|()| crate::service::stage(state, &unpacked).map_err(|e| format!("{e:#}")));
     let _ = std::fs::remove_dir_all(&dir);
     let version = match staged {

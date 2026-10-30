@@ -32,6 +32,13 @@ A row's Update does the same for one machine. Quitting and reopening dent runs n
 
 **One signing identity, notarised.** macOS ties what it allowed (folder access) to an app's signature, so every build is signed with one identity (secrets `DENT_SIGN_P12`, `DENT_SIGN_PASS`) and updates don't ask again. The identity is a **Developer ID Application** certificate: builds are signed with the hardened runtime and a timestamp, sent to Apple's notary service (`DENT_NOTARY_KEY`, an App Store Connect API key, with `DENT_NOTARY_KEY_ID` and `DENT_NOTARY_ISSUER`), and the app carries Apple's approval stapled inside it, so it opens anywhere with no warning. A build that Apple doesn't accept fails, and nothing is published. A self-signed certificate in the same secret still works, without notarisation. Without either, builds are signed ad hoc. They still run, but each one is a new program to macOS, so it asks for folder access again after every update. Worse, a holder still running from the swapped-out app can't keep an Allow at all. `scripts/app-update-trial.sh` signs with the hardened runtime, so it checks that dent still opens and updates under it.
 
+**Locked down.** Every merge runs on every machine, so the way in is guarded:
+- **`main` takes changes only through pull requests**, with the old/new check passing. It can't be force-pushed or deleted, and only the owner can write to the repo.
+- **Workflows get a read-only token.** Only the publish job, for main only, writes the release.
+- **Signing secrets never reach a fork's pull request.** GitHub withholds them, and a first-time contributor's workflow waits for approval.
+- **Every action is pinned to a commit**, so a compromised action can't reach the signing key through a moved tag.
+- **An update must be signed by the team that signed what runs** (`dent_update::same_signer`), intact, before the app swaps it in or a daemon stages it. A release file swapped by anyone else is refused, whatever the feed says. Linux daemons have no signatures and rely on the sha256 in the feed.
+
 **Installing the first time:** `scripts/install.sh`, piped from curl. It installs dent.app, and with `--service` (always on Linux) the daemon as a service. Downloads made by curl and by dent itself aren't quarantined, so Gatekeeper doesn't stop them.
 
 ## Why

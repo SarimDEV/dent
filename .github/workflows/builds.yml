@@ -29,6 +29,10 @@ env:
   DENT_COMMIT: ${{ github.sha }}
   FEED: https://github.com/${{ github.repository }}/releases/download/edge
 
+# Read-only unless a job says otherwise (publishing writes the release).
+permissions:
+  contents: read
+
 jobs:
   macos:
     name: macOS (app and daemon)
@@ -38,9 +42,11 @@ jobs:
       SIGNED: ${{ secrets.DENT_SIGN_P12 != '' }}
       NOTARY: ${{ secrets.DENT_NOTARY_KEY != '' }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: release
       # One identity for every build, so macOS keeps what it allowed dent
@@ -107,7 +113,7 @@ jobs:
             echo "signed ad hoc though the certificate is there" >&2
             exit 1
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: parts-macos
           path: parts/
@@ -124,9 +130,11 @@ jobs:
             runner: ubuntu-22.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: release
       - run: scripts/release-parts.sh parts
@@ -146,7 +154,7 @@ jobs:
           tar -xzf parts/daemon-linux-x86_64.tar.gz -C new
           scripts/compat.sh old new target/release/dent-fake-claude
           scripts/compat.sh new old target/release/dent-fake-claude
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: parts-linux-${{ matrix.arch }}
           path: parts/
@@ -166,8 +174,8 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       BUILD: ${{ github.run_number }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: parts-*
           path: parts
