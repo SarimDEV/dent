@@ -1281,7 +1281,6 @@ impl Dent {
             .into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// The newer build a row can update to ("" is this Mac: its app, or
     /// its daemon when the service runs it), by number.
     fn ready_for(&self, id: &str) -> Option<u64> {
@@ -1361,7 +1360,9 @@ impl Dent {
             return Some(
                 ui::button("update-all", "Updating…", true, &t)
                     .flex_none()
+                    .relative()
                     .opacity(0.6)
+                    .child(probe(&self.probes, "update-all"))
                     .into_any_element(),
             );
         }
@@ -1385,6 +1386,7 @@ impl Dent {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn machine_row(
         &self,
         id: &str,

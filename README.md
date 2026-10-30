@@ -53,7 +53,16 @@ The [roadmap](https://github.com/SarimDEV/dent/issues/20) tracks what's next, an
 
 ## Try it
 
-**Build from source** (needs [Rust](https://rustup.rs); Apple silicon, macOS 13 or later):
+**Install** (Apple silicon, macOS 13 or later). This gets the newest build of main:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/SarimDEV/dent/main/scripts/install.sh | sh
+open ~/Applications/dent.app
+```
+
+Every merge to main is a new build. When one is ready, **Update** appears in the status bar. Press it to update dent and every machine it drives, while sessions keep running. The builds are signed but not yet notarised.
+
+**Build from source** (needs [Rust](https://rustup.rs)). A build from source doesn't update itself.
 
 ```sh
 git clone https://github.com/SarimDEV/dent && cd dent
@@ -65,13 +74,13 @@ dent needs [Claude Code](https://docs.anthropic.com/en/docs/claude-code) install
 
 ### Another machine
 
-Build dent there from source and install it as a service (a systemd user unit on Linux, a LaunchAgent on macOS). Release downloads are still to come ([#16](https://github.com/SarimDEV/dent/issues/16)).
+Install dent's daemon there as a service: a systemd user unit on Linux, a LaunchAgent on macOS. It listens on port 7480 over Tailscale.
 
 ```sh
-cargo build --release -p dent-daemon -p dent-session-holder -p dent-launcher
-target/release/dent-daemon install   # runs it as a service; listens on port 7480 over Tailscale
-target/release/dent-daemon pair      # shows a pairing code, for devices not on your Tailscale account
+curl -fsSL https://raw.githubusercontent.com/SarimDEV/dent/main/scripts/install.sh | sh -s -- --service
 ```
+
+From then on it updates with Update in the app. To build it from source instead: `cargo build --release -p dent-daemon -p dent-session-holder -p dent-launcher`, then `target/release/dent-daemon install`. For devices that aren't on your Tailscale account, `dent-daemon pair` shows a pairing code.
 
 Then in the app, Settings › Machines › Add machine, with its address (and that code). Later builds go in with `dent-daemon update DIR`: the new version is tried first and the old one comes back if it doesn't start, while agents keep running. `dent-daemon status` says how it stands. A session moves between machines with `dent move MACHINE SESSION --to MACHINE`: its work, uncommitted changes included, and its agent's whole conversation go with it, into a new worktree of the same project there. What the service runs with (PATH, and anything else agents need) is in `service.env` in its state folder; devices on the same network (not Tailscale) need `DENT_REMOTE_LAN=1` there.
 

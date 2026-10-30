@@ -382,12 +382,24 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             Reply::Ok
         }
         // The launcher trials it; this daemon is stopped if it's taken on.
-        Request::Update { version } => {
+        Request::Update { version, once } => {
+            // Asked again for what already runs, or for a press already
+            // taken on (its answer lost as the daemon stopped): nothing to do.
+            let asked = d.paths.state.join("update-asked");
+            if crate::launcher::version().as_deref() == Some(version.as_str())
+                || (!once.is_empty()
+                    && std::fs::read_to_string(&asked).is_ok_and(|s| s.trim() == once))
+            {
+                return Ok(Reply::Ok);
+            }
             let Some(l) = crate::launcher::get() else {
                 anyhow::bail!(
                     "this daemon isn't run by dent-launcher, so it can't update itself; install it with `dent-daemon install`"
                 );
             };
+            if !once.is_empty() {
+                std::fs::write(&asked, &once)?;
+            }
             tokio::task::spawn_blocking(move || l.update(&version)).await??;
             Reply::Ok
         }

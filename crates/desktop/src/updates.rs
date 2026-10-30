@@ -33,7 +33,7 @@ const EVERY: Duration = Duration::from_secs(600);
 
 /// How long the new app has to start before the old one is put back,
 /// in tenths of a second.
-const START_WAIT: u32 = 450;
+const START_WAIT: u32 = 600;
 
 /// A newer app, downloaded, checked and unpacked.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +43,14 @@ pub struct Ready {
 }
 
 static READY: Mutex<Option<Ready>> = Mutex::new(None);
+
+/// What's ready changed off the window's thread: the next tick draws it.
+static CHANGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether what's ready changed since last asked.
+pub fn take_changed() -> bool {
+    CHANGED.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Where the app keeps its updates, beside its preferences.
 fn dir() -> PathBuf {
@@ -56,21 +64,48 @@ pub fn bundle() -> Option<PathBuf> {
     (app.extension()? == "app").then(|| app.to_path_buf())
 }
 
+/// Whether this dent.app can update itself where it is: not run from a
+/// disk image or a download macOS moved aside, and in a folder it can
+/// write to (the swap moves it).
+fn can_swap(app: &Path) -> bool {
+    let s = app.to_string_lossy();
+    if s.contains("/AppTranslocation/") || s.starts_with("/Volumes/") {
+        return false;
+    }
+    let Some(parent) = app.parent() else {
+        return false;
+    };
+    let probe = parent.join(format!(".dent-update-{}", std::process::id()));
+    let ok = std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
+/// Whether this run of the app updates itself: one CI built, from a
+/// dent.app it can swap, in the foreground.
+fn updates_itself() -> bool {
+    cfg!(target_os = "macos")
+        && dent_update::enabled()
+        && !crate::BACKGROUND.load(std::sync::atomic::Ordering::Relaxed)
+        && bundle().is_some_and(|b| can_swap(&b))
+}
+
 /// Look for newer builds now and then, for as long as the app runs.
 pub fn start() {
-    if !cfg!(target_os = "macos")
-        || !dent_update::enabled()
-        || bundle().is_none()
-        || crate::BACKGROUND.load(std::sync::atomic::Ordering::Relaxed)
-    {
+    if !updates_itself() {
         return;
     }
-    std::thread::spawn(|| {
+    // `DENT_UPDATE_EVERY` (seconds) for trials.
+    let every = std::env::var("DENT_UPDATE_EVERY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map_or(EVERY, Duration::from_secs);
+    std::thread::spawn(move || {
         loop {
             if let Err(e) = look(&dent_update::feed_url(), &dir()) {
                 eprintln!("dent: looking for an update: {e}");
             }
-            std::thread::sleep(EVERY);
+            std::thread::sleep(every);
         }
     });
 }
@@ -97,6 +132,13 @@ fn look(feed: &str, dir: &Path) -> Result<(), String> {
     let into = dir.join(feed.build.to_string());
     dent_update::unpack(&archive, &into)?;
     let _ = std::fs::remove_file(&archive);
+    // What an older look left (a download that didn't finish) goes too.
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".tar.gz") || name.ends_with(".part") {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
     let app = into.join("dent.app");
     if !app.join("Contents/MacOS/dent-desktop").is_file() {
         return Err(format!("build {} has no dent.app", feed.build));
@@ -112,7 +154,17 @@ fn look(feed: &str, dir: &Path) -> Result<(), String> {
         build: feed.build,
         app,
     });
+    CHANGED.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(())
+}
+
+/// A walk's stand-in for a newer app being ready.
+#[cfg(debug_assertions)]
+pub fn pretend_ready(build: Option<u64>) {
+    *READY.lock().unwrap_or_else(|e| e.into_inner()) = build.map(|build| Ready {
+        build,
+        app: PathBuf::from("/nowhere/dent.app"),
+    });
 }
 
 /// A build that didn't start here: never made ready again.
@@ -127,7 +179,7 @@ fn skipped(dir: &Path) -> Option<u64> {
 /// Running: the script that opened this app knows it started. Every start
 /// says so; only a swap waits for it.
 pub fn started() {
-    if bundle().is_some() {
+    if updates_itself() {
         let d = dir();
         let _ = std::fs::create_dir_all(&d);
         let _ = std::fs::write(d.join("started"), dent_update::number().to_string());
@@ -175,24 +227,34 @@ pub fn take_resume() -> Option<Resume> {
 const SWAP: &str = r#"#!/bin/sh
 pid=$1 new=$2 app=$3 prev=$4 ok=$5 note=$6 build=$7 wait=$8
 open=${DENT_OPEN:-open}
+# The app's binary, as a pattern matching it and nothing else.
+exe=$(printf '%s' "$app/Contents/MacOS/dent-desktop" | sed 's/[][\.*^$()+?{}|]/\\&/g')
 i=0
 while kill -0 "$pid" 2>/dev/null; do
-  i=$((i+1)); [ "$i" -gt 600 ] && exit 1
+  i=$((i+1))
+  # It never quit: leave it be.
+  [ "$i" -gt 600 ] && exit 1
   sleep 0.1
 done
 rm -rf "$prev" "$ok"
 mkdir -p "$(dirname "$prev")"
-mv "$app" "$prev" || exit 1
-if ! mv "$new" "$app"; then
-  mv "$prev" "$app"; $open "$app"; exit 1
+# Whatever goes wrong, dent opens again, as it was.
+if ! mv "$app" "$prev"; then
+  $open "$app"; exit 1
 fi
+if ! mv "$new" "$app"; then
+  rm -rf "$app"; mv "$prev" "$app"; $open "$app"; exit 1
+fi
+rmdir "$(dirname "$new")" 2>/dev/null
 $open "$app"
 i=0
-while [ ! -f "$ok" ]; do
+while [ "$(cat "$ok" 2>/dev/null)" != "$build" ]; do
   i=$((i+1))
   if [ "$i" -gt "$wait" ]; then
-    pkill -f "$app/Contents/MacOS/dent-desktop"
-    sleep 1
+    pkill -f "^$exe"
+    j=0
+    while pgrep -qf "^$exe" && [ "$j" -lt 50 ]; do j=$((j+1)); sleep 0.1; done
+    pkill -9 -f "^$exe"
     rm -rf "$app"
     mv "$prev" "$app"
     echo "$build" > "$note"
@@ -235,9 +297,10 @@ fn swap(ready: &Ready, app: &Path, pid: u32, dir: &Path, wait: u32) -> Result<()
 #[derive(Debug)]
 pub struct Run {
     pub since: Instant,
-    /// Machines asked to update ("" is this Mac's daemon), and the build
-    /// each was asked to run.
-    pub machines: BTreeMap<String, u64>,
+    /// Machines asked to update ("" is this Mac's daemon): the build each
+    /// was asked to run, and the id of its last update before (a rollback
+    /// counts only if it's a new one).
+    pub machines: BTreeMap<String, (u64, Option<String>)>,
     /// The app goes once the machines are back.
     pub app: bool,
 }
@@ -285,12 +348,13 @@ impl Dent {
         if self.updating.is_some() {
             return;
         }
-        let machines: BTreeMap<String, u64> = self
+        let machines: BTreeMap<String, (u64, Option<String>)> = self
             .machines_ready()
             .into_iter()
             .map(|(m, a)| {
                 self.ask_update(&m, &a);
-                (m, a.main_build)
+                let before = self.last_update_id(&m);
+                (m, (a.main_build, before))
             })
             .collect();
         let app = ready().is_some();
@@ -317,7 +381,8 @@ impl Dent {
             .find(|(m, _)| m == machine)
         {
             self.ask_update(machine, &a);
-            machines.insert(machine.to_string(), a.main_build);
+            let before = self.last_update_id(machine);
+            machines.insert(machine.to_string(), (a.main_build, before));
         }
         let app = machine.is_empty() && ready().is_some();
         if machines.is_empty() && !app {
@@ -336,6 +401,13 @@ impl Dent {
             machine,
             Request::Update {
                 version: a.version.clone(),
+                once: format!(
+                    "{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_nanos())
+                ),
             },
         );
         self.waiting_insert(n, crate::app::Waiting::Update(machine.to_string()));
@@ -358,8 +430,23 @@ impl Dent {
         cx.notify();
     }
 
-    /// Whether `machine` runs the build it was asked to, or has gone back.
-    fn machine_done(&self, machine: &str, build: u64) -> bool {
+    /// The id of `machine`'s last update, as it last said.
+    fn last_update_id(&self, machine: &str) -> Option<String> {
+        if machine.is_empty() {
+            self.machine_update.as_ref().map(|u| u.id.clone())
+        } else {
+            self.machines
+                .iter()
+                .find(|m| m.id == machine)?
+                .update
+                .as_ref()
+                .map(|u| u.id.clone())
+        }
+    }
+
+    /// Whether `machine` runs the build it was asked to, or has gone back
+    /// since (`before` is its last update's id when asked).
+    fn machine_done(&self, machine: &str, build: u64, before: Option<&str>) -> bool {
         let (runs, update) = if machine.is_empty() {
             (self.machine_main_build, self.machine_update.as_ref())
         } else {
@@ -368,16 +455,32 @@ impl Dent {
                 None => return true,
             }
         };
-        runs >= build || update.is_some_and(|u| u.rolled_back)
+        runs >= build || update.is_some_and(|u| u.rolled_back && Some(u.id.as_str()) != before)
     }
 
     /// Moves a press of Update all along: once its machines are back (or
     /// it's waited long enough), the app goes.
     pub fn update_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A debug build told to (`DENT_UPDATE_NOW`, for trials) presses
+        // Update all itself, once something is ready.
+        #[cfg(debug_assertions)]
+        {
+            static PRESSED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if std::env::var_os("DENT_UPDATE_NOW").is_some()
+                && self.updates_ready() > 0
+                && !PRESSED.swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                self.update_all(cx);
+            }
+        }
         let Some(run) = &self.updating else {
             return;
         };
-        let waiting = run.machines.iter().any(|(m, b)| !self.machine_done(m, *b));
+        let waiting = run
+            .machines
+            .iter()
+            .any(|(m, (b, before))| !self.machine_done(m, *b, before.as_deref()));
         if waiting && run.since.elapsed() < MACHINES_WAIT {
             return;
         }
@@ -450,7 +553,10 @@ impl Dent {
         self.save_prefs(cx);
         match wrote.and_then(|()| swap(&ready, &app, std::process::id(), &d, START_WAIT)) {
             Ok(()) => cx.quit(),
-            Err(e) => self.toast(ToastAction::Info, format!("dent couldn't update: {e}")),
+            Err(e) => {
+                let _ = std::fs::remove_file(d.join("resume.json"));
+                self.toast(ToastAction::Info, format!("dent couldn't update: {e}"));
+            }
         }
     }
 }
@@ -511,7 +617,10 @@ mod tests {
         let open = d.join("open.sh");
         std::fs::write(
             &open,
-            format!("#!/bin/sh\ntouch {}\n", d.join("updates/started").display()),
+            format!(
+                "#!/bin/sh\necho 7 > {}\n",
+                d.join("updates/started").display()
+            ),
         )
         .unwrap();
         std::fs::set_permissions(&open, std::os::unix::fs::PermissionsExt::from_mode(0o755))

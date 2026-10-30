@@ -72,25 +72,27 @@ pub fn ready(
         return Ok(None);
     }
     let part = feed.part("daemon")?;
+    // One build's download at a time: whatever an older look left goes.
     let dir = state.join("updates");
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let archive = dir.join(format!("{}.tar.gz", feed.build));
-    dent_update::download(part, &archive)?;
     let unpacked = dir.join(feed.build.to_string());
-    dent_update::unpack(&archive, &unpacked)?;
-    let version = crate::service::stage(state, &unpacked).map_err(|e| format!("{e:#}"))?;
-    // Staged, the download and what it unpacked to are done with; so is
-    // anything an older look left.
-    if let Ok(all) = std::fs::read_dir(&dir) {
-        for e in all.flatten() {
-            let p = e.path();
-            let _ = if p.is_dir() {
-                std::fs::remove_dir_all(&p)
-            } else {
-                std::fs::remove_file(&p)
-            };
+    let staged = dent_update::download(part, &archive)
+        .and_then(|()| dent_update::unpack(&archive, &unpacked))
+        .and_then(|()| crate::service::stage(state, &unpacked).map_err(|e| format!("{e:#}")));
+    let _ = std::fs::remove_dir_all(&dir);
+    let version = match staged {
+        Ok(v) => v,
+        // A build that can't be staged here (it won't run on this system,
+        // say) isn't tried again every few minutes: the next one is.
+        Err(e) if e.contains("manifest") || e.contains("launcher") => {
+            let _ = std::fs::write(&skip, feed.build.to_string());
+            return Err(e);
         }
-    }
+        Err(e) => return Err(e),
+    };
+    prune(state, &version);
     if rolled_back == Some(version.as_str()) {
         let _ = std::fs::write(&skip, feed.build.to_string());
         return Ok(None);
@@ -99,6 +101,25 @@ pub fn ready(
         main_build: feed.build,
         version,
     }))
+}
+
+/// Main's builds staged before `kept` and never run go: only what the
+/// launcher's record names (what runs, what it came from) stays.
+fn prune(state: &Path, kept: &str) {
+    let record = std::fs::read_to_string(state.join("launcher.state")).unwrap_or_default();
+    let Ok(all) = std::fs::read_dir(state.join("versions")) else {
+        return;
+    };
+    for e in all.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let main_build = name.split('-').nth(1).is_some_and(|p| {
+            p.strip_prefix('b')
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        });
+        if main_build && name != kept && !name.ends_with(".staging") && !record.contains(&name) {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 impl Daemon {
