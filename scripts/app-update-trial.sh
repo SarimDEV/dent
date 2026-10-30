@@ -49,9 +49,15 @@ DENT_STATE="$work/state" DENT_FEED="file://$work/feed/latest.json" DENT_UPDATE_E
 SH
 chmod +x "$work/open.sh"
 stop() {
+  # The app first (it would start its daemon again), then all it started.
   pkill -f "$work/Applications/dent.app/Contents/MacOS/dent-desktop" 2>/dev/null || true
-  pkill -f "dent-daemon --state $work/state" 2>/dev/null || true
-  pkill -f "dent-session-holder.*dent-aut" 2>/dev/null || true
+  # Until nothing of the trial's runs (a holder may start its daemon again).
+  for _ in $(seq 20); do
+    sleep 0.5
+    pkill -f "$(basename "$work")/" 2>/dev/null || true
+    pgrep -qf "$(basename "$work")/" || break
+  done
+  rm -rf "$work"
 }
 trap stop EXIT
 runs() { cmp -s "$work/Applications/dent.app/Contents/MacOS/dent-desktop" "$work/b$1/dent.app/Contents/MacOS/dent-desktop"; }
