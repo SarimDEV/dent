@@ -586,15 +586,19 @@ impl Dent {
                 e.act = None;
             }
         };
-        let mut v = Vec::new();
+        let mut v = vec![Entry::note("Move this session to another machine")];
         // This Mac, when the session runs elsewhere.
         if !here.is_empty() {
             let lacks = has("") == Some(false) && !anywhere;
             let mut e = Entry::row(
                 "move-this".into(),
-                &self.machine_name(""),
+                &if lacks {
+                    format!("Clone {project} to {} and move…", self.machine_name(""))
+                } else {
+                    format!("Move to {}", self.machine_name(""))
+                },
                 Some(if lacks {
-                    format!("Doesn't have {project} · Clone it here")
+                    format!("Doesn't have {project}")
                 } else {
                     "This Mac".into()
                 }),
@@ -621,10 +625,15 @@ impl Dent {
                 && !anywhere;
             let (note, off): (String, Option<&'static str>) = match Standing::of(m) {
                 Standing::Online => match has(&m.id) {
-                    _ if lacks => (format!("Doesn't have {project} · Clone it there"), None),
+                    _ if lacks => (format!("Doesn't have {project}"), None),
                     Some(true) => (format!("Has {project}{ms}"), None),
                     _ if anywhere || unsure(&m.id) => (format!("Online{ms}"), None),
-                    _ => (format!("Checking for {project}…{ms}"), None),
+                    // Not choosable until it's known whether that's a move
+                    // or a clone and a move.
+                    _ => (
+                        format!("Checking whether it has {project}…{ms}"),
+                        Some("Checking whether it has the project"),
+                    ),
                 },
                 Standing::Connecting => ("Connecting…".into(), Some("It isn't connected yet")),
                 Standing::Updating => (
@@ -639,9 +648,14 @@ impl Dent {
                 ),
                 Standing::Blocked => ("Can't be used".into(), Some("See Settings › Machines")),
             };
+            let short = crate::data::machine_short(m.name());
             let mut e = Entry::row(
                 format!("move-{}", m.id),
-                &crate::data::machine_short(m.name()),
+                &if lacks {
+                    format!("Clone {project} to {short} and move…")
+                } else {
+                    format!("Move to {short}")
+                },
                 Some(note),
                 false,
                 if lacks {
@@ -774,8 +788,9 @@ impl Dent {
         let p = match &c.pack {
             None => {
                 v.push(Entry::note(&format!(
-                    "Looking at {} here…",
-                    Dent::project_name(&c.dir)
+                    "Checking what cloning {} to {} needs…",
+                    Dent::project_name(&c.dir),
+                    self.machine_name(&c.to)
                 )));
                 return v;
             }

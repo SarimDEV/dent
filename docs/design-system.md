@@ -9,6 +9,8 @@ The rules every dent surface follows: spacing, sizes, type, shape, colour, eleva
 3. **Structure by hairline, elevation only for what floats.** Everything in the page plane is flat with 1px hairlines. Only menus, tooltips, the palette and toasts get a shadow.
 4. **Motion explains a change, it never decorates.** Things that happen tens of times a day, or from the keyboard, are instant. Rare and important things (an approval arriving, a theme switch) earn motion.
 5. **Effects fit the frame budget.** Motion is opacity, offset, colour and flat quads. No live blur, no animated shadows, no relayout of text per frame. An animation stops requesting frames the moment it settles, so a quiet window costs nothing.
+6. **Say what a choice does before it does it.** A row or button that starts something (copies, clones, moves, runs, updates, changes a default on other machines) is a verb phrase naming what happens and where: "Copy dent from MacBookPro…", "Move to dent-linux", "Run deploy". A row that only picks something can be its name, under a note saying what the list picks ("Start it on"). What a choice quietly undoes is said beside it ("another machine clears dent"). A choice that only acts once you've confirmed ends in "…".
+7. **A wait says what and why, and never strands you.** A busy line names the action, the thing and the machine ("Checking what copying dent from MacBookPro to this laptop needs…"). It gives up with a reason after a set time ("MacBookPro didn't answer") rather than waiting for good. It has a way back wherever leaving is safe. Reopening a menu never shows an old wait.
 
 ## Spacing
 

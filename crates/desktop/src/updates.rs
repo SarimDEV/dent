@@ -334,6 +334,27 @@ impl Dent {
         self.machines_ready().len() + usize::from(ready().is_some())
     }
 
+    /// What one press of Update all updates, in words: "Updates this app
+    /// and dent-linux".
+    pub fn update_words(&self) -> String {
+        let mut what: Vec<String> = Vec::new();
+        if ready().is_some() {
+            what.push("this app".into());
+        }
+        for (m, _) in self.machines_ready() {
+            what.push(if m.is_empty() {
+                "this Mac's dent service".into()
+            } else {
+                self.machine_name(&m)
+            });
+        }
+        match what.as_slice() {
+            [] => "Nothing to update".into(),
+            [one] => format!("Updates {one}"),
+            [rest @ .., last] => format!("Updates {} and {last}", rest.join(", ")),
+        }
+    }
+
     /// The newer build ready for `machine` ("" is this Mac's daemon).
     pub fn available_there(
         &mut self,
