@@ -1,0 +1,39 @@
+name: Bug report
+description: Something in dent doesn't work the way it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected and what happened instead. Screenshots or a screen recording help a lot.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start a new session in …
+        2. …
+  - type: input
+    id: version
+    attributes:
+      label: dent version
+      description: From the release you downloaded, or the commit you built.
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: macOS 15.4, Apple silicon
+  - type: input
+    id: agent
+    attributes:
+      label: Agent and version
+      placeholder: Claude Code 2.x
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Anything relevant from the daemon or the app. Please remove anything private first.
+      render: text

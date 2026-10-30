@@ -2081,11 +2081,11 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
 name = "dent-ambient"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "dent-cli"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "dent-client-core",
@@ -2099,7 +2099,7 @@ dependencies = [
 
 [[package]]
 name = "dent-client-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "dent-link",
  "dent-protocol",
@@ -2109,7 +2109,7 @@ dependencies = [
 
 [[package]]
 name = "dent-daemon"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "dent-client-core",
@@ -2132,7 +2132,7 @@ dependencies = [
 
 [[package]]
 name = "dent-desktop"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "arborium",
@@ -2175,7 +2175,7 @@ dependencies = [
 
 [[package]]
 name = "dent-fake-claude"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde_json",
 ]
@@ -2190,7 +2190,7 @@ dependencies = [
 
 [[package]]
 name = "dent-hub"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "dent-protocol",
 ]
@@ -2204,7 +2204,7 @@ dependencies = [
 
 [[package]]
 name = "dent-link"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
  "hex",
@@ -2218,7 +2218,7 @@ dependencies = [
 
 [[package]]
 name = "dent-protocol"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2226,7 +2226,7 @@ dependencies = [
 
 [[package]]
 name = "dent-remote"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "dent-client-core",
@@ -2244,7 +2244,7 @@ dependencies = [
 
 [[package]]
 name = "dent-session-holder"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -2254,7 +2254,7 @@ dependencies = [
 
 [[package]]
 name = "dent-web"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "dent-client-core",
 ]
@@ -8527,7 +8527,7 @@ dependencies = [
 
 [[package]]
 name = "spike-claude-stream"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -8537,7 +8537,7 @@ dependencies = [
 
 [[package]]
 name = "spike-codex-app-server"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -8547,7 +8547,7 @@ dependencies = [
 
 [[package]]
 name = "spike-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "chacha20poly1305",
@@ -8565,7 +8565,7 @@ dependencies = [
 
 [[package]]
 name = "spike-core-ffi"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "hex",
  "spike-core",
@@ -8574,7 +8574,7 @@ dependencies = [
 
 [[package]]
 name = "spike-core-test"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -8587,7 +8587,7 @@ dependencies = [
 
 [[package]]
 name = "spike-core-wasm"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "hex",
  "js-sys",
@@ -8598,7 +8598,7 @@ dependencies = [
 
 [[package]]
 name = "spike-desktop-concepts"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "block2 0.6.2",
  "cairo-rs",
@@ -8620,7 +8620,7 @@ dependencies = [
 
 [[package]]
 name = "spike-gpui-chat"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "gpui-fps",
  "gpui-kit",
@@ -8637,7 +8637,7 @@ dependencies = [
 
 [[package]]
 name = "spike-holder"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -8648,7 +8648,7 @@ dependencies = [
 
 [[package]]
 name = "spike-link"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -8672,7 +8672,7 @@ dependencies = [
 
 [[package]]
 name = "spike-markdown"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "merman",
