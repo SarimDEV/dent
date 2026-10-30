@@ -165,8 +165,10 @@ pub fn pr_tone(pr: &PullRequest) -> Tone {
 pub fn busy(a: GitAction) -> &'static str {
     match a {
         GitAction::Commit => "Committing…",
-        GitAction::CommitPush | GitAction::Push => "Pushing…",
-        GitAction::CommitPushPr | GitAction::Pr => "Opening PR…",
+        GitAction::Push => "Pushing…",
+        GitAction::CommitPush => "Committing & pushing…",
+        GitAction::Pr => "Opening PR…",
+        GitAction::CommitPushPr => "Committing & opening PR…",
         GitAction::Pull => "Pulling…",
     }
 }

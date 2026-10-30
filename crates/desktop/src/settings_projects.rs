@@ -225,7 +225,12 @@ impl Dent {
     pub fn keep_project_entries(&self, cx: &App) -> Vec<Entry> {
         let m = self.tab_machine();
         let all = match self.tab_projects.get(&m) {
-            None => return vec![Entry::note("Asking which projects it has…")],
+            None => {
+                return vec![Entry::note(&format!(
+                    "Asking {} which projects it has…",
+                    self.machine_name(&m)
+                ))];
+            }
             Some(Err(why)) => return vec![Entry::note(why)],
             Some(Ok(all)) => all,
         };

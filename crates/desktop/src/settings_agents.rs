@@ -671,7 +671,7 @@ impl Dent {
         let mut v = Vec::new();
         if only.is_none() {
             v.push(Entry::note(&format!(
-                "Set on all {} machines",
+                "Choosing one sets it on all {} machines",
                 self.machine_ids().len()
             )));
         }
@@ -694,7 +694,7 @@ impl Dent {
             v.push(Entry::separator());
             v.push(Entry::row(
                 "set-keep".into(),
-                "Keep each machine's own",
+                "Leave each machine as it is",
                 None,
                 false,
                 Some(std::rc::Rc::new(

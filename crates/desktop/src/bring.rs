@@ -14,6 +14,9 @@ use dent_protocol::{Bring, Pack, Project, Request};
 use gpui_kit::{Context, Window};
 
 use crate::app::{Dent, Waiting};
+
+/// How long a machine has to say what copying a project needs.
+const BRING_PATIENCE: std::time::Duration = std::time::Duration::from_secs(15);
 use crate::chat::{Act, Entry};
 use crate::picker::Mode;
 
@@ -300,8 +303,11 @@ impl Dent {
                 rows.push(
                     Entry::row(
                         format!("b-{m}-{}", p.path),
-                        &p.name,
-                        Some(format!("On {}", self.machine_name(&m))),
+                        &format!("Copy {} from {}…", p.name, self.machine_name(&m)),
+                        Some(format!(
+                            "Clones it on {}; you choose its files next",
+                            self.machine_name(&self.defaults.machine)
+                        )),
                         false,
                         act(move |this, _, cx| this.look_to_bring(&from, &dir, &name, cx)),
                     )
@@ -316,7 +322,7 @@ impl Dent {
             v.push(Entry::separator());
         }
         v.push(Entry::note(&format!(
-            "From your other machines, to bring to {}",
+            "Copy a project from your other machines to {}",
             self.machine_name(&self.defaults.machine)
         )));
         v.extend(rows.into_iter().take(12));
@@ -326,7 +332,11 @@ impl Dent {
     fn look_to_bring(&mut self, from: &str, dir: &str, name: &str, cx: &mut Context<Self>) {
         self.project_error = None;
         self.bring_asked = Some((from.to_string(), dir.to_string()));
-        self.project_busy = Some(format!("Looking at {name} on {}…", self.machine_name(from)));
+        self.project_busy = Some(format!(
+            "Checking what copying {name} from {} to {} needs…",
+            self.machine_name(from),
+            self.machine_name(&self.defaults.machine)
+        ));
         let n = self.live.send_to(
             from,
             Request::Pack {
@@ -334,7 +344,27 @@ impl Dent {
             },
         );
         let to = self.defaults.machine.clone();
-        self.waiting_insert(n, Waiting::Pack(from.to_string(), dir.to_string(), to));
+        self.waiting_insert(
+            n,
+            Waiting::Pack(from.to_string(), dir.to_string(), to.clone()),
+        );
+        // A machine that doesn't answer is said, rather than waited on for
+        // good.
+        let (from, dir) = (from.to_string(), dir.to_string());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(BRING_PATIENCE).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.bring_asked.as_ref() == Some(&(from.clone(), dir.clone())) {
+                    let why = format!(
+                        "{} didn't answer in {} seconds, so nothing was copied",
+                        this.machine_name(&from),
+                        BRING_PATIENCE.as_secs()
+                    );
+                    this.pack_came(from, dir, to, Err(why), cx);
+                }
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -467,8 +497,15 @@ impl Dent {
             let paths: Vec<String> = d.files.ticked.iter().cloned().collect();
             self.project_error = None;
             self.project_busy = Some(match paths.len() {
-                1 => format!("Reading {} on {}…", paths[0], self.machine_name(&from)),
-                n => format!("Reading {n} files on {}…", self.machine_name(&from)),
+                1 => format!(
+                    "Reading {} to copy from {}…",
+                    paths[0],
+                    self.machine_name(&from)
+                ),
+                n => format!(
+                    "Reading the {n} files to copy from {}…",
+                    self.machine_name(&from)
+                ),
             });
             let n = self.live.send_to(&from, Request::ReadFiles { dir, paths });
             let to = self.defaults.machine.clone();

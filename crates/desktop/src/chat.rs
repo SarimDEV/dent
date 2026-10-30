@@ -5636,11 +5636,11 @@ impl Dent {
                 let (id, name2) = (id.clone(), name.clone());
                 Entry::row(
                     format!("m-action-{name}"),
-                    name,
+                    &format!("Run {name}"),
                     Some(if about.is_empty() {
-                        format!("{}/{name}", crate::actions::DIR)
+                        format!("In your terminal · {}/{name}", crate::actions::DIR)
                     } else {
-                        about.clone()
+                        format!("In your terminal · {about}")
                     }),
                     false,
                     act(Box::new(move |this, window, cx| {
@@ -5983,6 +5983,13 @@ impl Dent {
                         (m.name.clone(), String::new())
                     } else {
                         (m.name.clone(), m.description.clone())
+                    };
+                    // In an open session the switch is for what's next, not
+                    // the reply under way.
+                    let note = match (which == Menu::Model, note.is_empty()) {
+                        (true, _) => note,
+                        (false, true) => "From your next message".to_string(),
+                        (false, false) => format!("From your next message · {note}"),
                     };
                     Entry::row(
                         format!("m-{}", m.id),
@@ -6379,7 +6386,10 @@ impl Dent {
             let note = if r.open {
                 format!("{project} · In use in a terminal")
             } else {
-                format!("{project} · {}", crate::data::ago(r.updated))
+                format!(
+                    "Continue it in dent · {project} · {}",
+                    crate::data::ago(r.updated)
+                )
             };
             let act: Option<Act> = (!r.open).then(|| {
                 Rc::new(

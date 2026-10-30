@@ -606,6 +606,116 @@ pub(super) fn updates() -> Vec<(f32, Act)> {
     v
 }
 
+/// Copying a project from another machine says so (design principle 6):
+/// the row is a verb, the wait says what it's checking, there's a way back,
+/// and a machine that never answers is said, not waited on.
+pub(super) fn copy_from() -> Vec<(f32, Act)> {
+    fn put_dent_there(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
+        d.elsewhere.insert(
+            "8e2e34085ddf".into(),
+            vec![dent_protocol::Project {
+                path: "/home/me/dent".into(),
+                name: "dent".into(),
+                last_used: 0,
+            }],
+        );
+        cx.notify();
+    }
+    const ROW: &str = "b-8e2e34085ddf-/home/me/dent";
+    fn row_label(d: &Dent, cx: &App) -> Option<String> {
+        d.project_entries(cx)
+            .into_iter()
+            .find(|e| e.key == ROW)
+            .map(|e| e.name.to_string())
+    }
+    vec![
+        (0.3, Key("cmd-n")),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                d.machines = made_up_machines();
+                cx.notify();
+            }),
+        ),
+        (0.2, Click("chip-project")),
+        // What that machine says it has, as its answer would.
+        (0.2, Call(put_dent_there)),
+        (
+            0.1,
+            Until(
+                "a project on another machine is offered as a copy, by name and machine",
+                |d, cx| {
+                    row_label(d, cx).is_some_and(|l| l.starts_with("Copy dent from dent-linux"))
+                },
+                3.,
+            ),
+        ),
+        (0.3, Shot("copy-rows")),
+        (0.1, Click(ROW)),
+        (
+            0.1,
+            Until(
+                "the wait says what it's checking, with a way back",
+                |d, cx| {
+                    d.project_busy
+                        .as_deref()
+                        .is_some_and(|b| b.starts_with("Checking what copying dent"))
+                        && d.project_entries(cx).iter().any(|e| e.key == "p-busy-back")
+                },
+                3.,
+            ),
+        ),
+        (0.3, Shot("copy-checking")),
+        (
+            0.1,
+            Until(
+                "a machine that never answers is said, and the wait ends",
+                |d, _| {
+                    d.project_busy.is_none()
+                        && d.project_error
+                            .as_deref()
+                            .is_some_and(|e| e.contains("didn't answer"))
+                },
+                20.,
+            ),
+        ),
+        (0.3, Shot("copy-no-answer")),
+        (0.1, Call(put_dent_there)),
+        (0.1, Click(ROW)),
+        (
+            0.1,
+            Until(
+                "asked again, it waits again",
+                |d, _| d.project_busy.is_some(),
+                3.,
+            ),
+        ),
+        (0.1, Click("p-busy-back")),
+        (
+            0.1,
+            Until(
+                "Back leaves the copy: the list is back, nothing waits",
+                |d, cx| {
+                    d.project_busy.is_none()
+                        && d.bring_asked.is_none()
+                        && row_label(d, cx).is_some()
+                },
+                3.,
+            ),
+        ),
+        (0.1, Key("escape")),
+        (0.2, Click("chip-project")),
+        (
+            0.1,
+            Until(
+                "reopened, the picker never shows an old wait",
+                |d, _| d.project_busy.is_none(),
+                3.,
+            ),
+        ),
+    ]
+}
+
 fn made_up_machines() -> Vec<crate::machines::MachineView> {
     use dent_client_core::machine::State;
     use dent_link::{Access, Goodbye, Trust};

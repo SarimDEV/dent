@@ -135,6 +135,23 @@ impl Dent {
         let mut v = Vec::new();
         if let Some(busy) = &self.project_busy {
             v.push(Entry::note(busy));
+            // Copying a project can be left: what's asked is then let go.
+            if self.bring_asked.is_some() || self.project_mode == Mode::Bring {
+                v.push(Entry::row(
+                    "p-busy-back".into(),
+                    "‹ Back",
+                    Some("Don't copy it".into()),
+                    false,
+                    act(Box::new(|this, _, cx| {
+                        this.project_busy = None;
+                        this.bring_asked = None;
+                        this.bring_draft = None;
+                        this.project_mode = Mode::Pick;
+                        this.menu_ix = None;
+                        cx.notify();
+                    })),
+                ));
+            }
             return v;
         }
         if let Some(e) = &self.project_error {
@@ -145,7 +162,10 @@ impl Dent {
             Mode::New => v.push(Entry::row(
                 "p-new".into(),
                 &format!("Create “{q}”"),
-                Some("A Git repository in ~/dent/projects".into()),
+                Some(format!(
+                    "A Git repository in ~/dent/projects on {}",
+                    self.machine_name(&self.defaults.machine)
+                )),
                 false,
                 act(Box::new(move |this, _, _| this.new_project(&q))),
             )),
@@ -155,7 +175,10 @@ impl Dent {
             Mode::Clone => v.push(Entry::row(
                 "p-clone".into(),
                 &format!("Clone {}", repo(&q)),
-                Some("Into ~/dent/projects".into()),
+                Some(format!(
+                    "Into ~/dent/projects on {}",
+                    self.machine_name(&self.defaults.machine)
+                )),
                 false,
                 act(Box::new(move |this, _, _| this.clone_project(&q))),
             )),
@@ -348,6 +371,9 @@ impl Dent {
     pub fn open_project_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.project_mode = Mode::Pick;
         self.project_error = None;
+        // A wait from before isn't this one's: whatever it was waiting for
+        // carries on, or is let go (a copy), and the list shows.
+        self.project_busy = None;
         self.folders = None;
         self.bring_draft = None;
         self.bring_asked = None;
@@ -456,7 +482,10 @@ impl Dent {
 
     /// Make a project from a name; the picker waits, then picks it.
     pub fn new_project(&mut self, name: &str) {
-        self.project_busy = Some(format!("Making {name}…"));
+        self.project_busy = Some(format!(
+            "Making {name} on {}…",
+            self.machine_name(&self.defaults.machine)
+        ));
         self.ask_here(
             Request::NewProject {
                 name: name.to_string(),
@@ -468,7 +497,10 @@ impl Dent {
     /// Clone a Git URL; the picker waits, then picks it.
     pub fn clone_project(&mut self, url: &str) {
         let short = repo(url);
-        self.project_busy = Some(format!("Cloning {short}…"));
+        self.project_busy = Some(format!(
+            "Cloning {short} to {}…",
+            self.machine_name(&self.defaults.machine)
+        ));
         self.ask_here(
             Request::CloneProject {
                 url: url.to_string(),

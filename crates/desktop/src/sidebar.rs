@@ -787,9 +787,9 @@ impl Dent {
                         })
                         .with_tip(crate::ui::tip_owned(
                             if updating {
-                                "Sessions keep running".to_string()
+                                "Updating · sessions keep running".to_string()
                             } else {
-                                "A newer dent is ready · sessions keep running".to_string()
+                                format!("{} · sessions keep running", self.update_words())
                             },
                             t,
                         ))

@@ -654,7 +654,10 @@ impl Dent {
         if self.has_machines() {
             v.push(Entry::row(
                 "make-default-all".into(),
-                "On all machines",
+                &format!(
+                    "Make it the default on all {} machines",
+                    self.added_machines().count() + 1
+                ),
                 Some("Each takes it as soon as it's reachable".into()),
                 false,
                 act(Box::new(move |this, cx| {

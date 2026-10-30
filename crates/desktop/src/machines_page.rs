@@ -420,13 +420,22 @@ impl Dent {
             ))
         };
         let here = self.defaults.machine.as_str();
-        let mut v = vec![Entry::row(
+        // The project picked is on this machine: another one's doesn't
+        // have it, so it's picked again there.
+        let mut v = vec![Entry::note(&match &self.defaults.project {
+            Some(p) => format!(
+                "Start it on · another machine clears {}",
+                Dent::project_name(p)
+            ),
+            None => "Start it on".to_string(),
+        })];
+        v.push(Entry::row(
             "machine-this".into(),
             &self.machine_name(""),
             Some("This Mac".into()),
             here.is_empty(),
             pick(String::new()),
-        )];
+        ));
         for m in self.added_machines() {
             let (note, off): (String, Option<&'static str>) = match Standing::of(m) {
                 Standing::Online => (

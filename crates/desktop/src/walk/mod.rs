@@ -257,6 +257,7 @@ const SCENES: &[(&str, &[Scene])] = &[
     ("settings", &[settings]),
     ("machines", &[machines]),
     ("updates", &[updates]),
+    ("copy-from", &[copy_from]),
     ("machines-live", &[machines_live]),
     ("bring-live", &[bring_live]),
     ("move-live", &[move_live]),
