@@ -29,7 +29,7 @@ use crate::app::{Dent, ToastAction};
 const MACHINES_WAIT: Duration = Duration::from_secs(150);
 
 /// How often to look for a newer build.
-const EVERY: Duration = Duration::from_secs(600);
+const EVERY: Duration = Duration::from_secs(120);
 
 /// How long the new app has to start before the old one is put back,
 /// in tenths of a second.
@@ -142,6 +142,13 @@ fn look(feed: &str, dir: &Path) -> Result<(), String> {
     let app = into.join("dent.app");
     if !app.join("Contents/MacOS/dent-desktop").is_file() {
         return Err(format!("build {} has no dent.app", feed.build));
+    }
+    // Signed by whoever signed this one, or it doesn't go in.
+    if let Some(running) = bundle()
+        && let Err(e) = dent_update::same_signer(&running, &app)
+    {
+        let _ = std::fs::remove_dir_all(&into);
+        return Err(e);
     }
     // Builds made ready before this one are done with.
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {

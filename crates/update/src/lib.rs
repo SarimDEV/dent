@@ -178,6 +178,46 @@ pub fn sha256(path: &Path) -> Result<String, String> {
     Ok(hex::encode(h.finalize()))
 }
 
+/// The team that signed the code at `path` (an app or a binary), on macOS;
+/// `None` when it's signed ad hoc or not at all, or off macOS.
+pub fn team(path: &Path) -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let out = Command::new("codesign")
+        .arg("-dv")
+        .arg(path)
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .find_map(|l| l.strip_prefix("TeamIdentifier="))
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && *t != "not set")
+        .map(str::to_string)
+}
+
+/// Whether `new` may take the place of `running` (both apps, or both
+/// binaries): once what runs is signed by a team, an update must be signed
+/// by that team too, intact. Off macOS, and from a build that isn't signed
+/// by a team, anything checked against the feed may.
+pub fn same_signer(running: &Path, new: &Path) -> Result<(), String> {
+    let Some(ours) = team(running) else {
+        return Ok(());
+    };
+    let intact = Command::new("codesign")
+        .args(["--verify", "--deep", "--strict"])
+        .arg(new)
+        .status()
+        .is_ok_and(|s| s.success());
+    match team(new) {
+        Some(t) if t == ours && intact => Ok(()),
+        Some(t) if t == ours => Err(format!("{} isn't intact", new.display())),
+        Some(t) => Err(format!("{} is signed by {t}, not {ours}", new.display())),
+        None => Err(format!("{} isn't signed by {ours}", new.display())),
+    }
+}
+
 /// Unpack the `.tar.gz` at `archive` into `into`, made afresh.
 pub fn unpack(archive: &Path, into: &Path) -> Result<(), String> {
     let _ = std::fs::remove_dir_all(into);
@@ -291,5 +331,54 @@ mod tests {
         std::fs::write(d.join("junk.tar.gz"), "junk").unwrap();
         assert!(unpack(&d.join("junk.tar.gz"), &d.join("o")).is_err());
         assert!(!d.join("o").exists());
+    }
+
+    /// Against a real signed dent.app, given as `DENT_SIGNED_APP` (else
+    /// skipped): the same team passes; an ad hoc copy and a changed copy
+    /// don't; an ad hoc build takes anything.
+    #[test]
+    fn an_update_must_come_from_the_same_team() {
+        let Some(signed) = std::env::var_os("DENT_SIGNED_APP").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let d = scratch("signer");
+        let copy = |name: &str| {
+            let to = d.join(name).join("dent.app");
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            assert!(
+                Command::new("cp")
+                    .arg("-R")
+                    .arg(&signed)
+                    .arg(&to)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            to
+        };
+        assert!(team(&signed).is_some());
+        assert_eq!(same_signer(&signed, &copy("same")), Ok(()));
+        let adhoc = copy("adhoc");
+        assert!(
+            Command::new("codesign")
+                .args(["--force", "--deep", "--sign", "-"])
+                .arg(&adhoc)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            same_signer(&signed, &adhoc)
+                .unwrap_err()
+                .contains("isn't signed by")
+        );
+        let changed = copy("changed");
+        std::fs::write(changed.join("Contents/MacOS/dent-daemon"), "#!/bin/sh\n").unwrap();
+        assert!(
+            same_signer(&signed, &changed)
+                .unwrap_err()
+                .contains("isn't intact")
+        );
+        assert_eq!(same_signer(&adhoc, &changed), Ok(()));
     }
 }

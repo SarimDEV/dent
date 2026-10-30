@@ -17,13 +17,13 @@ use dent_protocol::{Available, Out};
 
 use crate::daemon::{Daemon, Live};
 
-/// How often to look: often enough that a merge shows within the hour,
-/// rarely enough to cost nothing. `DENT_UPDATE_EVERY` (seconds) for tests.
+/// How often to look: a merge shows minutes after its build; reading the
+/// feed (a small file) costs nothing. `DENT_UPDATE_EVERY` (seconds) for tests.
 fn every() -> Duration {
     std::env::var("DENT_UPDATE_EVERY")
         .ok()
         .and_then(|s| s.parse().ok())
-        .map_or(Duration::from_secs(600), Duration::from_secs)
+        .map_or(Duration::from_secs(120), Duration::from_secs)
 }
 
 /// Look for newer builds for as long as the daemon runs.
@@ -80,6 +80,11 @@ pub fn ready(
     let unpacked = dir.join(feed.build.to_string());
     let staged = dent_update::download(part, &archive)
         .and_then(|()| dent_update::unpack(&archive, &unpacked))
+        // Signed by whoever signed this daemon, or it isn't staged.
+        .and_then(|()| match std::env::current_exe() {
+            Ok(me) => dent_update::same_signer(&me, &unpacked.join("dent-daemon")),
+            Err(_) => Ok(()),
+        })
         .and_then(|()| crate::service::stage(state, &unpacked).map_err(|e| format!("{e:#}")));
     let _ = std::fs::remove_dir_all(&dir);
     let version = match staged {
