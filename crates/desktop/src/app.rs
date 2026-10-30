@@ -10105,7 +10105,8 @@ impl Dent {
         } | self.looker.busy();
         // An update under way, or a place to put back, is looked at each
         // tick until it's done.
-        let updating = self.updating.is_some() || self.resuming.is_some();
+        let updating =
+            self.updating.is_some() || self.resuming.is_some() || crate::updates::take_changed();
         let toast_expired = self
             .toast
             .as_ref()

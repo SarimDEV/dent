@@ -525,6 +525,7 @@ fn update_to(paths: &Paths, version: &str) -> Result<()> {
     crate::admin::ask(
         paths,
         Request::Update {
+            once: String::new(),
             version: version.to_string(),
         },
     )?;

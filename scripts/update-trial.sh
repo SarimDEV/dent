@@ -94,7 +94,8 @@ while time.time() < end:
 a = w.get("available")
 assert a and a["main_build"] == 2 and "-b2-" in a["version"], w
 print("trial: build 2 ready as", a["version"])
-done = talk([hello, {"req": 3, "op": "update", "version": a["version"]}], lambda o: o.get("req") == 3)
+press = {"req": 3, "op": "update", "version": a["version"], "once": "trial-press-1"}
+done = talk([hello, press], lambda o: o.get("req") == 3)
 assert done.get("reply") == "ok", done
 end = time.time() + 90
 while time.time() < end:
@@ -109,6 +110,13 @@ assert w.get("main_build") == 2, w
 assert w.get("update") and not w["update"].get("rolled_back"), w
 assert not w.get("available"), w
 print("trial: build 2 runs; update", w["update"])
+# The same press sent again after a reconnect changes nothing.
+again = talk([hello, press], lambda o: o.get("req") == 3)
+assert again.get("reply") == "ok", again
+time.sleep(3)
+w2 = welcome()
+assert w2.get("main_build") == 2 and w2.get("update", {}).get("id") == w["update"]["id"], w2
+print("trial: the press sent again changed nothing")
 # The session made on build 1 is there on build 2.
 sid = made.get("session") or made.get("id")
 seen = talk([hello, {"req": 2, "op": "subscribe", "after": 0}],

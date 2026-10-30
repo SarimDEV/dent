@@ -21,6 +21,14 @@ case "$os" in
   Linux) os=linux; service=yes ;;
   *) echo "dent runs on macOS and Linux" >&2; exit 1 ;;
 esac
+if [ "$os" = macos ] && [ "$arch" != aarch64 ]; then
+  echo "dent's builds are for Macs with Apple silicon; on this Mac, build it from source." >&2
+  exit 1
+fi
+if [ "$os" = linux ] && ! command -v python3 >/dev/null; then
+  echo "Installing dent here needs python3 (to read the build list); install it and run this again." >&2
+  exit 1
+fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -74,7 +82,8 @@ if [ "$service" = yes ]; then
   "$tmp/daemon-$os-$arch/dent-daemon" install
   # The CLI, where a shell finds it.
   mkdir -p "$HOME/.local/bin"
-  cp "$tmp/daemon-$os-$arch/dent" "$HOME/.local/bin/dent"
+  cp "$tmp/daemon-$os-$arch/dent" "$HOME/.local/bin/.dent.new"
+  mv "$HOME/.local/bin/.dent.new" "$HOME/.local/bin/dent"
   echo "dent's daemon now runs as a service, and updates with Update in the app."
 fi
 

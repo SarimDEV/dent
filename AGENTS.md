@@ -32,12 +32,13 @@ All under `crates/`. Package names are prefixed `dent-`.
 | `protocol` | Wire messages, event types, versioning | serde, serde_json |
 | `link` | The link between devices and daemons: Noise handshake, framing with a control lane, pairing. **No I/O** ([0066](docs/decisions/0066-link-crates.md)) | serde, snow, spake2 |
 | `client-core` | Connections, sync, cache, search, Markdown → block tree. **No I/O and no runtime:** the host feeds it bytes and the time and does the I/O it asks for ([spike 07](docs/spikes/07-client-core.md)), so it binds to iOS (UniFFI) and wasm | `protocol`, `link` |
-| `daemon` | Drivers, event log, git, files, checkpoints, providers, remote devices | `protocol`, `link` |
+| `daemon` | Drivers, event log, git, files, checkpoints, providers, remote devices | `protocol`, `link`, `update` |
 | `session-holder` | Owns agent processes and PTYs. Tiny, rarely changed | std + minimal |
+| `update` | Updates from main's builds: the newest build, its parts downloaded (curl), checked (sha256) and unpacked (tar); the daemon and the app share it ([0077](docs/decisions/0077-updates-from-main.md)) | serde, sha2, hex |
 | `launcher` | What the service manager runs: which daemon version runs, update trials, snapshots and rollback ([0065](docs/decisions/0065-launcher-and-updates.md)). Tiny, rarely changed | std + libc |
 | `files` | Files a session names, resolved and read the same way on the daemon and in a client: `~` and relative paths, a safe open, a stamp per version, ranged reads ([0068](docs/decisions/0068-files-across-machines.md)) | `protocol`, libc |
 | `remote` | Remote machines on tokio for the CLI and desktop: the socket host for `client-core`'s connection actor, the daemon session over it (hello, subscribe, resend, waiting while away), saved machines and this device's key | `client-core`, `protocol`, `link`, tokio, rusqlite (the kept history) |
-| `desktop` | GPUI app. The only crate allowed to use GPUI | `client-core`, `protocol`, `ambient`, `remote` |
+| `desktop` | GPUI app. The only crate allowed to use GPUI | `client-core`, `protocol`, `ambient`, `remote`, `update` |
 | `ambient` | Ambient backgrounds for the new-session page: simulations drawing into a display list the desktop paints. No I/O, no dependencies ([docs/ambient.md](docs/ambient.md)) | std only |
 | `web` | wasm-bindgen facade over `client-core` | `client-core` |
 | `cli` | `dent` binary: scripts, agents, `dent daemon install`, `dent doctor` | `client-core`, `protocol`, `remote`, tokio |
@@ -56,6 +57,7 @@ Boundaries enforced by `just verify`: logic crates never import GPUI.
 | `just check` | While working | `cargo check` + unit tests (`just check <crate>…`; default: the crates changed since `origin/main` and everything depending on them) |
 | `just verify` | Before merging | fmt, clippy `-D warnings`, tests and the crate-boundary check, for the same changed crates and their dependents (`scripts/affected.py`). `just verify-all` for every crate, `just verify-spikes` for spikes too |
 | `scripts/walk.sh look --shots DIR` | A visual change | The fake agent replays one recorded real turn; stills of each moment in both themes, in well under a minute |
+| `scripts/update-trial.sh`, `scripts/app-update-trial.sh` | A change to updates | Real builds updating themselves end to end: the daemon under the launcher (Linux), the app with its rollback (Mac) ([0077](docs/decisions/0077-updates-from-main.md)) |
 | `scripts/walk.sh a+b` | A UI change | Only the scenes it touched (names in `crates/desktop/src/walk/mod.rs`). The full `checks` suite once per batch, started in the background while the next item begins; `compare` (the real agent) once, before a batch lands |
 
 Never run nightly-tier suites (screenshots, fuzzing, real agents) on your own.

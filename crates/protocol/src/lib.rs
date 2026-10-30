@@ -1747,6 +1747,11 @@ pub enum Request {
     /// fails; the answer says whether the launcher took it on.
     Update {
         version: String,
+        /// Unique to one press: a request sent again after a reconnect
+        /// (its answer lost as the daemon stopped) is known by it and
+        /// changes nothing.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        once: String,
     },
     /// What the session's directory has changed, against its last commit;
     /// with `turn` (one of your messages), only what that turn changed.
