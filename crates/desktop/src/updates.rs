@@ -29,7 +29,7 @@ use crate::app::{Dent, ToastAction};
 const MACHINES_WAIT: Duration = Duration::from_secs(150);
 
 /// How often to look for a newer build.
-const EVERY: Duration = Duration::from_secs(600);
+const EVERY: Duration = Duration::from_secs(120);
 
 /// How long the new app has to start before the old one is put back,
 /// in tenths of a second.

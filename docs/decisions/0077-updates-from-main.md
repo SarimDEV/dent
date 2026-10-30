@@ -13,7 +13,7 @@ The last few builds' parts stay, for anyone mid-download; older ones are deleted
 **A build knows its number.** CI's run number and commit are kept in every binary (`DENT_MAIN_BUILD`, `DENT_COMMIT`, read by `dent-update`). A dent built anywhere else is number 0 and never updates itself: it's updated by building it again. Rows say `build 412`. The launcher names a version of main `0.1.0-b412-3f2a9c1e`.
 
 **Each machine makes its own update ready.** No machine serves another ([0058](0058-independent-machines.md)).
-- **A daemon under the launcher** reads the feed every 10 minutes. It downloads a newer daemon part, checks it, and stages it beside the running version. It then says so in its welcome and to every device (`Available`).
+- **A daemon under the launcher** reads the feed every 2 minutes. It downloads a newer daemon part, checks it, and stages it beside the running version. It then says so in its welcome and to every device (`Available`).
 - **The app** does the same for itself, from a dent.app.
 - **A build that went back** here isn't offered again. The next build is.
 

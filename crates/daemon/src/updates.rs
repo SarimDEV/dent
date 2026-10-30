@@ -17,13 +17,13 @@ use dent_protocol::{Available, Out};
 
 use crate::daemon::{Daemon, Live};
 
-/// How often to look: often enough that a merge shows within the hour,
-/// rarely enough to cost nothing. `DENT_UPDATE_EVERY` (seconds) for tests.
+/// How often to look: a merge shows minutes after its build; reading the
+/// feed (a small file) costs nothing. `DENT_UPDATE_EVERY` (seconds) for tests.
 fn every() -> Duration {
     std::env::var("DENT_UPDATE_EVERY")
         .ok()
         .and_then(|s| s.parse().ok())
-        .map_or(Duration::from_secs(600), Duration::from_secs)
+        .map_or(Duration::from_secs(120), Duration::from_secs)
 }
 
 /// Look for newer builds for as long as the daemon runs.
