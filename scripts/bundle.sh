@@ -43,8 +43,10 @@ PLIST
 # so macOS would ask again each time. DENT_SIGN picks the identity; by
 # default it's this Mac's Apple Development certificate, if it has one.
 id=${DENT_SIGN:-$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Apple Development/ {print $2; exit}')}
+# DENT_SIGN_FLAGS adds to every signature: CI's Developer ID builds use
+# `--options runtime --timestamp`, which notarisation needs.
 sign() {
-  codesign --force --sign "${id:--}" "$@" >/dev/null
+  codesign --force --sign "${id:--}" ${DENT_SIGN_FLAGS:-} "$@" >/dev/null
 }
 if [[ -n "$id" ]] && sign --identifier sh.dent.daemon "$app/Contents/MacOS/dent-daemon" \
   && sign --identifier sh.dent.holder "$app/Contents/MacOS/dent-session-holder" \

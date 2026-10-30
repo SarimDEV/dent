@@ -22,7 +22,7 @@ if [[ $os == macos ]]; then
   # The same identity as the app, so macOS keeps what it allowed the service.
   id=${DENT_SIGN:-}
   for b in dent-daemon dent-session-holder dent-launcher dent; do
-    codesign --force --sign "${id:--}" --identifier "sh.dent.${b#dent-}" "$parts/$b" >/dev/null
+    codesign --force --sign "${id:--}" ${DENT_SIGN_FLAGS:-} --identifier "sh.dent.${b#dent-}" "$parts/$b" >/dev/null
   done
   scripts/bundle.sh >/dev/null
   tar -czf "$out/app-$os-$arch.tar.gz" -C "$target/release" dent.app

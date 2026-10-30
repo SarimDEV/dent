@@ -36,15 +36,17 @@ jobs:
     env:
       # A step's own env isn't seen by its `if`, so this is the job's.
       SIGNED: ${{ secrets.DENT_SIGN_P12 != '' }}
+      NOTARY: ${{ secrets.DENT_NOTARY_KEY != '' }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: release
-      # One self-signed identity for every build, so macOS keeps what it
-      # allowed dent (folder access) across updates. Without the secret,
-      # builds are signed ad hoc.
+      # One identity for every build, so macOS keeps what it allowed dent
+      # (folder access) across updates: a Developer ID (signed for
+      # notarisation), else a self-signed certificate (trusted on this
+      # runner only). Without the secret, builds are signed ad hoc.
       - name: Signing identity
         env:
           P12: ${{ secrets.DENT_SIGN_P12 }}
@@ -59,11 +61,41 @@ jobs:
           security import "$RUNNER_TEMP/dent.p12" -k "$kc" -P "$PASS" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple: -s -k ci "$kc" >/dev/null
           security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
-          security find-certificate -c "dent self-signed" -p "$kc" > "$RUNNER_TEMP/dent.pem"
-          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/dent.pem"
-          id=$(openssl x509 -in "$RUNNER_TEMP/dent.pem" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d :)
+          id=$(security find-identity -p codesigning "$kc" | awk '/Developer ID Application/ {print $2; exit}')
+          if [ -n "$id" ]; then
+            echo "DENT_SIGN_FLAGS=--options runtime --timestamp" >> "$GITHUB_ENV"
+          else
+            security find-certificate -c "dent self-signed" -p "$kc" > "$RUNNER_TEMP/dent.pem"
+            sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/dent.pem"
+            id=$(openssl x509 -in "$RUNNER_TEMP/dent.pem" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d :)
+          fi
           echo "DENT_SIGN=$id" >> "$GITHUB_ENV"
       - run: scripts/release-parts.sh parts
+      # Apple checks a Developer ID build and vouches for it: the app opens
+      # anywhere with no warning, the stamp travelling inside it.
+      - name: Notarise
+        if: env.NOTARY == 'true' && env.DENT_SIGN_FLAGS != ''
+        env:
+          KEY: ${{ secrets.DENT_NOTARY_KEY }}
+          KEY_ID: ${{ secrets.DENT_NOTARY_KEY_ID }}
+          ISSUER: ${{ secrets.DENT_NOTARY_ISSUER }}
+        run: |
+          echo "$KEY" | base64 --decode > "$RUNNER_TEMP/key.p8"
+          notarise() {
+            xcrun notarytool submit "$1" --key "$RUNNER_TEMP/key.p8" --key-id "$KEY_ID" \
+              --issuer "$ISSUER" --wait --timeout 30m --output-format json > "$RUNNER_TEMP/n.json"
+            cat "$RUNNER_TEMP/n.json"
+            grep -q '"status" *: *"Accepted"' "$RUNNER_TEMP/n.json"
+          }
+          ditto -c -k --keepParent target/release/dent.app "$RUNNER_TEMP/app.zip"
+          notarise "$RUNNER_TEMP/app.zip"
+          xcrun stapler staple target/release/dent.app
+          tar -czf parts/app-macos-aarch64.tar.gz -C target/release dent.app
+          mkdir "$RUNNER_TEMP/daemon"
+          tar -xzf parts/daemon-macos-aarch64.tar.gz -C "$RUNNER_TEMP/daemon"
+          ditto -c -k "$RUNNER_TEMP/daemon" "$RUNNER_TEMP/daemon.zip"
+          notarise "$RUNNER_TEMP/daemon.zip"
+          spctl --assess --type execute -v target/release/dent.app
       - name: Signed as one identity
         run: |
           codesign --verify --deep --strict target/release/dent.app
