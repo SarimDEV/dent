@@ -115,10 +115,21 @@ pub fn pack(dir: &Path) -> Option<Pack> {
     let folders: Vec<&str> = top.split('\0').filter(|p| p.ends_with('/')).collect();
     // Every ignored file, what's surely installed left out as git walks
     // (it still looks, but says less).
-    let excludes: Vec<String> = ["node_modules", ".venv", "site-packages", ".pnpm-store"]
+    let mut excludes: Vec<String> = ["node_modules", ".venv", "site-packages", ".pnpm-store"]
         .iter()
         .map(|d| format!(":(exclude,glob)**/{d}/**"))
         .collect();
+    // An ignored folder of what's built or installed (`target/`, `dist/`)
+    // isn't listed at all: nothing in it is offered (`in_deps`), and a
+    // build folder can hold hundreds of thousands of files, which took
+    // seconds to list and sift.
+    excludes.extend(
+        folders
+            .iter()
+            .map(|f| f.trim_end_matches('/'))
+            .filter(|f| NOT_IN.contains(&f.rsplit('/').next().unwrap_or(f)))
+            .map(|f| format!(":(exclude,literal){f}")),
+    );
     let mut args: Vec<&str> = IGNORED.to_vec();
     args.extend(["--exclude-standard", "--", "."]);
     args.extend(excludes.iter().map(String::as_str));
