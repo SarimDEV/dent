@@ -159,7 +159,6 @@ fn look(feed: &str, dir: &Path) -> Result<(), String> {
 }
 
 /// A walk's stand-in for a newer app being ready.
-#[cfg(debug_assertions)]
 pub fn pretend_ready(build: Option<u64>) {
     *READY.lock().unwrap_or_else(|e| e.into_inner()) = build.map(|build| Ready {
         build,
