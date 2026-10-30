@@ -751,6 +751,7 @@ impl Dent {
             Err(why) => (why.clone(), "dent's service isn't answering".to_string()),
         };
         let down = self.connection.is_err();
+        let (updates, updating) = (self.updates_ready(), self.updating.is_some());
         div()
             .h(px(size::STATUS))
             .flex_none()
@@ -778,6 +779,36 @@ impl Dent {
                     .with_tip(crate::ui::tip_owned(link_tip, t))
                     .child(div().min_w_0().truncate().child(link)),
             )
+            // A newer dent ready somewhere: one press runs it everywhere.
+            .when(updates > 0 || updating, |d| {
+                d.child(
+                    div()
+                        .id("update-ready")
+                        .relative()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .px(px(space::S1H))
+                        .h(px(size::CONTROL_SM))
+                        .rounded(px(radius::SM))
+                        .text_color(t.ink)
+                        .when(!updating, |d| {
+                            d.cursor_pointer()
+                                .hover(|d| d.bg(t.hover()))
+                                .on_press(cx.listener(|this, _, _, cx| this.update_all(cx)))
+                        })
+                        .with_tip(crate::ui::tip_owned(
+                            if updating {
+                                "Sessions keep running".to_string()
+                            } else {
+                                "A newer dent is ready · sessions keep running".to_string()
+                            },
+                            t,
+                        ))
+                        .child(if updating { "Updating…" } else { "Update" })
+                        .child(crate::ui::probe(&self.probes, "update-ready")),
+                )
+            })
             .when(needs > 0, |d| {
                 d.child(
                     div()

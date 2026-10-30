@@ -66,6 +66,8 @@ pub struct Daemon {
     /// The last look at how this machine is set up, and when, for replies
     /// that change nothing it looks at (see [`Daemon::machine_after`]).
     checked: std::sync::Mutex<Option<(std::time::Instant, dent_protocol::Machine)>>,
+    /// A newer build of main made ready here, if any (`updates.rs`).
+    pub(crate) available: std::sync::Mutex<Option<dent_protocol::Available>>,
     /// Re-read now and then, so tools installed after dent started are found.
     env: Mutex<Arc<AgentEnv>>,
     pub version: String,
@@ -152,6 +154,7 @@ impl Daemon {
             net,
             paths,
             checked: std::sync::Mutex::new(None),
+            available: std::sync::Mutex::new(None),
             env: Mutex::new(Arc::new(env)),
             version: env!("CARGO_PKG_VERSION").into(),
             build: std::env::current_exe()

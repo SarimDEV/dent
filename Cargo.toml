@@ -19,6 +19,7 @@ dent-ambient = { path = "crates/ambient" }
 dent-link = { path = "crates/link" }
 dent-files = { path = "crates/files" }
 dent-remote = { path = "crates/remote" }
+dent-update = { path = "crates/update" }
 
 anyhow = "=1.0.104"
 serde = { version = "=1.0.229", features = ["derive"] }

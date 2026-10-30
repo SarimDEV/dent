@@ -45,6 +45,10 @@ pub enum Event {
         /// runs it, and how its last update went.
         release: String,
         update: Option<dent_protocol::UpdateOutcome>,
+        /// Its number among main's builds (0: not built by CI), and a newer
+        /// one it has ready.
+        main_build: u64,
+        available: Option<dent_protocol::Available>,
         /// The protocol it speaks.
         proto: u32,
         agents: Vec<AgentInfo>,
@@ -522,7 +526,7 @@ async fn run(
                         let (req, out) = (env.req, env.body);
                         if req == HELLO {
                             match out {
-                                Out::Reply { reply: Reply::Welcome { proto, machine, id, version, agents, addresses, wake, epoch: e, release, update, .. } } => {
+                                Out::Reply { reply: Reply::Welcome { proto, machine, id, version, agents, addresses, wake, epoch: e, release, update, main_build, available, .. } } => {
                                     if !saved.id.is_empty() && !id.is_empty() && id != saved.id {
                                         events(Event::DifferentMachine(via.0.clone()));
                                         continue;
@@ -549,6 +553,8 @@ async fn run(
                                         version,
                                         release,
                                         update: update.map(|u| *u),
+                                        main_build,
+                                        available,
                                         proto,
                                         agents,
                                         via: via.0.clone(),

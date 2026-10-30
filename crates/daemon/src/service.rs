@@ -24,11 +24,16 @@ const PARTS: [&str; 2] = ["dent-daemon", "dent-session-holder"];
 /// What `dent-daemon manifest` prints, and a staged version keeps: read by
 /// the launcher with nothing but the standard library.
 pub fn manifest() -> String {
-    format!(
+    let mut m = format!(
         "version={}\nlauncher_protocol={}\n",
         env!("CARGO_PKG_VERSION"),
         crate::launcher::PROTOCOL
-    )
+    );
+    // One of main's builds says which (decision 0077).
+    if dent_update::number() > 0 {
+        m.push_str(&format!("main_build={}\n", dent_update::number()));
+    }
+    m
 }
 
 fn manifest_field(text: &str, key: &str) -> Option<String> {
@@ -62,7 +67,11 @@ pub fn stage(state: &Path, from: &Path) -> Result<String> {
             from.join("dent-daemon").display()
         );
     };
-    let name = format!("{version}-{:08x}", hash as u32);
+    // One of main's builds carries its number: `0.1.0-b412-3f2a9c1e`.
+    let name = match manifest_field(&text, "main_build") {
+        Some(n) => format!("{version}-b{n}-{:08x}", hash as u32),
+        None => format!("{version}-{:08x}", hash as u32),
+    };
     let versions = state.join("versions");
     let dir = versions.join(&name);
     if dir.join("manifest").is_file() {

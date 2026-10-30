@@ -17,6 +17,7 @@ dent-files.workspace = true
 dent-client-core.workspace = true
 dent-link.workspace = true
 dent-remote.workspace = true
+dent-update.workspace = true
 tokio = { workspace = true }
 # Ambient backgrounds for the new-session page: simulations we paint (docs/ambient.md).
 dent-ambient.workspace = true
