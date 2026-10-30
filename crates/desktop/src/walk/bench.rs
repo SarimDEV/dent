@@ -214,6 +214,25 @@ pub(super) fn rows() -> Vec<(f32, Act)> {
                 300.,
             ),
         ),
+        // Reading partway down a reply, a row above it changing (here the
+        // message that asked for it) leaves what you read where it is.
+        (0.3, Call(read_mid_reply)),
+        (0.3, Call(save_scroll)),
+        (0.1, Call(toggle_first_message)),
+        (
+            0.5,
+            Until(
+                "a change above where you read doesn't move it",
+                |d, _| chat_still(d),
+                0.5,
+            ),
+        ),
+        (0.1, Call(toggle_first_message)),
+        (
+            0.5,
+            Until("nor does it changing back", |d, _| chat_still(d), 0.5),
+        ),
+        (0.1, Call(to_end)),
         // Narration of several blocks folds away with the turn's work.
         (0.2, Type(Field::Composer, "folded bench")),
         (0.1, Key("enter")),
@@ -262,6 +281,31 @@ pub(super) fn rows() -> Vec<(f32, Act)> {
         (0.1, Key("escape")),
     ]);
     v
+}
+
+/// Read from partway into a block of the long reply.
+fn read_mid_reply(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
+    if let Some(ix) = long_reply(d) {
+        let row = d.rows.of(ix).start + 6;
+        d.transcript.pause_following_tail();
+        d.transcript.scroll_to(ListOffset {
+            item_ix: row,
+            offset_in_item: px(7.),
+        });
+        cx.notify();
+    }
+}
+
+/// Open the session's first message's fold, or close it: its row changes.
+fn toggle_first_message(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) {
+    let key = current(d).and_then(|s| match s.items.first() {
+        Some(Item::User { id, .. }) => Some(crate::data::Fold::Message(id).key()),
+        _ => None,
+    });
+    if let Some(key) = key {
+        d.toggle_fold(&key);
+        cx.notify();
+    }
 }
 
 /// The narration's rows, and whether its turn's fold hides them.
