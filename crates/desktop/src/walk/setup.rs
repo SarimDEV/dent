@@ -471,6 +471,141 @@ fn leave_made_up_machines(d: &mut Dent, _: &mut Window, cx: &mut Context<Dent>) 
     cx.notify();
 }
 
+/// Updates (decision 0077): machines and this app with a newer build ready,
+/// Update all in the header and Update in the status bar, then a press under
+/// way. The app here isn't a dent.app, so it never quits.
+pub(super) fn updates() -> Vec<(f32, Act)> {
+    fn ready(d: &mut Dent) {
+        let mut ms = made_up_machines();
+        for m in ms.iter_mut().filter(|m| m.rtt.is_some()) {
+            m.main_build = 412;
+        }
+        if let Some(m) = ms.iter_mut().find(|m| m.id == "8e2e34085ddf") {
+            m.available = Some(dent_protocol::Available {
+                main_build: 415,
+                version: "0.1.0-b415-3f2a9c1e".into(),
+            });
+        }
+        d.machines = ms;
+        crate::updates::pretend_ready(Some(415));
+    }
+    let mut v = vec![
+        (0.3, Key("cmd-n")),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                ready(d);
+                cx.notify();
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "the status bar says there's an update",
+                |d, _| drawn(d, "update-ready").is_some(),
+                3.,
+            ),
+        ),
+        (0.3, Shot("updates-status-light")),
+        (0.2, Key("cmd-,")),
+        (
+            0.1,
+            Until(
+                "Settings is open",
+                |d, _| drawn(d, "pane-settings").is_some(),
+                3.,
+            ),
+        ),
+        (0.1, Click("settings-tab-machines")),
+        (
+            0.1,
+            Until(
+                "Update all counts this Mac and the machine with a build ready",
+                |d, _| {
+                    d.updates_ready() == 2
+                        && drawn(d, "update-all").is_some()
+                        && drawn(d, "update-this").is_some()
+                        && drawn(d, "update-8e2e34085ddf").is_some()
+                },
+                3.,
+            ),
+        ),
+    ];
+    both_themes(&mut v, "updates-ready");
+    v.extend([
+        (0.1, Click("update-all")),
+        (
+            0.1,
+            Until(
+                "a press is under way, and says so",
+                |d, _| d.updating.is_some() && drawn(d, "update-all").is_some(),
+                2.,
+            ),
+        ),
+        (0.3, Shot("updates-running-light")),
+        (
+            0.1,
+            Call(|d, _, cx| {
+                d.updating = None;
+                crate::updates::pretend_ready(None);
+                for m in &mut d.machines {
+                    m.available = None;
+                }
+                cx.notify();
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "with nothing ready, nothing offers an update",
+                |d, _| {
+                    d.updates_ready() == 0
+                        && drawn(d, "update-all").is_none()
+                        && drawn(d, "update-8e2e34085ddf").is_none()
+                },
+                2.,
+            ),
+        ),
+        (0.3, Shot("updates-none-light")),
+        (0.1, Key("escape")),
+    ]);
+    // Just updated: the session it was in opens again, once it's there.
+    static WAS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    v.extend(new_session("Tidy the README"));
+    v.extend([
+        (
+            0.1,
+            Call(|d, w, cx| {
+                let id = d.selected.clone();
+                *WAS.lock().unwrap() = id.clone();
+                d.select(None, w, cx);
+                d.resuming = Some((
+                    crate::updates::Resume {
+                        session: id,
+                        window: None,
+                        scroll: Some((0, 0.)),
+                    },
+                    std::time::Instant::now(),
+                ));
+                cx.notify();
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "after an update, the session it was in opens again",
+                |d, _| {
+                    d.resuming.is_none()
+                        && d.selected.is_some()
+                        && d.selected == *WAS.lock().unwrap()
+                },
+                5.,
+            ),
+        ),
+    ]);
+    v
+}
+
 fn made_up_machines() -> Vec<crate::machines::MachineView> {
     use dent_client_core::machine::State;
     use dent_link::{Access, Goodbye, Trust};

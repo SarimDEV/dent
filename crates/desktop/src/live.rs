@@ -31,6 +31,9 @@ pub enum Incoming {
         /// version), and how its last update went.
         version: String,
         update: Option<dent_protocol::UpdateOutcome>,
+        /// Its number among main's builds, and a newer one it has ready.
+        main_build: u64,
+        available: Option<dent_protocol::Available>,
     },
     Down(String),
     Out {
@@ -186,6 +189,8 @@ fn run(
                                 version,
                                 release,
                                 update,
+                                main_build,
+                                available,
                                 ..
                             },
                     } if req == 1 => {
@@ -210,6 +215,8 @@ fn run(
                             agents,
                             version: if release.is_empty() { version } else { release },
                             update: update.map(|u| *u),
+                            main_build,
+                            available,
                         }
                     }
                     out => Incoming::Out { req, out },

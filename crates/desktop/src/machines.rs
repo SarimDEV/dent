@@ -24,6 +24,10 @@ pub struct MachineView {
     /// went, since its last welcome.
     pub release: String,
     pub update: Option<dent_protocol::UpdateOutcome>,
+    /// Its number among main's builds (0: not built by CI), and a newer one
+    /// it has ready, since its welcome and as it says.
+    pub main_build: u64,
+    pub available: Option<dent_protocol::Available>,
     /// The protocol its daemon speaks, since its last welcome.
     pub proto: Option<u32>,
     pub agents: Vec<AgentInfo>,
@@ -51,6 +55,8 @@ impl MachineView {
             version: String::new(),
             release: String::new(),
             update: None,
+            main_build: 0,
+            available: None,
             proto: None,
             agents: Vec::new(),
             agents_known: false,
@@ -125,6 +131,8 @@ pub fn apply(list: &mut Vec<MachineView>, id: &str, event: Event) {
             version,
             release,
             update,
+            main_build,
+            available,
             proto,
             agents,
             via,
@@ -135,6 +143,8 @@ pub fn apply(list: &mut Vec<MachineView>, id: &str, event: Event) {
             m.version = version;
             m.release = release;
             m.update = update;
+            m.main_build = main_build;
+            m.available = available;
             m.proto = Some(proto);
             // The welcome says what each agent is; how it stands (installed,
             // signed in) comes with the Agents reply, so a reconnect keeps

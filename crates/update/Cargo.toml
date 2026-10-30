@@ -1,0 +1,17 @@
+[package]
+name = "dent-update"
+description = "Updates from main's builds: which build is newest, and its parts downloaded, checked and unpacked. The daemon and the app share it."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "=0.10.9"
+hex = "=0.4.3"
+
+[lints]
+workspace = true

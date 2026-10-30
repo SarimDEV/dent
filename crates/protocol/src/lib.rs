@@ -1747,6 +1747,11 @@ pub enum Request {
     /// fails; the answer says whether the launcher took it on.
     Update {
         version: String,
+        /// Unique to one press: a request sent again after a reconnect
+        /// (its answer lost as the daemon stopped) is known by it and
+        /// changes nothing.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        once: String,
     },
     /// What the session's directory has changed, against its last commit;
     /// with `turn` (one of your messages), only what that turn changed.
@@ -1922,6 +1927,12 @@ pub enum Out {
         #[serde(default)]
         projects: std::collections::BTreeMap<String, Defaults>,
     },
+    /// The newer build this machine has ready changed: one was made
+    /// ready, or what was ready now runs.
+    Available {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        available: Option<Available>,
+    },
     /// Catch-up is over; what follows is live.
     CaughtUp {
         seq: u64,
@@ -2015,6 +2026,14 @@ pub enum Reply {
         /// ([decision 0065](../../docs/decisions/0065-launcher-and-updates.md)).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         update: Option<Box<UpdateOutcome>>,
+        /// Its number among main's builds, when CI built it; 0 otherwise
+        /// ([decision 0077](../../docs/decisions/0077-updates-from-main.md)).
+        #[serde(default, skip_serializing_if = "no_build")]
+        main_build: u64,
+        /// A newer build it has ready, if any: [`Out::Available`] says when
+        /// that changes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        available: Option<Available>,
     },
     Ok,
     /// Answers to a move's requests.
@@ -2301,6 +2320,7 @@ impl Out {
             | Out::Error { .. }
             | Out::Models { .. }
             | Out::Defaults { .. }
+            | Out::Available { .. }
             | Out::CaughtUp { .. } => Vec::new(),
         }
     }
@@ -2438,6 +2458,19 @@ pub enum MoveState {
     /// Kept here after it may have been sent (the other machine may hold
     /// a copy).
     ContinuedHere,
+}
+
+fn no_build(n: &u64) -> bool {
+    *n == 0
+}
+
+/// A newer build of main a machine has downloaded and checked, ready to
+/// run: [`Request::Update`] with its `version` runs it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Available {
+    pub main_build: u64,
+    /// The launcher's name for it.
+    pub version: String,
 }
 
 /// How an update went: `from` to `to`, kept or rolled back.

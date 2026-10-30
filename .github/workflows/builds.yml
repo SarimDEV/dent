@@ -1,0 +1,174 @@
+# Every merge to main, built and published as one rolling release (decision
+# 0077): the app and daemon for macOS, the daemon for Linux, and latest.json
+# saying which build is newest. Every dent built here updates itself from it.
+name: Builds
+
+on:
+  push:
+    branches: [main]
+  # A change to how builds are made is tried on its pull request, without
+  # publishing.
+  pull_request:
+    paths:
+      - .github/workflows/builds.yml
+      - scripts/release-parts.sh
+      - scripts/bundle.sh
+      - scripts/feed.py
+      - scripts/compat.sh
+  workflow_dispatch:
+
+# A newer merge makes an older build moot.
+concurrency:
+  group: builds-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Kept in every binary: a build knows its number and updates from there.
+  DENT_MAIN_BUILD: ${{ github.run_number }}
+  DENT_COMMIT: ${{ github.sha }}
+  FEED: https://github.com/${{ github.repository }}/releases/download/edge
+
+jobs:
+  macos:
+    name: macOS (app and daemon)
+    runs-on: macos-15
+    env:
+      # A step's own env isn't seen by its `if`, so this is the job's.
+      SIGNED: ${{ secrets.DENT_SIGN_P12 != '' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+      # One self-signed identity for every build, so macOS keeps what it
+      # allowed dent (folder access) across updates. Without the secret,
+      # builds are signed ad hoc.
+      - name: Signing identity
+        env:
+          P12: ${{ secrets.DENT_SIGN_P12 }}
+          PASS: ${{ secrets.DENT_SIGN_PASS }}
+        if: env.SIGNED == 'true'
+        run: |
+          kc=$RUNNER_TEMP/dent.keychain-db
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/dent.p12"
+          security create-keychain -p ci "$kc"
+          security set-keychain-settings "$kc"
+          security unlock-keychain -p ci "$kc"
+          security import "$RUNNER_TEMP/dent.p12" -k "$kc" -P "$PASS" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$kc" >/dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          security find-certificate -c "dent self-signed" -p "$kc" > "$RUNNER_TEMP/dent.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$RUNNER_TEMP/dent.pem"
+          id=$(openssl x509 -in "$RUNNER_TEMP/dent.pem" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d :)
+          echo "DENT_SIGN=$id" >> "$GITHUB_ENV"
+      - run: scripts/release-parts.sh parts
+      - name: Signed as one identity
+        run: |
+          codesign --verify --deep --strict target/release/dent.app
+          req=$(codesign -d -r- target/release/dent.app 2>&1 | grep designated)
+          echo "$req"
+          # With the certificate there, an ad hoc signature means signing
+          # quietly failed: macOS would ask for folder access after updates.
+          if [ "$SIGNED" = true ] && echo "$req" | grep -q cdhash; then
+            echo "signed ad hoc though the certificate is there" >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parts-macos
+          path: parts/
+
+  linux:
+    name: Linux daemon (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          # The oldest glibc we build on is the oldest a machine can have.
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+      - run: scripts/release-parts.sh parts
+      # The build before this one and this one still work together, both
+      # ways round, over the remote link.
+      - name: Works with the build before it
+        if: matrix.arch == 'x86_64'
+        run: |
+          cargo build --release -q -p dent-fake-claude
+          if ! curl -fsSL "$FEED/latest.json" -o last.json; then
+            echo "No build published yet; nothing to check against."
+            exit 0
+          fi
+          url=$(python3 -c 'import json; print(json.load(open("last.json"))["parts"]["daemon-linux-x86_64"]["url"])')
+          mkdir -p old new
+          curl -fsSL "$url" | tar -xz -C old
+          tar -xzf parts/daemon-linux-x86_64.tar.gz -C new
+          scripts/compat.sh old new target/release/dent-fake-claude
+          scripts/compat.sh new old target/release/dent-fake-claude
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parts-linux-${{ matrix.arch }}
+          path: parts/
+
+  publish:
+    name: Publish
+    needs: [macos, linux]
+    # Only main's builds are published, one at a time.
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    concurrency:
+      group: publish
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BUILD: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: parts-*
+          path: parts
+          merge-multiple: true
+      - name: Publish
+        run: |
+          # A re-run of an older build never takes a newer one's place.
+          if curl -fsSL "$FEED/latest.json" -o published.json; then
+            have=$(python3 -c 'import json; print(json.load(open("published.json"))["build"])')
+            if [ "$have" -ge "$BUILD" ]; then
+              echo "Build $have is already published; $BUILD is older."
+              exit 0
+            fi
+          fi
+          python3 scripts/feed.py parts "$BUILD" "$GITHUB_SHA" "$FEED" > latest.json
+          cat latest.json
+          gh release view edge >/dev/null 2>&1 || gh release create edge --prerelease \
+            --title "Main's newest build" \
+            --notes "Built from every merge to main. dent updates itself from here; to install, see the README." \
+            --target "$GITHUB_SHA"
+          # Parts first, named by build; latest.json last, so it never names
+          # a part that isn't there yet.
+          mkdir out
+          for f in parts/*.tar.gz; do
+            n=$(basename "$f" .tar.gz)
+            cp "$f" "out/$n-$BUILD.tar.gz"
+          done
+          gh release upload edge out/*.tar.gz --clobber
+          gh release upload edge latest.json --clobber
+          # The last few builds stay, for anyone mid-download; older go.
+          gh release view edge --json assets -q '.assets[].name' | while read -r a; do
+            b=$(echo "$a" | sed -n 's/.*-\([0-9]*\)\.tar\.gz$/\1/p')
+            if [ -n "$b" ] && [ "$b" -lt $((BUILD - 5)) ]; then
+              gh release delete-asset edge "$a" --yes
+            fi
+          done

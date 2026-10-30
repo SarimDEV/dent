@@ -797,6 +797,8 @@ pub enum Waiting {
     /// The files a project brings, read on its machine, and the machine
     /// it's for.
     BringFiles(dent_protocol::Bring, String),
+    /// A machine asked to run its newer build ("" is this Mac's daemon).
+    Update(String),
 }
 
 /// A message the daemon gave back longer ago than this isn't put back in
@@ -955,6 +957,15 @@ pub struct Dent {
     /// What runs on it, and how its last update went, from the same.
     pub machine_version: String,
     pub machine_update: Option<dent_protocol::UpdateOutcome>,
+    /// This Mac's daemon's number among main's builds, and a newer one it
+    /// has ready (when the service runs it).
+    pub machine_main_build: u64,
+    pub machine_available: Option<dent_protocol::Available>,
+    /// A press of Update all under way.
+    pub updating: Option<crate::updates::Run>,
+    /// Where the app was before it updated, put back as its sessions come
+    /// (until a while has passed).
+    pub resuming: Option<(crate::updates::Resume, Instant)>,
     /// The page of Settings showing.
     pub settings_tab: crate::settings::Tab,
     /// The machine whose tab Settings › Agents shows; `None` is All.
@@ -1951,6 +1962,10 @@ impl Dent {
             },
             machine_version: String::new(),
             machine_update: None,
+            machine_main_build: 0,
+            machine_available: None,
+            updating: None,
+            resuming: None,
             settings_tab: crate::settings::Tab::General,
             agents_tab: None,
             agents_project: None,
@@ -3301,11 +3316,15 @@ impl Dent {
                     agents,
                     version,
                     update,
+                    main_build,
+                    available,
                 } => {
                     self.machine = machine;
                     self.machine_id = id;
                     self.machine_version = version;
                     self.machine_update = update;
+                    self.machine_main_build = main_build;
+                    self.machine_available = available;
                     self.connection = Ok(());
                     self.ask_setup("");
                     // What each agent is (names, what it can do) from the
@@ -3559,6 +3578,9 @@ impl Dent {
         } = &out
         {
             self.defaults_changed_there(machine, defaults, *set, projects, cx);
+        }
+        if let Out::Available { available } = &out {
+            self.available_there(machine, available.clone(), cx);
         }
         if let Out::Models { models, agent } = &out {
             let key = self.model_key(machine, Some(agent));
@@ -4207,6 +4229,9 @@ impl Dent {
                 } else if !self.taking_back.contains_key(&msg) {
                     self.toast(ToastAction::Info, message);
                 }
+            }
+            (Waiting::Update(machine), Out::Error { message }) => {
+                self.update_refused(&machine, message, cx);
             }
             (_, Out::Error { message }) => self.toast(ToastAction::Info, message),
             _ => {}
@@ -10078,6 +10103,10 @@ impl Dent {
             let i = self.inline.borrow();
             i.tick() | i.settling()
         } | self.looker.busy();
+        // An update under way, or a place to put back, is looked at each
+        // tick until it's done.
+        let updating =
+            self.updating.is_some() || self.resuming.is_some() || crate::updates::take_changed();
         let toast_expired = self
             .toast
             .as_ref()
@@ -10111,7 +10140,8 @@ impl Dent {
             || (working_shown && new_second)
             || new_minute
             || disk
-            || rest_over;
+            || rest_over
+            || updating;
         if due && self.walk.as_ref().is_some_and(|w| w.resting.is_some()) {
             eprintln!(
                 "      tick: page={page} toast={toast_expired} copied={copied} second={}",

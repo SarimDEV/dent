@@ -130,9 +130,28 @@ pub fn route_kind(addr: &str) -> &'static str {
     if tailnet { "Tailscale" } else { "LAN" }
 }
 
-/// A version as a row says it: a release by its number, a build made
-/// from source by its stamp (`0.0.0-3f2a9c1e` reads "build 3f2a9c1e").
+/// A version as a row says it: one of main's builds by its number
+/// (`0.1.0-b412-3f2a9c1e` reads "build 412"), a release by its number, a
+/// build made from source by its stamp (`0.0.0-3f2a9c1e` reads "build
+/// 3f2a9c1e").
 pub fn version_word(v: &str) -> String {
+    if v.starts_with("build ") {
+        return v.to_string();
+    }
+    // The number sits between the version and the stamp, never last: a
+    // stamp can look like one.
+    let parts: Vec<&str> = v.split('-').collect();
+    if let Some(n) = parts
+        .iter()
+        .take(parts.len().saturating_sub(1))
+        .skip(1)
+        .find_map(|p| {
+            p.strip_prefix('b')
+                .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+    {
+        return format!("build {n}");
+    }
     match v.strip_prefix("0.0.0-") {
         Some(stamp) => format!("build {}", stamp.chars().take(8).collect::<String>()),
         // Built from source and run by hand, not by the service.
@@ -516,7 +535,12 @@ impl Dent {
                     .flex_col()
                     .gap(px(space::S1))
                     .child(div().ty(DISPLAY).text_color(t.ink).child("Machines"))
-                    .child(div().ty(UI).text_color(t.quiet).child(summary.join(" · "))),
+                    .child(div().ty(UI).text_color(t.quiet).child(summary.join(" · ")))
+                    .children((self.updates_ready() > 0 || self.updating.is_some()).then(|| {
+                        div().ty(UI).text_color(t.quiet).child(
+                            "Sessions keep running while a machine updates; one that doesn't come up goes back to what it had.",
+                        )
+                    })),
             )
             // Both buttons together: in a narrow window they go under the
             // title as a pair.
@@ -526,6 +550,7 @@ impl Dent {
                     .flex()
                     .items_center()
                     .gap(px(space::S2))
+                    .children(self.update_all_button(cx))
                     .child(
                         ui::button("pairing-code", "Pairing code", false, &t)
                             .flex_none()
@@ -1050,13 +1075,16 @@ impl Dent {
             match &self.connection {
                 Ok(()) => with_version(
                     "Online".to_string(),
-                    &self.machine_version,
+                    &match dent_update::number() {
+                        0 => self.machine_version.clone(),
+                        n => format!("build {n}"),
+                    },
                     self.machine_update.as_ref(),
                 ),
                 Err(why) => why.clone(),
             },
             holder(local_shape, None, 32., false, &t),
-            None,
+            self.update_action("", cx),
             local_open,
             cx,
         ));
@@ -1086,10 +1114,10 @@ impl Dent {
                                 _ => route_kind(addr),
                             })
                     ),
-                    if m.release.is_empty() {
-                        &m.version
-                    } else {
-                        &m.release
+                    &match m.main_build {
+                        0 if m.release.is_empty() => m.version.clone(),
+                        0 => m.release.clone(),
+                        n => format!("build {n}"),
                     },
                     m.update.as_ref(),
                 ),
@@ -1170,7 +1198,7 @@ impl Dent {
                 None,
                 meta,
                 holder(shape, st.dot(&t), 32., faded, &t),
-                retry,
+                retry.or_else(|| self.update_action(&m.id, cx)),
                 open,
                 cx,
             ));
@@ -1251,6 +1279,111 @@ impl Dent {
                     .child(r)
             }))
             .into_any_element()
+    }
+
+    /// The newer build a row can update to ("" is this Mac: its app, or
+    /// its daemon when the service runs it), by number.
+    fn ready_for(&self, id: &str) -> Option<u64> {
+        if id.is_empty() {
+            let daemon = self.machine_available.as_ref().map(|a| a.main_build);
+            crate::updates::ready().max(daemon)
+        } else {
+            let m = self.machines.iter().find(|m| m.id == id)?;
+            matches!(m.state, State::Online)
+                .then(|| m.available.as_ref().map(|a| a.main_build))
+                .flatten()
+        }
+    }
+
+    /// A row's update: the build it has ready and Update, or that it's
+    /// updating now.
+    fn update_action(&self, id: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = self.t;
+        let running = self
+            .updating
+            .as_ref()
+            .is_some_and(|r| r.machines.contains_key(id) || (id.is_empty() && r.app));
+        if running {
+            return Some(
+                div()
+                    .ty(UI)
+                    .text_color(t.quiet)
+                    .whitespace_nowrap()
+                    .child("Updating…")
+                    .into_any_element(),
+            );
+        }
+        let build = self.ready_for(id)?;
+        let key = id.to_string();
+        Some(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(space::S2))
+                .child(
+                    div()
+                        .ty(LABEL)
+                        .whitespace_nowrap()
+                        .px(px(space::S2))
+                        .py(px(2.))
+                        .rounded_full()
+                        .bg(t.tint())
+                        .text_color(t.ink)
+                        .child(format!("build {build} available")),
+                )
+                .child(
+                    ui::inner_button(
+                        SharedString::from(format!(
+                            "update-{}",
+                            if id.is_empty() { "this" } else { id }
+                        )),
+                        "Update",
+                        false,
+                        &t,
+                    )
+                    .relative()
+                    .child(probe(
+                        &self.probes,
+                        format!("update-{}", if id.is_empty() { "this" } else { id }),
+                    ))
+                    .on_press(cx.listener(move |this, _, _, cx| this.update_one(&key, cx))),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Update all, in the page's header, while anything has a build ready.
+    fn update_all_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let t = self.t;
+        if self.updating.is_some() {
+            return Some(
+                ui::button("update-all", "Updating…", true, &t)
+                    .flex_none()
+                    .relative()
+                    .opacity(0.6)
+                    .child(probe(&self.probes, "update-all"))
+                    .into_any_element(),
+            );
+        }
+        let n = self.updates_ready();
+        (n > 0).then(|| {
+            ui::button(
+                "update-all",
+                if n == 1 {
+                    "Update".to_string()
+                } else {
+                    format!("Update all ({n})")
+                },
+                true,
+                &t,
+            )
+            .flex_none()
+            .relative()
+            .child(probe(&self.probes, "update-all"))
+            .on_press(cx.listener(|this, _, _, cx| this.update_all(cx)))
+            .into_any_element()
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2207,6 +2340,10 @@ mod tests {
         assert_eq!(version_word("0.4.3"), "0.4.3");
         assert_eq!(version_word("0.0.0-547cd3579abc"), "build 547cd357");
         assert_eq!(version_word("0.0.0"), "dev build");
+        assert_eq!(version_word("0.1.0-b412-3f2a9c1e"), "build 412");
+        // A stamp that looks like a number is still a stamp.
+        assert_eq!(version_word("0.1.0-b1234567"), "0.1.0-b1234567");
+        assert_eq!(version_word("build 9"), "build 9");
         assert_eq!(with_version("Online".into(), "", None), "Online");
         assert_eq!(
             with_version("Online".into(), "0.4.3", None),
