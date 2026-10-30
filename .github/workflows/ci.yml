@@ -43,3 +43,26 @@ jobs:
           cache-dependency-path: push/package-lock.json
       - run: npm ci
       - run: npm test
+
+  compat:
+    name: Works with main's newest build
+    # This change's daemon with main's CLI, and main's daemon with this
+    # change's CLI, over the remote link (decision 0077).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -q -p dent-daemon -p dent-session-holder -p dent-cli -p dent-fake-claude
+      - name: Both ways round
+        run: |
+          feed=https://github.com/${{ github.repository }}/releases/download/edge/latest.json
+          if ! curl -fsSL "$feed" -o last.json; then
+            echo "No build published yet; nothing to check against."
+            exit 0
+          fi
+          url=$(python3 -c 'import json; print(json.load(open("last.json"))["parts"]["daemon-linux-x86_64"]["url"])')
+          mkdir -p main
+          curl -fsSL "$url" | tar -xz -C main
+          scripts/compat.sh main target/debug target/debug/dent-fake-claude
+          scripts/compat.sh target/debug main target/debug/dent-fake-claude

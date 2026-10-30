@@ -66,6 +66,7 @@ mod swipe;
 mod switcher;
 mod theme;
 mod ui;
+mod updates;
 mod viewer;
 mod walk;
 mod web;
@@ -163,6 +164,8 @@ pub fn style_input(input: &Entity<TextareaState>, t: &Theme, cx: &mut App) {
 impl Render for Dent {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.last_frame = Instant::now();
+        self.update_tick(window, cx);
+        self.resume_tick(window, cx);
         crate::ui::set_menu_open(self.context.is_some());
         // What this frame's drawing asks of other machines' files goes once
         // it's drawn.
@@ -1083,7 +1086,16 @@ fn opts() -> Opts {
 fn main() {
     PROCESS_START.get_or_init(Instant::now);
     let o = opts();
-    let _ = WINDOW.set((40., 40., o.size.0, o.size.1));
+    // Just updated: the window opens where the old one was.
+    let resume = (o.walk.is_none() && !o.background)
+        .then(updates::take_resume)
+        .flatten();
+    let _ = WINDOW.set(
+        resume
+            .as_ref()
+            .and_then(|r| r.window)
+            .unwrap_or((40., 40., o.size.0, o.size.1)),
+    );
 
     let app = gpui_kit::application().with_assets(assets::Assets);
     // A background run starts as an accessory app on macOS: no Dock icon, and
@@ -1179,6 +1191,13 @@ fn main() {
                     d.fold_turns = false;
                 }
                 d.walk = walk;
+                d.resuming = resume.map(|r| (r, Instant::now()));
+                if let Some(build) = updates::went_back() {
+                    d.toast(
+                        app::ToastAction::Info,
+                        format!("Build {build} didn't open, so dent went back to the one you had."),
+                    );
+                }
                 d
             });
             let starter = view.read(cx).starter.clone();
@@ -1186,6 +1205,14 @@ fn main() {
             view
         })
         .expect("open window");
+        // Up: an update waiting on this start knows it took. Then look for
+        // newer builds.
+        cx.spawn(async move |cx| {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            updates::started();
+        })
+        .detach();
+        updates::start();
         // Look in eight times a second, but only draw when something on
         // screen changes: a timer's second, a page's message. (A working
         // square asks for every frame itself, through `animating`.)

@@ -38,6 +38,7 @@ mod service;
 mod session;
 mod ship;
 mod store;
+mod updates;
 mod workspace;
 
 use std::os::unix::fs::PermissionsExt;
@@ -206,6 +207,7 @@ fn main() -> Result<()> {
         moving::sweep(&d.paths.state, &d.store());
         d.watch_prs();
         tokio::spawn(d.clone().watch_memory());
+        tokio::spawn(updates::watch(d.clone()));
         {
             let d = d.clone();
             tokio::spawn(async move {

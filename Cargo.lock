@@ -2118,6 +2118,7 @@ dependencies = [
  "dent-protocol",
  "dent-remote",
  "dent-session-holder",
+ "dent-update",
  "futures-util",
  "hex",
  "libc",
@@ -2144,6 +2145,7 @@ dependencies = [
  "dent-link",
  "dent-protocol",
  "dent-remote",
+ "dent-update",
  "futures",
  "gpui-kit",
  "gtk",
@@ -2182,7 +2184,7 @@ dependencies = [
 
 [[package]]
 name = "dent-files"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "dent-protocol",
  "libc",
@@ -2197,7 +2199,7 @@ dependencies = [
 
 [[package]]
 name = "dent-launcher"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "libc",
 ]
@@ -2250,6 +2252,16 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "dent-update"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

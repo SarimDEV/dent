@@ -247,6 +247,8 @@ pub async fn session(
                         managed: crate::launcher::get().is_some(),
                         release: crate::launcher::version().unwrap_or_default(),
                         update: crate::launcher::outcome(),
+                        main_build: dent_update::number(),
+                        available: d.available(),
                     })
                 }
             }
