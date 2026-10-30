@@ -109,5 +109,10 @@ assert w.get("main_build") == 2, w
 assert w.get("update") and not w["update"].get("rolled_back"), w
 assert not w.get("available"), w
 print("trial: build 2 runs; update", w["update"])
+# The session made on build 1 is there on build 2.
+sid = made.get("session") or made.get("id")
+seen = talk([hello, {"req": 2, "op": "subscribe", "after": 0}],
+            lambda o: o.get("op") == "events" and any(e.get("session") == sid for e in o.get("events", [])))
+print("trial: session", sid, "still there")
 PY
 echo "update-trial: ok"
