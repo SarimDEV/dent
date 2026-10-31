@@ -1770,6 +1770,11 @@ pub enum Request {
         hunk: Option<u32>,
         #[serde(default)]
         turn: Option<String>,
+        /// The hunk as it was shown ([`hunk_print`]): only a hunk that
+        /// still reads so is put back, wherever it is now. Sent again, or
+        /// from an old view, it can't take another hunk in its place.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seen: Option<String>,
     },
     /// Files in the session's directory, for @ mentions: tracked and
     /// untracked, ignoring what git ignores, at most a few thousand.
@@ -2175,6 +2180,119 @@ pub enum Reply {
     },
 }
 
+/// What may happen to a request whose answer was lost on a link that
+/// dropped ([decision 0078](../../docs/decisions/0078-requests-that-fail-well.md)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resend {
+    /// It only reads: sent again on the next link.
+    Read,
+    /// A second copy changes nothing more (it carries an id the daemon
+    /// checks, or sets a value outright): sent again.
+    Repeatable,
+    /// A second copy would do something else or more: never sent again.
+    /// Its client hears it may or may not have happened, and looks.
+    Once,
+}
+
+impl Request {
+    /// Whether this request may go again after its link dropped. No
+    /// catch-all arm: a new request must say.
+    pub fn resend(&self) -> Resend {
+        use Request as R;
+        use Resend::*;
+        match self {
+            R::Hello { .. }
+            | R::Pairing
+            | R::Devices
+            | R::Projects
+            | R::Agents { .. }
+            | R::Machine
+            | R::Models { .. }
+            | R::Usage { .. }
+            | R::Recent
+            | R::Commands { .. }
+            | R::MoveHave { .. }
+            | R::Changes { .. }
+            | R::Files { .. }
+            | R::FilesIn { .. }
+            | R::Folders { .. }
+            | R::Pack { .. }
+            | R::ReadFiles { .. }
+            | R::Repo { .. }
+            | R::GitStatus { .. }
+            | R::PrBrief { .. }
+            | R::ReadFile { .. }
+            | R::Stat { .. }
+            | R::Read { .. } => Read,
+            // Checked by the id they carry.
+            R::Create { id, .. } if !id.is_empty() => Repeatable,
+            R::Fork { id: Some(_), .. } => Repeatable,
+            R::Update { once, .. } if !once.is_empty() => Repeatable,
+            R::Send { .. }
+            | R::Rewind { .. }
+            | R::Looked { .. }
+            | R::Aside { .. }
+            | R::PromoteAside { .. }
+            | R::Subscribe { .. }
+            | R::MovePack { .. }
+            | R::MoveRead { .. }
+            | R::MoveIn { .. }
+            | R::MoveWrite { .. }
+            | R::MoveAccept { .. }
+            | R::BringProject { .. }
+            | R::RemoveWorktree { .. }
+            | R::Requeue { .. } => Repeatable,
+            R::MoveEnded { not_accepted, .. } if not_accepted.is_none() => Repeatable,
+            // Set outright, or put as they were.
+            R::SetModel { .. }
+            | R::SetPermission { .. }
+            | R::SetEffort { .. }
+            | R::Rename { .. }
+            | R::Close { .. }
+            | R::Reopen { .. }
+            | R::Resume { .. }
+            | R::KeepAwake { .. }
+            | R::Seen { .. }
+            | R::SetLan { .. }
+            | R::SetLoginItem { .. }
+            | R::SetGitUser { .. }
+            | R::SetDefaults { .. }
+            | R::AddProject { .. }
+            | R::HideProject { .. } => Repeatable,
+            R::Act {
+                act: Act::McpEnable { .. },
+                ..
+            } => Repeatable,
+            // A whole file goes back to as it was; one hunk, only as it was
+            // shown.
+            R::Discard { hunk: None, .. } | R::Discard { seen: Some(_), .. } => Repeatable,
+            // Again, these would stop a newer turn, make a second project,
+            // commit what changed since, take a session in twice, or say
+            // that what worked failed.
+            R::Create { .. }
+            | R::Fork { .. }
+            | R::Update { .. }
+            | R::MoveEnded { .. }
+            | R::Act { .. }
+            | R::Discard { .. }
+            | R::OpenPairing
+            | R::RemoveDevice { .. }
+            | R::Unqueue { .. }
+            | R::Interrupt { .. }
+            | R::Answer { .. }
+            | R::RestartAgent { .. }
+            | R::StopTask { .. }
+            | R::Retitle { .. }
+            | R::Adopt { .. }
+            | R::Restart
+            | R::MoveStop { .. }
+            | R::NewProject { .. }
+            | R::CloneProject { .. }
+            | R::Git { .. } => Once,
+        }
+    }
+}
+
 impl Request {
     /// Every session id this request names. A client connected to several
     /// machines qualifies ids with their machine and routes a request by
@@ -2458,6 +2576,19 @@ pub enum MoveState {
     /// Kept here after it may have been sent (the other machine may hold
     /// a copy).
     ContinuedHere,
+}
+
+/// One hunk's lines, each its kind (`' '`, `'+'`, `'-'`) and text without
+/// its line ending: what a client saw of it and what the daemon finds,
+/// compared for [`Request::Discard`].
+pub fn hunk_print<'a>(lines: impl IntoIterator<Item = (char, &'a str)>) -> String {
+    let mut out = String::new();
+    for (kind, text) in lines {
+        out.push(kind);
+        out.push_str(text.trim_end_matches(['\n', '\r']));
+        out.push('\n');
+    }
+    out
 }
 
 fn no_build(n: &u64) -> bool {

@@ -4729,11 +4729,17 @@ impl Dent {
             return;
         }
         self.discarding = None;
+        // The hunk as shown, so only that one goes back, wherever it is.
+        let seen = hunk.and_then(|n| {
+            let file = self.changes.get(session)?.iter().find(|f| f.path == path)?;
+            crate::data::hunk_print(file, n)
+        });
         let n = self.live.send(Request::Discard {
             session: session.to_string(),
             path: path.to_string(),
             hunk: hunk.map(|h| h as u32),
             turn: self.changes_turn.get(session).cloned(),
+            seen,
         });
         self.waiting
             .insert(n, Waiting::Discard(session.to_string()));

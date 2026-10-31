@@ -644,6 +644,20 @@ pub enum Line {
     Hunk,
 }
 
+/// Hunk `n` of a file's diff as [`dent_protocol::hunk_print`] writes it:
+/// what a discard names, so only the hunk shown goes back.
+pub fn hunk_print(file: &FileDiff, n: usize) -> Option<String> {
+    let lines = file.lines.split(|l| l.kind == Line::Hunk).nth(n + 1)?;
+    Some(dent_protocol::hunk_print(lines.iter().map(|l| {
+        let kind = match l.kind {
+            Line::Added => '+',
+            Line::Removed => '-',
+            _ => ' ',
+        };
+        (kind, l.text.as_str())
+    })))
+}
+
 /// A unified diff, as git writes it, into lines with numbers.
 pub fn parse_diff(path: &str, added: u32, removed: u32, diff: &str) -> FileDiff {
     let mut lines = Vec::new();
@@ -1069,5 +1083,25 @@ mod tests {
             assert_eq!(r, Ok(None), "hung on a pipe");
             let _ = std::fs::remove_dir_all(&d);
         }
+    }
+}
+
+#[cfg(test)]
+mod hunk_print_tests {
+    /// What the app names a hunk by is what the daemon reads it as: the
+    /// same lines, kind and text, from git's own diff.
+    #[test]
+    fn a_hunk_is_named_as_the_daemon_reads_it() {
+        let diff = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,5 +1,5 @@\n 1\n-2\n+TWO\n 3\n 4\n 5\n@@ -8,5 +8,5 @@\n 8\n 9\n 10\n-11\n+ELEVEN\n 12\n";
+        let f = super::parse_diff("a.txt", 2, 2, diff);
+        assert_eq!(
+            super::hunk_print(&f, 0).unwrap(),
+            " 1\n-2\n+TWO\n 3\n 4\n 5\n"
+        );
+        assert_eq!(
+            super::hunk_print(&f, 1).unwrap(),
+            " 8\n 9\n 10\n-11\n+ELEVEN\n 12\n"
+        );
+        assert!(super::hunk_print(&f, 2).is_none());
     }
 }

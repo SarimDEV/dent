@@ -345,6 +345,7 @@ pub fn discard(
     base: Option<&str>,
     path: &str,
     hunk: Option<usize>,
+    seen: Option<&str>,
 ) -> Result<(), String> {
     git(dir, &["rev-parse", "--is-inside-work-tree"]).ok_or("not a git repository")?;
     if path.split('/').any(|p| p == "..") || path.starts_with('/') {
@@ -381,6 +382,23 @@ pub fn discard(
     let now = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
     let diff = unified(&then, &now, path);
     let hunks = hunks(&diff);
+    // The hunk that reads as it was shown, wherever it is now: a hunk put
+    // back moves the ones after it up, so its number alone can name
+    // another. None reads so: it's gone, or changed since.
+    let n = match seen {
+        None => n,
+        Some(seen) => {
+            let prints = hunk_prints(&diff);
+            if prints.get(n).map(String::as_str) == Some(seen) {
+                n
+            } else {
+                prints
+                    .iter()
+                    .position(|p| p == seen)
+                    .ok_or("that change isn't there any more; look again")?
+            }
+        }
+    };
     let h = hunks.get(n).ok_or("that change has already gone")?;
     let mut lines: Vec<&str> = now.split_inclusive('\n').collect();
     let start = h.new_start.saturating_sub(1);
@@ -397,9 +415,13 @@ pub fn discard(
 
 /// A diff of two texts, as git writes it, through `git diff --no-index`.
 fn unified(old: &str, new: &str, path: &str) -> String {
+    // Its own folder each time: two discards at once (two sessions, files
+    // of one name) never diff each other's texts.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tmp = std::env::temp_dir().join(format!(
-        "dent-discard-{}-{}",
+        "dent-discard-{}-{}-{}",
         std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         path.replace('/', "_")
     ));
     let _ = std::fs::create_dir_all(&tmp);
@@ -415,6 +437,22 @@ fn unified(old: &str, new: &str, path: &str) -> String {
         .unwrap_or_default();
     let _ = std::fs::remove_dir_all(&tmp);
     out
+}
+
+/// Each hunk of a diff as [`dent_protocol::hunk_print`] writes it.
+fn hunk_prints(diff: &str) -> Vec<String> {
+    let mut out: Vec<Vec<(char, &str)>> = Vec::new();
+    for line in diff.split_inclusive('\n') {
+        if line.starts_with("@@ ") {
+            out.push(Vec::new());
+            continue;
+        }
+        let Some(h) = out.last_mut() else { continue };
+        if let Some(kind @ (' ' | '+' | '-')) = line.chars().next() {
+            h.push((kind, &line[1..]));
+        }
+    }
+    out.into_iter().map(dent_protocol::hunk_print).collect()
 }
 
 /// A hunk: where it starts in the new text, and its lines old and new.
@@ -519,15 +557,15 @@ mod discard_tests {
         let dir = repo("file");
         std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
         std::fs::write(dir.join("new.txt"), "new\n").unwrap();
-        discard(&dir, None, "a.txt", None).unwrap();
-        discard(&dir, None, "new.txt", None).unwrap();
+        discard(&dir, None, "a.txt", None, None).unwrap();
+        discard(&dir, None, "new.txt", None, None).unwrap();
         assert!(
             std::fs::read_to_string(dir.join("a.txt"))
                 .unwrap()
                 .starts_with("1\n2\n")
         );
         assert!(!dir.join("new.txt").exists());
-        assert!(discard(&dir, None, "../x", None).is_err());
+        assert!(discard(&dir, None, "../x", None, None).is_err());
     }
 
     #[test]
@@ -539,19 +577,51 @@ mod discard_tests {
         )
         .unwrap();
         assert_eq!(changes(&dir).len(), 1);
-        discard(&dir, None, "a.txt", Some(1)).unwrap();
+        discard(&dir, None, "a.txt", Some(1), None).unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.join("a.txt")).unwrap(),
             "1\nTWO\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n"
         );
-        discard(&dir, None, "a.txt", Some(0)).unwrap();
+        discard(&dir, None, "a.txt", Some(0), None).unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.join("a.txt")).unwrap(),
             "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n"
         );
         assert!(
-            discard(&dir, None, "a.txt", Some(0)).is_err(),
+            discard(&dir, None, "a.txt", Some(0), None).is_err(),
             "nothing left to discard"
+        );
+    }
+
+    /// A discard sent twice (its answer lost on a reconnect), or from a
+    /// view that's out of date, puts back only the hunk that was shown:
+    /// never the one that moved up into its place.
+    #[test]
+    fn a_hunk_named_by_what_it_read_goes_back_once() {
+        let dir = repo("seen");
+        std::fs::write(
+            dir.join("a.txt"),
+            "1\nTWO\n3\n4\n5\n6\n7\n8\n9\n10\nELEVEN\n12\n",
+        )
+        .unwrap();
+        let diff = changes(&dir)[0].diff.clone();
+        let shown = hunk_prints(&diff);
+        assert_eq!(shown.len(), 2);
+        assert!(shown[0].contains("+TWO") && shown[1].contains("+ELEVEN"));
+        discard(&dir, None, "a.txt", Some(0), Some(&shown[0])).unwrap();
+        // Again, as a resend: hunk 0 is now ELEVEN, and stays.
+        let again = discard(&dir, None, "a.txt", Some(0), Some(&shown[0]));
+        let why = again.unwrap_err();
+        assert!(why.contains("isn't there any more"), "{why}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\nELEVEN\n12\n"
+        );
+        // Shown as hunk 1 before the first went: found where it is now.
+        discard(&dir, None, "a.txt", Some(1), Some(&shown[1])).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n"
         );
     }
 
@@ -580,7 +650,7 @@ mod discard_tests {
             .output()
             .unwrap();
         std::fs::write(dir.join("b.txt"), "x\nY").unwrap();
-        discard(&dir, None, "b.txt", Some(0)).unwrap();
+        discard(&dir, None, "b.txt", Some(0), None).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "x\ny");
     }
 
@@ -597,7 +667,7 @@ mod discard_tests {
             ["a.txt"],
             "only what the turn did, not what was there before it"
         );
-        discard(&dir, Some(&c), "a.txt", None).unwrap();
+        discard(&dir, Some(&c), "a.txt", None, None).unwrap();
         assert!(changes_between(&dir, &c, None).is_empty());
         assert!(
             dir.join("before.txt").exists(),

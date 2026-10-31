@@ -102,8 +102,10 @@ fn run(
     seq: Arc<AtomicU64>,
 ) {
     let sock = dent_protocol::daemon_socket(&state);
-    // Requests not yet answered, resent after a reconnect.
-    let mut pending: BTreeMap<u64, Request> = BTreeMap::new();
+    // Requests not yet answered, and whether each went to a daemon: after a
+    // reconnect, what can be repeated goes again, and what went and can't
+    // is answered as lost (decision 0078).
+    let mut pending: BTreeMap<u64, (Request, bool)> = BTreeMap::new();
     let mut started_at: Option<Instant> = None;
     // When an older daemon that refused this app was last replaced.
     let mut replaced_at: Option<Instant> = None;
@@ -121,7 +123,7 @@ fn run(
                 // Take requests while waiting, so none is lost.
                 match rx.recv_timeout(wait) {
                     Ok((n, r)) => {
-                        pending.insert(n, r);
+                        pending.insert(n, (r, false));
                     }
                     Err(RecvTimeoutError::Disconnected) => return,
                     Err(RecvTimeoutError::Timeout) => {}
@@ -148,8 +150,23 @@ fn run(
         {
             continue;
         }
-        for (n, r) in &pending {
+        let lost: Vec<u64> = pending
+            .iter()
+            .filter(|(_, (r, gone))| *gone && r.resend() == dent_protocol::Resend::Once)
+            .map(|(n, _)| *n)
+            .collect();
+        for n in lost {
+            pending.remove(&n);
+            let _ = ui.unbounded_send(Incoming::Out {
+                req: n,
+                out: Out::Error {
+                    message: "dent's background service restarted before it answered, so that may or may not have happened; look before trying again".into(),
+                },
+            });
+        }
+        for (n, (r, gone)) in pending.iter_mut() {
             let _ = w.write_all(&encode(*n, r));
+            *gone = true;
         }
         // Lines from the daemon come through a reader thread; replies clear
         // pending requests here.
@@ -239,7 +256,8 @@ fn run(
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok((n, r)) => {
                     let line = encode(n, &r);
-                    pending.insert(n, r);
+                    // A write that fails may still have reached it.
+                    pending.insert(n, (r, true));
                     if w.write_all(&line).is_err() {
                         break;
                     }
@@ -279,7 +297,7 @@ fn run(
         while let Some(left) = until.checked_duration_since(Instant::now()) {
             match rx.recv_timeout(left) {
                 Ok((n, r)) => {
-                    pending.insert(n, r);
+                    pending.insert(n, (r, false));
                 }
                 Err(RecvTimeoutError::Disconnected) => return,
                 Err(RecvTimeoutError::Timeout) => break,

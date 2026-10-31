@@ -77,3 +77,4 @@ One short record per settled choice. Don't relitigate these; write a new record 
 - [0075. A watch on each agent's memory](0075-agent-memory-watch.md)
 - [0076. How new sessions start is kept on each machine](0076-defaults-on-machines.md)
 - [0077. Every merge to main is a build, and every dent updates from it with one button](0077-updates-from-main.md)
+- [0078. Requests across machines fail well: classified, never blindly repeated, always ended](0078-requests-that-fail-well.md)

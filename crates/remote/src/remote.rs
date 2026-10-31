@@ -1,8 +1,13 @@
 //! A remote daemon as a client sees one: the connection actor run by
 //! [`crate::host`], with the daemon session on top. On every trusted link it
 //! says hello, subscribes from the last event the client applied, and resends
-//! the requests still unanswered (a resend changes nothing twice: messages,
-//! forks and new sessions carry the client's own ids). Requests made while
+//! the requests still unanswered that a second copy can't change anything
+//! more with (`Request::resend`): reads, and changes that carry an id or set
+//! a value outright. One that went on the link that dropped and can't be
+//! repeated (a stop, a commit, a new project) is answered here instead: it
+//! may or may not have happened, so the client looks before trying again
+//! ([decision 0078](../../docs/decisions/0078-requests-that-fail-well.md)).
+//! Requests made while
 //! the machine is away wait here and go when it's back
 //! ([decision 0063](../../docs/decisions/0063-queued-prompts.md)).
 
@@ -97,6 +102,21 @@ impl Pending {
     fn to_carry(&self, n: u64, theirs: &HashSet<String>) -> Option<Request> {
         let (r, _) = self.0.get(&n)?;
         local_files(r, theirs).then(|| r.clone())
+    }
+
+    /// Requests that went on a link that's gone and mustn't go again:
+    /// taken out, to be answered as lost.
+    fn lost(&mut self) -> Vec<u64> {
+        let lost: Vec<u64> = self
+            .0
+            .iter()
+            .filter(|(_, (r, gone))| *gone && r.resend() == dent_protocol::Resend::Once)
+            .map(|(n, _)| *n)
+            .collect();
+        for n in &lost {
+            self.0.remove(n);
+        }
+        lost
     }
 
     /// Take back request `n`; only one that never went can be.
@@ -560,8 +580,21 @@ async fn run(
                                         via: via.0.clone(),
                                         trust: via.1.clone(),
                                     });
+                                    // What went and can't go again is said:
+                                    // it may or may not have happened.
+                                    let lost = pending.lock().map(|mut p| p.lost()).unwrap_or_default();
+                                    for n in lost {
+                                        events(Event::Out {
+                                            req: n,
+                                            out: Out::Error {
+                                                message: format!(
+                                                    "The connection to {machine} dropped before it answered, so that may or may not have happened; look before trying again"
+                                                ),
+                                            },
+                                        });
+                                    }
                                     // What's still unanswered goes again, in
-                                    // order: a resend changes nothing twice.
+                                    // order: none of it changes anything twice.
                                     ready = Some(proto);
                                     let all: Vec<u64> = pending.lock().map(|p| p.0.keys().copied().collect()).unwrap_or_default();
                                     for n in all {
@@ -665,6 +698,36 @@ mod tests {
         assert!(p.go(5).is_some());
         assert!(!p.cancel(5));
         assert!(!p.cancel(9), "answered or never asked");
+    }
+
+    /// After a link drops, what went on it is sent again only if a second
+    /// copy can't do more; the rest is answered as lost. What never went
+    /// still goes, whatever it is.
+    #[test]
+    fn only_what_can_be_repeated_goes_again() {
+        let mut p = Pending::default();
+        let stop = || Request::Interrupt {
+            session: "s".into(),
+            by: None,
+        };
+        p.0.insert(3, (Request::Projects, false));
+        p.0.insert(4, (stop(), false));
+        p.0.insert(5, (stop(), false));
+        p.go(3);
+        p.go(4);
+        // 5 waited for the link: it never went.
+        assert_eq!(
+            p.lost(),
+            vec![4],
+            "the stop that went is lost, not repeated"
+        );
+        assert!(p.resend(3).is_some(), "a read goes again");
+        assert!(p.resend(4).is_none());
+        assert!(p.resend(5).is_some(), "what never went goes");
+        assert!(
+            p.lost().contains(&5),
+            "and once gone, it's lost the next time"
+        );
     }
 
     #[test]
