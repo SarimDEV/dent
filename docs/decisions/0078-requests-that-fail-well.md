@@ -50,7 +50,16 @@ T3 learned the same lessons:
 
 - **Step 1, built:** points 1 and 2, with tests: only what can be repeated goes again, and a discard sent twice puts back one hunk.
 - **Step 2, built:** point 3's deadlines (`client-core::inflight`). Every request has a patience (`Request::patience`): 30 s for most, 2 minutes for big reads and Git, 10 minutes for what clones, starts an agent or moves. Its time counts only while its machine is connected. Past that, whatever waited on it hears an error in words: a read "didn't answer in 30 seconds"; a change "may or may not have happened; look before trying again". A request for a machine that's gone ends at once. A read asked in the background ends quietly, and only what shows its own wait says so. A message waiting in the outbox is left to its link to send again.
-- **Still to come:** a wait tied to the view that started it, generically, instead of feature by feature; ids on every change; steps and stalls for long jobs; the full failure suite.
+- **Step 3, built:** point 4's keys (protocol 5).
+  - Every change is sent with a key on its envelope (`encode_request`): the client's run and the request's number, the same however often it's sent.
+  - A daemon of protocol 5 runs a keyed change once (`daemon/answered.rs`) and keeps its answer for a day, on disk, so a restart doesn't forget it. A copy gets that answer; a copy arriving while the first still runs waits for it, which closes the races the audit found in Create and Adopt.
+  - To such a daemon, a client sends every change again after a dropped link. To an older daemon, step 1's rule still holds.
+  - Tested against a real daemon: a keyed new project sent again on another connection, and after a restart, makes one project and gets the first answer.
+- **Still to come:**
+  - an absolute setter that also says what it was set from, so a late copy can't undo another device's newer change;
+  - a wait tied to the view that started it, generically;
+  - steps and stalls for long jobs;
+  - the full failure suite.
 - **Some errors appear where there were none.** A stop, commit or new project caught by a dropped link now says it may not have happened, instead of being silently repeated.
 - **Starting numbers, from T3:**
   - opening a link times out after 15 s;

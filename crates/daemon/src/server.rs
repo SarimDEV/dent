@@ -147,6 +147,34 @@ pub async fn session(
             }
         };
         let req = env.req;
+        // A change with a key runs once: a copy gets the first answer, or
+        // waits for it while the first still runs (decision 0078).
+        let keyed = (!env.key.is_empty() && env.body.resend() != dent_protocol::Resend::Read)
+            .then(|| env.key.clone());
+        if let Some(key) = &keyed {
+            match d.answered.begin(key) {
+                crate::answered::Seen::New => {}
+                crate::answered::Seen::Done(out) => {
+                    if tx.send(encode(req, &*out)).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                crate::answered::Seen::Running(mut rx) => {
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        while rx.changed().await.is_ok() {
+                            let out = rx.borrow().clone();
+                            if let Some(out) = out {
+                                let _ = tx.send(encode(req, &out)).await;
+                                break;
+                            }
+                        }
+                    });
+                    continue;
+                }
+            }
+        }
         if !hello && !matches!(env.body, Request::Hello { .. }) {
             let _ = tx
                 .send(encode(
@@ -306,6 +334,9 @@ pub async fn session(
                 message: format!("{e:#}"),
             },
         };
+        if let Some(key) = &keyed {
+            d.answered.finish(key, &msg);
+        }
         if tx.send(encode(req, &msg)).await.is_err() {
             break;
         }

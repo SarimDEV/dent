@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use dent_client_core::machine::{Machine, Note, Signal, State};
 use dent_link::{Keys, Trust};
-use dent_protocol::{AgentInfo, Out, PROTOCOL, Reply, Request, encode};
+use dent_protocol::{AgentInfo, Out, PROTOCOL, Reply, Request};
 use tokio::sync::mpsc;
 
 use crate::history::History;
@@ -105,8 +105,12 @@ impl Pending {
     }
 
     /// Requests that went on a link that's gone and mustn't go again:
-    /// taken out, to be answered as lost.
-    fn lost(&mut self) -> Vec<u64> {
+    /// taken out, to be answered as lost. A daemon that answers changes by
+    /// their key (`keys`) does each once, so to it every one goes again.
+    fn lost(&mut self, keys: bool) -> Vec<u64> {
+        if keys {
+            return Vec::new();
+        }
         let lost: Vec<u64> = self
             .0
             .iter()
@@ -461,7 +465,8 @@ async fn ready_up(
 }
 
 fn line(n: u64, r: &Request) -> Vec<u8> {
-    let mut l = encode(n, r);
+    // With its key: a daemon that answers by key does a change once.
+    let mut l = dent_protocol::encode_request(n, r);
     l.pop();
     l
 }
@@ -582,7 +587,8 @@ async fn run(
                                     });
                                     // What went and can't go again is said:
                                     // it may or may not have happened.
-                                    let lost = pending.lock().map(|mut p| p.lost()).unwrap_or_default();
+                                    let keys = proto >= dent_protocol::KEYS_FROM;
+                                    let lost = pending.lock().map(|mut p| p.lost(keys)).unwrap_or_default();
                                     for n in lost {
                                         events(Event::Out {
                                             req: n,
@@ -716,8 +722,10 @@ mod tests {
         p.go(3);
         p.go(4);
         // 5 waited for the link: it never went.
+        // A daemon that answers changes by key does each once: all goes.
+        assert!(p.lost(true).is_empty());
         assert_eq!(
-            p.lost(),
+            p.lost(false),
             vec![4],
             "the stop that went is lost, not repeated"
         );
@@ -725,7 +733,7 @@ mod tests {
         assert!(p.resend(4).is_none());
         assert!(p.resend(5).is_some(), "what never went goes");
         assert!(
-            p.lost().contains(&5),
+            p.lost(false).contains(&5),
             "and once gone, it's lost the next time"
         );
     }
