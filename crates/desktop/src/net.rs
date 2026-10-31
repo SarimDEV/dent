@@ -41,6 +41,9 @@ pub struct Net {
     ///
     /// [decision 0068]: ../../../docs/decisions/0068-files-across-machines.md
     history: Option<dent_remote::history::History>,
+    /// Every request still waiting for its answer, and for how long
+    /// ([decision 0078](../../../docs/decisions/0078-requests-that-fail-well.md)).
+    inflight: Arc<Mutex<dent_client_core::inflight::Inflight>>,
 }
 
 impl Net {
@@ -68,6 +71,7 @@ impl Net {
             keys,
             far: Arc::new(Mutex::new(HashMap::new())),
             history,
+            inflight: Arc::default(),
         };
         // Off the window's thread: reading each machine's kept history
         // can take a while, and each link starts only once its history is
@@ -106,7 +110,30 @@ impl Net {
         n
     }
 
+    /// The first answer to request `n` came: it's settled.
+    pub fn answered(&self, n: u64) {
+        if let Ok(mut f) = self.inflight.lock() {
+            f.answered(n);
+        }
+    }
+
+    /// Requests that have waited past their patience while their machine
+    /// was connected (`connected`), taken out to be ended in words.
+    pub fn overdue(
+        &self,
+        now: std::time::Instant,
+        link: impl Fn(&str) -> dent_client_core::inflight::Link,
+    ) -> Vec<dent_client_core::inflight::Overdue> {
+        self.inflight
+            .lock()
+            .map(|mut f| f.tick(now, link))
+            .unwrap_or_default()
+    }
+
     fn deliver(&self, machine: &str, n: u64, r: Request) {
+        if let Ok(mut f) = self.inflight.lock() {
+            f.asked(n, machine, &r);
+        }
         if machine.is_empty() {
             self.local.send_as(n, r);
         } else if let Some(f) = self
@@ -117,6 +144,8 @@ impl Net {
         {
             f.send(n, r);
         }
+        // A machine no longer followed: its request ends at once, as gone
+        // (`Dent::end_overdue`).
     }
 
     /// Paths `machine` named in its own events: its files, which a

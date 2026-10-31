@@ -48,7 +48,9 @@ T3 learned the same lessons:
 
 ## Consequences
 
-- **Step 1, built:** points 1 and 2, with tests: only what can be repeated goes again, and a discard sent twice puts back one hunk. Steps 2 to 4 (points 3 to 6) follow in that order, each with its tests.
+- **Step 1, built:** points 1 and 2, with tests: only what can be repeated goes again, and a discard sent twice puts back one hunk.
+- **Step 2, built:** point 3's deadlines (`client-core::inflight`). Every request has a patience (`Request::patience`): 30 s for most, 2 minutes for big reads and Git, 10 minutes for what clones, starts an agent or moves. Its time counts only while its machine is connected. Past that, whatever waited on it hears an error in words: a read "didn't answer in 30 seconds"; a change "may or may not have happened; look before trying again". A request for a machine that's gone ends at once. A read asked in the background ends quietly, and only what shows its own wait says so. A message waiting in the outbox is left to its link to send again.
+- **Still to come:** a wait tied to the view that started it, generically, instead of feature by feature; ids on every change; steps and stalls for long jobs; the full failure suite.
 - **Some errors appear where there were none.** A stop, commit or new project caught by a dropped link now says it may not have happened, instead of being silently repeated.
 - **Starting numbers, from T3:**
   - opening a link times out after 15 s;
