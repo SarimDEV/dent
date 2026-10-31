@@ -350,7 +350,7 @@ pub fn read_files(dir: &Path, paths: &[String]) -> Result<Vec<Carried>, String> 
 /// monorepo's hundreds of `.env` files were a process each).
 fn ignored_of(root: &Path, paths: &[String]) -> Result<std::collections::HashSet<String>, String> {
     use std::io::Write;
-    let mut child = std::process::Command::new("git")
+    let mut child = crate::git::cmd()
         .args(["check-ignore", "-z", "--stdin"])
         .current_dir(root)
         .stdin(std::process::Stdio::piped())
@@ -555,18 +555,11 @@ const GIT_FOR: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 /// a prompt (SSH's included), given up when the link stalls for a minute,
 /// and stopped after [`GIT_FOR`] in all.
 fn quiet_git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    use std::process::{Command, Stdio};
-    let mut child = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env(
-            "GIT_SSH_COMMAND",
-            "ssh -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4",
-        )
-        .env("GIT_HTTP_LOW_SPEED_LIMIT", "1000")
-        .env("GIT_HTTP_LOW_SPEED_TIME", "60")
+    use std::process::Stdio;
+    let mut child = crate::git::cmd();
+    child.arg("-C").arg(dir).args(args);
+    crate::git::never_hangs(&mut child);
+    let mut child = child
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

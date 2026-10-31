@@ -17,8 +17,36 @@ const MAX_UNTRACKED: usize = 200;
 /// git's empty tree, for repositories with no commits yet.
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
+/// What every git the daemon runs is given, so one that talks to a remote
+/// never waits on a person or on a network that's gone quiet (decision
+/// 0078): no prompts; HTTP below 1 KB/s for a minute gives up; SSH that
+/// stops answering for a minute gives up, and never asks. An SSH command
+/// set for the service (`GIT_SSH_COMMAND` in `service.env`) is kept.
+/// Git, as every git the daemon runs starts: with [`never_hangs`]. A test
+/// (`every_git_starts_here`) holds the daemon to it.
+pub fn cmd() -> Command {
+    let mut c = Command::new("git");
+    never_hangs(&mut c);
+    c
+}
+
+pub fn never_hangs(cmd: &mut Command) -> &mut Command {
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
+        .env("SSH_ASKPASS_REQUIRE", "never")
+        .env("GIT_HTTP_LOW_SPEED_LIMIT", "1000")
+        .env("GIT_HTTP_LOW_SPEED_TIME", "60");
+    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
+        cmd.env(
+            "GIT_SSH_COMMAND",
+            "ssh -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4",
+        );
+    }
+    cmd
+}
+
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
+    let out = crate::git::cmd()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -178,6 +206,58 @@ fn added(dir: &Path, path: &str) -> FileChange {
 
 #[cfg(test)]
 mod tests {
+    /// Every git the daemon runs starts at `cmd()`, so none can wait for
+    /// ever on a prompt or a network gone quiet (decision 0078). Tests may
+    /// run git as they like.
+    #[test]
+    fn every_git_starts_here() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        let mut found = Vec::new();
+        for f in files {
+            let text = std::fs::read_to_string(&f).unwrap();
+            // Test modules (from `#[cfg(test)]` and `mod` to their closing
+            // brace at the margin) are left out.
+            let mut in_test = false;
+            let mut prev_cfg_test = false;
+            for (i, line) in text.lines().enumerate() {
+                if prev_cfg_test && line.starts_with("mod ") {
+                    in_test = true;
+                }
+                prev_cfg_test = line.trim() == "#[cfg(test)]";
+                if in_test {
+                    if line == "}" {
+                        in_test = false;
+                    }
+                    continue;
+                }
+                let starts_git = line.contains("Command::new(\"git\")");
+                let the_one = f.ends_with("src/git.rs")
+                    && line.trim() == "let mut c = Command::new(\"git\");";
+                if starts_git && !the_one {
+                    found.push(format!("{}:{}", f.display(), i + 1));
+                }
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "git started without crate::git::cmd(): {found:?}"
+        );
+    }
+
     #[test]
     fn splits_and_counts() {
         let d = "diff --git a/x.rs b/x.rs\n--- a/x.rs\n+++ b/x.rs\n@@ -1 +1,2 @@\n-a\n+b\n+c\ndiff --git a/y b/y\n--- a/y\n+++ b/y\n@@ -1 +0,0 @@\n-z\n";
@@ -211,7 +291,7 @@ fn snapshot(dir: &Path) -> Option<String> {
         std::fs::copy(&real, &index).ok()?;
     }
     let with = |args: &[&str]| {
-        let out = Command::new("git")
+        let out = cmd()
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -278,7 +358,7 @@ pub fn restore(dir: &Path, commit: &str) -> Result<(), String> {
     }
     let index = temp_index(dir).ok_or("not a git repository")?;
     let run = |args: &[&str]| {
-        Command::new("git")
+        cmd()
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -428,7 +508,7 @@ fn unified(old: &str, new: &str, path: &str) -> String {
     let (a, b) = (tmp.join("a"), tmp.join("b"));
     let _ = std::fs::write(&a, old);
     let _ = std::fs::write(&b, new);
-    let out = Command::new("git")
+    let out = cmd()
         .args(["diff", "--no-index", "--no-color", "--no-ext-diff"])
         .arg(&a)
         .arg(&b)

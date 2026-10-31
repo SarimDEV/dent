@@ -5,7 +5,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use dent_protocol::Project;
@@ -117,7 +116,7 @@ fn free(root: &Path, name: &str) -> Result<PathBuf> {
 }
 
 fn run(dir: &Path, args: &[&str]) -> Result<(), String> {
-    let out = Command::new("git")
+    let out = crate::git::cmd()
         .args(args)
         .current_dir(dir)
         // Never wait on a password prompt nobody can see.

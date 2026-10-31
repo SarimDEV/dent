@@ -55,10 +55,25 @@ T3 learned the same lessons:
   - A daemon of protocol 5 runs a keyed change once (`daemon/answered.rs`) and keeps its answer for a day, on disk, so a restart doesn't forget it. A copy gets that answer; a copy arriving while the first still runs waits for it, which closes the races the audit found in Create and Adopt.
   - To such a daemon, a client sends every change again after a dropped link. To an older daemon, step 1's rule still holds.
   - Tested against a real daemon: a keyed new project sent again on another connection, and after a restart, makes one project and gets the first answer.
+- **Step 4, built:** point 5's long jobs and stalls.
+  - While a request with 2 minutes' patience or more runs, the daemon says `Out::Progress` for it every 5 s. It isn't the answer: clients keep the request pending.
+  - Once heard from, a request's limit becomes a minute of quiet (`inflight::STALL`). A healthy 20-minute clone never times out, and a stalled one is said within a minute: "stopped answering partway through".
+  - Every git the daemon runs starts at `git::cmd()`, which never prompts. It also gives up when HTTP drops below 1 KB/s for a minute or SSH stops answering keepalives. A guard test (`every_git_starts_here`) holds every git in the daemon to it, and catches one planted outside.
+  - Tested against a real daemon: a clone from a server that accepts and then says nothing sends heartbeats, then fails by itself after about 60 s with git's reason.
+- **Checked against T3, then fixed.** An audit of this design against T3's lessons and its mistakes found what step 3 and the first cut of step 4 got wrong, now fixed:
+  - **Jobs aren't their link's** (T3's own fix, a75ea468b1). A request with 2 minutes' patience or more runs as its own task: a dropped link no longer aborts a clone halfway, and nothing else from that client waits behind it. A copy on the next link waits on the running job, hearing it's at work, and gets its answer.
+  - **Nothing is left "running" for ever.** Every keyed job has a guard (`answered::Job`). If it ends without answering (it panicked, its link's loop was aborted, the daemon stopped), its copies hear "dent stopped partway through that, so it may or may not have happened". A keyed change sent before hello is refused before it's taken on.
+  - **What can't be done twice is written down before it runs**, and only that is kept on disk (T3 B5.1, #20937). After a crash, a copy hears it may or may not have happened, instead of running again. Repeatable changes aren't written at all, so frequent ones can't crowd out the rest or slow the disk.
+  - **A heartbeat proves the daemon is alive, not that the job is moving.** So a request's patience in all still holds (30 minutes for long jobs), beside the minute-of-quiet stall: a job "at work" for ever is said not to have finished.
+  - **Each request remembers whether it went with a key the daemon honours.** One that went to an older daemon isn't sent again after that daemon is updated.
+  - **A request said not to have answered is let go**, never sent again later. If its machine answers anyway, the person hears "finished that after all".
+  - **Only what the person did gets a word when nothing waits on it**, so upkeep (`Seen`, `KeepAwake`) never piles up toasts (T3 #9592).
 - **Still to come:**
-  - an absolute setter that also says what it was set from, so a late copy can't undo another device's newer change;
-  - a wait tied to the view that started it, generically;
-  - steps and stalls for long jobs;
+  - Retry and Check buttons where a "may or may not have happened" is said;
+  - an absolute setter that also says what it was set from, so a late copy can't undo another device's newer change (beats T3 #18762);
+  - named steps for long jobs (git progress), so a heartbeat means the job is moving;
+  - asking again after the app restarts with the same key (beats T3 #20937);
+  - a limit on git processes running at once;
   - the full failure suite.
 - **Some errors appear where there were none.** A stop, commit or new project caught by a dropped link now says it may not have happened, instead of being silently repeated.
 - **Starting numbers, from T3:**

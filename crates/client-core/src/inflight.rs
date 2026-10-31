@@ -18,6 +18,10 @@ use std::time::{Duration, Instant};
 
 use dent_protocol::{Request, Resend};
 
+/// How long a request that's been heard working on may go quiet: its
+/// machine says so every few seconds while it works (decision 0078).
+pub const STALL: Duration = Duration::from_secs(60);
+
 /// How a request's machine stands, as the host sees it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Link {
@@ -39,6 +43,14 @@ pub struct Overdue {
     pub patience: Duration,
     /// Its machine is gone, rather than slow.
     pub gone: bool,
+    /// It was being worked on, then went quiet: stalled, not slow.
+    pub stalled: bool,
+    /// It was being worked on all along, and still hadn't finished.
+    pub unfinished: bool,
+    /// The person did it (a stop, a commit), as opposed to the client
+    /// keeping things up to date: only what they did is worth a word when
+    /// nothing waits on it.
+    pub once: bool,
 }
 
 impl Overdue {
@@ -46,6 +58,28 @@ impl Overdue {
     pub fn words(&self, machine_name: &str) -> String {
         if self.gone {
             return format!("{machine_name} isn't one of your machines any more");
+        }
+        if self.unfinished {
+            return if self.changes {
+                format!(
+                    "{machine_name} has been at it for {} minutes without finishing, so it may or may not have happened; look before trying again",
+                    self.patience.as_secs() / 60
+                )
+            } else {
+                format!(
+                    "{machine_name} has been at it for {} minutes without finishing",
+                    self.patience.as_secs() / 60
+                )
+            };
+        }
+        if self.stalled {
+            return if self.changes {
+                format!(
+                    "{machine_name} stopped answering partway through, so that may or may not have happened; look before trying again"
+                )
+            } else {
+                format!("{machine_name} stopped answering partway through")
+            };
         }
         let secs = self.patience.as_secs();
         let when = if secs >= 120 {
@@ -67,11 +101,19 @@ impl Overdue {
 struct Asked {
     machine: String,
     changes: bool,
+    once: bool,
     patience: Duration,
-    /// Time spent waiting while the machine was connected.
+    /// Time spent waiting while the machine was connected, since it was
+    /// asked: never more than its patience, however busy it says it is.
+    total: Duration,
+    /// The same since its machine last said it's at work on it.
     waited: Duration,
     /// When it was last looked at, while connected.
     since: Option<Instant>,
+    /// Its machine has said it's at work on it.
+    heard: bool,
+    /// It said so since the last look.
+    fresh: bool,
 }
 
 /// Every request still waiting for its first answer.
@@ -88,11 +130,27 @@ impl Inflight {
             Asked {
                 machine: machine.to_string(),
                 changes: r.resend() != Resend::Read,
+                once: r.resend() == Resend::Once,
                 patience: r.patience(),
+                total: Duration::ZERO,
                 waited: Duration::ZERO,
                 since: None,
+                heard: false,
+                fresh: false,
             },
         );
+    }
+
+    /// Its machine says it's still at work on `req`: the clock starts
+    /// again, and from now on a minute's quiet is a stall ([`STALL`]).
+    pub fn alive(&mut self, req: u64) {
+        if let Some(a) = self.asked.get_mut(&req) {
+            a.waited = Duration::ZERO;
+            // Quiet counts from here: what came before the next look isn't
+            // quiet. (Its patience in all still counts it.)
+            a.fresh = true;
+            a.heard = true;
+        }
     }
 
     /// An answer to `req` came: it's settled, late or not.
@@ -118,20 +176,31 @@ impl Inflight {
             match state {
                 Link::Up => {
                     if let Some(since) = a.since {
-                        a.waited += now.saturating_duration_since(since);
+                        let more = now.saturating_duration_since(since);
+                        if !std::mem::take(&mut a.fresh) {
+                            a.waited += more;
+                        }
+                        a.total += more;
                     }
                     a.since = Some(now);
                 }
                 // Away: the clock stops; it starts again from when it's back.
                 Link::Away | Link::Gone => a.since = None,
             }
-            if state == Link::Gone || a.waited >= a.patience {
+            // Heard at work, a minute's quiet is a stall; and however busy
+            // it says it is, never past its patience in all.
+            let stalled = a.heard && a.waited >= STALL;
+            let unfinished = a.total >= a.patience;
+            if state == Link::Gone || stalled || unfinished {
                 over.push(Overdue {
                     req: *req,
                     machine: a.machine.clone(),
                     changes: a.changes,
                     patience: a.patience,
                     gone: state == Link::Gone,
+                    stalled: stalled && !unfinished && state != Link::Gone,
+                    unfinished: a.heard && unfinished && state != Link::Gone,
+                    once: a.once,
                 });
             }
         }
@@ -254,6 +323,62 @@ mod tests {
         assert!(f.is_empty());
     }
 
+    /// A long job that keeps saying it's at work never runs out, however
+    /// long it takes; one that goes quiet for a minute is stalled.
+    #[test]
+    fn a_job_at_work_runs_on_and_one_gone_quiet_is_stalled() {
+        let mut f = Inflight::default();
+        let t = Instant::now();
+        f.asked(5, "m", &Request::CloneProject { url: "u".into() });
+        f.tick(t, |_| Link::Up);
+        // Twenty minutes of work, heard from every 5 s.
+        for i in 1..=240 {
+            f.alive(5);
+            assert!(
+                f.tick(t + Duration::from_secs(i * 5), |_| Link::Up)
+                    .is_empty()
+            );
+        }
+        // Then quiet.
+        let quiet = t + Duration::from_secs(1200);
+        assert!(
+            f.tick(quiet + Duration::from_secs(59), |_| Link::Up)
+                .is_empty()
+        );
+        let over = f.tick(quiet + Duration::from_secs(61), |_| Link::Up);
+        assert!(over[0].stalled);
+        assert!(
+            over[0]
+                .words("mini")
+                .starts_with("mini stopped answering partway through")
+        );
+    }
+
+    /// One that says it's at work for ever still ends: at its patience in
+    /// all, and says it never finished.
+    #[test]
+    fn busy_for_ever_still_ends() {
+        let mut f = Inflight::default();
+        let t = Instant::now();
+        f.asked(5, "m", &Request::CloneProject { url: "u".into() });
+        f.tick(t, |_| Link::Up);
+        let mut over = Vec::new();
+        for i in 1..=400 {
+            f.alive(5);
+            over = f.tick(t + Duration::from_secs(i * 5), |_| Link::Up);
+            if !over.is_empty() {
+                assert_eq!(i * 5, 1800, "ends at 30 minutes");
+                break;
+            }
+        }
+        assert!(over[0].unfinished && !over[0].stalled);
+        assert!(
+            over[0]
+                .words("mini")
+                .contains("at it for 30 minutes without finishing")
+        );
+    }
+
     #[test]
     fn long_jobs_get_long_patience() {
         let mut f = Inflight::default();
@@ -267,10 +392,10 @@ mod tests {
         );
         f.tick(t, |_| Link::Up);
         assert!(
-            f.tick(t + Duration::from_secs(300), |_| Link::Up)
+            f.tick(t + Duration::from_secs(1200), |_| Link::Up)
                 .is_empty()
         );
-        let over = f.tick(t + Duration::from_secs(601), |_| Link::Up);
-        assert!(over[0].words("mini").contains("10 minutes"));
+        let over = f.tick(t + Duration::from_secs(1801), |_| Link::Up);
+        assert!(over[0].words("mini").contains("30 minutes"));
     }
 }

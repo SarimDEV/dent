@@ -198,7 +198,8 @@ fn run(
                     let _ = refused_tx.send(());
                     break;
                 }
-                if req != 0 {
+                // "Still at work" isn't its answer: it stays pending.
+                if req != 0 && !matches!(out, Out::Progress { .. }) {
                     let _ = done_tx.send(req);
                 }
                 let msg = match out {

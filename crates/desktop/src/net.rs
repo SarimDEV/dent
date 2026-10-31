@@ -117,6 +117,13 @@ impl Net {
         }
     }
 
+    /// Request `n` is still being worked on, its machine says.
+    pub fn alive(&self, n: u64) {
+        if let Ok(mut f) = self.inflight.lock() {
+            f.alive(n);
+        }
+    }
+
     /// Requests that have waited past their patience while their machine
     /// was connected (`connected`), taken out to be ended in words.
     pub fn overdue(
@@ -128,6 +135,20 @@ impl Net {
             .lock()
             .map(|mut f| f.tick(now, link))
             .unwrap_or_default()
+    }
+
+    /// Request `n` to `machine` was said not to have answered: let go, so
+    /// it never goes again later to do what the person was told may not
+    /// have happened.
+    pub fn abandon(&self, machine: &str, n: u64) {
+        if let Some(f) = self
+            .far
+            .lock()
+            .ok()
+            .and_then(|f| f.get(machine).map(|f| f.remote.clone()))
+        {
+            f.abandon(n);
+        }
     }
 
     fn deliver(&self, machine: &str, n: u64, r: Request) {

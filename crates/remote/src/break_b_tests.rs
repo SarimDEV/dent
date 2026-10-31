@@ -75,7 +75,7 @@ fn an_attachment_that_never_ends_doesnt_stall_the_machine() {
         .lock()
         .unwrap()
         .0
-        .insert(1, (send_with(vec![fifo.display().to_string()]), false));
+        .insert(1, (send_with(vec![fifo.display().to_string()]), None));
     let theirs = Arc::new(Mutex::new(HashSet::new()));
     let (tx, rx) = std::sync::mpsc::channel();
     let p = pending.clone();
@@ -120,20 +120,20 @@ fn a_resend_after_reconnect_doesnt_read_the_file_again() {
         .lock()
         .unwrap()
         .0
-        .insert(5, (send_with(vec![f.display().to_string()]), false));
+        .insert(5, (send_with(vec![f.display().to_string()]), None));
     let theirs = Arc::new(Mutex::new(HashSet::new()));
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
     rt.block_on(ready_up(&pending, &theirs, PROTOCOL_FOR_TEST, "vm", 5))
         .unwrap();
-    assert!(pending.lock().unwrap().go(5).is_some());
+    assert!(pending.lock().unwrap().go(5, false).is_some());
     // The link drops; the file is edited, then deleted.
     std::fs::write(&f, b"second").unwrap();
     std::fs::remove_file(&f).unwrap();
     rt.block_on(ready_up(&pending, &theirs, PROTOCOL_FOR_TEST, "vm", 5))
         .expect("a resend reads nothing");
-    let line = pending.lock().unwrap().resend(5).unwrap();
+    let line = pending.lock().unwrap().resend(5, false).unwrap();
     let text = String::from_utf8(line).unwrap();
     assert!(
         text.contains(&dent_protocol::b64::encode(b"first")),

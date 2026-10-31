@@ -173,6 +173,8 @@ struct Client {
     replies: HashMap<u64, Out>,
     /// What came unasked, besides events and streaming text.
     pushed: Vec<Out>,
+    /// How many times each request was said to be still at work.
+    alive: HashMap<u64, usize>,
 }
 
 impl Client {
@@ -199,6 +201,7 @@ impl Client {
             partial: HashMap::new(),
             replies: HashMap::new(),
             pushed: Vec::new(),
+            alive: HashMap::new(),
         };
         c.call(Request::Hello {
             proto: dent_protocol::PROTOCOL,
@@ -292,6 +295,8 @@ impl Client {
                 p.push_str(&text);
             }
             Out::CaughtUp { .. } => {}
+            // Still at work on `req`: counted, not its answer.
+            Out::Progress { .. } => *self.alive.entry(req).or_default() += 1,
             o if req != 0 => {
                 self.replies.insert(req, o);
             }
@@ -1235,6 +1240,127 @@ fn a_sessions_files_are_stat_and_read_by_what_it_wrote() {
         t.elapsed()
     );
     let _ = std::fs::remove_file(&outside);
+}
+
+/// A long job says it's still at work every few seconds, and one stuck on
+/// a network that's gone quiet gives up by itself with a reason, rather
+/// than hanging (decision 0078): a clone from a server that accepts and
+/// then never says a word.
+#[test]
+fn a_clone_from_a_silent_server_says_its_alive_then_gives_up() {
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = silent.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for s in silent.incoming().flatten() {
+            held.push(s);
+        }
+    });
+    let home = std::env::temp_dir().join(format!("dent-silent-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let h = home.display().to_string();
+    let w = World::new(&[("HOME", h.as_str())]);
+    let mut c = w.client();
+    let started = Instant::now();
+    let id = c.send_req(Request::CloneProject {
+        url: format!("http://127.0.0.1:{port}/quiet.git"),
+    });
+    let until = Instant::now() + Duration::from_secs(150);
+    let out = loop {
+        if let Some(out) = c.replies.remove(&id) {
+            break out;
+        }
+        assert!(Instant::now() < until, "the clone never gave up");
+        c.pump(Duration::from_millis(200));
+    };
+    let took = started.elapsed();
+    let alive = c.alive.get(&id).copied().unwrap_or(0);
+    assert!(alive >= 8, "said it was at work {alive} times in {took:?}");
+    assert!(matches!(out, Out::Error { .. }), "{out:?}");
+    assert!(took < Duration::from_secs(120), "gave up after {took:?}");
+}
+
+/// A long job isn't its link's: a client that goes away mid-clone doesn't
+/// stop it, and the same request with its key, from the client that comes
+/// back, waits on that job (hearing it's at work) and gets its answer
+/// (decision 0078). A keyed change sent before hello is refused and never
+/// left hanging.
+#[test]
+fn a_long_job_outlives_its_link_and_its_copy_gets_the_answer() {
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = silent.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for s in silent.incoming().flatten() {
+            held.push(s);
+        }
+    });
+    let home = std::env::temp_dir().join(format!("dent-outlive-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let h = home.display().to_string();
+    let w = World::new(&[("HOME", h.as_str())]);
+    let clone = || Request::CloneProject {
+        url: format!("http://127.0.0.1:{port}/away.git"),
+    };
+    let key = "run9-41";
+    // The first client starts it, then goes away.
+    {
+        let mut a = w.client();
+        a.next += 1;
+        let mut v: Value = serde_json::from_slice(&encode(a.next, &clone())).unwrap();
+        v["key"] = Value::String(key.into());
+        let mut line = serde_json::to_vec(&v).unwrap();
+        line.push(b'\n');
+        a.w.write_all(&line).unwrap();
+        a.pump_for(Duration::from_secs(5));
+    }
+    // The one that comes back asks again: same key.
+    let mut b = w.client();
+    b.next += 1;
+    let id = b.next;
+    let mut v: Value = serde_json::from_slice(&encode(id, &clone())).unwrap();
+    v["key"] = Value::String(key.into());
+    let mut line = serde_json::to_vec(&v).unwrap();
+    line.push(b'\n');
+    b.w.write_all(&line).unwrap();
+    let until = Instant::now() + Duration::from_secs(120);
+    let out = loop {
+        if let Some(out) = b.replies.remove(&id) {
+            break out;
+        }
+        assert!(
+            Instant::now() < until,
+            "the copy never heard how the job went"
+        );
+        b.pump(Duration::from_millis(200));
+    };
+    assert!(
+        b.alive.get(&id).copied().unwrap_or(0) >= 3,
+        "the copy heard it at work"
+    );
+    // The job's own answer (git giving up on the quiet server), not a
+    // stop: it ran to the end though its link went.
+    match out {
+        Out::Error { message } => assert!(
+            !message.contains("stopped partway"),
+            "the job was cut off with its link: {message}"
+        ),
+        o => panic!("{o:?}"),
+    }
+
+    // A keyed change before hello: refused, and its key not left running.
+    let mut c = UnixStream::connect(w.state.join("daemon.sock")).unwrap();
+    let mut early: Value = serde_json::from_slice(&encode(9, &clone())).unwrap();
+    early["key"] = Value::String("run9-99".into());
+    let mut line = serde_json::to_vec(&early).unwrap();
+    line.push(b'\n');
+    c.write_all(&line).unwrap();
+    let mut r = BufReader::new(c.try_clone().unwrap());
+    let mut said = String::new();
+    r.read_line(&mut said).unwrap();
+    assert!(said.contains("hello first"), "{said}");
 }
 
 /// A change sent again with its key (its answer lost as a link dropped, or
