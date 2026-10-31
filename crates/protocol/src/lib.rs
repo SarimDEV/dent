@@ -2195,6 +2195,41 @@ pub enum Resend {
 }
 
 impl Request {
+    /// How long its machine may take to answer, counted only while it's
+    /// connected: past that, the client says so instead of waiting on
+    /// ([decision 0078](../../docs/decisions/0078-requests-that-fail-well.md)).
+    /// Most answer at once; what clones, starts an agent or moves a session
+    /// can take minutes.
+    pub fn patience(&self) -> std::time::Duration {
+        use Request as R;
+        let secs = match self {
+            R::Create { .. }
+            | R::Fork { .. }
+            | R::Adopt { .. }
+            | R::NewProject { .. }
+            | R::CloneProject { .. }
+            | R::BringProject { .. }
+            | R::RemoveWorktree { .. }
+            | R::Reopen { .. }
+            | R::MovePack { .. }
+            | R::MoveIn { .. }
+            | R::MoveAccept { .. }
+            | R::Update { .. } => 600,
+            R::Git { .. }
+            | R::PrBrief { .. }
+            | R::ReadFiles { .. }
+            | R::Read { .. }
+            | R::MoveRead { .. }
+            | R::MoveWrite { .. }
+            | R::Changes { .. }
+            | R::Retitle { .. }
+            | R::Usage { .. }
+            | R::Agents { .. } => 120,
+            _ => 30,
+        };
+        std::time::Duration::from_secs(secs)
+    }
+
     /// Whether this request may go again after its link dropped. No
     /// catch-all arm: a new request must say.
     pub fn resend(&self) -> Resend {

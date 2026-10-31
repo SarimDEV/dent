@@ -10,6 +10,7 @@
 
 pub mod carry;
 pub mod fleet;
+pub mod inflight;
 pub mod machine;
 pub mod timeline;
 

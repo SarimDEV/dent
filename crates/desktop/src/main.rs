@@ -1223,7 +1223,10 @@ fn main() {
                 cx.background_executor()
                     .timer(Duration::from_secs_f32(1. / ds::motion::LOOK_FPS))
                     .await;
-                let Ok(due) = weak.update(cx, |this, _| this.tick_due()) else {
+                let Ok(due) = weak.update(cx, |this, cx| {
+                    this.end_overdue(cx);
+                    this.tick_due()
+                }) else {
                     break;
                 };
                 // A page an agent asked to see is drawn even while the window

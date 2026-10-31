@@ -963,6 +963,10 @@ pub struct Dent {
     pub machine_available: Option<dent_protocol::Available>,
     /// A press of Update all under way.
     pub updating: Option<crate::updates::Run>,
+    /// When requests were last looked at for having waited too long.
+    overdue_checked: Option<Instant>,
+    /// An overdue read is being ended: the catch-all toast stays quiet.
+    quiet_errors: bool,
     /// Where the app was before it updated, put back as its sessions come
     /// (until a while has passed).
     pub resuming: Option<(crate::updates::Resume, Instant)>,
@@ -1965,6 +1969,8 @@ impl Dent {
             machine_main_build: 0,
             machine_available: None,
             updating: None,
+            overdue_checked: None,
+            quiet_errors: false,
             resuming: None,
             settings_tab: crate::settings::Tab::General,
             agents_tab: None,
@@ -3449,6 +3455,9 @@ impl Dent {
         changed: &mut Vec<String>,
         cx: &mut Context<Self>,
     ) {
+        if req != 0 {
+            self.live.answered(req);
+        }
         // Another machine's files, as its messages name them: put back to
         // edit and sent again, they're named there, not carried.
         if !machine.is_empty()
@@ -3649,6 +3658,56 @@ impl Dent {
             });
         })
         .detach();
+    }
+
+    /// Requests whose machine has had them too long, while connected, end
+    /// here as an answer that says so: whatever waited on one hears it the
+    /// way it hears a refusal. A change nothing waits on (Stop) is said in a
+    /// toast; a read nothing waits on just goes (decision 0078).
+    pub fn end_overdue(&mut self, cx: &mut Context<Self>) {
+        use dent_client_core::machine::State;
+        let now = Instant::now();
+        if self
+            .overdue_checked
+            .is_some_and(|t| now.duration_since(t) < Duration::from_secs(1))
+        {
+            return;
+        }
+        self.overdue_checked = Some(now);
+        use dent_client_core::inflight::Link;
+        let over = self.live.overdue(now, |m| {
+            if m.is_empty() {
+                return if self.connection.is_ok() {
+                    Link::Up
+                } else {
+                    Link::Away
+                };
+            }
+            match self.machines.iter().find(|x| x.id == m) {
+                None => Link::Gone,
+                Some(x) if matches!(x.state, State::Online | State::Slow) => Link::Up,
+                Some(_) => Link::Away,
+            }
+        });
+        for o in over {
+            // A message waiting in the outbox is sent again by its link
+            // (it carries its own id), never dropped for being slow.
+            if self.outbox.iter().any(|m| m.req == Some(o.req)) {
+                continue;
+            }
+            let message = o.words(&self.machine_name(&o.machine));
+            if self.waiting.contains_key(&o.req) {
+                // A read asked in the background (another machine's
+                // projects, a refresh) ends quietly: only what shows its
+                // own wait says it didn't answer.
+                self.quiet_errors = !o.changes && !o.gone;
+                self.reply(o.req, Out::Error { message }, cx);
+                self.quiet_errors = false;
+            } else if o.changes {
+                self.toast(ToastAction::Info, message);
+                cx.notify();
+            }
+        }
     }
 
     fn reply(&mut self, req: u64, out: Out, cx: &mut Context<Self>) {
@@ -4233,7 +4292,9 @@ impl Dent {
             (Waiting::Update(machine), Out::Error { message }) => {
                 self.update_refused(&machine, message, cx);
             }
-            (_, Out::Error { message }) => self.toast(ToastAction::Info, message),
+            (_, Out::Error { message }) if !self.quiet_errors => {
+                self.toast(ToastAction::Info, message)
+            }
             _ => {}
         }
         cx.notify();

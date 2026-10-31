@@ -716,6 +716,82 @@ pub(super) fn copy_from() -> Vec<(f32, Act)> {
     ]
 }
 
+/// Requests that fail well (decision 0078): one to a machine that's
+/// connected but never answers ends after its patience, in words; one to a
+/// machine that's asleep waits on, its time not counting; one to a machine
+/// that's gone ends at once.
+pub(super) fn overdue() -> Vec<(f32, Act)> {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    const UP: &str = "8e2e34085ddf";
+    static ASLEEP: AtomicU64 = AtomicU64::new(0);
+    fn asleep_id(d: &Dent) -> String {
+        d.machines
+            .iter()
+            .find(|m| {
+                matches!(
+                    m.state,
+                    dent_client_core::machine::State::Away(dent_link::Goodbye::Sleep)
+                )
+            })
+            .map(|m| m.id.clone())
+            .unwrap_or_default()
+    }
+    vec![
+        (
+            0.3,
+            Call(|d, _, cx| {
+                d.machines = made_up_machines();
+                // Asked of a machine that's up but never answers.
+                d.tab_projects.remove(UP);
+                let n = d.live.send_to(UP, dent_protocol::Request::Projects);
+                d.waiting_insert(n, crate::app::Waiting::TabProjects(UP.into()));
+                // And of one that's asleep.
+                let asleep = asleep_id(d);
+                let n = d.live.send_to(&asleep, dent_protocol::Request::Projects);
+                d.waiting_insert(n, crate::app::Waiting::TabProjects(asleep));
+                ASLEEP.store(n, Relaxed);
+                // A stop for a machine that's gone.
+                d.live.send_to(
+                    "f00dfeed0000",
+                    dent_protocol::Request::Interrupt {
+                        session: "f00dfeed0000/s1".into(),
+                        by: None,
+                    },
+                );
+                cx.notify();
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "a stop for a machine that's gone ends at once, saying so",
+                |d, _| {
+                    d.toast
+                        .as_ref()
+                        .is_some_and(|t| t.text.contains("isn't one of your machines any more"))
+                },
+                4.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "one to a machine that's up but silent ends after 30 s, in words",
+                |d, _| matches!(d.tab_projects.get(UP), Some(Err(e)) if e == "dent-linux didn't answer in 30 seconds"),
+                40.,
+            ),
+        ),
+        (
+            0.1,
+            Until(
+                "one to a machine that's asleep is still waiting: its time doesn't count",
+                |d, _| d.is_waiting(ASLEEP.load(Relaxed)),
+                1.,
+            ),
+        ),
+    ]
+}
+
 fn made_up_machines() -> Vec<crate::machines::MachineView> {
     use dent_client_core::machine::State;
     use dent_link::{Access, Goodbye, Trust};
