@@ -809,6 +809,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             path,
             hunk,
             turn,
+            seen,
         } => {
             crate::moving::check(&d.store(), &session)?;
             let cwd = cwd_of(d, &session)?;
@@ -829,6 +830,7 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
                     base.as_deref(),
                     &path,
                     hunk.map(|h| h as usize),
+                    seen.as_deref(),
                 )
             })
             .await?
