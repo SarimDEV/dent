@@ -18,6 +18,10 @@ use std::time::{Duration, Instant};
 
 use dent_protocol::{Request, Resend};
 
+/// How long a request that's been heard working on may go quiet: its
+/// machine says so every few seconds while it works (decision 0078).
+pub const STALL: Duration = Duration::from_secs(60);
+
 /// How a request's machine stands, as the host sees it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Link {
@@ -39,6 +43,8 @@ pub struct Overdue {
     pub patience: Duration,
     /// Its machine is gone, rather than slow.
     pub gone: bool,
+    /// It was being worked on, then went quiet: stalled, not slow.
+    pub stalled: bool,
 }
 
 impl Overdue {
@@ -46,6 +52,15 @@ impl Overdue {
     pub fn words(&self, machine_name: &str) -> String {
         if self.gone {
             return format!("{machine_name} isn't one of your machines any more");
+        }
+        if self.stalled {
+            return if self.changes {
+                format!(
+                    "{machine_name} stopped answering partway through, so that may or may not have happened; look before trying again"
+                )
+            } else {
+                format!("{machine_name} stopped answering partway through")
+            };
         }
         let secs = self.patience.as_secs();
         let when = if secs >= 120 {
@@ -72,6 +87,8 @@ struct Asked {
     waited: Duration,
     /// When it was last looked at, while connected.
     since: Option<Instant>,
+    /// Its machine has said it's at work on it.
+    heard: bool,
 }
 
 /// Every request still waiting for its first answer.
@@ -91,8 +108,20 @@ impl Inflight {
                 patience: r.patience(),
                 waited: Duration::ZERO,
                 since: None,
+                heard: false,
             },
         );
+    }
+
+    /// Its machine says it's still at work on `req`: the clock starts
+    /// again, and from now on a minute's quiet is a stall ([`STALL`]).
+    pub fn alive(&mut self, req: u64) {
+        if let Some(a) = self.asked.get_mut(&req) {
+            a.waited = Duration::ZERO;
+            // From the next look: nothing before this counts.
+            a.since = None;
+            a.heard = true;
+        }
     }
 
     /// An answer to `req` came: it's settled, late or not.
@@ -125,13 +154,19 @@ impl Inflight {
                 // Away: the clock stops; it starts again from when it's back.
                 Link::Away | Link::Gone => a.since = None,
             }
-            if state == Link::Gone || a.waited >= a.patience {
+            let limit = if a.heard {
+                a.patience.min(STALL)
+            } else {
+                a.patience
+            };
+            if state == Link::Gone || a.waited >= limit {
                 over.push(Overdue {
                     req: *req,
                     machine: a.machine.clone(),
                     changes: a.changes,
                     patience: a.patience,
                     gone: state == Link::Gone,
+                    stalled: a.heard && state != Link::Gone,
                 });
             }
         }
@@ -252,6 +287,37 @@ mod tests {
             "mini isn't one of your machines any more"
         );
         assert!(f.is_empty());
+    }
+
+    /// A long job that keeps saying it's at work never runs out, however
+    /// long it takes; one that goes quiet for a minute is stalled.
+    #[test]
+    fn a_job_at_work_runs_on_and_one_gone_quiet_is_stalled() {
+        let mut f = Inflight::default();
+        let t = Instant::now();
+        f.asked(5, "m", &Request::CloneProject { url: "u".into() });
+        f.tick(t, |_| Link::Up);
+        // Twenty minutes of work, heard from every 5 s.
+        for i in 1..=240 {
+            f.alive(5);
+            assert!(
+                f.tick(t + Duration::from_secs(i * 5), |_| Link::Up)
+                    .is_empty()
+            );
+        }
+        // Then quiet.
+        let quiet = t + Duration::from_secs(1200);
+        assert!(
+            f.tick(quiet + Duration::from_secs(59), |_| Link::Up)
+                .is_empty()
+        );
+        let over = f.tick(quiet + Duration::from_secs(61), |_| Link::Up);
+        assert!(over[0].stalled);
+        assert!(
+            over[0]
+                .words("mini")
+                .starts_with("mini stopped answering partway through")
+        );
     }
 
     #[test]

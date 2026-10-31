@@ -117,6 +117,13 @@ impl Net {
         }
     }
 
+    /// Request `n` is still being worked on, its machine says.
+    pub fn alive(&self, n: u64) {
+        if let Ok(mut f) = self.inflight.lock() {
+            f.alive(n);
+        }
+    }
+
     /// Requests that have waited past their patience while their machine
     /// was connected (`connected`), taken out to be ended in words.
     pub fn overdue(

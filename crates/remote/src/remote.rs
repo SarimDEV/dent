@@ -633,7 +633,9 @@ async fn run(
                                 _ => {}
                             }
                         }
+                        // "Still at work" isn't its answer: it stays pending.
                         if req != 0
+                            && !matches!(out, Out::Progress { .. })
                             && let Ok(mut p) = pending.lock()
                         {
                             p.0.remove(&req);

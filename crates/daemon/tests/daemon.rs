@@ -173,6 +173,8 @@ struct Client {
     replies: HashMap<u64, Out>,
     /// What came unasked, besides events and streaming text.
     pushed: Vec<Out>,
+    /// How many times each request was said to be still at work.
+    alive: HashMap<u64, usize>,
 }
 
 impl Client {
@@ -199,6 +201,7 @@ impl Client {
             partial: HashMap::new(),
             replies: HashMap::new(),
             pushed: Vec::new(),
+            alive: HashMap::new(),
         };
         c.call(Request::Hello {
             proto: dent_protocol::PROTOCOL,
@@ -292,6 +295,8 @@ impl Client {
                 p.push_str(&text);
             }
             Out::CaughtUp { .. } => {}
+            // Still at work on `req`: counted, not its answer.
+            Out::Progress { .. } => *self.alive.entry(req).or_default() += 1,
             o if req != 0 => {
                 self.replies.insert(req, o);
             }
@@ -1235,6 +1240,45 @@ fn a_sessions_files_are_stat_and_read_by_what_it_wrote() {
         t.elapsed()
     );
     let _ = std::fs::remove_file(&outside);
+}
+
+/// A long job says it's still at work every few seconds, and one stuck on
+/// a network that's gone quiet gives up by itself with a reason, rather
+/// than hanging (decision 0078): a clone from a server that accepts and
+/// then never says a word.
+#[test]
+fn a_clone_from_a_silent_server_says_its_alive_then_gives_up() {
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = silent.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for s in silent.incoming().flatten() {
+            held.push(s);
+        }
+    });
+    let home = std::env::temp_dir().join(format!("dent-silent-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let h = home.display().to_string();
+    let w = World::new(&[("HOME", h.as_str())]);
+    let mut c = w.client();
+    let started = Instant::now();
+    let id = c.send_req(Request::CloneProject {
+        url: format!("http://127.0.0.1:{port}/quiet.git"),
+    });
+    let until = Instant::now() + Duration::from_secs(150);
+    let out = loop {
+        if let Some(out) = c.replies.remove(&id) {
+            break out;
+        }
+        assert!(Instant::now() < until, "the clone never gave up");
+        c.pump(Duration::from_millis(200));
+    };
+    let took = started.elapsed();
+    let alive = c.alive.get(&id).copied().unwrap_or(0);
+    assert!(alive >= 8, "said it was at work {alive} times in {took:?}");
+    assert!(matches!(out, Out::Error { .. }), "{out:?}");
+    assert!(took < Duration::from_secs(120), "gave up after {took:?}");
 }
 
 /// A change sent again with its key (its answer lost as a link dropped, or

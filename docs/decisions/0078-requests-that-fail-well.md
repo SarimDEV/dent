@@ -55,10 +55,15 @@ T3 learned the same lessons:
   - A daemon of protocol 5 runs a keyed change once (`daemon/answered.rs`) and keeps its answer for a day, on disk, so a restart doesn't forget it. A copy gets that answer; a copy arriving while the first still runs waits for it, which closes the races the audit found in Create and Adopt.
   - To such a daemon, a client sends every change again after a dropped link. To an older daemon, step 1's rule still holds.
   - Tested against a real daemon: a keyed new project sent again on another connection, and after a restart, makes one project and gets the first answer.
+- **Step 4, built:** point 5's long jobs and stalls.
+  - While a request with 2 minutes' patience or more runs, the daemon says `Out::Progress` for it every 5 s. It isn't the answer: clients keep the request pending.
+  - Once heard from, a request's limit becomes a minute of quiet (`inflight::STALL`). A healthy 20-minute clone never times out, and a stalled one is said within a minute: "stopped answering partway through".
+  - Every git the daemon runs starts at `git::cmd()`, which never prompts. It also gives up when HTTP drops below 1 KB/s for a minute or SSH stops answering keepalives. A guard test (`every_git_starts_here`) holds every git in the daemon to it, and catches one planted outside.
+  - Tested against a real daemon: a clone from a server that accepts and then says nothing sends heartbeats, then fails by itself after about 60 s with git's reason.
 - **Still to come:**
   - an absolute setter that also says what it was set from, so a late copy can't undo another device's newer change;
   - a wait tied to the view that started it, generically;
-  - steps and stalls for long jobs;
+  - named steps for long jobs (clone percentages);
   - the full failure suite.
 - **Some errors appear where there were none.** A stop, commit or new project caught by a dropped link now says it may not have happened, instead of being silently repeated.
 - **Starting numbers, from T3:**

@@ -1946,6 +1946,14 @@ pub enum Out {
         #[serde(default)]
         projects: std::collections::BTreeMap<String, Defaults>,
     },
+    /// Request `req` is still being worked on: said every few seconds while
+    /// a long one runs, so a client tells a slow job from a stalled one
+    /// ([decision 0078](../../docs/decisions/0078-requests-that-fail-well.md)).
+    /// Not its answer: that comes after.
+    Progress {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        step: String,
+    },
     /// The newer build this machine has ready changed: one was made
     /// ready, or what was ready now runs.
     Available {
@@ -2488,6 +2496,7 @@ impl Out {
             | Out::Models { .. }
             | Out::Defaults { .. }
             | Out::Available { .. }
+            | Out::Progress { .. }
             | Out::CaughtUp { .. } => Vec::new(),
         }
     }

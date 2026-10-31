@@ -46,11 +46,9 @@ pub fn one_at_a_time<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
 
 /// git, its output, or what it said went wrong.
 pub fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
+    let mut cmd = crate::git::cmd();
+    cmd.arg("-C").arg(dir).args(args);
+    let out = crate::git::never_hangs(&mut cmd)
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("couldn't run git: {e}"))?;

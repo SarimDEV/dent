@@ -73,13 +73,13 @@ fn quoted(value: &str) -> String {
 /// Whether git would track `file` in the repository at `cwd`: it's in a
 /// repository and not ignored there.
 pub fn tracked(cwd: &Path, file: &Path) -> bool {
-    let repo = std::process::Command::new("git")
+    let repo = crate::git::cmd()
         .arg("-C")
         .arg(cwd)
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
         .is_ok_and(|o| o.status.success());
-    repo && std::process::Command::new("git")
+    repo && crate::git::cmd()
         .arg("-C")
         .arg(cwd)
         .args(["check-ignore", "-q"])

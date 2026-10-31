@@ -9,7 +9,7 @@
 //! [spike 11]: ../../../../docs/spikes/11-moving-git.md
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use dent_protocol::MoveRepo;
 
@@ -19,7 +19,7 @@ pub const MAX_BUNDLE: u64 = 200 * 1024 * 1024;
 /// `git` in `dir`, prompts off, with `env` added and nothing of a caller's
 /// git environment let in: its output, or what it said went wrong.
 fn git(dir: &Path, args: &[&str], env: &[(&str, &Path)]) -> Result<String, String> {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::git::cmd();
     cmd.arg("-C").arg(dir).args(args);
     for v in [
         "GIT_DIR",
@@ -33,10 +33,7 @@ fn git(dir: &Path, args: &[&str], env: &[(&str, &Path)]) -> Result<String, Strin
     ] {
         cmd.env_remove(v);
     }
-    cmd.env("GIT_TERMINAL_PROMPT", "0")
-        .env("GCM_INTERACTIVE", "never")
-        .env("SSH_ASKPASS_REQUIRE", "never")
-        .stdin(Stdio::null());
+    crate::git::never_hangs(&mut cmd).stdin(Stdio::null());
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -550,7 +547,7 @@ mod tests {
     use super::*;
 
     fn sh(dir: &Path, script: &str) {
-        let ok = Command::new("sh")
+        let ok = std::process::Command::new("sh")
             .arg("-c")
             .arg(script)
             .current_dir(dir)

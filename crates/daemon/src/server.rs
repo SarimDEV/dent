@@ -175,6 +175,22 @@ pub async fn session(
                 }
             }
         }
+        // A long one says it's still at work every few seconds, so its
+        // client can tell slow from stalled (decision 0078).
+        let alive = (env.body.patience() >= std::time::Duration::from_secs(120)).then(|| {
+            let tx = tx.clone();
+            AbortOnDrop(tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    let still = Out::Progress {
+                        step: String::new(),
+                    };
+                    if tx.send(encode(req, &still)).await.is_err() {
+                        break;
+                    }
+                }
+            }))
+        });
         if !hello && !matches!(env.body, Request::Hello { .. }) {
             let _ = tx
                 .send(encode(
@@ -334,6 +350,8 @@ pub async fn session(
                 message: format!("{e:#}"),
             },
         };
+        // Done: no more "still at work" after its answer.
+        drop(alive);
         if let Some(key) = &keyed {
             d.answered.finish(key, &msg);
         }

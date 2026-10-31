@@ -105,17 +105,14 @@ fn fetch_now_and_then(dir: &Path) {
     if fresh {
         return;
     }
-    let mut git = Command::new("git");
+    let mut git = crate::git::cmd();
     git.arg("-C")
         .arg(dir)
-        .args(["fetch", "-q", "--no-tags", "origin"])
-        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(["fetch", "-q", "--no-tags", "origin"]);
+    crate::git::never_hangs(&mut git)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
-        git.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
-    }
     let _ = git.status();
 }
 

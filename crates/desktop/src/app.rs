@@ -3455,6 +3455,11 @@ impl Dent {
         changed: &mut Vec<String>,
         cx: &mut Context<Self>,
     ) {
+        // Still at work on it: its clock starts again, and that's all.
+        if let Out::Progress { .. } = &out {
+            self.live.alive(req);
+            return;
+        }
         if req != 0 {
             self.live.answered(req);
         }
