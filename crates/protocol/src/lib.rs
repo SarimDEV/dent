@@ -25,8 +25,17 @@ use serde::{Deserialize, Serialize};
 /// 4: a session's files can be read from anywhere by what the session
 /// wrote (`Request::Stat`, `Request::Read`; [decision 0068]).
 ///
+/// 5: a change carries a key ([`Envelope::key`]), and a daemon answers it
+/// once: a copy sent again gets the first answer, not a second effect
+/// ([decision 0078]). A client sends any change again after a dropped
+/// link only to a daemon of 5 or later.
+///
 /// [decision 0068]: ../../docs/decisions/0068-files-across-machines.md
-pub const PROTOCOL: u32 = 4;
+/// [decision 0078]: ../../docs/decisions/0078-requests-that-fail-well.md
+pub const PROTOCOL: u32 = 5;
+
+/// The first protocol whose daemons answer a change by its key.
+pub const KEYS_FROM: u32 = 5;
 /// The oldest protocol this build still speaks. Two sides talk when their
 /// ranges overlap ([decision 0060]).
 ///
@@ -1395,6 +1404,11 @@ pub struct Envelope<T> {
     /// Echoed on the reply. 0 for messages nobody asked for.
     #[serde(default)]
     pub req: u64,
+    /// A change's key, the same each time it's sent: a daemon of
+    /// [`KEYS_FROM`] or later does it once and answers any copy with that
+    /// first answer. Empty for reads, and from older clients.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key: String,
     #[serde(flatten)]
     pub body: T,
 }
@@ -2661,6 +2675,47 @@ pub fn read_out(line: &[u8]) -> Option<Envelope<Out>> {
         events.retain(|e| serde_json::from_value::<Event>(e.clone()).is_ok());
     }
     serde_json::from_value(v).ok()
+}
+
+/// This client's run, for keys: unique to each start.
+fn run_id() -> &'static str {
+    static RUN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    RUN.get_or_init(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        format!("{:x}{:x}", std::process::id(), nanos)
+    })
+}
+
+/// The key request number `n` goes with: the same each time it's sent from
+/// this run, empty for a read (decision 0078).
+pub fn request_key(n: u64, r: &Request) -> String {
+    if r.resend() == Resend::Read {
+        String::new()
+    } else {
+        format!("{}-{n}", run_id())
+    }
+}
+
+/// A request as a line, carrying its key ([`request_key`]).
+pub fn encode_request(n: u64, r: &Request) -> Vec<u8> {
+    #[derive(Serialize)]
+    struct Line<'a> {
+        req: u64,
+        #[serde(skip_serializing_if = "String::is_empty")]
+        key: String,
+        #[serde(flatten)]
+        body: &'a Request,
+    }
+    let mut v = serde_json::to_vec(&Line {
+        req: n,
+        key: request_key(n, r),
+        body: r,
+    })
+    .unwrap_or_default();
+    v.push(b'\n');
+    v
 }
 
 pub fn encode<T: Serialize>(req: u64, body: &T) -> Vec<u8> {

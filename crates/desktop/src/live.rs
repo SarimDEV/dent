@@ -106,6 +106,9 @@ fn run(
     // reconnect, what can be repeated goes again, and what went and can't
     // is answered as lost (decision 0078).
     let mut pending: BTreeMap<u64, (Request, bool)> = BTreeMap::new();
+    // The protocol the daemon last spoke: one that answers changes by key
+    // does each once, so every change goes again after it restarts.
+    let spoke = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let mut started_at: Option<Instant> = None;
     // When an older daemon that refused this app was last replaced.
     let mut replaced_at: Option<Instant> = None;
@@ -152,7 +155,11 @@ fn run(
         }
         let lost: Vec<u64> = pending
             .iter()
-            .filter(|(_, (r, gone))| *gone && r.resend() == dent_protocol::Resend::Once)
+            .filter(|(_, (r, gone))| {
+                spoke.load(Ordering::Relaxed) < dent_protocol::KEYS_FROM
+                    && *gone
+                    && r.resend() == dent_protocol::Resend::Once
+            })
             .map(|(n, _)| *n)
             .collect();
         for n in lost {
@@ -165,7 +172,7 @@ fn run(
             });
         }
         for (n, (r, gone)) in pending.iter_mut() {
-            let _ = w.write_all(&encode(*n, r));
+            let _ = w.write_all(&dent_protocol::encode_request(*n, r));
             *gone = true;
         }
         // Lines from the daemon come through a reader thread; replies clear
@@ -175,10 +182,11 @@ fn run(
         let (refused_tx, refused_rx) = mpsc::channel::<()>();
         let ui2 = ui.clone();
         let installed = bin.clone();
+        let spoke2 = spoke.clone();
         let reading = std::thread::spawn(move || {
             for line in BufReader::new(reader).lines() {
                 let Ok(line) = line else { break };
-                let Some(dent_protocol::Envelope { req, body: out }) =
+                let Some(dent_protocol::Envelope { req, body: out, .. }) =
                     dent_protocol::read_out(line.as_bytes())
                 else {
                     continue;
@@ -217,6 +225,7 @@ fn run(
                         // launcher instead: restarted, it would come back as
                         // the same version, again and again. One speaking a
                         // newer protocol than this app stays.
+                        spoke2.store(proto, Ordering::Relaxed);
                         let installed = dent_protocol::build_stamp(&installed);
                         // One too old to say its build is older still.
                         if !managed
@@ -255,7 +264,7 @@ fn run(
             }
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok((n, r)) => {
-                    let line = encode(n, &r);
+                    let line = dent_protocol::encode_request(n, &r);
                     // A write that fails may still have reached it.
                     pending.insert(n, (r, true));
                     if w.write_all(&line).is_err() {
@@ -358,7 +367,7 @@ fn make_way(sock: &Path, service: bool, bundled: &Path) -> Refused {
     let reply = loop {
         match lines.next() {
             Some(Ok(line)) => match dent_protocol::read_out(line.as_bytes()) {
-                Some(dent_protocol::Envelope { req: 1, body }) => break body,
+                Some(dent_protocol::Envelope { req: 1, body, .. }) => break body,
                 _ => continue,
             },
             Some(Err(e)) => return failed(e),
@@ -595,7 +604,7 @@ mod tests {
         let said = std::fs::read_to_string(&started).expect("the app's own daemon was started");
         assert_eq!(said.trim(), format!("--state {}", state.display()));
         let asked: Vec<String> = asked.try_iter().collect();
-        assert_eq!(asked[0], "hello 4");
+        assert_eq!(asked[0], format!("hello {}", dent_protocol::PROTOCOL));
         assert!(asked.contains(&"hello 1".to_string()), "{asked:?}");
         assert_eq!(asked.last().map(String::as_str), Some("restart null"));
 

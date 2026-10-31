@@ -68,6 +68,8 @@ pub struct Daemon {
     checked: std::sync::Mutex<Option<(std::time::Instant, dent_protocol::Machine)>>,
     /// A newer build of main made ready here, if any (`updates.rs`).
     pub(crate) available: std::sync::Mutex<Option<dent_protocol::Available>>,
+    /// Changes answered once, by their key (decision 0078).
+    pub answered: crate::answered::Answered,
     /// Re-read now and then, so tools installed after dent started are found.
     env: Mutex<Arc<AgentEnv>>,
     pub version: String,
@@ -150,11 +152,13 @@ impl Daemon {
             .collect();
         let (live, _) = broadcast::channel(4096);
         let net = crate::remote::Net::new(&paths, &store);
+        let answered = crate::answered::Answered::open(paths.state.join("answered.json"));
         Arc::new(Self {
             net,
             paths,
             checked: std::sync::Mutex::new(None),
             available: std::sync::Mutex::new(None),
+            answered,
             env: Mutex::new(Arc::new(env)),
             version: env!("CARGO_PKG_VERSION").into(),
             build: std::env::current_exe()

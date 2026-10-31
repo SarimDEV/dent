@@ -214,6 +214,29 @@ impl Client {
         self.next
     }
 
+    /// Send a change with `key`, as a client of decision 0078 does, and
+    /// wait for its reply.
+    fn call_keyed(&mut self, key: &str, r: Request) -> Result<Out, String> {
+        self.next += 1;
+        let id = self.next;
+        let mut v: Value = serde_json::from_slice(&encode(id, &r)).unwrap();
+        v["key"] = Value::String(key.into());
+        let mut line = serde_json::to_vec(&v).unwrap();
+        line.push(b'\n');
+        self.w.write_all(&line).unwrap();
+        let until = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(out) = self.replies.remove(&id) {
+                return match out {
+                    Out::Error { message } => Err(message),
+                    o => Ok(o),
+                };
+            }
+            assert!(Instant::now() < until, "no reply to request {id}");
+            self.pump(Duration::from_millis(50));
+        }
+    }
+
     /// Send a request and wait for its reply.
     fn call(&mut self, r: Request) -> Result<Out, String> {
         let id = self.send_req(r);
@@ -1212,6 +1235,47 @@ fn a_sessions_files_are_stat_and_read_by_what_it_wrote() {
         t.elapsed()
     );
     let _ = std::fs::remove_file(&outside);
+}
+
+/// A change sent again with its key (its answer lost as a link dropped, or
+/// as the daemon restarted) is done once: every copy, on any connection
+/// and after a restart, gets the first answer, and nothing more is made
+/// (decision 0078). Without the key, the same request makes another.
+#[test]
+fn a_change_sent_again_with_its_key_is_done_once() {
+    let home = std::env::temp_dir().join(format!("dent-keyed-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let h = home.display().to_string();
+    std::fs::write(
+        home.join(".gitconfig"),
+        "[user]\n\tname = t\n\temail = t@t\n",
+    )
+    .unwrap();
+    let mut w = World::new(&[("HOME", h.as_str())]);
+    let new = || Request::NewProject {
+        name: "Twice".into(),
+    };
+    let made = |out: Out| match out {
+        Out::Reply {
+            reply: dent_protocol::Reply::ProjectMade { path, .. },
+        } => path,
+        o => panic!("{o:?}"),
+    };
+    let first = made(w.client().call_keyed("run1-7", new()).unwrap());
+    assert_eq!(first, format!("{h}/dent/projects/twice"));
+    // Again, on another connection: the first answer, and no twice-2.
+    assert_eq!(made(w.client().call_keyed("run1-7", new()).unwrap()), first);
+    // And after the daemon restarts.
+    w.kill();
+    w.start();
+    assert_eq!(made(w.client().call_keyed("run1-7", new()).unwrap()), first);
+    assert!(!home.join("dent/projects/twice-2").exists());
+    // A new press (a new key) is a new request.
+    assert_eq!(
+        made(w.client().call_keyed("run1-8", new()).unwrap()),
+        format!("{h}/dent/projects/twice-2")
+    );
 }
 
 #[test]
