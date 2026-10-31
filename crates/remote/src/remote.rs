@@ -79,22 +79,25 @@ pub enum Event {
 /// Unanswered requests, resent on each new link, each with whether it has
 /// gone out on any link yet: one that has may have reached the daemon, so
 /// it can't be taken back here.
+/// Unanswered requests: each, and whether it went, on a link whose daemon
+/// answers changes by key (`Some(true)`) or not (`Some(false)`).
 #[derive(Default)]
-struct Pending(BTreeMap<u64, (Request, bool)>);
+struct Pending(BTreeMap<u64, (Request, Option<bool>)>);
 
 impl Pending {
-    /// Request `n` to send on a new link, gone or not, now marked gone.
-    fn resend(&mut self, n: u64) -> Option<Vec<u8>> {
-        let (r, gone) = self.0.get_mut(&n)?;
-        *gone = true;
+    /// Request `n` to send on a new link (one whose daemon answers by key
+    /// or not: `keys`), gone or not, now marked gone.
+    fn resend(&mut self, n: u64, keys: bool) -> Option<Vec<u8>> {
+        let (r, went) = self.0.get_mut(&n)?;
+        *went = Some(keys);
         Some(line(n, r))
     }
 
     /// Request `n` on a link that's up, now marked gone; none if it went
     /// already (the link came up after it was asked, and took it).
-    fn go(&mut self, n: u64) -> Option<Vec<u8>> {
-        let (r, gone) = self.0.get_mut(&n).filter(|(_, gone)| !*gone)?;
-        *gone = true;
+    fn go(&mut self, n: u64, keys: bool) -> Option<Vec<u8>> {
+        let (r, went) = self.0.get_mut(&n).filter(|(_, went)| went.is_none())?;
+        *went = Some(keys);
         Some(line(n, r))
     }
 
@@ -105,16 +108,19 @@ impl Pending {
     }
 
     /// Requests that went on a link that's gone and mustn't go again:
-    /// taken out, to be answered as lost. A daemon that answers changes by
-    /// their key (`keys`) does each once, so to it every one goes again.
+    /// taken out, to be answered as lost. One that can't be repeated goes
+    /// again only if the daemon it went to and the one now (`keys`) both
+    /// answer by key: one that went to an older daemon, or comes back to
+    /// one, might be done twice.
     fn lost(&mut self, keys: bool) -> Vec<u64> {
-        if keys {
-            return Vec::new();
-        }
         let lost: Vec<u64> = self
             .0
             .iter()
-            .filter(|(_, (r, gone))| *gone && r.resend() == dent_protocol::Resend::Once)
+            .filter(|(_, (r, went))| {
+                went.is_some()
+                    && !(keys && *went == Some(true))
+                    && r.resend() == dent_protocol::Resend::Once
+            })
             .map(|(n, _)| *n)
             .collect();
         for n in &lost {
@@ -125,11 +131,22 @@ impl Pending {
 
     /// Take back request `n`; only one that never went can be.
     fn cancel(&mut self, n: u64) -> bool {
-        if self.0.get(&n).is_some_and(|(_, gone)| !gone) {
+        if self.0.get(&n).is_some_and(|(_, went)| went.is_none()) {
             self.0.remove(&n);
             return true;
         }
         false
+    }
+
+    #[cfg(test)]
+    fn clone_for_test(&self) -> Self {
+        Self(self.0.clone())
+    }
+
+    /// Stop waiting for request `n`: its client has said it didn't answer.
+    /// It never goes again; an answer that still comes is passed on.
+    fn abandon(&mut self, n: u64) {
+        self.0.remove(&n);
     }
 }
 
@@ -159,9 +176,18 @@ impl Remote {
             "request numbers below {FIRST} are the link's own"
         );
         if let Ok(mut p) = self.pending.lock() {
-            p.0.insert(n, (r, false));
+            p.0.insert(n, (r, None));
         }
         let _ = self.tx.send(Cmd::Send(n));
+    }
+
+    /// Stop waiting for request `n` (its client said it didn't answer): it
+    /// never goes again, gone or not; an answer that still comes is passed
+    /// on, for the client to say it happened after all.
+    pub fn abandon(&self, n: u64) {
+        if let Ok(mut p) = self.pending.lock() {
+            p.abandon(n);
+        }
     }
 
     /// Take back request `n` if it hasn't gone out on any link: it won't be
@@ -457,7 +483,7 @@ async fn ready_up(
         .await
         .map_err(|e| e.to_string())??;
     if let Ok(mut p) = pending.lock()
-        && let Some((was, false)) = p.0.get_mut(&n)
+        && let Some((was, None)) = p.0.get_mut(&n)
     {
         *was = r;
     }
@@ -606,7 +632,7 @@ async fn run(
                                     for n in all {
                                         if let Err(why) = ready_up(&pending, &theirs, proto, &machine, n).await {
                                             refuse(n, why, &mut events);
-                                        } else if let Some(l) = pending.lock().ok().and_then(|mut p| p.resend(n)) {
+                                        } else if let Some(l) = pending.lock().ok().and_then(|mut p| p.resend(n, keys)) {
                                             let _ = ask_tx.send(Ask::Send(l));
                                         }
                                     }
@@ -653,7 +679,7 @@ async fn run(
                     if let Some(proto) = ready {
                         if let Err(why) = ready_up(&pending, &theirs, proto, &saved.name, n).await {
                             refuse(n, why, &mut events);
-                        } else if let Some(l) = pending.lock().ok().and_then(|mut p| p.go(n)) {
+                        } else if let Some(l) = pending.lock().ok().and_then(|mut p| p.go(n, proto >= dent_protocol::KEYS_FROM)) {
                             let _ = ask_tx.send(Ask::Send(l));
                         }
                     }
@@ -691,19 +717,22 @@ mod tests {
     fn only_a_request_that_never_went_out_is_taken_back() {
         let mut p = Pending::default();
         let r = || Request::Projects;
-        p.0.insert(3, (r(), false));
-        p.0.insert(4, (r(), false));
+        p.0.insert(3, (r(), None));
+        p.0.insert(4, (r(), None));
         // Away: 3 waits and is taken back; it never goes.
         assert!(p.cancel(3));
-        assert!(p.go(3).is_none());
+        assert!(p.go(3, false).is_none());
         // The link comes up first: 4 goes, and may have reached the daemon.
-        assert!(p.resend(4).is_some());
-        assert!(p.resend(3).is_none());
+        assert!(p.resend(4, false).is_some());
+        assert!(p.resend(3, false).is_none());
         assert!(!p.cancel(4));
-        assert!(p.go(4).is_none(), "the link took it: it doesn't go twice");
+        assert!(
+            p.go(4, false).is_none(),
+            "the link took it: it doesn't go twice"
+        );
         // Sent while up, it went at once.
-        p.0.insert(5, (r(), false));
-        assert!(p.go(5).is_some());
+        p.0.insert(5, (r(), None));
+        assert!(p.go(5, false).is_some());
         assert!(!p.cancel(5));
         assert!(!p.cancel(9), "answered or never asked");
     }
@@ -711,6 +740,26 @@ mod tests {
     /// After a link drops, what went on it is sent again only if a second
     /// copy can't do more; the rest is answered as lost. What never went
     /// still goes, whatever it is.
+    /// A change that went with its key, to a daemon that answers by key,
+    /// goes again to another such daemon: it's done once there.
+    #[test]
+    fn a_keyed_change_goes_again_to_a_daemon_that_answers_by_key() {
+        let mut p = Pending::default();
+        p.0.insert(
+            4,
+            (
+                Request::Interrupt {
+                    session: "s".into(),
+                    by: None,
+                },
+                None,
+            ),
+        );
+        p.go(4, true);
+        assert!(p.clone_for_test().lost(true).is_empty());
+        assert_eq!(p.lost(false), vec![4], "back to an older daemon: lost");
+    }
+
     #[test]
     fn only_what_can_be_repeated_goes_again() {
         let mut p = Pending::default();
@@ -718,22 +767,24 @@ mod tests {
             session: "s".into(),
             by: None,
         };
-        p.0.insert(3, (Request::Projects, false));
-        p.0.insert(4, (stop(), false));
-        p.0.insert(5, (stop(), false));
-        p.go(3);
-        p.go(4);
+        p.0.insert(3, (Request::Projects, None));
+        p.0.insert(4, (stop(), None));
+        p.0.insert(5, (stop(), None));
+        p.go(3, false);
+        p.go(4, false);
         // 5 waited for the link: it never went.
-        // A daemon that answers changes by key does each once: all goes.
-        assert!(p.lost(true).is_empty());
+        // Sent to a daemon that doesn't answer by key, it's lost even if
+        // the one that's back does (it was updated while the link was down):
+        // that one might do it again.
+        assert!(p.clone_for_test().lost(true) == vec![4]);
         assert_eq!(
             p.lost(false),
             vec![4],
             "the stop that went is lost, not repeated"
         );
-        assert!(p.resend(3).is_some(), "a read goes again");
-        assert!(p.resend(4).is_none());
-        assert!(p.resend(5).is_some(), "what never went goes");
+        assert!(p.resend(3, false).is_some(), "a read goes again");
+        assert!(p.resend(4, false).is_none());
+        assert!(p.resend(5, false).is_some(), "what never went goes");
         assert!(
             p.lost(false).contains(&5),
             "and once gone, it's lost the next time"
@@ -802,7 +853,7 @@ mod tests {
             bring: Some(Default::default()),
         };
         let pending = Arc::new(Mutex::new(Pending::default()));
-        pending.lock().unwrap().0.insert(1, (bring, false));
+        pending.lock().unwrap().0.insert(1, (bring, None));
         let theirs = Arc::new(Mutex::new(HashSet::new()));
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()

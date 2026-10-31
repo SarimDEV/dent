@@ -967,6 +967,9 @@ pub struct Dent {
     overdue_checked: Option<Instant>,
     /// An overdue read is being ended: the catch-all toast stays quiet.
     quiet_errors: bool,
+    /// Changes said not to have answered, by request, and their machine:
+    /// an answer that still comes is said (decision 0078).
+    given_up: HashMap<u64, String>,
     /// Where the app was before it updated, put back as its sessions come
     /// (until a while has passed).
     pub resuming: Option<(crate::updates::Resume, Instant)>,
@@ -1971,6 +1974,7 @@ impl Dent {
             updating: None,
             overdue_checked: None,
             quiet_errors: false,
+            given_up: HashMap::new(),
             resuming: None,
             settings_tab: crate::settings::Tab::General,
             agents_tab: None,
@@ -3700,7 +3704,9 @@ impl Dent {
             if self.outbox.iter().any(|m| m.req == Some(o.req)) {
                 continue;
             }
+            self.live.abandon(&o.machine, o.req);
             let message = o.words(&self.machine_name(&o.machine));
+            let shown = self.waiting.contains_key(&o.req) || o.once;
             if self.waiting.contains_key(&o.req) {
                 // A read asked in the background (another machine's
                 // projects, a refresh) ends quietly: only what shows its
@@ -3708,9 +3714,17 @@ impl Dent {
                 self.quiet_errors = !o.changes && !o.gone;
                 self.reply(o.req, Out::Error { message }, cx);
                 self.quiet_errors = false;
-            } else if o.changes {
+            } else if o.once {
+                // Only what the person did (a stop, a commit) is worth a
+                // word when nothing waits on it; upkeep goes quietly.
                 self.toast(ToastAction::Info, message);
                 cx.notify();
+            }
+            // A change the person saw go (or did) that it may still finish:
+            // if it does, that's said. (Set after its wait has heard it
+            // didn't answer.)
+            if o.changes && !o.gone && shown {
+                self.given_up.insert(o.req, o.machine.clone());
             }
         }
     }
@@ -3736,6 +3750,19 @@ impl Dent {
                 Draft::with(o.text.clone(), atts),
                 false,
             ));
+        }
+        // One given up on that answers after all: said, so what the person
+        // was told may not have happened is put right.
+        if let Some(machine) = self.given_up.remove(&req) {
+            self.waiting.remove(&req);
+            let name = self.machine_name(&machine);
+            let said = match out {
+                Out::Error { message } => format!("{name} answered after all: {message}"),
+                _ => format!("{name} finished that after all"),
+            };
+            self.toast(ToastAction::Info, said);
+            cx.notify();
+            return;
         }
         let Some(w) = self.waiting.remove(&req) else {
             if let Out::Error { message } = out {

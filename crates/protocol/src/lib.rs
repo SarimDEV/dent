@@ -2221,7 +2221,8 @@ impl Request {
     /// connected: past that, the client says so instead of waiting on
     /// ([decision 0078](../../docs/decisions/0078-requests-that-fail-well.md)).
     /// Most answer at once; what clones, starts an agent or moves a session
-    /// can take minutes.
+    /// can take many minutes, and says it's still at work meanwhile: a
+    /// minute's quiet then is a stall, and this is its limit in all.
     pub fn patience(&self) -> std::time::Duration {
         use Request as R;
         let secs = match self {
@@ -2236,7 +2237,7 @@ impl Request {
             | R::MovePack { .. }
             | R::MoveIn { .. }
             | R::MoveAccept { .. }
-            | R::Update { .. } => 600,
+            | R::Update { .. } => 1800,
             R::Git { .. }
             | R::PrBrief { .. }
             | R::ReadFiles { .. }
@@ -2250,6 +2251,17 @@ impl Request {
             _ => 30,
         };
         std::time::Duration::from_secs(secs)
+    }
+
+    /// The key a request makes for itself from the id it carries, for a
+    /// client that sends none: two copies of one new session or fork, at
+    /// once from two links, run as one (decision 0078).
+    pub fn own_key(&self) -> Option<String> {
+        match self {
+            Request::Create { id, .. } if !id.is_empty() => Some(format!("create.{id}")),
+            Request::Fork { id: Some(id), .. } if !id.is_empty() => Some(format!("fork.{id}")),
+            _ => None,
+        }
     }
 
     /// Whether this request may go again after its link dropped. No

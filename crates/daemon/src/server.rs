@@ -147,12 +147,30 @@ pub async fn session(
             }
         };
         let req = env.req;
+        if !hello && !matches!(env.body, Request::Hello { .. }) {
+            let _ = tx
+                .send(encode(
+                    req,
+                    &Out::Error {
+                        message: "hello first".into(),
+                    },
+                ))
+                .await;
+            continue;
+        }
         // A change with a key runs once: a copy gets the first answer, or
-        // waits for it while the first still runs (decision 0078).
-        let keyed = (!env.key.is_empty() && env.body.resend() != dent_protocol::Resend::Read)
-            .then(|| env.key.clone());
+        // waits for it (hearing it's still at work) while the first runs
+        // (decision 0078).
+        // One without a key that carries its own id (a new session) is
+        // keyed by it: copies of it at once can't make two.
+        let keyed = if !env.key.is_empty() && env.body.resend() != dent_protocol::Resend::Read {
+            Some(env.key.clone())
+        } else {
+            env.body.own_key()
+        };
         if let Some(key) = &keyed {
-            match d.answered.begin(key) {
+            let once = env.body.resend() == dent_protocol::Resend::Once;
+            match d.answered.begin(key, once) {
                 crate::answered::Seen::New => {}
                 crate::answered::Seen::Done(out) => {
                     if tx.send(encode(req, &*out)).await.is_err() {
@@ -163,6 +181,7 @@ pub async fn session(
                 crate::answered::Seen::Running(mut rx) => {
                     let tx = tx.clone();
                     tokio::spawn(async move {
+                        let _alive = still_at_work(&tx, req);
                         while rx.changed().await.is_ok() {
                             let out = rx.borrow().clone();
                             if let Some(out) = out {
@@ -175,33 +194,9 @@ pub async fn session(
                 }
             }
         }
-        // A long one says it's still at work every few seconds, so its
-        // client can tell slow from stalled (decision 0078).
-        let alive = (env.body.patience() >= std::time::Duration::from_secs(120)).then(|| {
-            let tx = tx.clone();
-            AbortOnDrop(tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    let still = Out::Progress {
-                        step: String::new(),
-                    };
-                    if tx.send(encode(req, &still)).await.is_err() {
-                        break;
-                    }
-                }
-            }))
-        });
-        if !hello && !matches!(env.body, Request::Hello { .. }) {
-            let _ = tx
-                .send(encode(
-                    req,
-                    &Out::Error {
-                        message: "hello first".into(),
-                    },
-                ))
-                .await;
-            continue;
-        }
+        // Whatever ends this one before it answers (its link dropping
+        // aborts this loop), its copies hear so.
+        let job = crate::answered::Job::new(&d, keyed.as_ref());
         // How the machine is set up asks Git and the GitHub CLI, which can
         // take seconds: answered alongside, so a message sent meanwhile
         // isn't held up behind it. (Neither changes what another request
@@ -342,6 +337,27 @@ pub async fn session(
                     anyhow::bail!("no device {id} is paired with this machine")
                 }
             }),
+            // A long one (a clone, a new session, a move) is its own job,
+            // not this link's: a link that drops doesn't stop it, its copy
+            // on the next link waits for its answer, and nothing else from
+            // this client waits behind it.
+            other if other.patience() >= LONG => {
+                let (d, tx) = (d.clone(), tx.clone());
+                tokio::spawn(async move {
+                    let alive = still_at_work(&tx, req);
+                    let out = handle(&d, other).await;
+                    drop(alive);
+                    let msg = match out {
+                        Ok(reply) => Out::Reply { reply },
+                        Err(e) => Out::Error {
+                            message: format!("{e:#}"),
+                        },
+                    };
+                    job.finish(&msg);
+                    let _ = tx.send(encode(req, &msg)).await;
+                });
+                continue;
+            }
             other => handle(&d, other).await,
         };
         let msg = match out {
@@ -350,16 +366,32 @@ pub async fn session(
                 message: format!("{e:#}"),
             },
         };
-        // Done: no more "still at work" after its answer.
-        drop(alive);
-        if let Some(key) = &keyed {
-            d.answered.finish(key, &msg);
-        }
+        job.finish(&msg);
         if tx.send(encode(req, &msg)).await.is_err() {
             break;
         }
     }
     Ok(())
+}
+
+/// Requests at least this patient run as their own jobs and say they're
+/// still at work (decision 0078).
+const LONG: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Says request `req` is still at work every 5 s, until dropped.
+fn still_at_work(tx: &mpsc::Sender<Vec<u8>>, req: u64) -> AbortOnDrop {
+    let tx = tx.clone();
+    AbortOnDrop(tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let still = Out::Progress {
+                step: String::new(),
+            };
+            if tx.send(encode(req, &still)).await.is_err() {
+                break;
+            }
+        }
+    }))
 }
 
 /// A task that stops when this is dropped.

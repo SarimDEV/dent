@@ -137,6 +137,20 @@ impl Net {
             .unwrap_or_default()
     }
 
+    /// Request `n` to `machine` was said not to have answered: let go, so
+    /// it never goes again later to do what the person was told may not
+    /// have happened.
+    pub fn abandon(&self, machine: &str, n: u64) {
+        if let Some(f) = self
+            .far
+            .lock()
+            .ok()
+            .and_then(|f| f.get(machine).map(|f| f.remote.clone()))
+        {
+            f.abandon(n);
+        }
+    }
+
     fn deliver(&self, machine: &str, n: u64, r: Request) {
         if let Ok(mut f) = self.inflight.lock() {
             f.asked(n, machine, &r);
