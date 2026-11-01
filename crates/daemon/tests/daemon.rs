@@ -1363,6 +1363,133 @@ fn a_long_job_outlives_its_link_and_its_copy_gets_the_answer() {
     assert!(said.contains("hello first"), "{said}");
 }
 
+/// The failure suite (decision 0078), for the change audit found worst
+/// when repeated: a commit. Sent with its key, its answer lost, it's sent
+/// again from another link, then again after the daemon restarts, with
+/// another file changed meanwhile: one commit, of what was asked, and the
+/// later change never swept in unasked.
+#[test]
+fn a_commit_sent_again_commits_once_and_never_what_changed_since() {
+    let home = std::env::temp_dir().join(format!("dent-commit-once-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let h = home.display().to_string();
+    std::fs::write(
+        home.join(".gitconfig"),
+        "[user]\n\tname = t\n\temail = t@t\n",
+    )
+    .unwrap();
+    let mut w = World::new(&[("HOME", h.as_str())]);
+    let repo = home.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .env("HOME", &home)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    };
+    git(&["init", "-q"]);
+    std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "first"]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let session = c.create(&repo.display().to_string(), Permission::Full, "hello");
+    c.wait_turns(&session, 1);
+    std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+    let commit = || Request::Git {
+        session: session.clone(),
+        action: dent_protocol::GitAction::Commit,
+        message: Some("asked for".into()),
+    };
+    let first = c.call_keyed("run7-30", commit()).expect("the commit");
+    // Meanwhile, another change the person never asked to commit.
+    std::fs::write(repo.join("b.txt"), "not asked\n").unwrap();
+    // Sent again from another link: the first answer, no second commit.
+    let again = w
+        .client()
+        .call_keyed("run7-30", commit())
+        .expect("answered");
+    assert_eq!(again, first);
+    // And after the daemon restarts.
+    w.kill();
+    w.start();
+    let after = w
+        .client()
+        .call_keyed("run7-30", commit())
+        .expect("answered");
+    assert_eq!(after, first);
+    assert_eq!(
+        git(&["rev-list", "--count", "HEAD"]),
+        "2",
+        "one commit, not three"
+    );
+    assert_eq!(git(&["log", "-1", "--format=%s"]), "asked for");
+    assert_eq!(
+        git(&["show", "--name-only", "--format=", "HEAD"]),
+        "a.txt",
+        "only what was asked"
+    );
+    assert!(
+        git(&["status", "--porcelain"]).contains("b.txt"),
+        "the later change is left alone"
+    );
+}
+
+/// The failure suite (decision 0078): a Stop sent again (its answer lost)
+/// never stops the turn that started since. The second copy gets the first
+/// answer, and the newer turn runs to its end.
+#[test]
+fn a_stop_sent_again_never_stops_a_newer_turn() {
+    let w = World::new(&[("FAKE_CLAUDE_SPEED", "3")]);
+    let mut c = w.client();
+    c.subscribe(0);
+    let s = c.create(&w.cwd(), Permission::Full, "a long answer please");
+    c.wait(&s, "the first turn to start", |b| {
+        matches!(b, Body::TurnStarted)
+    });
+    let stop = || Request::Interrupt {
+        session: s.clone(),
+        by: Some("the test".into()),
+    };
+    let first = c.call_keyed("run8-12", stop()).expect("stopped");
+    c.wait(&s, "the first turn to stop", |b| {
+        matches!(
+            b,
+            Body::TurnEnded {
+                outcome: Outcome::Interrupted { .. }
+            }
+        )
+    });
+    // A newer turn.
+    c.say(&s, "u2", "another long answer please", false);
+    let until = Instant::now() + Duration::from_secs(15);
+    while c.count(&s, |b| matches!(b, Body::TurnStarted)) < 2 {
+        assert!(Instant::now() < until, "the newer turn never started");
+        c.pump(Duration::from_millis(100));
+    }
+    // The stop again, as a resend from another link.
+    let again = w.client().call_keyed("run8-12", stop()).expect("answered");
+    assert_eq!(again, first);
+    // The newer turn ends as it should, not stopped.
+    c.wait_turns(&s, 1);
+    assert_eq!(
+        c.count(&s, |b| matches!(
+            b,
+            Body::TurnEnded {
+                outcome: Outcome::Interrupted { .. }
+            }
+        )),
+        1,
+        "only the turn it was pressed for stopped"
+    );
+}
+
 /// A change sent again with its key (its answer lost as a link dropped, or
 /// as the daemon restarted) is done once: every copy, on any connection
 /// and after a restart, gets the first answer, and nothing more is made
