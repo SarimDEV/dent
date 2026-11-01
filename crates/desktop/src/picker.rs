@@ -134,7 +134,11 @@ impl Dent {
         let q = self.menu_query.read(cx).value().trim().to_string();
         let mut v = Vec::new();
         if let Some(busy) = &self.project_busy {
-            v.push(Entry::note(busy));
+            // What it's doing now, as its machine says.
+            match self.project_busy_req.and_then(|n| self.steps.get(&n)) {
+                Some(step) => v.push(Entry::note(&format!("{busy} · {step}"))),
+                None => v.push(Entry::note(busy)),
+            }
             // Copying a project can be left: what's asked is then let go.
             if self.bring_asked.is_some() || self.project_mode == Mode::Bring {
                 v.push(Entry::row(
@@ -486,12 +490,12 @@ impl Dent {
             "Making {name} on {}…",
             self.machine_name(&self.defaults.machine)
         ));
-        self.ask_here(
+        self.project_busy_req = Some(self.ask_here(
             Request::NewProject {
                 name: name.to_string(),
             },
             Waiting::ProjectMade,
-        );
+        ));
     }
 
     /// Clone a Git URL; the picker waits, then picks it.
@@ -501,12 +505,12 @@ impl Dent {
             "Cloning {short} to {}…",
             self.machine_name(&self.defaults.machine)
         ));
-        self.ask_here(
+        self.project_busy_req = Some(self.ask_here(
             Request::CloneProject {
                 url: url.to_string(),
             },
             Waiting::ProjectMade,
-        );
+        ));
     }
 }
 

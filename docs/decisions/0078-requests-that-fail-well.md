@@ -68,6 +68,7 @@ T3 learned the same lessons:
   - **Each request remembers whether it went with a key the daemon honours.** One that went to an older daemon isn't sent again after that daemon is updated.
   - **A request said not to have answered is let go**, never sent again later. If its machine answers anyway, the person hears "finished that after all".
   - **Only what the person did gets a word when nothing waits on it**, so upkeep (`Seen`, `KeepAwake`) never piles up toasts (T3 #9592).
+- **Steps, built.** A long job runs inside `progress::scoped`, and its heartbeat carries what it's doing now. A clone runs git with `--progress`, read as it goes (`git::watched`), so the wait reads "Cloning dent to dent-linux… · Receiving objects 42%". Bringing a project for a move still says only that it's cloning, because its reply shape is kept for older clients. The guard test also stops any daemon code from setting a weaker `GIT_SSH_COMMAND` after `git::cmd()`: one did, in the project clone.
 - **The failure suite, against a real daemon** (`crates/daemon/tests/daemon.rs`), one test per hazard the audit found:
   - a commit sent again commits once, and never what changed since, across another link and a restart;
   - a Stop sent again never stops a newer turn;
@@ -80,7 +81,6 @@ T3 learned the same lessons:
 - **A narrow gap, accepted:** a repeatable setter (set model, rename) answered before a daemon restart is remembered only in memory. A copy arriving after the restart applies again, and could undo a newer change made from another device in between. It needs a lost answer, a restart and another device's change, all inside the same minutes. Messages don't carry settings, so T3's version of this (#18762, the next message undoing a switch made on the phone) can't happen here.
 - **Still to come:**
   - Retry and Check buttons where a "may or may not have happened" is said;
-  - named steps for long jobs (git progress), so a heartbeat means the job is moving;
   - asking again after the app restarts with the same key (beats T3 #20937);
   - a limit on git processes running at once;
   - more of the failure suite as new risky requests arrive: each must come with its own.

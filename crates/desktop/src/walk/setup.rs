@@ -789,6 +789,32 @@ pub(super) fn overdue() -> Vec<(f32, Act)> {
                 1.,
             ),
         ),
+        // A clone under way says what it's doing, as its machine says it.
+        (0.2, Key("cmd-n")),
+        (0.2, Click("chip-project")),
+        (
+            0.2,
+            Call(|d, _, cx| {
+                d.project_busy = Some("Cloning dent to dent-linux…".into());
+                d.project_busy_req = Some(77);
+                d.steps.insert(77, "Receiving objects 42%".into());
+                cx.notify();
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "a clone's wait shows what it's doing now",
+                |d, cx| {
+                    d.project_entries(cx).iter().any(|e| {
+                        e.name
+                            .contains("Cloning dent to dent-linux… · Receiving objects 42%")
+                    })
+                },
+                2.,
+            ),
+        ),
+        (0.3, Shot("clone-step")),
     ]
 }
 
