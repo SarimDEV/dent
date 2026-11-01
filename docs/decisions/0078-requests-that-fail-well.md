@@ -69,8 +69,9 @@ T3 learned the same lessons:
   - **A request said not to have answered is let go**, never sent again later. If its machine answers anyway, the person hears "finished that after all".
   - **Only what the person did gets a word when nothing waits on it**, so upkeep (`Seen`, `KeepAwake`) never piles up toasts (T3 #9592).
 - **Steps, built.** A long job runs inside `progress::scoped`, and its heartbeat carries what it's doing now. A clone runs git with `--progress`, read as it goes (`git::watched`), so the wait reads "Cloning dent to dent-linux… · Receiving objects 42%". Bringing a project for a move still says only that it's cloning, because its reply shape is kept for older clients. The guard test also stops any daemon code from setting a weaker `GIT_SSH_COMMAND` after `git::cmd()`: one did, in the project clone.
+- **Try again, built.** A key made Retry and Check one button. Sent again under its own number, so its own key, an action either happens now or brings back how it went the first time, never twice. When something the person did goes unanswered and nothing waits on it, the toast reads "No answer from dent-linux: it may not have happened", with **Try again**. Its outcome comes as "finished that after all" or as the machine's error. It's offered only to a machine that answers by key.
 - **Still to come:**
-  - Retry and Check buttons where a "may or may not have happened" is said;
+  - Try again where a feature shows its own wait (the picker, the Git button), not only in toasts;
   - an absolute setter that also says what it was set from, so a late copy can't undo another device's newer change (beats T3 #18762);
   - asking again after the app restarts with the same key (beats T3 #20937);
   - a limit on git processes running at once;

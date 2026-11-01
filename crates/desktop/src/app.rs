@@ -423,6 +423,9 @@ pub enum ToastAction {
     },
     /// Open an address: a pull request just made.
     Open(String),
+    /// Send what may or may not have happened again, by its number: done
+    /// once at most, or said how it went (decision 0078).
+    TryAgain(u64),
     /// Just a message, like a request the daemon refused.
     Info,
 }
@@ -967,6 +970,9 @@ pub struct Dent {
     overdue_checked: Option<Instant>,
     /// An overdue read is being ended: the catch-all toast stays quiet.
     quiet_errors: bool,
+    /// What may or may not have happened, to try again: its machine and
+    /// what was asked, by its number.
+    pub retries: HashMap<u64, (String, dent_protocol::Request)>,
     /// What each long request is doing now, as its machine last said
     /// ("Receiving objects 42%").
     pub steps: HashMap<u64, String>,
@@ -1981,6 +1987,7 @@ impl Dent {
             quiet_errors: false,
             given_up: HashMap::new(),
             steps: HashMap::new(),
+            retries: HashMap::new(),
             project_busy_req: None,
             resuming: None,
             settings_tab: crate::settings::Tab::General,
@@ -3288,6 +3295,16 @@ impl Dent {
                 }
             }
             ToastAction::Resume(id) => self.resume(&id, cx),
+            ToastAction::TryAgain(n) => {
+                if let Some((machine, r)) = self.retries.remove(&n) {
+                    self.given_up.insert(n, machine.clone());
+                    self.live.send_again(&machine, n, r);
+                    self.toast(
+                        ToastAction::Info,
+                        format!("Asking {} again…", self.machine_name(&machine)),
+                    );
+                }
+            }
             ToastAction::Open(url) => cx.open_url(&url),
             ToastAction::UnhideProject(path) => self.hide_project(&path, false, cx),
             // Back in the queue where it waited (or, the turn over
@@ -3729,8 +3746,30 @@ impl Dent {
                 self.quiet_errors = false;
             } else if o.once {
                 // Only what the person did (a stop, a commit) is worth a
-                // word when nothing waits on it; upkeep goes quietly.
-                self.toast(ToastAction::Info, message);
+                // word when nothing waits on it; upkeep goes quietly. To a
+                // machine that answers by key, Try again is always safe.
+                let keyed = if o.machine.is_empty() {
+                    true
+                } else {
+                    self.machines
+                        .iter()
+                        .find(|m| m.id == o.machine)
+                        .and_then(|m| m.proto)
+                        .is_some_and(|p| p >= dent_protocol::KEYS_FROM)
+                };
+                match o.request.clone() {
+                    Some(r) if keyed => {
+                        self.retries.insert(o.req, (o.machine.clone(), r));
+                        // Short, to fit; its button is safe to press (the
+                        // same key: done once at most).
+                        let said = format!(
+                            "No answer from {}: it may not have happened",
+                            self.machine_name(&o.machine)
+                        );
+                        self.toast(ToastAction::TryAgain(o.req), said);
+                    }
+                    _ => self.toast(ToastAction::Info, message),
+                }
                 cx.notify();
             }
             // A change the person saw go (or did) that it may still finish:

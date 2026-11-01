@@ -137,6 +137,12 @@ impl Net {
             .unwrap_or_default()
     }
 
+    /// Send request `n` again as it was, under its own number, so its key:
+    /// a daemon that answers by key does it once, or says how it went.
+    pub fn send_again(&self, machine: &str, n: u64, r: Request) {
+        self.deliver(machine, n, r);
+    }
+
     /// Request `n` to `machine` was said not to have answered: let go, so
     /// it never goes again later to do what the person was told may not
     /// have happened.

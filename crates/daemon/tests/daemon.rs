@@ -1804,7 +1804,16 @@ fn a_dead_holder_interrupts_the_turn_and_the_session_carries_on() {
     // fails to make it notice the holder has gone.
     let s = c.create(&w.cwd(), Permission::Ask, "work quietly please");
     c.wait(&s, "the turn to start", |b| matches!(b, Body::TurnStarted));
-    let agents = w.agent_pids();
+    // Its process is on record a moment after the turn starts (later
+    // still under a loaded machine): waited for, not assumed.
+    let until = Instant::now() + Duration::from_secs(10);
+    let agents = loop {
+        let a = w.agent_pids();
+        if a.len() == 1 || Instant::now() > until {
+            break a;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
     assert_eq!(agents.len(), 1);
     let pid = w.holder_pid().expect("holder running");
     // SAFETY: kill has no memory preconditions.
