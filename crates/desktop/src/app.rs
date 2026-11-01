@@ -967,6 +967,11 @@ pub struct Dent {
     overdue_checked: Option<Instant>,
     /// An overdue read is being ended: the catch-all toast stays quiet.
     quiet_errors: bool,
+    /// What each long request is doing now, as its machine last said
+    /// ("Receiving objects 42%").
+    pub steps: HashMap<u64, String>,
+    /// The request the project picker waits on, for its step.
+    pub project_busy_req: Option<u64>,
     /// Changes said not to have answered, by request, and their machine:
     /// an answer that still comes is said (decision 0078).
     given_up: HashMap<u64, String>,
@@ -1975,6 +1980,8 @@ impl Dent {
             overdue_checked: None,
             quiet_errors: false,
             given_up: HashMap::new(),
+            steps: HashMap::new(),
+            project_busy_req: None,
             resuming: None,
             settings_tab: crate::settings::Tab::General,
             agents_tab: None,
@@ -3459,13 +3466,19 @@ impl Dent {
         changed: &mut Vec<String>,
         cx: &mut Context<Self>,
     ) {
-        // Still at work on it: its clock starts again, and that's all.
-        if let Out::Progress { .. } = &out {
+        // Still at work on it: its clock starts again, and what it's doing
+        // now (if it says) shows where it's waited on.
+        if let Out::Progress { step } = &out {
             self.live.alive(req);
+            if !step.is_empty() && self.steps.get(&req) != Some(step) {
+                self.steps.insert(req, step.clone());
+                cx.notify();
+            }
             return;
         }
         if req != 0 {
             self.live.answered(req);
+            self.steps.remove(&req);
         }
         // Another machine's files, as its messages name them: put back to
         // edit and sent again, they're named there, not carried.
@@ -6247,10 +6260,11 @@ impl Dent {
         self.waiting.remove(&n);
     }
 
-    /// Ask the machine new sessions go to.
-    pub fn ask_here(&mut self, req: Request, w: Waiting) {
+    /// Ask the machine new sessions go to; the request's number.
+    pub fn ask_here(&mut self, req: Request, w: Waiting) -> u64 {
         let n = self.live.send_to(&self.defaults.machine, req);
         self.waiting.insert(n, w);
+        n
     }
 
     /// New sessions go to `machine` ("" is this one). Its projects aren't

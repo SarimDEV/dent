@@ -181,7 +181,7 @@ pub async fn session(
                 crate::answered::Seen::Running(mut rx) => {
                     let tx = tx.clone();
                     tokio::spawn(async move {
-                        let _alive = still_at_work(&tx, req);
+                        let _alive = still_at_work(&tx, req, None);
                         while rx.changed().await.is_ok() {
                             let out = rx.borrow().clone();
                             if let Some(out) = out {
@@ -344,8 +344,9 @@ pub async fn session(
             other if other.patience() >= LONG => {
                 let (d, tx) = (d.clone(), tx.clone());
                 tokio::spawn(async move {
-                    let alive = still_at_work(&tx, req);
-                    let out = handle(&d, other).await;
+                    let step = crate::progress::Step::default();
+                    let alive = still_at_work(&tx, req, Some(step.clone()));
+                    let out = crate::progress::scoped(step, handle(&d, other)).await;
                     drop(alive);
                     let msg = match out {
                         Ok(reply) => Out::Reply { reply },
@@ -379,13 +380,21 @@ pub async fn session(
 const LONG: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Says request `req` is still at work every 5 s, until dropped.
-fn still_at_work(tx: &mpsc::Sender<Vec<u8>>, req: u64) -> AbortOnDrop {
+/// With the job's `step`, what it's doing now goes too.
+fn still_at_work(
+    tx: &mpsc::Sender<Vec<u8>>,
+    req: u64,
+    step: Option<crate::progress::Step>,
+) -> AbortOnDrop {
     let tx = tx.clone();
     AbortOnDrop(tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             let still = Out::Progress {
-                step: String::new(),
+                step: step
+                    .as_ref()
+                    .map(crate::progress::Step::now)
+                    .unwrap_or_default(),
             };
             if tx.send(encode(req, &still)).await.is_err() {
                 break;
@@ -788,7 +797,10 @@ async fn handle(d: &Arc<Daemon>, req: Request) -> Result<Reply> {
             Reply::ProjectMade { path, warning }
         }
         Request::CloneProject { url } => {
-            let dir = tokio::task::spawn_blocking(move || crate::projects::clone(&url)).await??;
+            let step = crate::progress::current();
+            let dir =
+                tokio::task::spawn_blocking(move || crate::projects::clone(&url, step.as_ref()))
+                    .await??;
             let path = dir.display().to_string();
             remember_project(d, &path)?;
             Reply::ProjectMade {

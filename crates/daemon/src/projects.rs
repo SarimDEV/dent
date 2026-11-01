@@ -116,18 +116,22 @@ fn free(root: &Path, name: &str) -> Result<PathBuf> {
 }
 
 fn run(dir: &Path, args: &[&str]) -> Result<(), String> {
-    let out = crate::git::cmd()
-        .args(args)
-        .current_dir(dir)
-        // Never wait on a password prompt nobody can see.
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
-        .output()
-        .map_err(|e| e.to_string())?;
-    if out.status.success() {
+    run_saying(dir, args, None)
+}
+
+/// Run git, saying its progress to `step` as it goes.
+fn run_saying(
+    dir: &Path,
+    args: &[&str],
+    step: Option<&crate::progress::Step>,
+) -> Result<(), String> {
+    // Never waits on a prompt or a network gone quiet (`git::cmd`).
+    let mut cmd = crate::git::cmd();
+    cmd.args(args).current_dir(dir);
+    let (status, err) = crate::git::watched(&mut cmd, step).map_err(|e| e.to_string())?;
+    if status.success() {
         Ok(())
     } else {
-        let err = String::from_utf8_lossy(&out.stderr);
         Err(err
             .lines()
             .map(str::trim)
@@ -189,7 +193,7 @@ pub fn free_in_root(name: &str) -> Result<PathBuf> {
 
 /// Clone a Git URL into the projects folder. Only remote URLs, and never
 /// one that git would read as an option.
-pub fn clone(url: &str) -> Result<PathBuf> {
+pub fn clone(url: &str, step: Option<&crate::progress::Step>) -> Result<PathBuf> {
     let url = url.trim();
     let remote = ["https://", "http://", "ssh://", "git://", "git@"]
         .iter()
@@ -205,7 +209,8 @@ pub fn clone(url: &str) -> Result<PathBuf> {
     std::fs::create_dir_all(&root)?;
     let dir = free(&root, &name)?;
     let dest = dir.display().to_string();
-    if let Err(e) = run(&root, &["clone", "-q", "--", url, &dest]) {
+    // With its progress, said as it goes ("Receiving objects 42%").
+    if let Err(e) = run_saying(&root, &["clone", "--progress", "--", url, &dest], step) {
         let _ = std::fs::remove_dir_all(&dir);
         bail!("Couldn't clone: {e}");
     }
@@ -308,9 +313,9 @@ mod tests {
 
     #[test]
     fn clones_only_remote_urls() {
-        assert!(clone("--upload-pack=evil").is_err());
-        assert!(clone("/tmp/repo").is_err());
-        assert!(clone("https://x y").is_err());
+        assert!(clone("--upload-pack=evil", None).is_err());
+        assert!(clone("/tmp/repo", None).is_err());
+        assert!(clone("https://x y", None).is_err());
     }
 
     #[test]

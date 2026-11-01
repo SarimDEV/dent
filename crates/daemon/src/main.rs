@@ -30,6 +30,7 @@ mod moving;
 mod paths;
 mod plan_tool;
 mod power;
+mod progress;
 mod projects;
 mod remote;
 mod scopes;
