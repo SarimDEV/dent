@@ -79,11 +79,11 @@ T3 learned the same lessons:
 
   Client-side cases (answer late, after its scope, twice; a link dropped before or after sending; a daemon updated while away) are covered in `inflight`, `remote` and the `overdue` walk.
 - **A narrow gap, accepted:** a repeatable setter (set model, rename) answered before a daemon restart is remembered only in memory. A copy arriving after the restart applies again, and could undo a newer change made from another device in between. It needs a lost answer, a restart and another device's change, all inside the same minutes. Messages don't carry settings, so T3's version of this (#18762, the next message undoing a switch made on the phone) can't happen here.
-- **Still to come:**
-  - Retry and Check buttons where a "may or may not have happened" is said;
-  - asking again after the app restarts with the same key (beats T3 #20937);
-  - a limit on git processes running at once;
-  - more of the failure suite as new risky requests arrive: each must come with its own.
+- **Try again, built.** A key made Retry and Check one button. Sent again under its own number, so its own key, an action either happens now or brings back how it went the first time, never twice. When something the person did goes unanswered, the toast reads "No answer from dent-linux: it may not have happened", with **Try again**. Its outcome comes as "finished that after all" or as the machine's error. It's offered only to a machine that answers by key.
+- **Still to come:** more of the failure suite as new risky requests arrive; each must come with its own.
+- **Left for now, and why:**
+  - **Asking again after the app restarts** (T3 #20937). What these actions touch shows its own state when you open dent again: the Git button reads the branch, the picker the projects. A key kept on disk would add only a toast. Build it if an action appears whose result isn't visible like that.
+  - **A limit on git processes at once** (T3's 8 slots). Every git the daemon runs is now short or bounded (`git::cmd`), and long jobs no longer queue behind each other. The many-agents stress run (a standing target) decides if a limit is needed; a guess at one could slow ordinary work.
 - **Some errors appear where there were none.** A stop, commit or new project caught by a dropped link now says it may not have happened, instead of being silently repeated.
 - **Starting numbers, from T3:**
   - opening a link times out after 15 s;

@@ -34,7 +34,7 @@ pub enum Link {
 }
 
 /// A request that waited too long, or whose machine is gone.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Overdue {
     pub req: u64,
     pub machine: String,
@@ -51,6 +51,9 @@ pub struct Overdue {
     /// keeping things up to date: only what they did is worth a word when
     /// nothing waits on it.
     pub once: bool,
+    /// What was asked, when the person did it: sent again under its
+    /// number (so its key), Try again either does it or hears it was done.
+    pub request: Option<Request>,
 }
 
 impl Overdue {
@@ -102,6 +105,7 @@ struct Asked {
     machine: String,
     changes: bool,
     once: bool,
+    request: Option<Request>,
     patience: Duration,
     /// Time spent waiting while the machine was connected, since it was
     /// asked: never more than its patience, however busy it says it is.
@@ -131,6 +135,7 @@ impl Inflight {
                 machine: machine.to_string(),
                 changes: r.resend() != Resend::Read,
                 once: r.resend() == Resend::Once,
+                request: (r.resend() == Resend::Once).then(|| r.clone()),
                 patience: r.patience(),
                 total: Duration::ZERO,
                 waited: Duration::ZERO,
@@ -201,6 +206,7 @@ impl Inflight {
                     stalled: stalled && !unfinished && state != Link::Gone,
                     unfinished: a.heard && unfinished && state != Link::Gone,
                     once: a.once,
+                    request: a.request.clone(),
                 });
             }
         }

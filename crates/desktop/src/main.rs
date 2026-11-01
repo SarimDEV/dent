@@ -486,6 +486,7 @@ impl Render for Dent {
                     | ToastAction::Unremove { .. } => "Undo",
                     ToastAction::Resume(_) => "Continue",
                     ToastAction::Open(_) => "Open",
+                    ToastAction::TryAgain(_) => "Try again",
                     ToastAction::Info => "OK",
                 };
                 div()
@@ -522,6 +523,7 @@ impl Render for Dent {
                                     ToastAction::Unremove { .. } => "x",
                                     ToastAction::Resume(_) => "square",
                                     ToastAction::Open(_) => "git-pull-request",
+                                    ToastAction::TryAgain(_) => "info",
                                     ToastAction::Info => "info",
                                 },
                                 14.,

@@ -789,6 +789,58 @@ pub(super) fn overdue() -> Vec<(f32, Act)> {
                 1.,
             ),
         ),
+        // A stop the machine never answers: it may or may not have
+        // happened, and Try again (same key) is offered and asks again.
+        (
+            0.1,
+            Call(|d, _, cx| {
+                if let Some(m) = d.machines.iter_mut().find(|m| m.id == UP) {
+                    m.proto = Some(dent_protocol::PROTOCOL);
+                }
+                d.live.send_to(
+                    UP,
+                    dent_protocol::Request::Interrupt {
+                        session: format!("{UP}/s1"),
+                        by: None,
+                    },
+                );
+                cx.notify();
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "a stop it never answered offers Try again, safely",
+                |d, _| {
+                    d.toast.as_ref().is_some_and(|t| {
+                        matches!(t.action, crate::app::ToastAction::TryAgain(_))
+                            && t.text == "No answer from dent-linux: it may not have happened"
+                    })
+                },
+                40.,
+            ),
+        ),
+        (0.3, Shot("try-again")),
+        (
+            0.1,
+            Call(|d, w, cx| {
+                d.toast_action(w, cx);
+                cx.notify();
+            }),
+        ),
+        (
+            0.1,
+            Until(
+                "Try again asks again, and waits to say how it went",
+                |d, _| {
+                    d.toast
+                        .as_ref()
+                        .is_some_and(|t| t.text == "Asking dent-linux again…")
+                        && d.retries.is_empty()
+                },
+                3.,
+            ),
+        ),
         // A clone under way says what it's doing, as its machine says it.
         (0.2, Key("cmd-n")),
         (0.2, Click("chip-project")),
