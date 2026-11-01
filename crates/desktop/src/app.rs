@@ -3742,9 +3742,18 @@ impl Dent {
                 // projects, a refresh) ends quietly: only what shows its
                 // own wait says it didn't answer.
                 self.quiet_errors = !o.changes && !o.gone;
-                self.reply(o.req, Out::Error { message }, cx);
+                self.reply(
+                    o.req,
+                    Out::Error {
+                        message: message.clone(),
+                    },
+                    cx,
+                );
                 self.quiet_errors = false;
-            } else if o.once {
+            }
+            // Something the person did: a word, with Try again where it's
+            // safe, whether or not its own place also shows it.
+            if o.once {
                 // Only what the person did (a stop, a commit) is worth a
                 // word when nothing waits on it; upkeep goes quietly. To a
                 // machine that answers by key, Try again is always safe.
