@@ -45,6 +45,47 @@ pub fn never_hangs(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
+/// Run `cmd` (a git started at [`cmd`]) saying its progress to `step` as
+/// it goes: its status, and what it wrote to stderr (for its error).
+pub fn watched(
+    cmd: &mut Command,
+    step: Option<&crate::progress::Step>,
+) -> std::io::Result<(std::process::ExitStatus, String)> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut err = Vec::new();
+    if let Some(mut e) = child.stderr.take() {
+        let mut buf = [0u8; 4096];
+        // git rewrites its progress line with \r: each piece is a step.
+        let mut line = Vec::new();
+        while let Ok(n) = e.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            err.extend_from_slice(&buf[..n]);
+            for &b in &buf[..n] {
+                if b == b'\r' || b == b'\n' {
+                    if let (Some(step), Some(s)) = (
+                        step,
+                        crate::progress::git_step(&String::from_utf8_lossy(&line)),
+                    ) {
+                        step.say(&s);
+                    }
+                    line.clear();
+                } else {
+                    line.push(b);
+                }
+            }
+        }
+    }
+    Ok((child.wait()?, String::from_utf8_lossy(&err).into_owned()))
+}
+
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
     let out = crate::git::cmd()
         .arg("-C")
@@ -244,6 +285,10 @@ mod tests {
                     }
                     continue;
                 }
+                // Nor is its SSH set again afterwards, weaker.
+                if line.contains("\"GIT_SSH_COMMAND\"") && !f.ends_with("src/git.rs") {
+                    found.push(format!("{}:{} sets GIT_SSH_COMMAND", f.display(), i + 1));
+                }
                 let starts_git = line.contains("Command::new(\"git\")");
                 let the_one = f.ends_with("src/git.rs")
                     && line.trim() == "let mut c = Command::new(\"git\");";
@@ -255,6 +300,64 @@ mod tests {
         assert!(
             found.is_empty(),
             "git started without crate::git::cmd(): {found:?}"
+        );
+    }
+
+    /// A clone's progress reaches its step as git writes it.
+    #[test]
+    fn a_clones_progress_is_said_as_it_goes() {
+        let base = std::env::temp_dir().join(format!("dent-watched-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let src = base.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let g = |dir: &std::path::Path, args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(dir)
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        };
+        g(&src, &["init", "-q"]);
+        for i in 0..40 {
+            std::fs::write(
+                src.join(format!("f{i}.txt")),
+                format!("file {i}\n").repeat(200),
+            )
+            .unwrap();
+        }
+        g(&src, &["add", "."]);
+        g(
+            &src,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "x",
+            ],
+        );
+        let step = crate::progress::Step::default();
+        let mut c = super::cmd();
+        c.arg("-C").arg(&base).args([
+            "clone",
+            "--progress",
+            &format!("file://{}", src.display()),
+            "dst",
+        ]);
+        let (status, _) = super::watched(&mut c, Some(&step)).unwrap();
+        assert!(status.success());
+        let last = step.now();
+        assert!(
+            last.ends_with("100%")
+                && (last.starts_with("Receiving") || last.starts_with("Resolving")),
+            "{last:?}"
         );
     }
 

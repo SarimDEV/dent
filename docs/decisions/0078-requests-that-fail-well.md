@@ -68,10 +68,10 @@ T3 learned the same lessons:
   - **Each request remembers whether it went with a key the daemon honours.** One that went to an older daemon isn't sent again after that daemon is updated.
   - **A request said not to have answered is let go**, never sent again later. If its machine answers anyway, the person hears "finished that after all".
   - **Only what the person did gets a word when nothing waits on it**, so upkeep (`Seen`, `KeepAwake`) never piles up toasts (T3 #9592).
+- **Steps, built.** A long job runs inside `progress::scoped`, and its heartbeat carries what it's doing now. A clone runs git with `--progress`, read as it goes (`git::watched`), so the wait reads "Cloning dent to dent-linux… · Receiving objects 42%". Bringing a project for a move still says only that it's cloning, because its reply shape is kept for older clients. The guard test also stops any daemon code from setting a weaker `GIT_SSH_COMMAND` after `git::cmd()`: one did, in the project clone.
 - **Still to come:**
   - Retry and Check buttons where a "may or may not have happened" is said;
   - an absolute setter that also says what it was set from, so a late copy can't undo another device's newer change (beats T3 #18762);
-  - named steps for long jobs (git progress), so a heartbeat means the job is moving;
   - asking again after the app restarts with the same key (beats T3 #20937);
   - a limit on git processes running at once;
   - the full failure suite.
